@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: QuickDucks Cognito staff authentication and SES sending identity
+
+Parameters:
+  AppOrigin:
+    Type: String
+    Default: https://quickducks.com
+
+Resources:
+  StaffUserPool:
+    Type: AWS::Cognito::UserPool
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      UserPoolName: quickducks-staff
+      UserPoolTier: ESSENTIALS
+      DeletionProtection: ACTIVE
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false
+      AutoVerifiedAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      MfaConfiguration: "OFF"
+      Policies:
+        SignInPolicy:
+          AllowedFirstAuthFactors:
+            - PASSWORD
+            - EMAIL_OTP
+      EmailAuthenticationSubject: Your QuickDucks sign-in code
+      EmailAuthenticationMessage: Your QuickDucks sign-in code is {####}
+      UserPoolTags:
+        Project: quickducks
+        Environment: production
+
+  StaffWebClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref StaffUserPool
+      ClientName: quickducks-web
+      GenerateSecret: false
+      EnableTokenRevocation: true
+      PreventUserExistenceErrors: ENABLED
+      ExplicitAuthFlows:
+        - ALLOW_USER_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthScopes:
+        - openid
+        - email
+        - profile
+      CallbackURLs:
+        - !Sub ${AppOrigin}/auth/callback
+        - http://localhost:8787/auth/callback
+      LogoutURLs:
+        - !Ref AppOrigin
+        - http://localhost:8787
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+      RefreshTokenRotation:
+        Feature: ENABLED
+        RetryGracePeriodSeconds: 10
+
+  StaffUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      UserPoolId: !Ref StaffUserPool
+      Domain: !Sub quickducks-staff-${AWS::AccountId}
+      ManagedLoginVersion: 2
+
+  SesIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: quickducks.com
+      DkimSigningAttributes:
+        NextSigningKeyLength: RSA_2048_BIT
+      MailFromAttributes:
+        BehaviorOnMxFailure: REJECT_MESSAGE
+        MailFromDomain: mail.quickducks.com
+      Tags:
+        - Key: Project
+          Value: quickducks
+        - Key: Environment
+          Value: production
+
+  WorkerSesUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: quickducks-worker-ses
+      Tags:
+        - Key: Project
+          Value: quickducks
+      Policies:
+        - PolicyName: SendQuickDucksEmail
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/quickducks.com
+
+Outputs:
+  UserPoolId:
+    Value: !Ref StaffUserPool
+  UserPoolClientId:
+    Value: !Ref StaffWebClient
+  CognitoDomain:
+    Value: !Sub https://${StaffUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com
+  CognitoIssuer:
+    Value: !Sub https://cognito-idp.${AWS::Region}.amazonaws.com/${StaffUserPool}
+  SesIdentityArn:
+    Value: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/quickducks.com
+  SesDkimName1:
+    Value: !GetAtt SesIdentity.DkimDNSTokenName1
+  SesDkimValue1:
+    Value: !GetAtt SesIdentity.DkimDNSTokenValue1
+  SesDkimName2:
+    Value: !GetAtt SesIdentity.DkimDNSTokenName2
+  SesDkimValue2:
+    Value: !GetAtt SesIdentity.DkimDNSTokenValue2
+  SesDkimName3:
+    Value: !GetAtt SesIdentity.DkimDNSTokenName3
+  SesDkimValue3:
+    Value: !GetAtt SesIdentity.DkimDNSTokenValue3
+  SesIamUser:
+    Value: !Ref WorkerSesUser

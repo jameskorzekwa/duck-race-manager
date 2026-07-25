@@ -65,6 +65,7 @@ delivery phases, and acceptance criteria.
 - [Heat assignment, notifications, and duck inspection](docs/HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md)
 - [Staff UX and duck recovery](docs/STAFF_UX_AND_DUCK_RECOVERY.md)
 - [Race lifecycle and duck reuse](docs/RACE_LIFECYCLE_AND_DUCK_REUSE.md)
+- [Infrastructure](docs/INFRASTRUCTURE.md)
 
 ## License
 
