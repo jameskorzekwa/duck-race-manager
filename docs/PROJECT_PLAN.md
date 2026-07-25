@@ -127,14 +127,21 @@ the random URL token.
 The tag domain must be owned and retained for the useful lifetime of the
 ducks. Tags must never contain preview, vendor, or temporary deployment URLs.
 
-Recommended shape:
+Recommended shape using the application's canonical production origin:
 
 ```text
-https://d.<permanent-race-domain>/t/<token>
+https://<permanent-race-domain>/t/<token>
 ```
 
-The short domain may redirect or route to different hosting infrastructure in
-the future. It must always remain under the race organization's control.
+The tag URL should not redirect to another origin. Keeping public pages, staff
+sessions, the offline service worker, and tag URLs on one origin avoids
+cross-domain cookie and offline-navigation failures. A `www` hostname may
+redirect to the canonical origin, but production tags contain the canonical
+origin directly. The domain may route to different hosting infrastructure in
+the future, but it must always remain under the race organization's control.
+
+Detailed setup and the mandatory pre-provisioning gate are documented in
+[DOMAIN_SETUP.md](DOMAIN_SETUP.md).
 
 ### 5.4 Physical Identification Fallbacks
 
@@ -531,7 +538,11 @@ paused after one week of inactivity, which is a poor fit for an annual event.
 Hosting can remain free, but a permanent custom domain is not free. The
 organization must purchase and retain the domain before production NFC tags
 are written. Development can use a `workers.dev` address, but permanent tags
-must use the organization's stable custom domain.
+must use the organization's stable custom domain. Cloudflare Workers Custom
+Domains create the required DNS record and TLS certificate automatically after
+the domain is active in Cloudflare. See
+[DOMAIN_SETUP.md](DOMAIN_SETUP.md) for the complete setup and verification
+checklist.
 
 ## 14. Data Model
 
@@ -788,6 +799,7 @@ duck-race-manager/
 |   |-- PROJECT_PLAN.md
 |   |-- ARCHITECTURE.md
 |   |-- NFC_PROVISIONING.md
+|   |-- DOMAIN_SETUP.md
 |   `-- RACE_DAY_RUNBOOK.md
 |-- src/ or apps/web/
 |-- packages/
@@ -837,11 +849,11 @@ before implementation code is offered for reuse.
 
 ## 26. Remaining Decisions
 
-- Permanent production domain and short tag subdomain
+- Permanent production domain name
 - Exact physical maximum for first-round and final heats
 - Public winner-name policy
 - Confirmation email behavior when an email is supplied
-- Cloudflare account, permanent domain, and optional email-service account
+- Cloudflare account and optional email-service account
 - Data retention period
 - Open-source license
 - Exact supported iPhone, Android, and browser versions after field testing
@@ -860,3 +872,5 @@ foundation, but they must be resolved before production provisioning or launch.
 - [Next.js on Cloudflare Workers](https://developers.cloudflare.com/workers/framework-guides/web-apps/nextjs/)
 - [Cloudflare Access one-time PIN](https://developers.cloudflare.com/cloudflare-one/identity/one-time-pin/)
 - [Cloudflare Turnstile plans](https://developers.cloudflare.com/turnstile/plans/)
+- [Cloudflare Workers Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)
+- [Cloudflare Universal SSL](https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/)
