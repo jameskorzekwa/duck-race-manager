@@ -6,9 +6,10 @@ The purchased domain will identify the deployed Duck Race Manager website. It
 does not point directly to the GitHub repository. GitHub stores the source code;
 Cloudflare Workers runs the application.
 
-The only required recurring infrastructure cost is domain registration, as
-long as the application remains within the Cloudflare Workers and D1 free-tier
-limits documented in the project plan.
+The only expected recurring fixed infrastructure cost is domain registration,
+as long as the application remains within the Cloudflare free-tier limits.
+Transactional race email is usage-based and is expected to cost only cents per
+event at the planned volume.
 
 ## Canonical Domain Design
 
@@ -53,7 +54,8 @@ No physical production tag may ever be written with the staging hostname.
 | Cloudflare Turnstile | Free |
 | Cloudflare-managed TLS certificate | Free |
 | Domain registration and renewal | Paid annually |
-| Optional transactional email provider | To be selected |
+| Cloudflare Queues for email jobs | Free within plan limits |
+| Transactional email delivery | Usage-based; expected to cost cents per event with Amazon SES |
 
 Free-tier usage must be monitored during rehearsal and race day. If expected
 traffic approaches a hard free limit, upgrade for the event period rather than
