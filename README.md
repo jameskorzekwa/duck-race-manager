@@ -48,6 +48,7 @@ delivery phases, and acceptance criteria.
 ## Documentation
 
 - [Project plan](docs/PROJECT_PLAN.md)
+- [Domain and hosting setup](docs/DOMAIN_SETUP.md)
 
 ## License
 
