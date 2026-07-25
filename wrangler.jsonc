@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "quickducks",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-25",
+  "workers_dev": false,
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "APP_ORIGIN": "https://quickducks.com",
+    "AWS_REGION": "us-east-1",
+    "COGNITO_USER_POOL_ID": "us-east-1_QuEKwmLhI",
+    "COGNITO_USER_POOL_CLIENT_ID": "55o4cn925erp7tr0jv56ad3qh1",
+    "COGNITO_DOMAIN": "https://quickducks-staff-106298360125.auth.us-east-1.amazoncognito.com"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "quickducks-prod",
+      "database_id": "3c12a95d-3505-4b80-bd69-b91f61fe5b93",
+      "migrations_dir": "db/migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "EMAIL_QUEUE",
+        "queue": "quickducks-email"
+      }
+    ]
+  },
+  "routes": [
+    {
+      "pattern": "quickducks.com",
+      "custom_domain": true
+    }
+  ]
+}
