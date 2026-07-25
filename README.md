@@ -35,6 +35,10 @@ delivery phases, and acceptance criteria.
 - Support immediate fixed-size or post-registration balanced heat assignment.
 - Send upcoming-heat email notifications to participants who provide email.
 - Provide a read-only duck inspection workflow for misplaced ducks.
+- Preserve a participant's heat and race status when replacing a lost duck.
+- Optimize staff workflows for speed and people with limited technical skill.
+- Create each annual race from prior settings without deleting race history.
+- Reuse returned ducks while recording ducks kept by participants.
 
 ## Planned Applications
 
@@ -46,6 +50,9 @@ delivery phases, and acceptance criteria.
 - Participant heat assignment and upcoming-heat email notifications
 - Pre-heat announcer roster
 - Read-only duck status inspection and recovery tools
+- Guided lost-duck replacement, tag replacement, and duck swapping
+- Role-specific, scan-first staff screens with plain-language recovery
+- Guided new-race setup, archived race history, and reusable duck inventory
 - Round-one winner recording and finalist promotion
 - Final verification and first/second/third place recording
 - Public heat results and final podium
@@ -56,6 +63,8 @@ delivery phases, and acceptance criteria.
 - [Project plan](docs/PROJECT_PLAN.md)
 - [Domain and hosting setup](docs/DOMAIN_SETUP.md)
 - [Heat assignment, notifications, and duck inspection](docs/HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md)
+- [Staff UX and duck recovery](docs/STAFF_UX_AND_DUCK_RECOVERY.md)
+- [Race lifecycle and duck reuse](docs/RACE_LIFECYCLE_AND_DUCK_REUSE.md)
 
 ## License
 
