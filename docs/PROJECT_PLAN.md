@@ -10,13 +10,15 @@ duck race:
    duck.
 3. The system permanently identifies the duck by a random token stored in the
    duck's NFC URL.
-4. Race officials scan ducks into balanced first-round heats and place them in
-   labeled heat bags.
+4. The event either assigns ducks to ten-duck heat bags during pairing or waits
+   until registration closes and scans a random, balanced draw into heat bags.
 5. The winner of each first-round heat is scanned and moved to a winners bag.
 6. Officials scan the expected winners into one final heat.
 7. First, second, and third place are scanned and published.
 8. Participants and spectators view finalized heat winners and the final podium
    on the public website.
+9. Participants who provide email can receive heat-assignment and upcoming-heat
+   notifications.
 
 The recommended product is a responsive progressive web application (PWA), not
 a native mobile app. NFC tags are provisioned once from a protected page in
@@ -32,7 +34,11 @@ software-as-a-service product.
 - Provide low-friction public registration without requiring participant
   accounts.
 - Let authorized staff pair registrations with physical ducks.
-- Let officials load physical heat bags by scanning the ducks placed in them.
+- Support both pairing-time fixed heat bags and post-close balanced random draw.
+- Show an authoritative participant roster before every heat is announced.
+- Notify participants with email when their heat is assigned and coming up.
+- Let staff safely inspect any duck's assignment, heat, expected bag, and race
+  status without changing it.
 - Enforce race rules and prevent duplicate assignments, heat entries, and
   results.
 - Automatically promote first-round winners into the final.
@@ -55,6 +61,7 @@ software-as-a-service product.
 - Multi-organization tenancy
 - NFC-based authentication or anti-counterfeit guarantees
 - Automatic race timing or camera-based finish detection
+- Marketing email campaigns or SMS notifications
 
 These features can be evaluated after the core annual race has been operated
 successfully.
@@ -76,10 +83,16 @@ successfully.
 | Participant scale | Approximately 100 to 500 per event |
 | Required fields | First name and last name |
 | Email | Event setting controls optional versus required |
+| Email notifications | Assignment and upcoming-heat transactional messages |
 | Phone | Optional |
 | Race format | Multiple first-round heats and one final |
+| Heat assignment modes | Immediate fixed ten-duck heats or post-close balanced draw |
+| Pre-heat operation | Staff announcer view lists every participant in the heat |
+| Duck diagnostics | Authenticated read-only scan with status and location history |
 | Advancement | One winner from each first-round heat |
 | Final result | First, second, and third place |
+| Email queue | Cloudflare Queues |
+| Email delivery | Provider adapter; Amazon SES recommended for production |
 
 ## 5. NFC Design
 
@@ -90,7 +103,7 @@ of cryptographically secure randomness encoded in a URL-safe format. The tag
 stores one NDEF URL record:
 
 ```text
-https://d.example.org/t/fG9pV8rB2mK4qX7zLcN1Aw
+https://example.org/t/fG9pV8rB2mK4qX7zLcN1Aw
 ```
 
 The URL contains no participant, registration, event, result, or contact
@@ -277,6 +290,7 @@ Operation types include:
 
 - Assign duck to registration
 - Load duck into a first-round heat
+- Inspect duck status and expected location (read-only)
 - Record first-round winner
 - Verify final qualifiers
 - Record final first place
@@ -302,6 +316,11 @@ POST /api/staff/scan-operations/<operation-id>/tags
 The command includes the tag token, client command UUID, browser device ID,
 expected revision, and client timestamp. Server authorization, CSRF protection,
 state validation, and idempotency are mandatory.
+
+Inspection is the safe default for authenticated staff when no mutating scan
+operation is active. It shows duck, participant, heat, expected physical
+location, race status, synchronization state, and audit history. It never
+changes state. Public tag scans continue to show only the generic duck page.
 
 ## 9. Registration Workflow
 
@@ -335,12 +354,51 @@ UUIDs and queueing commands.
 6. The PWA displays the participant and duck together.
 7. Staff explicitly confirm the assignment.
 8. The server creates the assignment and changes the registration to `ACTIVE`.
+9. In immediate mode, the same atomic command assigns the next available slot
+   in a ten-duck heat and tells staff which physical bag receives the duck.
+10. In balanced-draw mode, the duck remains in the common draw pool until it is
+    scanned after registration closes.
 
 The database prevents one registration from holding multiple active ducks and
 prevents one duck from being assigned to multiple active registrations in the
 same event.
 
-## 10. Heat Planning
+## 10. Heat Assignment and Planning
+
+Each event selects one immutable mode before registration opens:
+
+```text
+IMMEDIATE_FIXED_HEATS
+POST_CLOSE_BALANCED_DRAW
+```
+
+Detailed workflows, notification timing, bag handling, and offline safeguards
+are specified in
+[HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md](HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md).
+
+### 10.1 Immediate Fixed Heats
+
+When staff pair a duck with a participant, the server assigns the lowest-numbered
+open heat with fewer than ten ducks. A full heat closes automatically and the
+next assignment creates or fills the next heat. Registration closure locks the
+last underfilled heat without rebalancing it.
+
+The response identifies the heat and physical bag. Staff immediately place the
+duck in that bag and confirm placement. No first-round rescan is required before
+racing.
+
+For `N` active assignments:
+
+```text
+H = ceil(N / 10)
+```
+
+The configuration is valid only when `H` fits in the final. At the upper design
+limit of 500 participants, this mode creates 50 finalists, so the race director
+must confirm that the physical final can support that many ducks or lower the
+event capacity.
+
+### 10.2 Post-Close Balanced Draw
 
 Let:
 
@@ -384,11 +442,18 @@ heat is loaded. For example, 500 participants with 25 ducks per first-round
 heat requires 20 heats and therefore a final capacity of at least 20 ducks.
 
 The software sets balanced capacities. Physical random drawing and scanning
-determine which ducks enter each heat.
+determine which ducks enter each heat. Officials may preload multiple heat bags
+to provide participants more email notice, or load the next heat just in time.
 
 ## 11. Race Workflow
 
-### 11.1 Loading a First-Round Heat
+### 11.1 Preparing a First-Round Heat
+
+In immediate mode, the heat roster and bag were created during duck pairing.
+Officials select the heat and verify its expected bag and synchronized roster;
+they do not rescan every duck.
+
+In balanced-draw mode:
 
 1. A race official selects an unclaimed heat.
 2. The browser device claims responsibility for loading that heat.
@@ -401,7 +466,15 @@ determine which ducks enter each heat.
    command has synchronized.
 9. The physical bag is sealed or marked ready.
 
-### 11.2 Recording a First-Round Winner
+### 11.2 Announcing a Heat
+
+Before either mode can start a heat, the PWA opens `Announcer View` from the
+authoritative heat entries. It shows the heat number, participant names, duck
+numbers, and count. Staff read the participants aloud, optionally check off
+each name, record the announcement time, and then move the heat from `CALLING`
+to `RUNNING`.
+
+### 11.3 Recording a First-Round Winner
 
 1. An official selects `Record winner` for the completed heat.
 2. The PWA starts a `RECORD_HEAT_WINNER` operation.
@@ -412,7 +485,7 @@ determine which ducks enter each heat.
 7. The assignment is promoted to the final roster.
 8. The physical duck is placed in the winners bag.
 
-### 11.3 Loading the Final
+### 11.4 Loading the Final
 
 1. The system calculates the expected finalist set from finalized round-one
    winners.
@@ -422,7 +495,7 @@ determine which ducks enter each heat.
 5. The final becomes ready only when the scanned set equals the expected set or
    an administrator records an audited race-director override.
 
-### 11.4 Recording the Podium
+### 11.5 Recording the Podium
 
 1. Staff start the first-place operation and scan the winner.
 2. Staff review and confirm first place.
@@ -457,6 +530,7 @@ SUBMITTED
 PLANNED
   -> LOADING
   -> READY
+  -> CALLING
   -> RUNNING
   -> AWAITING_RESULT
   -> FINALIZED
@@ -478,6 +552,8 @@ flowchart LR
     Web --> Cache[Service Worker and IndexedDB]
     API --> Auth[Cloudflare Access]
     API --> DB[Cloudflare D1]
+    API --> Queue[Cloudflare Queues]
+    Queue --> Email[Transactional Email Provider]
     API --> Results[Cached Results API]
     Results --> Web
 ```
@@ -497,6 +573,8 @@ Recommended implementation stack:
 | Validation | Shared Zod request/response schemas |
 | Offline data | IndexedDB and an idempotent command outbox |
 | Bot protection | Cloudflare Turnstile on public registration |
+| Background jobs | Cloudflare Queues for email delivery and retries |
+| Transactional email | Provider adapter with Amazon SES recommended |
 | Hosting | Cloudflare Workers with static assets and custom domains |
 | CI | GitHub Actions |
 
@@ -544,6 +622,12 @@ the domain is active in Cloudflare. See
 [DOMAIN_SETUP.md](DOMAIN_SETUP.md) for the complete setup and verification
 checklist.
 
+Email delivery is a separate metered service. Free provider limits reviewed in
+July 2026 are too low for a possible 500-participant race-day batch. Amazon SES
+is recommended because expected event volume costs only cents and has no
+required monthly minimum under a-la-carte pricing. Cloudflare Queues remains
+within its free allowance at this scale.
+
 ## 14. Data Model
 
 ### 14.1 Core Tables
@@ -560,8 +644,12 @@ checklist.
 | `duck_assignments` | Event-specific participant-to-duck relationship |
 | `scan_operations` | Short-lived staff scanning context |
 | `heats` | Round, heat number, target size, status, and device claim |
-| `heat_entries` | Assignment scanned into a heat |
+| `heat_entries` | Assignment placed in a heat, including assignment source/time |
+| `heat_roster_calls` | Announcer completion, checklist, actor, and timestamp |
 | `heat_results` | Ranked result linked to a heat entry |
+| `duck_location_events` | Append-only expected physical location history |
+| `email_notifications` | One logical participant notification and delivery state |
+| `email_attempts` | Provider attempts, message IDs, errors, and timestamps |
 | `race_commands` | Idempotent online/offline mutation log |
 | `audit_events` | Corrections, overrides, permissions, and state changes |
 
@@ -572,6 +660,9 @@ checklist.
 - One active duck assignment per registration and event.
 - One active registration assignment per duck and event.
 - One first-round heat entry per duck and event.
+- Heat assignment mode cannot change after the first duck pairing.
+- Immediate mode cannot place more than ten ducks in a first-round heat.
+- Balanced-draw mode cannot create heat entries before the post-close plan.
 - Heat entry count cannot exceed target capacity.
 - A result must reference an entry from the same heat.
 - A result place is unique within a heat.
@@ -579,6 +670,8 @@ checklist.
 - An event has exactly one final heat.
 - Final entrants originate from finalized first-round winners.
 - A race command UUID is processed at most once.
+- A registration receives at most one logical notification of each type per
+  heat.
 
 Historical heat entries must retain the assignment used at race time. Later
 corrections must not rewrite past results without an explicit audited operation.
@@ -599,15 +692,29 @@ client writes to database tables.
 | `claimHeat` | Assign one browser device to a heat |
 | `addHeatEntry` | Record a scanned duck in a heat |
 | `lockHeatRoster` | Seal a synchronized roster |
+| `markHeatAnnounced` | Record the pre-race participant call |
+| `advanceRaceProgress` | Select current/upcoming heat and enqueue due notices |
 | `recordHeatResult` | Record a winner or podium place |
 | `finalizeHeat` | Publish results and create promotions |
 | `reopenHeat` | Perform an audited correction |
+| `markDuckLocation` | Record missing, found, or corrected physical location |
 | `syncCommands` | Upload ordered offline commands |
 
 Every mutation includes a client command UUID, staff/device identity when
 applicable, expected entity revision, client timestamp, and server timestamp.
 Responses explicitly distinguish accepted, duplicate, stale, unauthorized,
 invalid-state, and conflict outcomes.
+
+Duck inspection is a query rather than a mutation. It derives a read-only
+snapshot from tag, assignment, heat, location, result, command, and audit data.
+
+### 15.1 Email Commands and Queue
+
+Heat assignment and race-progress commands create unique notification records
+and publish their IDs to Cloudflare Queues. A consumer renders a versioned
+template and calls an `EmailSender` provider adapter. Retries, provider IDs,
+bounces, suppressions, and permanent failures are recorded without delaying or
+blocking the race command.
 
 ## 16. Offline and Spotty Connectivity
 
@@ -621,6 +728,7 @@ The PWA caches the minimum data required for the active event:
 - Staff role and browser device identity
 - Current entity revisions
 - Pending command outbox
+- Expected duck locations and email delivery summaries
 
 Email and phone should not be replicated to every race-day browser unless an
 explicit workflow needs them.
@@ -635,6 +743,10 @@ Offline behavior requirements:
 - Bind a heat to one browser device to reduce offline conflicts.
 - Show the public website's last successful update time.
 - Remove event caches from staff devices after the retention period.
+- Never guess the next immediate heat from multiple offline registration
+  stations; pre-claim bags, use one station, or wait for synchronization.
+- Queue email only after the authoritative server accepts the triggering
+  command.
 
 Android direct Web NFC can continue while the cached PWA remains open. On
 iPhone, scanning opens a URL navigation, so the service worker must serve the
@@ -665,6 +777,10 @@ Private registration-status pages use high-entropy bearer tokens and are marked
 for search-engine exclusion. Short confirmation codes are staff lookup values,
 not public authentication tokens.
 
+The private status page shows the participant's assigned heat as soon as it is
+known. In balanced-draw mode it clearly shows `Heat assignment pending` until
+the duck is scanned into a locked roster.
+
 ## 18. Roles and Authorization
 
 | Role | Permissions |
@@ -674,6 +790,9 @@ not public authentication tokens.
 | Registration staff | Registration lookup/create and duck assignment |
 | Race official | Heat loading, result recording, final verification |
 | Results viewer | Read operational data without mutations |
+
+All authenticated staff may inspect a duck. Participant contact details in the
+inspection view remain limited to registration staff and administrators.
 
 Authorization is checked at the Cloudflare Access boundary and again in every
 API domain command using D1 event roles. Database constraints enforce race
@@ -692,6 +811,10 @@ invariants. The client interface must never be the only enforcement point.
 - Audit result corrections, assignment changes, tag replacement, and role changes.
 - Never place service credentials or production data in the public repository.
 - Collect only the participant information required for the event.
+- Explain operational email use when an address is collected and honor the
+  participant's notification preference.
+- Configure SPF, DKIM, DMARC, bounce handling, complaint handling, and provider
+  suppression before sending production email.
 - Define and enforce data retention after each race.
 - Provide database backups and event-level CSV exports.
 
@@ -708,10 +831,13 @@ Primary staff screens:
 - Participant QR scan and registration search
 - Walk-up registration
 - Duck assignment
+- Read-only duck inspection, expected location, and audit timeline
 - Duck inventory and Android-only provisioning
 - Tag verification and replacement
 - Heat plan and printable bag labels
 - Heat loading
+- Announcer roster and race-progress control
+- Email notification status and failures
 - Round-one winner recording
 - Winners-bag verification
 - Final podium recording
@@ -731,6 +857,12 @@ The active operation must remain unmistakable. Assigning a duck, loading Heat
 - Test event, registration, heat, and result state transitions.
 - Integration-test all database uniqueness and referential constraints.
 - Test concurrent assignment and duplicate scan attempts.
+- Test concurrent immediate assignments never exceed ten ducks per heat.
+- Test immediate-mode closure preserves the underfilled last heat.
+- Test balanced mode never assigns a heat before the post-close plan.
+- Test announcer rosters match authoritative heat entries in both modes.
+- Test notification uniqueness, queue replay, retries, and provider failure.
+- Test role-filtered duck inspection and every expected location state.
 - Test command replay, ordering, and stale-revision conflicts.
 - Test authorization for every role and endpoint.
 - Use Playwright for registration, staff, administration, and results flows.
@@ -779,10 +911,11 @@ are acceptable to the race director.
 | --- | --- | --- |
 | 0. Hardware proof | Tag audit, Android write/read prototype, iPhone URL scan test, wet-use test | Existing tags and supported phones pass |
 | 1. Foundation | Next.js PWA on Workers, D1 migrations, CI, Cloudflare Access | Staging deployment and staff login work |
-| 2. Registration | Event settings, public form, confirmation code/QR, staff lookup, walk-ups | Configurable email requirement works |
+| 2. Registration | Event settings, public form, confirmation code/QR, staff lookup, walk-ups | Configurable email requirement and preference work |
 | 3. Inventory | Ducks, visible numbers, tag token model, provisioning and verification | Numbered test batch is repeatably provisioned |
 | 4. Assignment | Active operations, NFC/QR/manual resolution, assignment constraints | Cross-platform duck assignment works |
-| 5. Race domain | Heat planning, loading, winner promotion, final podium | Complete online simulated race succeeds |
+| 5. Race domain | Both assignment modes, bagging, announcer view, inspection, winner promotion, final podium | Both complete online race modes succeed |
+| 5a. Notifications | Cloudflare Queue, provider adapter, templates, delivery status | Upcoming notices are deduplicated and observable |
 | 6. Offline | Service worker, IndexedDB cache, command outbox, conflict handling | Planned outage recovers without loss/duplicates |
 | 7. Public results | Heat pages, realtime/polling, final podium, privacy policy | Finalized results publish correctly |
 | 8. Hardening | Security, accessibility, backups, exports, observability, corrections | Production checklist passes |
@@ -800,6 +933,7 @@ duck-race-manager/
 |   |-- ARCHITECTURE.md
 |   |-- NFC_PROVISIONING.md
 |   |-- DOMAIN_SETUP.md
+|   |-- HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md
 |   `-- RACE_DAY_RUNBOOK.md
 |-- src/ or apps/web/
 |-- packages/
@@ -836,8 +970,17 @@ before implementation code is offered for reuse.
   Android phones.
 - Staff can identify a duck by NFC, QR, or visible number.
 - One eligible duck can be assigned to exactly one active registration.
+- An event can select immediate ten-duck heats or post-close balanced draw.
+- Immediate pairing atomically returns the heat and physical bag.
+- Immediate registration closure preserves a smaller final first-round heat.
 - The system generates and explains a valid balanced two-round heat plan.
 - Staff can load physical heat bags without duplicate entries.
+- Both modes show the authoritative participant roster before each heat starts.
+- Participants with enabled email receive at most one assignment and one
+  upcoming notice per heat.
+- Failed email remains visible but never blocks race operation.
+- Staff can scan any duck to inspect its participant, heat, expected location,
+  race status, synchronization state, and history without modifying it.
 - A scanned round-one winner is automatically promoted to the final.
 - The winners bag can be verified against the expected finalist set.
 - First, second, and third place cannot contain duplicate ducks.
@@ -852,8 +995,11 @@ before implementation code is offered for reuse.
 - Permanent production domain name
 - Exact physical maximum for first-round and final heats
 - Public winner-name policy
-- Confirmation email behavior when an email is supplied
-- Cloudflare account and optional email-service account
+- Default number of heats ahead for upcoming notifications
+- Production email provider account, sending domain, and production quota
+- Whether registration confirmation and finalist emails join the initial two
+  heat notification templates
+- Cloudflare account
 - Data retention period
 - Open-source license
 - Exact supported iPhone, Android, and browser versions after field testing
@@ -874,3 +1020,8 @@ foundation, but they must be resolved before production provisioning or launch.
 - [Cloudflare Turnstile plans](https://developers.cloudflare.com/turnstile/plans/)
 - [Cloudflare Workers Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)
 - [Cloudflare Universal SSL](https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/)
+- [Cloudflare Queues](https://developers.cloudflare.com/queues/)
+- [Cloudflare Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/)
+- [Cloudflare Email Service pricing](https://developers.cloudflare.com/email-service/platform/pricing/)
+- [Amazon SES pricing](https://aws.amazon.com/ses/pricing/)
+- [Resend pricing](https://resend.com/pricing)

@@ -32,6 +32,9 @@ delivery phases, and acceptance criteria.
 - Support spotty race-day connectivity with cached data and an offline outbox.
 - Preserve NFC-independent QR and manual-entry recovery paths.
 - Host the PWA, API, and database on Cloudflare's free developer platform.
+- Support immediate fixed-size or post-registration balanced heat assignment.
+- Send upcoming-heat email notifications to participants who provide email.
+- Provide a read-only duck inspection workflow for misplaced ducks.
 
 ## Planned Applications
 
@@ -39,7 +42,10 @@ delivery phases, and acceptance criteria.
 - Staff registration lookup and walk-up registration
 - Duck inventory and NFC provisioning
 - Participant-to-duck assignment
-- Configurable round-one heat planning and loading
+- Two configurable round-one heat assignment and bagging workflows
+- Participant heat assignment and upcoming-heat email notifications
+- Pre-heat announcer roster
+- Read-only duck status inspection and recovery tools
 - Round-one winner recording and finalist promotion
 - Final verification and first/second/third place recording
 - Public heat results and final podium
@@ -49,6 +55,7 @@ delivery phases, and acceptance criteria.
 
 - [Project plan](docs/PROJECT_PLAN.md)
 - [Domain and hosting setup](docs/DOMAIN_SETUP.md)
+- [Heat assignment, notifications, and duck inspection](docs/HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md)
 
 ## License
 
