@@ -278,7 +278,7 @@ controls responsive and makes retries safe.
 The application uses an `EmailSender` interface so provider choice does not
 affect race rules.
 
-Amazon SES is the recommended production provider for this event size. Pricing
+Amazon SES is the selected production provider for this event size. Pricing
 reviewed in July 2026 is approximately $0.10 to $0.16 per 1,000 outbound
 recipient messages, depending on the account pricing mode, with no required
 monthly minimum for a-la-carte sending. A 500-to-1,500-message event should cost
@@ -413,6 +413,13 @@ Every mutation requires confirmation and an audit reason when it changes a
 locked roster, assignment, or result. The read-only inspection result remains
 available even when no corrective action is permitted.
 
+Physical duck replacement is different from tag replacement. A stable race
+entry owns the participant's heat and qualification, while versioned duck
+assignments record which physical duck is current and which duck actually raced
+each heat. Guided replacement, two-duck swapping, phase restrictions, and
+low-tech interface requirements are specified in
+[STAFF_UX_AND_DUCK_RECOVERY.md](STAFF_UX_AND_DUCK_RECOVERY.md).
+
 ### Offline Inspection
 
 The PWA can resolve known ducks from its cached event data. Offline inspection
@@ -433,6 +440,8 @@ cache.
 | `duck_location_events` | Append-only expected physical location history |
 | `email_notifications` | One logical notification and current status |
 | `email_attempts` | Provider attempts, IDs, errors, and timestamps |
+| `race_entries` | Stable participant progression independent of replacement duck |
+| `duck_assignments` | Versioned physical-duck relationship |
 
 ## Required Invariants
 
@@ -440,12 +449,14 @@ cache.
 - Immediate mode creates no heat with more than ten entries.
 - Closing immediate registration locks the last partial heat without balancing.
 - Balanced mode creates no first-round entry before the post-close plan exists.
-- One duck can appear in only one first-round heat.
+- One race entry can appear in only one first-round heat.
 - Every heat roster shown to the announcer comes from authoritative entries.
 - A participant receives at most one email of each type for a heat.
 - Email failure cannot change race state or block the onsite announcement.
 - Duck inspection is read-only and safe to repeat.
 - Public duck inspection reveals no participant or operational information.
+- Replacing a duck preserves the race entry and heat slot.
+- Each heat result retains the duck assignment used for that race.
 
 ## Acceptance Tests
 

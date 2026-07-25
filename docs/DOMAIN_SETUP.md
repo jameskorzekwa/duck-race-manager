@@ -55,7 +55,7 @@ No physical production tag may ever be written with the staging hostname.
 | Cloudflare-managed TLS certificate | Free |
 | Domain registration and renewal | Paid annually |
 | Cloudflare Queues for email jobs | Free within plan limits |
-| Transactional email delivery | Usage-based; expected to cost cents per event with Amazon SES |
+| Amazon SES transactional email | Usage-based; expected to cost cents per event |
 
 Free-tier usage must be monitored during rehearsal and race day. If expected
 traffic approaches a hard free limit, upgrade for the event period rather than

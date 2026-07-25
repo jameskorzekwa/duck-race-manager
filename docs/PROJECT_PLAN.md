@@ -39,6 +39,12 @@ software-as-a-service product.
 - Notify participants with email when their heat is assigned and coming up.
 - Let staff safely inspect any duck's assignment, heat, expected bag, and race
   status without changing it.
+- Let staff replace or swap physical ducks without losing a participant's heat
+  slot or historical results.
+- Make common staff workflows fast and understandable to non-technical users.
+- Create each annual event from prior settings while preserving race history.
+- Return eligible ducks to reusable inventory or record that participants kept
+  them.
 - Enforce race rules and prevent duplicate assignments, heat entries, and
   results.
 - Automatically promote first-round winners into the final.
@@ -89,10 +95,15 @@ successfully.
 | Heat assignment modes | Immediate fixed ten-duck heats or post-close balanced draw |
 | Pre-heat operation | Staff announcer view lists every participant in the heat |
 | Duck diagnostics | Authenticated read-only scan with status and location history |
+| Duck replacement | Race entry retains heat/qualification while physical duck changes |
+| Staff UX | Role-specific, scan-first, plain-language guided workflows |
+| Event history | New annual races preserve prior registrations, heats, and results |
+| Duck reuse | Only physically returned and inspected ducks become available again |
+| Keep option | Participant preference plus staff-confirmed final disposition |
 | Advancement | One winner from each first-round heat |
 | Final result | First, second, and third place |
 | Email queue | Cloudflare Queues |
-| Email delivery | Provider adapter; Amazon SES recommended for production |
+| Email delivery | Amazon SES through a provider adapter; expected cost accepted |
 
 ## 5. NFC Design
 
@@ -337,6 +348,9 @@ changes state. Public tag scans continue to show only the generic duck page.
 
 Participant accounts are not required. If no email or phone is supplied, the
 confirmation page must clearly tell the participant to retain the code or QR.
+Registration or duck pairing also records whether the participant plans to
+keep, return, or has not decided about the duck. This preference helps planning
+but does not change inventory until staff record the physical disposition.
 
 ### 9.2 Staff and Walk-Up Registration
 
@@ -359,9 +373,9 @@ UUIDs and queueing commands.
 10. In balanced-draw mode, the duck remains in the common draw pool until it is
     scanned after registration closes.
 
-The database prevents one registration from holding multiple active ducks and
-prevents one duck from being assigned to multiple active registrations in the
-same event.
+The database creates one race entry for the active registration, permits only
+one current duck assignment for that race entry, and prevents one duck from
+being assigned to multiple active race entries in the same event.
 
 ## 10. Heat Assignment and Planning
 
@@ -514,6 +528,8 @@ DRAFT
   -> ROUND_ONE
   -> FINAL
   -> COMPLETED
+  -> RETURN_PROCESSING
+  -> ARCHIVED
 ```
 
 ### 12.2 Registration
@@ -539,6 +555,11 @@ PLANNED
 An administrator can reopen a heat only with a recorded reason. Reopening a
 round-one result must detect and invalidate dependent final state rather than
 silently leaving an inconsistent final.
+
+Archived events retain their registrations, assignments, heats, results,
+notifications, dispositions, and audits. Creating a new race copies only
+approved settings. Detailed lifecycle and reuse rules are documented in
+[RACE_LIFECYCLE_AND_DUCK_REUSE.md](RACE_LIFECYCLE_AND_DUCK_REUSE.md).
 
 ## 13. Proposed Architecture
 
@@ -574,7 +595,7 @@ Recommended implementation stack:
 | Offline data | IndexedDB and an idempotent command outbox |
 | Bot protection | Cloudflare Turnstile on public registration |
 | Background jobs | Cloudflare Queues for email delivery and retries |
-| Transactional email | Provider adapter with Amazon SES recommended |
+| Transactional email | Amazon SES through a provider adapter |
 | Hosting | Cloudflare Workers with static assets and custom domains |
 | CI | GitHub Actions |
 
@@ -624,9 +645,9 @@ checklist.
 
 Email delivery is a separate metered service. Free provider limits reviewed in
 July 2026 are too low for a possible 500-participant race-day batch. Amazon SES
-is recommended because expected event volume costs only cents and has no
-required monthly minimum under a-la-carte pricing. Cloudflare Queues remains
-within its free allowance at this scale.
+is selected because expected event volume costs only cents and has no required
+monthly minimum under a-la-carte pricing. Cloudflare Queues remains within its
+free allowance at this scale.
 
 ## 14. Data Model
 
@@ -641,13 +662,17 @@ within its free allowance at this scale.
 | `registrations` | Participant details, status, and confirmation identifiers |
 | `ducks` | Permanent physical duck inventory and visible number |
 | `duck_tags` | Permanent token, status, and optional observed serial |
-| `duck_assignments` | Event-specific participant-to-duck relationship |
+| `event_ducks` | Eligible permanent ducks reserved for a specific event |
+| `race_entries` | Stable participant identity and progression within an event |
+| `duck_assignments` | Versioned race-entry-to-duck history with start/end reason |
 | `scan_operations` | Short-lived staff scanning context |
 | `heats` | Round, heat number, target size, status, and device claim |
-| `heat_entries` | Assignment placed in a heat, including assignment source/time |
+| `heat_entries` | Race-entry heat slot, including assignment source/time |
 | `heat_roster_calls` | Announcer completion, checklist, actor, and timestamp |
-| `heat_results` | Ranked result linked to a heat entry |
+| `heat_results` | Ranked race entry and physical duck assignment used in that heat |
 | `duck_location_events` | Append-only expected physical location history |
+| `duck_event_dispositions` | Returned, kept, damaged, missing, or unresolved outcome |
+| `duck_inventory_events` | Append-only cross-event inventory history |
 | `email_notifications` | One logical participant notification and delivery state |
 | `email_attempts` | Provider attempts, message IDs, errors, and timestamps |
 | `race_commands` | Idempotent online/offline mutation log |
@@ -657,21 +682,27 @@ within its free allowance at this scale.
 
 - Tag token is globally unique.
 - Visible duck number is unique among active ducks.
-- One active duck assignment per registration and event.
-- One active registration assignment per duck and event.
-- One first-round heat entry per duck and event.
+- One active race entry per registration and event.
+- One active duck assignment per race entry.
+- One active race entry per duck and event.
+- One first-round heat entry per race entry and event.
 - Heat assignment mode cannot change after the first duck pairing.
 - Immediate mode cannot place more than ten ducks in a first-round heat.
 - Balanced-draw mode cannot create heat entries before the post-close plan.
 - Heat entry count cannot exceed target capacity.
 - A result must reference an entry from the same heat.
 - A result place is unique within a heat.
-- A duck cannot occupy multiple result places in one heat.
+- A race entry cannot occupy multiple result places in one heat.
 - An event has exactly one final heat.
 - Final entrants originate from finalized first-round winners.
 - A race command UUID is processed at most once.
 - A registration receives at most one logical notification of each type per
   heat.
+- Replacing a duck preserves the race entry and heat slot.
+- Every result records the physical duck assignment actually used in that heat.
+- A duck is reusable only after confirmed return and condition approval.
+- New events never copy registrations, race entries, assignments, heats,
+  results, notifications, dispositions, or audit records.
 
 Historical heat entries must retain the assignment used at race time. Later
 corrections must not rewrite past results without an explicit audited operation.
@@ -688,6 +719,8 @@ client writes to database tables.
 | `confirmTagProvisioning` | Activate a successfully verified tag |
 | `replaceDuckTag` | Retire and replace a failed or incorrect tag |
 | `assignDuck` | Pair a registration with a duck |
+| `replaceRaceEntryDuck` | Replace a lost/damaged duck while preserving progression |
+| `swapRaceEntryDucks` | Exchange two physical ducks while preserving heat slots |
 | `createHeatPlan` | Calculate and approve balanced capacities |
 | `claimHeat` | Assign one browser device to a heat |
 | `addHeatEntry` | Record a scanned duck in a heat |
@@ -698,6 +731,10 @@ client writes to database tables.
 | `finalizeHeat` | Publish results and create promotions |
 | `reopenHeat` | Perform an audited correction |
 | `markDuckLocation` | Record missing, found, or corrected physical location |
+| `createEventFromPrevious` | Copy approved settings into a new draft race |
+| `reserveEventDucks` | Select reusable permanent inventory for an event |
+| `recordDuckDisposition` | Record returned, kept, damaged, or unresolved outcome |
+| `archiveEvent` | Validate returns and preserve the completed event |
 | `syncCommands` | Upload ordered offline commands |
 
 Every mutation includes a client command UUID, staff/device identity when
@@ -707,6 +744,12 @@ invalid-state, and conflict outcomes.
 
 Duck inspection is a query rather than a mutation. It derives a read-only
 snapshot from tag, assignment, heat, location, result, command, and audit data.
+
+Duck replacement and swapping are atomic commands. Heat entries reference the
+stable race entry, while results retain the assignment used in that race. This
+allows a lost duck to be replaced without rewriting the participant's history.
+Detailed semantics and staff steps are documented in
+[STAFF_UX_AND_DUCK_RECOVERY.md](STAFF_UX_AND_DUCK_RECOVERY.md).
 
 ### 15.1 Email Commands and Queue
 
@@ -824,6 +867,16 @@ The interface is mobile-first, sunlight-readable, and usable with one hand.
 Every scan result provides a prominent color, sound, vibration, duck number,
 participant display name, operation name, and count.
 
+Common screens are role-specific, scan-first, and limited to one clear task.
+Routine staff never see tokens, database IDs, provider errors, or state-machine
+terms. Lost-duck replacement is a guided flow: identify participant/old duck,
+scan an available replacement, review one before/after summary, confirm, and
+follow the large bag-placement instruction.
+
+Design requirements, speed budgets, error language, training mode, replacement
+flows, and non-technical usability tests are specified in
+[STAFF_UX_AND_DUCK_RECOVERY.md](STAFF_UX_AND_DUCK_RECOVERY.md).
+
 Primary staff screens:
 
 - Login and event selection
@@ -834,6 +887,9 @@ Primary staff screens:
 - Read-only duck inspection, expected location, and audit timeline
 - Duck inventory and Android-only provisioning
 - Tag verification and replacement
+- Lost-duck replacement and two-participant duck swapping
+- New-race setup and historical race browser
+- Bulk duck return/keep processing and reusable inventory
 - Heat plan and printable bag labels
 - Heat loading
 - Announcer roster and race-progress control
@@ -846,6 +902,9 @@ Primary staff screens:
 
 The active operation must remain unmistakable. Assigning a duck, loading Heat
 4, and recording second place must use clearly different labels and colors.
+Color is never the only identifier. Common actions are one tap from the
+role-specific home screen, and errors always state what happened, whether the
+action saved, and what staff should do next.
 
 ## 21. Testing Strategy
 
@@ -863,6 +922,13 @@ The active operation must remain unmistakable. Assigning a duck, loading Heat
 - Test announcer rosters match authoritative heat entries in both modes.
 - Test notification uniqueness, queue replay, retries, and provider failure.
 - Test role-filtered duck inspection and every expected location state.
+- Test duck replacement preserves race entry, heat, qualification, and prior
+  result history.
+- Test two-duck swaps are atomic and preserve both heat slots.
+- Test tag-only replacement leaves physical duck and race progression unchanged.
+- Test new-race setup copies settings but no participant or result data.
+- Test returned ducks become reusable while kept/missing ducks remain excluded.
+- Run task-based usability tests with at least five non-technical volunteers.
 - Test command replay, ordering, and stale-revision conflicts.
 - Test authorization for every role and endpoint.
 - Use Playwright for registration, staff, administration, and results flows.
@@ -897,6 +963,9 @@ are acceptable to the race director.
 | NFC tag will not read | Scan matching QR or enter visible duck number |
 | Wrong URL on writable tag | Reprovision through the protected Android page |
 | Damaged tag | Retire mapping, attach replacement, provision new token |
+| Lost physical duck | Replace with an available duck while preserving race entry and heat |
+| Wrong participants have two ducks | Use atomic two-duck swap before either heat runs |
+| Old replaced duck is found | Mark found; do not automatically reactivate it |
 | Duplicate duck scan | Reject without changing count; explain prior location |
 | Wrong heat | Reject and identify the correct/previous heat |
 | Phone loses connectivity | Queue command locally and mark it pending |
@@ -916,10 +985,12 @@ are acceptable to the race director.
 | 4. Assignment | Active operations, NFC/QR/manual resolution, assignment constraints | Cross-platform duck assignment works |
 | 5. Race domain | Both assignment modes, bagging, announcer view, inspection, winner promotion, final podium | Both complete online race modes succeed |
 | 5a. Notifications | Cloudflare Queue, provider adapter, templates, delivery status | Upcoming notices are deduplicated and observable |
+| 5b. Recovery and UX | Race entries, replacement/swap commands, guided screens, usability tests | Non-technical staff pass common and recovery tasks |
 | 6. Offline | Service worker, IndexedDB cache, command outbox, conflict handling | Planned outage recovers without loss/duplicates |
 | 7. Public results | Heat pages, realtime/polling, final podium, privacy policy | Finalized results publish correctly |
 | 8. Hardening | Security, accessibility, backups, exports, observability, corrections | Production checklist passes |
 | 9. Rehearsal | Full physical event simulation and runbook | Race director signs off |
+| 10. Lifecycle | New-race wizard, return/keep station, reusable inventory, archive | A second race reuses returned ducks and preserves the first race |
 
 ## 24. Repository Plan
 
@@ -934,6 +1005,8 @@ duck-race-manager/
 |   |-- NFC_PROVISIONING.md
 |   |-- DOMAIN_SETUP.md
 |   |-- HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md
+|   |-- STAFF_UX_AND_DUCK_RECOVERY.md
+|   |-- RACE_LIFECYCLE_AND_DUCK_REUSE.md
 |   `-- RACE_DAY_RUNBOOK.md
 |-- src/ or apps/web/
 |-- packages/
@@ -969,7 +1042,7 @@ before implementation code is offered for reuse.
 - Normal registration and race operation work from supported iPhones and
   Android phones.
 - Staff can identify a duck by NFC, QR, or visible number.
-- One eligible duck can be assigned to exactly one active registration.
+- One eligible duck can be assigned to exactly one active race entry.
 - An event can select immediate ten-duck heats or post-close balanced draw.
 - Immediate pairing atomically returns the heat and physical bag.
 - Immediate registration closure preserves a smaller final first-round heat.
@@ -981,6 +1054,18 @@ before implementation code is offered for reuse.
 - Failed email remains visible but never blocks race operation.
 - Staff can scan any duck to inspect its participant, heat, expected location,
   race status, synchronization state, and history without modifying it.
+- Staff can replace a lost duck while preserving participant, heat, and
+  qualification.
+- Staff can replace only a bad tag without replacing the duck.
+- Authorized staff can atomically swap two participants' ducks before racing.
+- The interface meets documented tap, response-time, accessibility, and
+  non-technical usability targets.
+- Administrators can create a new race from prior settings without copying
+  participant data.
+- Historical races remain available after later races are created.
+- Returned good-condition ducks can be reused with the same NFC URL.
+- Ducks kept by participants, missing, damaged, or unaccounted for cannot be
+  assigned in a future race.
 - A scanned round-one winner is automatically promoted to the final.
 - The winners bag can be verified against the expected finalist set.
 - First, second, and third place cannot contain duplicate ducks.
@@ -996,9 +1081,10 @@ before implementation code is offered for reuse.
 - Exact physical maximum for first-round and final heats
 - Public winner-name policy
 - Default number of heats ahead for upcoming notifications
-- Production email provider account, sending domain, and production quota
+- Amazon SES account, sending domain, and production sending access
 - Whether registration confirmation and finalist emails join the initial two
   heat notification templates
+- Whether a round-one winner may use a replacement duck in the final
 - Cloudflare account
 - Data retention period
 - Open-source license
