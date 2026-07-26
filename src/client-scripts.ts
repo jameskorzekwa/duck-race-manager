@@ -129,12 +129,176 @@ form.addEventListener("submit", async (event) => {
 });
 `;
 
+export const staffHomeScript = String.raw`
+const returnReview = document.querySelector("[data-return-review]");
+const returnTitle = document.querySelector("[data-return-title]");
+const returnMessage = document.querySelector("[data-return-message]");
+const returnSummary = document.querySelector("[data-return-summary]");
+const numberedDispositionForm = document.querySelector("[data-numbered-disposition-form]");
+const purgeReadyForm = document.querySelector("[data-purge-ready-form]");
+const cancelPurgeReadyForm = document.querySelector("[data-cancel-purge-ready-form]");
+const isSystemAdmin = returnReview.dataset.systemAdmin === "true";
+let reviewEvent = null;
+
+const reviewFact = (label, value) => {
+  const fact = document.createElement("div");
+  fact.className = "fact";
+  const term = document.createElement("dt");
+  const description = document.createElement("dd");
+  term.textContent = label;
+  description.textContent = value;
+  fact.append(term, description);
+  returnSummary.append(fact);
+};
+
+const reviewFetch = async (url, options) => {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    location.assign("/staff");
+    throw new Error("signed-out");
+  }
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || "Request failed.");
+  return body;
+};
+
+const loadReturnReview = async () => {
+  const body = await reviewFetch("/api/v1/staff/events/return-review");
+  reviewEvent = body.event;
+  numberedDispositionForm.hidden = true;
+  purgeReadyForm.hidden = true;
+  cancelPurgeReadyForm.hidden = true;
+  returnSummary.replaceChildren();
+  if (!reviewEvent) {
+    returnReview.hidden = true;
+    return;
+  }
+
+  returnReview.hidden = false;
+  returnTitle.textContent = reviewEvent.name;
+  reviewFact("Event status", reviewEvent.status.replaceAll("_", " ").toLowerCase());
+  reviewFact("Physical ducks", String(body.review.totalDucks));
+  reviewFact("Unresolved", String(body.review.unresolvedDucks));
+  if (body.review.unresolvedDuckNumbers.length > 0) {
+    reviewFact("Unresolved duck numbers", body.review.unresolvedDuckNumbers.join(", "));
+  }
+  const dispositionSummary = Object.entries(body.review.dispositions)
+    .map(([name, count]) => name.replaceAll("_", " ").toLowerCase() + ": " + count)
+    .join(" · ");
+  reviewFact("Dispositions", dispositionSummary || "None recorded");
+
+  const blocked = body.review.unresolvedDucks > 0
+    || body.review.unreleasedDucks > 0
+    || body.review.hasBlockingHeat
+    || body.review.hasActiveAssignment;
+  if (reviewEvent.status === "ARCHIVED") {
+    returnMessage.textContent = "This event is read-only and purge-ready.";
+    if (isSystemAdmin) cancelPurgeReadyForm.hidden = false;
+  } else {
+    numberedDispositionForm.hidden = false;
+    numberedDispositionForm.querySelector("button").disabled = false;
+    returnMessage.textContent = blocked
+      ? "Finish every disposition, reservation, assignment, and racing result before purge readiness."
+      : "All automated gates pass. An administrator can complete the final review.";
+    if (isSystemAdmin) {
+      purgeReadyForm.hidden = false;
+      purgeReadyForm.querySelector("button").disabled = blocked;
+    }
+  }
+};
+
+numberedDispositionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const values = new FormData(form);
+  const visibleNumber = String(values.get("visibleNumber"));
+  button.disabled = true;
+  returnMessage.textContent = "Saving physical disposition…";
+  try {
+    const result = await reviewFetch(
+      "/api/v1/staff/events/" + encodeURIComponent(reviewEvent.id)
+        + "/ducks/" + encodeURIComponent(visibleNumber) + "/dispositions",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          disposition: String(values.get("disposition")),
+        }),
+      },
+    );
+    form.reset();
+    await loadReturnReview();
+    returnMessage.textContent = "Duck #" + result.duck.visibleNumber + " disposition saved.";
+  } catch (error) {
+    if (error.message !== "signed-out") returnMessage.textContent = error.message;
+    button.disabled = false;
+  }
+});
+
+purgeReadyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button");
+  button.disabled = true;
+  returnMessage.textContent = "Validating final return gates…";
+  try {
+    await reviewFetch("/api/v1/staff/events/" + encodeURIComponent(reviewEvent.id) + "/purge-ready", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        returnReviewCompleted: true,
+        permanentDeletionAcknowledged: true,
+      }),
+    });
+    await loadReturnReview();
+    returnMessage.textContent = "Event marked purge-ready. Normal race changes are now disabled.";
+  } catch (error) {
+    if (error.message !== "signed-out") returnMessage.textContent = error.message;
+    button.disabled = false;
+  }
+});
+
+cancelPurgeReadyForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const reason = new FormData(form).get("reason");
+  button.disabled = true;
+  returnMessage.textContent = "Reopening return processing…";
+  try {
+    await reviewFetch("/api/v1/staff/events/" + encodeURIComponent(reviewEvent.id) + "/purge-ready/cancel", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId: crypto.randomUUID(), reason: String(reason) }),
+    });
+    form.reset();
+    await loadReturnReview();
+    returnMessage.textContent = "Return processing reopened for correction.";
+  } catch (error) {
+    if (error.message !== "signed-out") returnMessage.textContent = error.message;
+    button.disabled = false;
+  }
+});
+
+loadReturnReview().catch((error) => {
+  if (error.message !== "signed-out") {
+    returnReview.hidden = false;
+    returnMessage.textContent = "Return review is temporarily unavailable.";
+  }
+});
+`;
+
 export const staffDuckScript = String.raw`
 const root = document.querySelector("[data-staff-duck]");
 const token = root.dataset.token;
 const pageTitle = document.querySelector("[data-staff-title]");
 const summary = document.querySelector("[data-duck-summary]");
 const workArea = document.querySelector("[data-pairing-work]");
+const dispositionArea = document.querySelector("[data-disposition-work]");
+const dispositionForm = document.querySelector("[data-disposition-form]");
+const dispositionMessage = document.querySelector("[data-disposition-message]");
 const message = document.querySelector("[data-staff-message]");
 let currentEvent = null;
 let selectedRegistration = null;
@@ -163,6 +327,26 @@ const addFact = (label, value) => {
   summary.append(fact);
 };
 
+const showDisposition = (data) => {
+  if (!data.event || !["COMPLETED", "RETURN_PROCESSING"].includes(data.event.status)) return false;
+  dispositionArea.hidden = false;
+  dispositionArea.dataset.eventId = data.event.id;
+  document.querySelector("[data-disposition-event]").textContent = data.event.name;
+  const select = dispositionForm.elements.disposition;
+  const button = document.querySelector("[data-confirm-disposition]");
+  button.disabled = false;
+  if (data.disposition) {
+    select.value = data.disposition;
+    button.textContent = "Save disposition correction";
+    dispositionMessage.textContent = "Current disposition: " + data.disposition.replaceAll("_", " ").toLowerCase() + ".";
+  } else {
+    button.textContent = "Record physical disposition";
+    dispositionMessage.textContent = "Confirm the physical duck before recording this final outcome.";
+  }
+  message.textContent = "Review this duck, then record its confirmed physical disposition.";
+  return true;
+};
+
 const showInspection = (data) => {
   const participant = data.assignment.participant;
   pageTitle.textContent = "Inspect Duck #" + data.duck.visibleNumber;
@@ -172,8 +356,11 @@ const showInspection = (data) => {
   addFact("Participant", participant.firstName + " " + participant.lastName);
   addFact("Lookup code", participant.lookupCode);
   addFact("Registration", participant.registrationStatus.replaceAll("_", " ").toLowerCase());
+  if (!data.assignment.active) addFact("Assignment", "closed");
+  if (data.disposition) addFact("Disposition", data.disposition.replaceAll("_", " ").toLowerCase());
   if (participant.email) addFact("Email", participant.email);
   if (participant.phone) addFact("Phone", participant.phone);
+  showDisposition(data);
 };
 
 const renderSelection = (registration) => {
@@ -193,6 +380,7 @@ const showPairing = (data) => {
   pageTitle.textContent = "Pair Duck #" + data.duck.visibleNumber;
   addFact("Duck", "#" + data.duck.visibleNumber);
   addFact("Inventory", data.duck.inventoryStatus.replaceAll("_", " ").toLowerCase());
+  if (showDisposition(data)) return;
   if (!data.pairingRequired) {
     message.textContent = "This duck cannot be paired in its current inventory or tag state.";
     return;
@@ -214,6 +402,9 @@ const load = async () => {
     ]);
     currentEvent = eventResponse.event;
     summary.replaceChildren();
+    workArea.hidden = true;
+    dispositionArea.hidden = true;
+    dispositionMessage.textContent = "";
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
   } catch (error) {
@@ -277,6 +468,32 @@ document.querySelector("[data-confirm-pairing]").addEventListener("click", async
       message.textContent = error.message;
       event.currentTarget.disabled = false;
     }
+  }
+});
+
+dispositionForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = document.querySelector("[data-confirm-disposition]");
+  const disposition = new FormData(event.currentTarget).get("disposition");
+  button.disabled = true;
+  dispositionMessage.textContent = "Saving physical disposition…";
+  try {
+    const result = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/dispositions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: dispositionArea.dataset.eventId,
+        disposition: String(disposition),
+      }),
+    });
+    await load();
+    dispositionMessage.textContent = result.replayed
+      ? "This disposition was already saved."
+      : "Disposition saved. Inventory is now " + result.inventoryStatus.replaceAll("_", " ").toLowerCase() + ".";
+  } catch (error) {
+    if (error.message !== "signed-out") dispositionMessage.textContent = error.message;
+    button.disabled = false;
   }
 });
 

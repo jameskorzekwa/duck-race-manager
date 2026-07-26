@@ -32,6 +32,7 @@ export const faviconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 const styles = `
 :root { color-scheme: light; --ink:#112b3c; --cream:#fff7d6; --paper:#fffdf3; --yellow:#ffd43b; --orange:#ff7132; --water:#3294b0; --water-dark:#146780; --muted:#607078; font-family:ui-rounded,"Avenir Next Rounded","Arial Rounded MT Bold",system-ui,sans-serif; }
 * { box-sizing:border-box; }
+[hidden] { display:none !important; }
 html { scroll-behavior:smooth; }
 body { margin:0; min-width:320px; min-height:100vh; background:var(--cream); color:var(--ink); }
 a { color:inherit; }
@@ -323,7 +324,7 @@ export const renderStaffLogin = (returnTo = "/staff"): string => page({
     </section>`,
 });
 
-export const renderStaffHome = (displayName: string): string => page({
+export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): string => page({
   title: "Staff tools",
   description: "Protected QuickDucks staff race operations.",
   robots: "noindex,nofollow",
@@ -335,7 +336,42 @@ export const renderStaffHome = (displayName: string): string => page({
       <h1 class="page-title">Scan the selected duck first.</h1>
       <p class="lede">Open the duck’s NFC or QR tag. QuickDucks will take you to pairing when it is available, or inspection when it is already assigned.</p>
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
+      <section data-return-review data-system-admin="${isSystemAdmin ? "true" : "false"}" hidden>
+        <hr style="margin:2rem 0;border:0;border-top:2px solid #b8c6c9">
+        <p class="eyebrow">Return review</p>
+        <h2 data-return-title>Loading return review…</h2>
+        <p class="lede" data-return-message aria-live="polite"></p>
+        <dl class="facts" data-return-summary></dl>
+        <form data-numbered-disposition-form hidden>
+          <div class="field-grid">
+            <label>Duck number<input name="visibleNumber" type="number" min="1" max="999999999" inputmode="numeric" required placeholder="128"></label>
+            <label>Confirmed disposition
+              <select name="disposition" required>
+                <option value="" selected disabled>Choose confirmed outcome</option>
+                <option value="RETURNED">Returned, good condition</option>
+                <option value="QUARANTINED">Returned, needs tag or inspection</option>
+                <option value="DAMAGED">Damaged</option>
+                <option value="RETIRED">Retired</option>
+                <option value="KEPT">Participant keeping duck</option>
+                <option value="MISSING">Missing</option>
+                <option value="UNACCOUNTED_FOR">Unaccounted for</option>
+              </select>
+            </label>
+          </div>
+          <button class="button secondary" type="submit">Record by duck number</button>
+        </form>
+        <form data-purge-ready-form hidden>
+          <label class="check"><input type="checkbox" name="review" required><span class="label-text">I reviewed every physical duck disposition and exception.</span></label>
+          <label class="check"><input type="checkbox" name="deletion" required><span class="label-text">I understand that purge permanently deletes all participant, race, duck, tag, command, and audit data.</span></label>
+          <button class="button" type="submit">Mark event purge-ready</button>
+        </form>
+        <form data-cancel-purge-ready-form hidden>
+          <label>Correction reason<input name="reason" minlength="4" maxlength="500" required placeholder="Describe what needs correction"></label>
+          <button class="button secondary" type="submit">Reopen return processing</button>
+        </form>
+      </section>
       <a class="button secondary" href="/mock/staff/ducks/128/pair">Preview pairing layout</a>
+      <script src="/assets/staff-home.js" defer></script>
     </section>`,
 });
 
@@ -359,6 +395,24 @@ export const renderStaffDuck = (token: string, displayName: string): string => p
         <div class="result-list" data-registration-results></div>
         <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
         <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
+      </section>
+      <section data-disposition-work hidden>
+        <div class="privacy"><strong>Physical return</strong><span data-disposition-event></span></div>
+        <form data-disposition-form>
+          <label>Confirmed disposition
+            <select name="disposition" required>
+              <option value="RETURNED">Returned, good condition</option>
+              <option value="QUARANTINED">Returned, needs tag or inspection</option>
+              <option value="DAMAGED">Damaged</option>
+              <option value="RETIRED">Retired</option>
+              <option value="KEPT">Participant keeping duck</option>
+              <option value="MISSING">Missing</option>
+              <option value="UNACCOUNTED_FOR">Unaccounted for</option>
+            </select>
+          </label>
+          <button class="button" type="submit" data-confirm-disposition>Record physical disposition</button>
+        </form>
+        <p class="muted" data-disposition-message aria-live="polite"></p>
       </section>
       <script src="/assets/staff-duck.js" defer></script>
     </section>`,

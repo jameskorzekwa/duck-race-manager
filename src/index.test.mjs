@@ -63,11 +63,14 @@ test("serves the home-page status client", async () => {
 test("serves registration and staff pairing browser clients", async () => {
   const registration = await worker.fetch(new Request("https://quickducks.com/assets/register.js"), env);
   const staff = await worker.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env);
+  const staffHome = await worker.fetch(new Request("https://quickducks.com/assets/staff-home.js"), env);
 
   assert.equal(registration.status, 200);
   assert.match(await registration.text(), /\/api\/v1\/registrations/);
   assert.equal(staff.status, 200);
   assert.match(await staff.text(), /\/api\/v1\/staff\/ducks/);
+  assert.equal(staffHome.status, 200);
+  assert.match(await staffHome.text(), /\/api\/v1\/staff\/events\/return-review/);
 });
 
 test("serves the rubber-duck favicon", async () => {
@@ -257,7 +260,17 @@ test("renders protected staff pairing preview with code and name lookup", async 
   );
   const workingBody = await working.text();
   assert.match(workingBody, /data-staff-duck/);
+  assert.match(workingBody, /data-disposition-form/);
   assert.match(workingBody, /\/assets\/staff-duck\.js/);
+
+  const staffHome = await worker.fetch(
+    new Request("https://quickducks.com/mock/staff/home"),
+    env,
+  );
+  const staffHomeBody = await staffHome.text();
+  assert.match(staffHomeBody, /data-return-review/);
+  assert.match(staffHomeBody, /data-system-admin="true"/);
+  assert.match(staffHomeBody, /\/assets\/staff-home\.js/);
 });
 
 test("keeps the database health check", async () => {

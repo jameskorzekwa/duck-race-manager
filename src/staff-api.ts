@@ -34,7 +34,10 @@ interface StaffDuckRow {
   inventory_status: string;
   duck_revision: number;
   tag_status: string;
+  event_name: string | null;
+  event_status: string | null;
   assignment_id: string | null;
+  assignment_valid_to: string | null;
   event_id: string | null;
   race_entry_id: string | null;
   first_name: string | null;
@@ -43,6 +46,7 @@ interface StaffDuckRow {
   phone: string | null;
   lookup_code: string | null;
   registration_status: string | null;
+  disposition: string | null;
 }
 
 const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
@@ -50,15 +54,31 @@ const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
   const duck = await env.DB.prepare(
     `SELECT d.id AS duck_id, d.visible_number, d.inventory_status,
             d.revision AS duck_revision, dt.status AS tag_status,
-            da.id AS assignment_id, da.event_id, da.race_entry_id,
+            e.name AS event_name, e.status AS event_status,
+            da.id AS assignment_id, da.valid_to AS assignment_valid_to,
+            ed.event_id, da.race_entry_id,
             r.first_name, r.last_name, r.email, r.phone, r.lookup_code,
-            r.status AS registration_status
+            r.status AS registration_status, ded.disposition
        FROM duck_tags dt
        JOIN ducks d ON d.id = dt.duck_id
-       LEFT JOIN duck_assignments da
-         ON da.duck_id = d.id AND da.valid_to IS NULL
+       LEFT JOIN event_ducks ed ON ed.id = (
+         SELECT ed2.id
+           FROM event_ducks ed2
+          WHERE ed2.duck_id = d.id
+          ORDER BY ed2.reserved_at DESC
+          LIMIT 1
+       )
+       LEFT JOIN events e ON e.id = ed.event_id
+       LEFT JOIN duck_assignments da ON da.id = (
+         SELECT da2.id
+           FROM duck_assignments da2
+          WHERE da2.event_duck_id = ed.id
+          ORDER BY da2.valid_from DESC
+          LIMIT 1
+       )
        LEFT JOIN race_entries re ON re.id = da.race_entry_id
        LEFT JOIN registrations r ON r.id = re.registration_id
+       LEFT JOIN duck_event_dispositions ded ON ded.event_duck_id = ed.id
       WHERE dt.token = ?
       ORDER BY CASE dt.status WHEN 'ACTIVE' THEN 0 ELSE 1 END
       LIMIT 1`,
@@ -74,10 +94,18 @@ const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
       tagStatus: duck.tag_status,
     },
     pairingRequired: duck.assignment_id === null
+      && duck.disposition === null
       && duck.tag_status === "ACTIVE"
       && ["AVAILABLE", "RESERVED_FOR_EVENT"].includes(duck.inventory_status),
+    event: duck.event_id === null ? null : {
+      id: duck.event_id,
+      name: duck.event_name,
+      status: duck.event_status,
+    },
+    disposition: duck.disposition,
     assignment: duck.assignment_id === null ? null : {
       id: duck.assignment_id,
+      active: duck.assignment_valid_to === null,
       eventId: duck.event_id,
       raceEntryId: duck.race_entry_id,
       participant: {
@@ -90,6 +118,218 @@ const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
       },
     },
   });
+};
+
+const dispositionInventoryStatus = {
+  RETURNED: "AVAILABLE",
+  KEPT: "KEPT",
+  MISSING: "MISSING",
+  DAMAGED: "DAMAGED",
+  QUARANTINED: "QUARANTINED",
+  RETIRED: "RETIRED",
+  UNACCOUNTED_FOR: "UNACCOUNTED_FOR",
+} as const;
+
+type DuckDisposition = keyof typeof dispositionInventoryStatus;
+
+interface ExistingCommand {
+  event_id: string;
+  command_type: string;
+  result_id: string | null;
+}
+
+const findCommand = (commandId: string, env: Env): Promise<ExistingCommand | null> =>
+  env.DB.prepare(
+    "SELECT event_id, command_type, result_id FROM race_commands WHERE id = ?",
+  ).bind(commandId).first<ExistingCommand>();
+
+interface DispositionResultRow {
+  disposition_id: string;
+  disposition: DuckDisposition;
+  visible_number: number;
+  inventory_status: string;
+  event_status: string;
+}
+
+const dispositionResponse = (row: DispositionResultRow, replayed: boolean): Response => json({
+  dispositionId: row.disposition_id,
+  disposition: row.disposition,
+  inventoryStatus: row.inventory_status,
+  eventStatus: row.event_status,
+  duck: { visibleNumber: row.visible_number },
+  replayed,
+}, replayed ? 200 : 201);
+
+const recordDuckDisposition = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  selector: { token: string } | { visibleNumber: number; eventId: string },
+): Promise<Response> => {
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const eventId = "eventId" in selector ? selector.eventId : payload?.eventId;
+  const disposition = payload?.disposition;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || typeof eventId !== "string" || eventId.length === 0 || eventId.length > 128
+    || typeof disposition !== "string" || !(disposition in dispositionInventoryStatus)
+  ) {
+    return json({ error: "Command, event, and physical disposition are required." }, 400);
+  }
+
+  const existingCommand = await findCommand(commandId, env);
+  if (existingCommand !== null) {
+    if (existingCommand.event_id !== eventId || existingCommand.command_type !== "RECORD_DUCK_DISPOSITION") {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const replay = "token" in selector
+      ? await env.DB.prepare(
+        `SELECT ded.id AS disposition_id, ded.disposition, d.visible_number,
+                d.inventory_status, e.status AS event_status
+           FROM duck_event_dispositions ded
+           JOIN event_ducks ed ON ed.id = ded.event_duck_id
+           JOIN ducks d ON d.id = ed.duck_id
+           JOIN duck_tags dt ON dt.duck_id = d.id AND dt.token = ?
+           JOIN events e ON e.id = ded.event_id
+          WHERE ded.id = ? AND ded.event_id = ?
+          LIMIT 1`,
+      ).bind(selector.token, existingCommand.result_id, eventId).first<DispositionResultRow>()
+      : await env.DB.prepare(
+        `SELECT ded.id AS disposition_id, ded.disposition, d.visible_number,
+                d.inventory_status, e.status AS event_status
+           FROM duck_event_dispositions ded
+           JOIN event_ducks ed ON ed.id = ded.event_duck_id
+           JOIN ducks d ON d.id = ed.duck_id
+           JOIN events e ON e.id = ded.event_id
+          WHERE ded.id = ? AND ded.event_id = ? AND d.visible_number = ?
+          LIMIT 1`,
+      ).bind(existingCommand.result_id, eventId, selector.visibleNumber).first<DispositionResultRow>();
+    return replay === null
+      ? json({ error: "The saved command does not match this duck." }, 409)
+      : dispositionResponse(replay, true);
+  }
+
+  const contextQuery = `SELECT d.id AS duck_id, d.visible_number, ed.id AS event_duck_id,
+            e.status AS event_status, ded.id AS disposition_id,
+            da.id AS active_assignment_id
+       FROM ducks d
+       JOIN event_ducks ed ON ed.duck_id = d.id AND ed.event_id = ?
+       JOIN events e ON e.id = ed.event_id
+       LEFT JOIN duck_event_dispositions ded ON ded.event_duck_id = ed.id
+       LEFT JOIN duck_assignments da
+         ON da.event_duck_id = ed.id AND da.valid_to IS NULL`;
+  const context = await ("token" in selector
+    ? env.DB.prepare(
+      `${contextQuery}
+       JOIN duck_tags dt ON dt.duck_id = d.id
+      WHERE dt.token = ? AND dt.status = 'ACTIVE'
+      LIMIT 1`,
+    ).bind(eventId, selector.token)
+    : env.DB.prepare(
+      `${contextQuery}
+      WHERE d.visible_number = ?
+      LIMIT 1`,
+    ).bind(eventId, selector.visibleNumber)
+  ).first<{
+    duck_id: string;
+    visible_number: number;
+    event_duck_id: string;
+    event_status: string;
+    disposition_id: string | null;
+    active_assignment_id: string | null;
+  }>();
+  if (context === null) return json({ error: "This duck is not reserved for that event." }, 404);
+  if (!["COMPLETED", "RETURN_PROCESSING"].includes(context.event_status)) {
+    return json({ error: "Duck returns can be recorded only after racing is complete." }, 409);
+  }
+
+  const now = new Date().toISOString();
+  const dispositionId = context.disposition_id ?? crypto.randomUUID();
+  const inventoryStatus = dispositionInventoryStatus[disposition as DuckDisposition];
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `INSERT INTO race_commands
+        (id, event_id, command_type, result_id, requested_at, completed_at)
+       SELECT ?, ?, 'RECORD_DUCK_DISPOSITION', ?, ?, ?
+         FROM events
+        WHERE id = ? AND status IN ('COMPLETED', 'RETURN_PROCESSING')`,
+    ).bind(commandId, eventId, dispositionId, now, now, eventId),
+  ];
+  if (context.disposition_id === null) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO duck_event_dispositions
+        (id, event_id, event_duck_id, disposition, recorded_by_staff_profile_id,
+         source_command_id, recorded_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(dispositionId, eventId, context.event_duck_id, disposition, actor.id, commandId, now));
+  } else {
+    statements.push(env.DB.prepare(
+      `UPDATE duck_event_dispositions
+          SET disposition = ?, recorded_by_staff_profile_id = ?,
+              source_command_id = ?, recorded_at = ?
+        WHERE id = ? AND event_id = ?`,
+    ).bind(disposition, actor.id, commandId, now, dispositionId, eventId));
+  }
+  if (context.active_assignment_id !== null) {
+    statements.push(env.DB.prepare(
+      `UPDATE duck_assignments
+          SET valid_to = ?, end_reason = ?, ended_by_staff_profile_id = ?
+        WHERE id = ? AND valid_to IS NULL`,
+    ).bind(now, disposition, actor.id, context.active_assignment_id));
+  }
+  statements.push(
+    env.DB.prepare(
+      `UPDATE event_ducks
+          SET released_at = COALESCE(released_at, ?), release_reason = ?,
+              released_by_staff_profile_id = ?
+        WHERE id = ? AND event_id = ?`,
+    ).bind(now, disposition, actor.id, context.event_duck_id, eventId),
+    env.DB.prepare(
+      `UPDATE ducks
+          SET inventory_status = ?, inventory_status_changed_at = ?,
+              updated_at = ?, revision = revision + 1
+        WHERE id = ?`,
+    ).bind(inventoryStatus, now, now, context.duck_id),
+    env.DB.prepare(
+      `UPDATE events
+          SET status = 'RETURN_PROCESSING', updated_at = ?
+        WHERE id = ? AND status = 'COMPLETED'`,
+    ).bind(now, eventId),
+    env.DB.prepare(
+      `INSERT INTO audit_events
+        (id, event_id, command_id, action, subject_type, subject_id,
+         actor_type, occurred_at, details_json)
+       VALUES (?, ?, ?, ?, 'EVENT_DUCK', ?, 'STAFF', ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      eventId,
+      commandId,
+      context.disposition_id === null ? "DUCK_DISPOSITION_RECORDED" : "DUCK_DISPOSITION_CORRECTED",
+      context.event_duck_id,
+      now,
+      JSON.stringify({
+        staff_profile_id: actor.id,
+        duck_id: context.duck_id,
+        disposition,
+        inventory_status: inventoryStatus,
+      }),
+    ),
+  );
+
+  try {
+    await env.DB.batch(statements);
+  } catch {
+    return json({ error: "The disposition conflicted with another update. Refresh and try again." }, 409);
+  }
+
+  return dispositionResponse({
+    disposition_id: dispositionId,
+    disposition: disposition as DuckDisposition,
+    visible_number: context.visible_number,
+    inventory_status: inventoryStatus,
+    event_status: "RETURN_PROCESSING",
+  }, false);
 };
 
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
@@ -430,6 +670,253 @@ const pairDuck = async (
   );
 };
 
+const dispositionCounts = async (eventId: string, env: Env): Promise<Record<string, number>> => {
+  const rows = await env.DB.prepare(
+    `SELECT disposition, COUNT(*) AS disposition_count
+       FROM duck_event_dispositions
+      WHERE event_id = ?
+      GROUP BY disposition
+      ORDER BY disposition`,
+  ).bind(eventId).all<{ disposition: string; disposition_count: number }>();
+  return Object.fromEntries(rows.results.map((row) => [row.disposition, row.disposition_count]));
+};
+
+const returnReview = async (env: Env): Promise<Response> => {
+  const event = await env.DB.prepare(
+    `SELECT id, name, status
+       FROM events
+      WHERE status IN ('COMPLETED', 'RETURN_PROCESSING', 'ARCHIVED')
+      ORDER BY CASE status WHEN 'RETURN_PROCESSING' THEN 0 WHEN 'COMPLETED' THEN 1 ELSE 2 END
+      LIMIT 1`,
+  ).first<{ id: string; name: string; status: string }>();
+  if (event === null) return json({ event: null });
+
+  const summary = await env.DB.prepare(
+    `SELECT COUNT(*) AS total_count,
+            SUM(CASE WHEN ded.id IS NULL THEN 1 ELSE 0 END) AS unresolved_count,
+            SUM(CASE WHEN ed.released_at IS NULL AND ded.id IS NOT NULL THEN 1 ELSE 0 END) AS unreleased_count
+       FROM event_ducks ed
+       LEFT JOIN duck_event_dispositions ded ON ded.event_duck_id = ed.id
+      WHERE ed.event_id = ?`,
+  ).bind(event.id).first<{
+    total_count: number;
+    unresolved_count: number;
+    unreleased_count: number;
+  }>();
+  const blockingHeat = await env.DB.prepare(
+    `SELECT id FROM heats
+      WHERE event_id = ? AND status IN ('RUNNING', 'AWAITING_RESULT')
+      LIMIT 1`,
+  ).bind(event.id).first<{ id: string }>();
+  const activeAssignment = await env.DB.prepare(
+    `SELECT id FROM duck_assignments
+      WHERE event_id = ? AND valid_to IS NULL
+      LIMIT 1`,
+  ).bind(event.id).first<{ id: string }>();
+  const unresolvedDucks = await env.DB.prepare(
+    `SELECT d.visible_number
+       FROM event_ducks ed
+       JOIN ducks d ON d.id = ed.duck_id
+       LEFT JOIN duck_event_dispositions ded ON ded.event_duck_id = ed.id
+      WHERE ed.event_id = ? AND ded.id IS NULL
+      ORDER BY d.visible_number
+      LIMIT 100`,
+  ).bind(event.id).all<{ visible_number: number }>();
+
+  return json({
+    event,
+    review: {
+      totalDucks: summary?.total_count ?? 0,
+      unresolvedDucks: summary?.unresolved_count ?? 0,
+      unreleasedDucks: summary?.unreleased_count ?? 0,
+      hasBlockingHeat: blockingHeat !== null,
+      hasActiveAssignment: activeAssignment !== null,
+      unresolvedDuckNumbers: unresolvedDucks.results.map((duck) => duck.visible_number),
+      dispositions: await dispositionCounts(event.id, env),
+    },
+  });
+};
+
+const markEventPurgeReady = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  eventId: string,
+): Promise<Response> => {
+  if (!actor.isSystemAdmin) return json({ error: "Administrator permission required." }, 403);
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || payload?.returnReviewCompleted !== true
+    || payload?.permanentDeletionAcknowledged !== true
+  ) {
+    return json({ error: "Command, completed return review, and permanent-deletion acknowledgement are required." }, 400);
+  }
+
+  const existingCommand = await findCommand(commandId, env);
+  if (existingCommand !== null) {
+    if (existingCommand.event_id !== eventId || existingCommand.command_type !== "MARK_EVENT_PURGE_READY") {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const event = await env.DB.prepare(
+      "SELECT id, name, status FROM events WHERE id = ?",
+    ).bind(eventId).first<{ id: string; name: string; status: string }>();
+    return event === null
+      ? json({ error: "Event not found." }, 404)
+      : json({ event, dispositions: await dispositionCounts(eventId, env), replayed: true });
+  }
+
+  const event = await env.DB.prepare(
+    "SELECT id, name, status FROM events WHERE id = ?",
+  ).bind(eventId).first<{ id: string; name: string; status: string }>();
+  if (event === null) return json({ error: "Event not found." }, 404);
+  if (!["COMPLETED", "RETURN_PROCESSING"].includes(event.status)) {
+    return json({ error: "The event is not in return review." }, 409);
+  }
+
+  const blockingHeat = await env.DB.prepare(
+    `SELECT id FROM heats
+      WHERE event_id = ? AND status IN ('RUNNING', 'AWAITING_RESULT')
+      LIMIT 1`,
+  ).bind(eventId).first<{ id: string }>();
+  if (blockingHeat !== null) {
+    return json({ error: "A heat is still running or awaiting a result." }, 409);
+  }
+  const unresolved = await env.DB.prepare(
+    `SELECT ed.id
+       FROM event_ducks ed
+       LEFT JOIN duck_event_dispositions ded ON ded.event_duck_id = ed.id
+      WHERE ed.event_id = ? AND ded.id IS NULL
+      LIMIT 1`,
+  ).bind(eventId).first<{ id: string }>();
+  if (unresolved !== null) {
+    return json({ error: "Every event duck needs a physical disposition." }, 409);
+  }
+  const unreleased = await env.DB.prepare(
+    `SELECT id FROM event_ducks
+      WHERE event_id = ? AND released_at IS NULL
+      LIMIT 1`,
+  ).bind(eventId).first<{ id: string }>();
+  if (unreleased !== null) {
+    return json({ error: "Every event duck reservation must be released." }, 409);
+  }
+  const activeAssignment = await env.DB.prepare(
+    `SELECT id FROM duck_assignments
+      WHERE event_id = ? AND valid_to IS NULL
+      LIMIT 1`,
+  ).bind(eventId).first<{ id: string }>();
+  if (activeAssignment !== null) {
+    return json({ error: "Every duck assignment must be closed." }, 409);
+  }
+
+  const counts = await dispositionCounts(eventId, env);
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at)
+         SELECT ?, ?, 'MARK_EVENT_PURGE_READY', ?, ?, ?
+           FROM events
+          WHERE id = ? AND status IN ('COMPLETED', 'RETURN_PROCESSING')`,
+      ).bind(commandId, eventId, eventId, now, now, eventId),
+      env.DB.prepare(
+        `UPDATE events SET status = 'ARCHIVED', updated_at = ?
+          WHERE id = ? AND status IN ('COMPLETED', 'RETURN_PROCESSING')`,
+      ).bind(now, eventId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         VALUES (?, ?, ?, 'EVENT_MARKED_PURGE_READY', 'EVENT', ?, 'STAFF', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(),
+        eventId,
+        commandId,
+        eventId,
+        now,
+        JSON.stringify({ staff_profile_id: actor.id, disposition_counts: counts }),
+      ),
+    ]);
+  } catch {
+    return json({ error: "Purge readiness conflicted with another update. Refresh and try again." }, 409);
+  }
+
+  return json({
+    event: { ...event, status: "ARCHIVED" },
+    dispositions: counts,
+    replayed: false,
+  }, 201);
+};
+
+const cancelEventPurgeReady = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  eventId: string,
+): Promise<Response> => {
+  if (!actor.isSystemAdmin) return json({ error: "Administrator permission required." }, 403);
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const reason = typeof payload?.reason === "string" ? payload.reason.trim() : "";
+  if (typeof commandId !== "string" || !isCommandId(commandId) || reason.length < 4 || reason.length > 500) {
+    return json({ error: "Command and a correction reason between 4 and 500 characters are required." }, 400);
+  }
+
+  const existingCommand = await findCommand(commandId, env);
+  if (existingCommand !== null) {
+    if (existingCommand.event_id !== eventId || existingCommand.command_type !== "CANCEL_EVENT_PURGE_READY") {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const event = await env.DB.prepare(
+      "SELECT id, name, status FROM events WHERE id = ?",
+    ).bind(eventId).first<{ id: string; name: string; status: string }>();
+    return event === null
+      ? json({ error: "Event not found." }, 404)
+      : json({ event, replayed: true });
+  }
+
+  const event = await env.DB.prepare(
+    "SELECT id, name, status FROM events WHERE id = ?",
+  ).bind(eventId).first<{ id: string; name: string; status: string }>();
+  if (event === null) return json({ error: "Event not found." }, 404);
+  if (event.status !== "ARCHIVED") return json({ error: "The event is not purge-ready." }, 409);
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at)
+         SELECT ?, ?, 'CANCEL_EVENT_PURGE_READY', ?, ?, ?
+           FROM events
+          WHERE id = ? AND status = 'ARCHIVED'`,
+      ).bind(commandId, eventId, eventId, now, now, eventId),
+      env.DB.prepare(
+        "UPDATE events SET status = 'RETURN_PROCESSING', updated_at = ? WHERE id = ? AND status = 'ARCHIVED'",
+      ).bind(now, eventId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         VALUES (?, ?, ?, 'EVENT_PURGE_READY_CANCELLED', 'EVENT', ?, 'STAFF', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(),
+        eventId,
+        commandId,
+        eventId,
+        now,
+        JSON.stringify({ staff_profile_id: actor.id, reason }),
+      ),
+    ]);
+  } catch {
+    return json({ error: "The correction request conflicted with another update. Refresh and try again." }, 409);
+  }
+
+  return json({ event: { ...event, status: "RETURN_PROCESSING" }, replayed: false }, 201);
+};
+
 const purgeEvent = async (
   request: Request,
   env: Env,
@@ -510,6 +997,20 @@ export const handleStaffApi = async (
 ): Promise<Response> => {
   const url = new URL(request.url);
 
+  if (url.pathname === "/api/v1/staff/events/return-review" && request.method === "GET") {
+    return returnReview(env);
+  }
+
+  const cancelPurgeReadyMatch = url.pathname.match(/^\/api\/v1\/staff\/events\/([^/]{1,128})\/purge-ready\/cancel$/);
+  if (cancelPurgeReadyMatch !== null && request.method === "POST") {
+    return cancelEventPurgeReady(request, env, actor, cancelPurgeReadyMatch[1]);
+  }
+
+  const purgeReadyMatch = url.pathname.match(/^\/api\/v1\/staff\/events\/([^/]{1,128})\/purge-ready$/);
+  if (purgeReadyMatch !== null && request.method === "POST") {
+    return markEventPurgeReady(request, env, actor, purgeReadyMatch[1]);
+  }
+
   const purgeMatch = url.pathname.match(/^\/api\/v1\/staff\/events\/([^/]+)\/purge$/);
   if (purgeMatch !== null && request.method === "POST") {
     return purgeEvent(request, env, actor, purgeMatch[1]);
@@ -522,6 +1023,21 @@ export const handleStaffApi = async (
   const assignmentMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)\/assignments$/);
   if (assignmentMatch !== null && request.method === "POST") {
     return pairDuck(request, env, actor, assignmentMatch[1]);
+  }
+
+  const numberedDispositionMatch = url.pathname.match(
+    /^\/api\/v1\/staff\/events\/([^/]{1,128})\/ducks\/([1-9][0-9]{0,8})\/dispositions$/,
+  );
+  if (numberedDispositionMatch !== null && request.method === "POST") {
+    return recordDuckDisposition(request, env, actor, {
+      eventId: numberedDispositionMatch[1],
+      visibleNumber: Number(numberedDispositionMatch[2]),
+    });
+  }
+
+  const dispositionMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)\/dispositions$/);
+  if (dispositionMatch !== null && request.method === "POST") {
+    return recordDuckDisposition(request, env, actor, { token: dispositionMatch[1] });
   }
 
   const duckMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
