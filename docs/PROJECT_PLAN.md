@@ -331,7 +331,9 @@ state validation, and idempotency are mandatory.
 Inspection is the safe default for authenticated staff when no mutating scan
 operation is active. It shows duck, participant, heat, expected physical
 location, race status, synchronization state, and audit history. It never
-changes state. Public tag scans continue to show only the generic duck page.
+changes state. An anonymous scan of an unpaired duck redirects home. An
+anonymous scan of a paired duck opens its public race-status page with no
+contact details, staff lookup code, private token, location, or audit data.
 
 ## 9. Registration Workflow
 
@@ -352,6 +354,13 @@ Registration or duck pairing also records whether the participant plans to
 keep, return, or has not decided about the duck. This preference helps planning
 but does not change inventory until staff record the physical disposition.
 
+One browser may register multiple participants. Successful responses append
+the participant name, lookup code, and private status path to a secure,
+HttpOnly, host-only browser cookie. The home page shows all registrations held
+by that browser and offers `Register another participant`. If browser state is
+lost, public name search returns only name, duck, heat, and published race
+status; contact details, private tokens, and lookup codes remain hidden.
+
 ### 9.2 Staff and Walk-Up Registration
 
 Authorized staff can create the same registration from the staff interface.
@@ -360,11 +369,12 @@ UUIDs and queueing commands.
 
 ### 9.3 Duck Assignment
 
-1. Staff scan the participant's confirmation QR or search by code/name.
-2. Staff review the selected registration.
-3. Staff start an `ASSIGN_DUCK` scan operation.
-4. The participant selects a duck.
-5. Staff scan the duck by NFC, QR, or visible number.
+1. The participant selects a duck.
+2. Staff scan the duck by NFC, QR, or visible number.
+3. The authenticated scan opens the protected pairing page for that duck.
+4. Staff enter the participant's short lookup code or search by name when the
+   code is unavailable.
+5. Staff review the selected registration.
 6. The PWA displays the participant and duck together.
 7. Staff explicitly confirm the assignment.
 8. The server creates the assignment and changes the registration to `ACTIVE`.

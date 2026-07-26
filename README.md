@@ -67,6 +67,7 @@ delivery phases, and acceptance criteria.
 - [Race lifecycle and duck reuse](docs/RACE_LIFECYCLE_AND_DUCK_REUSE.md)
 - [Infrastructure](docs/INFRASTRUCTURE.md)
 - [Registration API](docs/REGISTRATION_API.md)
+- [Duck scan, pairing, and public status](docs/DUCK_SCAN_AND_PAIRING.md)
 
 ## License
 

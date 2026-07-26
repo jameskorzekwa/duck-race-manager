@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { handleApi } from "./api.ts";
+import { readBrowserRegistrations, registrationCookie } from "./browser-registrations.ts";
 import { hashToken, randomToken } from "./registration.ts";
 
 const openEvent = {
@@ -14,6 +15,22 @@ const openEvent = {
   registration_opens_at: null,
   registration_closes_at: null,
   email_required: 0,
+};
+
+const publicStatus = {
+  first_name: "Daisy",
+  last_name: "Duck",
+  registration_status: "ACTIVE",
+  event_name: "Test Duck Race",
+  event_status: "ROUND_ONE",
+  visible_number: 42,
+  round_type: "ROUND_ONE",
+  heat_number: 7,
+  heat_status: "PLANNED",
+  current_heat_number: 5,
+  current_heat_round: "ROUND_ONE",
+  result_position: null,
+  advanced: 0,
 };
 
 const makeDb = (first) => {
@@ -33,6 +50,10 @@ const makeDb = (first) => {
         },
         async first() {
           return first(sql, this.args);
+        },
+        async all() {
+          const value = first(sql, this.args);
+          return { results: Array.isArray(value) ? value : [] };
         },
       };
       statements.push(statement);
@@ -74,12 +95,8 @@ test("returns the current event without private configuration", async () => {
   assert.doesNotMatch(db.statements[0].sql, /DRAFT/);
 });
 
-test("returns only safe public data for an NFC duck token", async () => {
-  const db = makeDb(() => ({
-    visible_number: 42,
-    inventory_status: "IN_USE",
-    tag_status: "ACTIVE",
-  }));
+test("returns paired duck race status without private data", async () => {
+  const db = makeDb(() => publicStatus);
   const token = "a".repeat(32);
   const response = await handleApi(
     new Request(`https://quickducks.com/api/v1/ducks/${token}`),
@@ -87,10 +104,47 @@ test("returns only safe public data for an NFC duck token", async () => {
   );
   const body = await response.json();
 
-  assert.deepEqual(body, { visibleNumber: 42, tagStatus: "ACTIVE" });
-  assert.equal("inventoryStatus" in body, false);
-  assert.match(db.statements[0].sql, /t\.status IN \('ACTIVE', 'RETIRED'\)/);
-  assert.doesNotMatch(db.statements[0].sql, /inventory_status/);
+  assert.deepEqual(body, {
+    displayName: "Daisy Duck",
+    registrationStatus: "ACTIVE",
+    eventName: "Test Duck Race",
+    eventStatus: "ROUND_ONE",
+    duckNumber: 42,
+    assignedHeat: { round: "ROUND_ONE", number: 7, status: "PLANNED" },
+    currentHeat: { round: "ROUND_ONE", number: 5 },
+    result: null,
+  });
+  assert.equal("email" in body, false);
+  assert.equal("lookupCode" in body, false);
+  assert.equal("privateStatusPath" in body, false);
+  assert.match(db.statements[0].sql, /JOIN duck_assignments/);
+});
+
+test("does not expose an unpaired duck through the public API", async () => {
+  const db = makeDb(() => null);
+  const response = await handleApi(
+    new Request(`https://quickducks.com/api/v1/ducks/${"a".repeat(32)}`),
+    makeEnv(db),
+  );
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(await response.json(), { error: "Not found." });
+});
+
+test("searches public status by name without returning private fields", async () => {
+  const db = makeDb(() => [publicStatus]);
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/status/search?q=Daisy%20Duck"),
+    makeEnv(db),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.results[0].displayName, "Daisy Duck");
+  assert.equal(body.results[0].duckNumber, 42);
+  assert.equal("email" in body.results[0], false);
+  assert.equal("lookupCode" in body.results[0], false);
+  assert.match(db.statements[0].sql, /LIMIT 25/);
 });
 
 test("rejects cross-origin registration before touching the database", async () => {
@@ -151,10 +205,20 @@ test("creates registration, race-entry, command, and audit records atomically", 
     hostname: "quickducks.com",
   }));
   const privateToken = randomToken();
+  const existingRegistration = {
+    name: "Donald Duck",
+    lookupCode: "WXYZ6789",
+    statusPath: `/r/${"b".repeat(43)}`,
+  };
+  const existingCookie = registrationCookie(null, existingRegistration);
   const response = await handleApi(
     new Request("https://quickducks.com/api/v1/registrations", {
       method: "POST",
-      headers: { "content-type": "application/json", origin: "https://quickducks.com" },
+      headers: {
+        "content-type": "application/json",
+        origin: "https://quickducks.com",
+        cookie: existingCookie,
+      },
       body: JSON.stringify({
         eventId: openEvent.id,
         commandId: crypto.randomUUID(),
@@ -176,6 +240,14 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.equal(body.privateStatusPath, `/r/${privateToken}`);
   assert.equal(body.replayed, false);
   assert.match(body.lookupCode, /^[A-HJ-NP-Z2-9]{8}$/);
+  assert.deepEqual(readBrowserRegistrations(response.headers.get("set-cookie")), [
+    existingRegistration,
+    {
+      name: "Daisy Duck",
+      lookupCode: body.lookupCode,
+      statusPath: `/r/${privateToken}`,
+    },
+  ]);
   assert.equal(db.batches.length, 1);
   assert.equal(db.batches[0].length, 4);
   assert.match(db.batches[0][0].sql, /INSERT INTO race_commands/);
@@ -218,8 +290,10 @@ test("replays a completed command without reusing a Turnstile token", async () =
     if (sql.includes("FROM race_commands")) {
       return {
         result_id: "registration_existing",
-        lookup_code: "DUCK2026",
+        lookup_code: "DCKS2345",
         private_token_hash: privateTokenHash,
+        first_name: "Daisy",
+        last_name: "Duck",
       };
     }
     return null;
@@ -243,6 +317,11 @@ test("replays a completed command without reusing a Turnstile token", async () =
   assert.equal(response.status, 200);
   assert.equal(body.registrationId, "registration_existing");
   assert.equal(body.replayed, true);
+  assert.deepEqual(readBrowserRegistrations(response.headers.get("set-cookie")), [{
+    name: "Daisy Duck",
+    lookupCode: "DCKS2345",
+    statusPath: `/r/${privateToken}`,
+  }]);
   assert.equal(db.batches.length, 0);
   assert.equal(db.statements.length, 1);
 });
