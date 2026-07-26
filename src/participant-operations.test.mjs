@@ -174,12 +174,18 @@ test("migration adds only bounded staff notes to participant storage", () => {
 
 test("handler returns null for routes owned by other staff modules", async () => {
   const { database, env } = makeContext();
-  const response = await handleParticipantOperations(
+  const duckResponse = await handleParticipantOperations(
     new Request("https://quickducks.com/api/v1/staff/ducks/token"),
     env,
     staffActor,
   );
-  assert.equal(response, null);
+  const registrationSearchResponse = await handleParticipantOperations(
+    new Request("https://quickducks.com/api/v1/staff/registrations/search?eventId=event-open&q=Daisy"),
+    env,
+    staffActor,
+  );
+  assert.equal(duckResponse, null);
+  assert.equal(registrationSearchResponse, null);
   database.close();
 });
 

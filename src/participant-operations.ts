@@ -730,6 +730,7 @@ export const handleParticipantOperations = async (
   );
   if (registrationMatch === null) return null;
   const [, registrationId, operation] = registrationMatch;
+  if (registrationId === "search" && operation === undefined) return null;
   if (operation === undefined && request.method === "GET") {
     return detailRegistration(env, registrationId);
   }
