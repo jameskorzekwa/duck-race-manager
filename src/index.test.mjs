@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker from "./index.ts";
+import { renderStaffHome } from "./site.ts";
 
 const env = {
   APP_ORIGIN: "https://quickducks.com",
@@ -270,7 +271,14 @@ test("renders protected staff pairing preview with code and name lookup", async 
   const staffHomeBody = await staffHome.text();
   assert.match(staffHomeBody, /data-return-review/);
   assert.match(staffHomeBody, /data-system-admin="true"/);
+  assert.match(staffHomeBody, /data-staff-access-form/);
+  assert.match(staffHomeBody, /Regular staff/);
+  assert.match(staffHomeBody, /Administrator/);
   assert.match(staffHomeBody, /\/assets\/staff-home\.js/);
+
+  const regularStaffHome = renderStaffHome("Regular Staff", false);
+  assert.doesNotMatch(regularStaffHome, /data-staff-access-form/);
+  assert.doesNotMatch(regularStaffHome, /Administrators have deletion authority/);
 });
 
 test("keeps the database health check", async () => {

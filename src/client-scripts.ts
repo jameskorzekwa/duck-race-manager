@@ -137,6 +137,10 @@ const returnSummary = document.querySelector("[data-return-summary]");
 const numberedDispositionForm = document.querySelector("[data-numbered-disposition-form]");
 const purgeReadyForm = document.querySelector("[data-purge-ready-form]");
 const cancelPurgeReadyForm = document.querySelector("[data-cancel-purge-ready-form]");
+const staffAccess = document.querySelector("[data-staff-access]");
+const staffAccessForm = document.querySelector("[data-staff-access-form]");
+const staffAccessMessage = document.querySelector("[data-staff-access-message]");
+const staffAccessList = document.querySelector("[data-staff-access-list]");
 const isSystemAdmin = returnReview.dataset.systemAdmin === "true";
 let reviewEvent = null;
 
@@ -149,6 +153,13 @@ const reviewFact = (label, value) => {
   description.textContent = value;
   fact.append(term, description);
   returnSummary.append(fact);
+};
+
+const staffText = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value;
+  if (className) element.className = className;
+  return element;
 };
 
 const reviewFetch = async (url, options) => {
@@ -206,6 +217,57 @@ const loadReturnReview = async () => {
     }
   }
 };
+
+const loadStaffProfiles = async () => {
+  if (!staffAccess) return;
+  const body = await reviewFetch("/api/v1/staff/profiles");
+  staffAccessList.replaceChildren();
+  for (const profile of body.staff) {
+    const card = staffText("article", "", "staff-access-card");
+    const identity = staffText("div", "");
+    identity.append(
+      staffText("p", profile.displayName || profile.email),
+      staffText("p", profile.email, "muted"),
+    );
+    card.append(
+      identity,
+      staffText("span", profile.role === "ADMIN" ? "Administrator" : "Regular staff", "role-tag"),
+    );
+    staffAccessList.append(card);
+  }
+  staffAccessMessage.textContent = body.staff.length === 1
+    ? "1 authorized staff account."
+    : body.staff.length + " authorized staff accounts.";
+};
+
+if (staffAccessForm) staffAccessForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const values = new FormData(form);
+  button.disabled = true;
+  staffAccessMessage.textContent = "Creating Cognito account and staff access…";
+  try {
+    const result = await reviewFetch("/api/v1/staff/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        email: String(values.get("email")),
+        displayName: String(values.get("displayName")),
+        role: String(values.get("role")),
+      }),
+    });
+    form.reset();
+    await loadStaffProfiles();
+    staffAccessMessage.textContent = result.staff.displayName + " can now sign in as "
+      + (result.staff.role === "ADMIN" ? "an administrator." : "regular staff.");
+  } catch (error) {
+    if (error.message !== "signed-out") staffAccessMessage.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
 
 numberedDispositionForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -286,6 +348,11 @@ loadReturnReview().catch((error) => {
   if (error.message !== "signed-out") {
     returnReview.hidden = false;
     returnMessage.textContent = "Return review is temporarily unavailable.";
+  }
+});
+loadStaffProfiles().catch((error) => {
+  if (staffAccess && error.message !== "signed-out") {
+    staffAccessMessage.textContent = "Staff access is temporarily unavailable.";
   }
 });
 `;

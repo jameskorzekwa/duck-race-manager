@@ -1,6 +1,8 @@
 export interface Env {
   APP_ORIGIN: string;
+  AWS_ACCESS_KEY_ID: string;
   AWS_REGION: string;
+  AWS_SECRET_ACCESS_KEY: string;
   COGNITO_USER_POOL_ID: string;
   COGNITO_USER_POOL_CLIENT_ID: string;
   COGNITO_DOMAIN: string;

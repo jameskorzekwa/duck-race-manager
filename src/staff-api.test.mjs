@@ -120,6 +120,231 @@ test("requires same-origin protection for cookie-authenticated staff mutations",
   assert.equal(allowed.status, 404);
 });
 
+test("regular staff cannot list or add staff access", async () => {
+  const db = makeDb(() => null);
+  let provisioned = false;
+  const provisioner = {
+    async create() {
+      provisioned = true;
+      throw new Error("should not run");
+    },
+    async delete() {},
+  };
+  const list = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/profiles"),
+    makeEnv(db),
+    actor,
+    provisioner,
+  );
+  const create = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        email: "new.staff@example.com",
+        displayName: "New Staff",
+        role: "STAFF",
+      }),
+    }),
+    makeEnv(db),
+    actor,
+    provisioner,
+  );
+
+  assert.equal(list.status, 403);
+  assert.equal(create.status, 403);
+  assert.equal(provisioned, false);
+  assert.equal(db.statements.length, 0);
+});
+
+test("administrators list staff without exposing Cognito subjects", async () => {
+  const admin = { ...actor, isSystemAdmin: true };
+  const db = makeDb(
+    () => null,
+    () => ({
+      results: [
+        {
+          id: "admin_test",
+          email: "admin@example.com",
+          display_name: "Admin Person",
+          is_system_admin: 1,
+          created_at: "2026-07-26T00:00:00Z",
+        },
+        {
+          id: "staff_test",
+          email: "staff@example.com",
+          display_name: "Staff Person",
+          is_system_admin: 0,
+          created_at: "2026-07-26T00:00:00Z",
+        },
+      ],
+    }),
+  );
+  const response = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/profiles"),
+    makeEnv(db),
+    admin,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body.staff.map((profile) => profile.role), ["ADMIN", "STAFF"]);
+  assert.equal(JSON.stringify(body).includes("cognitoSub"), false);
+});
+
+test("an administrator creates passwordless regular staff with command and audit records", async () => {
+  const admin = { ...actor, isSystemAdmin: true };
+  const db = makeDb(() => null);
+  const provisioner = {
+    async create(email, displayName) {
+      assert.equal(email, "new.staff@example.com");
+      assert.equal(displayName, "New Staff");
+      return { cognitoSub: "new-staff-sub", username: "new-staff-user", created: true };
+    },
+    async delete() {
+      assert.fail("successful creation must not be deleted");
+    },
+  };
+  const response = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        email: " New.Staff@Example.com ",
+        displayName: "  New   Staff ",
+        role: "STAFF",
+      }),
+    }),
+    makeEnv(db),
+    admin,
+    provisioner,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.equal(body.staff.email, "new.staff@example.com");
+  assert.equal(body.staff.displayName, "New Staff");
+  assert.equal(body.staff.role, "STAFF");
+  assert.equal(db.batches.length, 1);
+  const profileInsert = db.batches[0].find((statement) => statement.sql.includes("INSERT INTO staff_profiles"));
+  assert.deepEqual(profileInsert.args.slice(1), ["new-staff-sub", "new.staff@example.com", "New Staff", 0, actor.id]);
+  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
+  assert.match(sql, /INSERT INTO staff_access_commands/);
+  assert.match(sql, /INSERT INTO staff_access_audit_events/);
+  const audit = db.batches[0].find((statement) => statement.sql.includes("staff_access_audit_events"));
+  assert.equal(JSON.parse(audit.args[5]).role, "STAFF");
+});
+
+test("an administrator can grant administrator role", async () => {
+  const admin = { ...actor, isSystemAdmin: true };
+  const db = makeDb(() => null);
+  const response = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        email: "another.admin@example.com",
+        displayName: "Another Admin",
+        role: "ADMIN",
+      }),
+    }),
+    makeEnv(db),
+    admin,
+    {
+      async create() {
+        return { cognitoSub: "another-admin-sub", username: "another-admin-user", created: true };
+      },
+      async delete() {},
+    },
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal((await response.json()).staff.role, "ADMIN");
+  const profileInsert = db.batches[0].find((statement) => statement.sql.includes("INSERT INTO staff_profiles"));
+  assert.equal(profileInsert.args[4], 1);
+});
+
+test("replaying a staff grant does not create another Cognito identity", async () => {
+  const admin = { ...actor, isSystemAdmin: true };
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM staff_access_commands")) {
+      return {
+        id: "staff_replay",
+        email: "staff@example.com",
+        display_name: "Staff Person",
+        is_system_admin: 0,
+        created_at: "2026-07-26T00:00:00Z",
+      };
+    }
+    return null;
+  });
+  let provisioned = false;
+  const response = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: "2c293c36-bca9-4bd0-bc12-a5c9d1ab8370",
+        email: "staff@example.com",
+        displayName: "Staff Person",
+        role: "STAFF",
+      }),
+    }),
+    makeEnv(db),
+    admin,
+    {
+      async create() {
+        provisioned = true;
+        throw new Error("should not run");
+      },
+      async delete() {},
+    },
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.replayed, true);
+  assert.equal(provisioned, false);
+  assert.equal(db.batches.length, 0);
+});
+
+test("a failed D1 grant removes a newly created Cognito identity", async () => {
+  const admin = { ...actor, isSystemAdmin: true };
+  const db = makeDb(() => null);
+  db.batch = async () => {
+    throw new Error("conflict");
+  };
+  const deleted = [];
+  const response = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/profiles", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        email: "cleanup@example.com",
+        displayName: "Cleanup Person",
+        role: "STAFF",
+      }),
+    }),
+    makeEnv(db),
+    admin,
+    {
+      async create() {
+        return { cognitoSub: "cleanup-sub", username: "cleanup-user", created: true };
+      },
+      async delete(username) {
+        deleted.push(username);
+      },
+    },
+  );
+
+  assert.equal(response.status, 409);
+  assert.deepEqual(deleted, ["cleanup-user"]);
+});
+
 test("staff name search may return contact details", async () => {
   const db = makeDb(
     () => null,

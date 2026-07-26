@@ -13,4 +13,7 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(staffDuckScript, /\/dispositions/);
   assert.match(staffHomeScript, /\/api\/v1\/staff\/events\/return-review/);
   assert.match(staffHomeScript, /\/purge-ready/);
+  assert.match(staffHomeScript, /\/api\/v1\/staff\/profiles/);
+  assert.match(staffHomeScript, /Regular staff/);
+  assert.match(staffHomeScript, /Administrator/);
 });

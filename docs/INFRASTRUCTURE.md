@@ -22,8 +22,9 @@ after the domain's nameservers are changed to the assigned Cloudflare pair.
 
 Do not commit credentials. Local administration uses browser-authenticated AWS
 CLI and Wrangler sessions. Runtime AWS access is a least-privilege IAM user that
-can send only from the QuickDucks SES identity; its key is stored only as
-encrypted Cloudflare Worker secrets.
+can send only from the QuickDucks SES identity and create, inspect, or compensate
+passwordless users only in the QuickDucks Cognito pool. Its key is stored only
+as encrypted Cloudflare Worker secrets.
 
 Expected Worker secrets:
 
@@ -46,6 +47,14 @@ stores only the short-lived access token in the host-only
 `SameSite=Lax`; no refresh token is retained, so staff sign in again after the
 one-hour Cognito access token expires.
 
+Public Cognito sign-up remains disabled. A system administrator grants access
+from the protected staff UI, selecting either regular staff or administrator.
+The Worker creates a confirmed passwordless email identity in Cognito and then
+atomically records its immutable Cognito subject, role, idempotent command, and
+retained access audit in D1. A Cognito identity without a matching
+`staff_profiles` row cannot access staff tools. If D1 rejects a new grant, the
+Worker deletes the newly created Cognito identity as compensation.
+
 Automatic Workers invocation logs are disabled in Wrangler because Cloudflare
 fetch-event logs include request URLs. QuickDucks private status credentials are
 URL path segments and must not be persisted in observability data. Application
@@ -62,9 +71,10 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_NAMED_IAM
 ```
 
-The stack creates Cognito, SES identity, and the least-privilege IAM user. It
+The stack creates Cognito, the managed-login default branding, SES identity,
+and the least-privilege IAM user. It
 does not create an IAM access key. Access keys are generated only when the
-Worker email integration is ready and are transferred directly into encrypted
+Worker AWS integration is ready and are transferred directly into encrypted
 Cloudflare secrets without committing or logging them.
 
 ## Cloudflare Deployment

@@ -100,6 +100,10 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .result-button:hover,.result-button:focus-visible { outline:4px solid #83d8ec; outline-offset:1px; }
 .result-button:disabled { opacity:.55; cursor:not-allowed; }
 .pairing-review { margin:1rem 0; padding:1rem; border:2px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; }
+.staff-access-list { display:grid; gap:.75rem; margin-top:1rem; }
+.staff-access-card { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.5rem 1rem; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
+.staff-access-card p { margin:0; }
+.role-tag { align-self:flex-start; padding:.3rem .55rem; border:2px solid var(--ink); border-radius:999px; background:var(--cream); font-size:.75rem; font-weight:950; letter-spacing:.06em; text-transform:uppercase; }
 .code { display:inline-block; margin:.5rem 0; padding:.65rem .85rem; border:2px dashed var(--ink); border-radius:.6rem; background:var(--cream); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:clamp(1.4rem,7vw,2.4rem); font-weight:950; letter-spacing:.12em; }
 .facts { display:grid; gap:.8rem; margin:1.5rem 0; }
 .fact { padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
@@ -336,6 +340,28 @@ export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): st
       <h1 class="page-title">Scan the selected duck first.</h1>
       <p class="lede">Open the duck’s NFC or QR tag. QuickDucks will take you to pairing when it is available, or inspection when it is already assigned.</p>
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
+      ${isSystemAdmin ? `<section data-staff-access>
+        <hr style="margin:2rem 0;border:0;border-top:2px solid #b8c6c9">
+        <p class="eyebrow">Administrator</p>
+        <h2>Staff access</h2>
+        <p class="lede">Invite an email as regular staff or grant administrator access. New staff sign in with a one-time code from Cognito.</p>
+        <div class="privacy"><strong>Administrators have deletion authority.</strong><span>Only grant Administrator to people who may review returns, reopen purge readiness, and permanently delete a completed race.</span></div>
+        <form data-staff-access-form>
+          <div class="field-grid">
+            <label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required placeholder="staff@example.com"></label>
+            <label>Display name<input name="displayName" autocomplete="off" maxlength="100" required placeholder="Jamie Rivera"></label>
+          </div>
+          <label>Role
+            <select name="role" required>
+              <option value="STAFF">Regular staff</option>
+              <option value="ADMIN">Administrator</option>
+            </select>
+          </label>
+          <button class="button" type="submit">Add staff access</button>
+        </form>
+        <p class="muted" data-staff-access-message aria-live="polite">Loading authorized staff…</p>
+        <div class="staff-access-list" data-staff-access-list></div>
+      </section>` : ""}
       <section data-return-review data-system-admin="${isSystemAdmin ? "true" : "false"}" hidden>
         <hr style="margin:2rem 0;border:0;border-top:2px solid #b8c6c9">
         <p class="eyebrow">Return review</p>

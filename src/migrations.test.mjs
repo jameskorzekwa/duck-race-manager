@@ -8,6 +8,7 @@ const migrationNames = [
   "0002_registration_foundation.sql",
   "0003_assignment_and_heat_status.sql",
   "0004_pairing_status_and_purge.sql",
+  "0005_staff_access_management.sql",
 ];
 
 const createDatabase = () => {
@@ -82,6 +83,29 @@ test("fresh migrations enforce event, duck, heat, and result relationships", () 
     VALUES ('bad-result', 'event', 'heat-1', 'entry-1', 'assignment-2', 1, '2026-07-25T00:00:00Z', 'staff', 'command-3');
   `), /FOREIGN KEY constraint failed/);
 
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("staff access commands retain administrator and target relationships", () => {
+  const database = createDatabase();
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, is_system_admin)
+    VALUES
+      ('admin', 'admin-sub', 'admin@example.com', 1),
+      ('staff', 'staff-sub', 'staff@example.com', 0);
+    INSERT INTO staff_access_commands
+      (id, command_type, target_staff_profile_id, requested_by_staff_profile_id, requested_at, completed_at)
+    VALUES
+      ('command', 'ADD_STAFF', 'staff', 'admin', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO staff_access_audit_events
+      (id, command_id, actor_staff_profile_id, target_staff_profile_id, action, occurred_at)
+    VALUES
+      ('audit', 'command', 'admin', 'staff', 'STAFF_ACCESS_GRANTED', '2026-07-26T00:00:00Z');
+  `);
+
+  assert.throws(() => database.exec("DELETE FROM staff_profiles WHERE id = 'admin'"), /FOREIGN KEY constraint failed/);
+  assert.throws(() => database.exec("DELETE FROM staff_profiles WHERE id = 'staff'"), /FOREIGN KEY constraint failed/);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });
