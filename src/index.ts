@@ -1,4 +1,13 @@
 import { handleApi } from "./api.ts";
+import {
+  faviconSvg,
+  manifestJson,
+  renderDuck,
+  renderHome,
+  renderNotFound,
+  renderRegistration,
+  renderStatus,
+} from "./site.ts";
 import type { Env } from "./types.ts";
 
 const securityHeaders = {
@@ -18,6 +27,18 @@ const json = (value: unknown, status = 200): Response =>
     },
   });
 
+const html = (body: string, status = 200, noindex = false): Response =>
+  new Response(body, {
+    status,
+    headers: {
+      ...securityHeaders,
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; style-src 'unsafe-inline'; upgrade-insecure-requests",
+      "content-type": "text/html; charset=utf-8",
+      ...(noindex ? { "x-robots-tag": "noindex, nofollow" } : {}),
+    },
+  });
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -29,8 +50,39 @@ export default {
       return new Response(null, {
         status: 308,
         headers: {
+          ...securityHeaders,
           "cache-control": "public, max-age=3600",
           location: destination.toString(),
+        },
+      });
+    }
+
+    if (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico") {
+      return new Response(faviconSvg, {
+        headers: {
+          ...securityHeaders,
+          "cache-control": "public, max-age=604800, immutable",
+          "content-type": "image/svg+xml; charset=utf-8",
+        },
+      });
+    }
+
+    if (url.pathname === "/site.webmanifest") {
+      return new Response(manifestJson, {
+        headers: {
+          ...securityHeaders,
+          "cache-control": "public, max-age=86400",
+          "content-type": "application/manifest+json; charset=utf-8",
+        },
+      });
+    }
+
+    if (url.pathname === "/robots.txt") {
+      return new Response("User-agent: *\nAllow: /\nDisallow: /r/\nDisallow: /api/\n", {
+        headers: {
+          ...securityHeaders,
+          "cache-control": "public, max-age=86400",
+          "content-type": "text/plain; charset=utf-8",
         },
       });
     }
@@ -48,39 +100,11 @@ export default {
 
     if (url.pathname.startsWith("/api/v1/")) return handleApi(request, env);
 
-    if (url.pathname === "/") {
-      return new Response(
-        `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>QuickDucks</title>
-    <style>
-      :root { color-scheme: light; font-family: system-ui, sans-serif; }
-      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f3c740; color: #182018; }
-      main { width: min(36rem, calc(100% - 3rem)); padding: 3rem; border: 3px solid #182018; background: #fff9df; box-shadow: 10px 10px 0 #182018; }
-      h1 { margin: 0 0 1rem; font-size: clamp(3rem, 12vw, 6rem); line-height: .85; letter-spacing: -.06em; }
-      p { font-size: 1.2rem; line-height: 1.5; }
-    </style>
-  </head>
-  <body>
-    <main>
-      <h1>Quick<br>Ducks</h1>
-      <p>The duck race registration and race-day system is being prepared.</p>
-    </main>
-  </body>
-</html>`,
-        {
-          headers: {
-            ...securityHeaders,
-            "content-type": "text/html; charset=utf-8",
-            "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-          },
-        },
-      );
-    }
+    if (url.pathname === "/" && request.method === "GET") return html(renderHome());
+    if (url.pathname === "/register" && request.method === "GET") return html(renderRegistration(), 200, true);
+    if (url.pathname === "/r/mock" && request.method === "GET") return html(renderStatus(), 200, true);
+    if (url.pathname === "/t/mock" && request.method === "GET") return html(renderDuck(), 200, true);
 
-    return json({ error: "Not found" }, 404);
+    return html(renderNotFound(), 404, true);
   },
 } satisfies ExportedHandler<Env>;

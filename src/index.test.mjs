@@ -5,16 +5,24 @@ import worker from "./index.ts";
 
 const env = {
   APP_ORIGIN: "https://quickducks.com",
+  AWS_REGION: "us-east-1",
+  DB: {
+    prepare: () => ({
+      async first() {
+        return { ok: 1 };
+      },
+    }),
+  },
 };
 
 test("redirects HTTP requests to canonical HTTPS", async () => {
   const response = await worker.fetch(
-    new Request("http://quickducks.com/register?source=nfc"),
+    new Request("http://quickducks.com/api/v1/events/current"),
     env,
   );
 
   assert.equal(response.status, 308);
-  assert.equal(response.headers.get("location"), "https://quickducks.com/register?source=nfc");
+  assert.equal(response.headers.get("location"), "https://quickducks.com/api/v1/events/current");
 });
 
 test("redirects alternate hosts to the canonical origin", async () => {
@@ -24,19 +32,52 @@ test("redirects alternate hosts to the canonical origin", async () => {
   assert.equal(response.headers.get("location"), "https://quickducks.com/");
 });
 
-test("adds HSTS and browser security headers to HTML", async () => {
+test("renders the responsive landing-page mockup", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/"), env);
+  const body = await response.text();
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
-  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
-  assert.equal(response.headers.get("cross-origin-opener-policy"), "same-origin");
+  assert.match(body, /Find your duck\. Follow the race\./);
+  assert.match(body, /href="\/favicon\.svg"/);
 });
 
-test("adds security headers to JSON errors", async () => {
+test("serves the rubber-duck favicon", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/favicon.svg"), env);
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /image\/svg\+xml/);
+  assert.match(body, /#ffd43b/);
+});
+
+test("renders the clickable registration and status mockups", async () => {
+  const registration = await worker.fetch(new Request("https://quickducks.com/register"), env);
+  const confirmation = await worker.fetch(new Request("https://quickducks.com/r/mock"), env);
+
+  assert.match(await registration.text(), /Preview confirmation/);
+  assert.match(await confirmation.text(), /DUCK-824/);
+  assert.equal(confirmation.headers.get("x-robots-tag"), "noindex, nofollow");
+});
+
+test("keeps the database health check", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/health"), env);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    service: "quickducks",
+    status: "ok",
+    database: "connected",
+    region: "us-east-1",
+  });
+});
+
+test("renders a secured noindex not-found page", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/missing"), env);
+  const body = await response.text();
 
   assert.equal(response.status, 404);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
-  assert.deepEqual(await response.json(), { error: "Not found" });
+  assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.match(body, /Nothing is swimming here/);
 });
