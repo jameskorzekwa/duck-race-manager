@@ -297,9 +297,9 @@ test("one browser collection returns multiple independent registrations", async 
           public_name_policy: "FIRST_NAME_LAST_INITIAL",
           first_name: raceEntryId === "entry_one" ? "Daisy" : "Donald",
           last_name: "Duck",
-          registration_status: "ACTIVE",
+          registration_status: raceEntryId === "entry_one" ? "ACTIVE" : "SUBMITTED",
           race_entry_id: raceEntryId,
-          visible_number: raceEntryId === "entry_one" ? 42 : 43,
+          visible_number: raceEntryId === "entry_one" ? 42 : null,
           round_one_heat_number: null,
           round_one_heat_status: null,
           round_one_place: null,
@@ -319,6 +319,7 @@ test("one browser collection returns multiple independent registrations", async 
           last_name: "Duck",
           lookup_code: "DAISY123",
           status: "ACTIVE",
+          is_paired: 1,
         },
         {
           registration_id: "registration_two",
@@ -326,7 +327,8 @@ test("one browser collection returns multiple independent registrations", async 
           first_name: "Donald",
           last_name: "Duck",
           lookup_code: "DONALD45",
-          status: "ACTIVE",
+          status: "SUBMITTED",
+          is_paired: 0,
         },
       ],
     } : { results: [] },
@@ -341,10 +343,58 @@ test("one browser collection returns multiple independent registrations", async 
 
   assert.equal(body.registrations.length, 2);
   assert.deepEqual(body.registrations.map((item) => item.lookupCode), ["DAISY123", "DONALD45"]);
+  assert.deepEqual(body.registrations.map((item) => item.paired), [true, false]);
+  assert.equal(body.registrations[0].raceStatus.duck.visibleNumber, 42);
+  assert.equal(body.registrations[1].raceStatus.duck, null);
   assert.equal("email" in body.registrations[0], false);
   assert.equal("phone" in body.registrations[0], false);
+  assert.equal("privateStatusPath" in body.registrations[0], false);
+  assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(db.statements[1].sql, /SET last_seen_at = \?, expires_at = \?/);
+  assert.match(db.statements[2].sql, /FROM duck_assignments da/);
+  assert.doesNotMatch(db.statements[2].sql, /email|phone|private_token/i);
   assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
+});
+
+test("browser collection presence probe refreshes the cookie without selecting private records", async () => {
+  const cookieToken = "C".repeat(43);
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM browser_registration_collections")) {
+      return { id: "collection_test", expires_at: "2099-01-01T00:00:00.000Z" };
+    }
+    if (sql.includes("SELECT 1 AS has_registration")) return { has_registration: 1 };
+    return null;
+  });
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/registrations/mine/presence", {
+      headers: { cookie: `__Host-quickducks_browser=${cookieToken}` },
+    }),
+    makeEnv(db),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { hasRegistrations: true });
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
+  assert.match(db.statements[1].sql, /SET last_seen_at = \?, expires_at = \?/);
+  assert.match(db.statements[2].sql, /SELECT 1 AS has_registration/);
+  assert.match(db.statements[2].sql, /LIMIT 1/);
+  assert.doesNotMatch(db.statements[2].sql, /JOIN|first_name|last_name|lookup_code|email|phone|private_token|race_entry/i);
+  assert.equal(db.statements.some((statement) => statement.sql.includes("FROM race_entries")), false);
+});
+
+test("browser collection presence probe clears an invalid cookie without querying registration data", async () => {
+  const db = makeDb(() => assert.fail("invalid collection cookie must not query D1"));
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/registrations/mine/presence", {
+      headers: { cookie: "__Host-quickducks_browser=invalid" },
+    }),
+    makeEnv(db),
+  );
+
+  assert.deepEqual(await response.json(), { hasRegistrations: false });
+  assert.match(response.headers.get("set-cookie") ?? "", /Max-Age=0/);
+  assert.equal(db.statements.length, 0);
 });
 
 test("private registration status still keeps email and phone staff-only", async () => {

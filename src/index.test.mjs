@@ -43,9 +43,11 @@ test("renders the responsive landing page", async () => {
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
   assert.match(body, /Find your duck\. Follow the race\./);
-  assert.match(body, /My ducks/);
+  assert.match(body, /<a href="\/my-ducks" data-my-ducks-nav hidden>My Ducks<\/a>/);
+  assert.doesNotMatch(body, /Saved on this device|data-my-ducks-list/);
   assert.match(body, /Find race status by name/);
   assert.match(body, /src="\/assets\/home\.js"/);
+  assert.match(body, /src="\/assets\/participant\.js"/);
   assert.match(body, /href="\/favicon\.svg"/);
   assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
   assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self'/);
@@ -62,6 +64,7 @@ test("serves the home-page status client", async () => {
 
 test("serves registration and staff pairing browser clients", async () => {
   const registration = await worker.fetch(new Request("https://quickducks.com/assets/register.js"), env);
+  const participant = await worker.fetch(new Request("https://quickducks.com/assets/participant.js"), env);
   const staff = await worker.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env);
   const staffHome = await worker.fetch(new Request("https://quickducks.com/assets/staff-home.js"), env);
   const live = await worker.fetch(new Request("https://quickducks.com/assets/live.js"), env);
@@ -72,6 +75,9 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(registration.status, 200);
   assert.equal(registration.headers.get("cache-control"), "public, max-age=3600");
   assert.match(await registration.text(), /\/api\/v1\/registrations/);
+  assert.equal(participant.status, 200);
+  assert.equal(participant.headers.get("cache-control"), "public, max-age=3600");
+  assert.match(await participant.text(), /\/api\/v1\/registrations\/mine/);
   assert.equal(staff.status, 200);
   assert.equal(staff.headers.get("cache-control"), "no-store");
   assert.match(await staff.text(), /\/api\/v1\/staff\/ducks/);
@@ -85,6 +91,28 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(finishLine.headers.get("cache-control"), "no-store");
   assert.match(await inventoryIntake.text(), /intakeCreateProvisioningMachine/);
   assert.equal(inventoryIntake.headers.get("cache-control"), "no-store");
+});
+
+test("renders the private My Ducks page with two accessible horizontal sections", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/my-ducks"), env);
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.match(body, /<meta name="robots" content="noindex,nofollow">/);
+  assert.match(body, /<h2 id="awaiting-participants-title">Awaiting Participants<\/h2>/);
+  assert.match(body, /<h2 id="paired-participants-title">My Ducks<\/h2>/);
+  assert.match(body, /data-carousel-previous/);
+  assert.match(body, /data-carousel-next/);
+  assert.match(body, /tabindex="0" aria-label="Awaiting participant registrations"/);
+  assert.match(body, /scroll-snap-type:x mandatory/);
+  assert.match(body, /data-my-ducks-freshness[^>]*>Loading saved registrations/);
+  assert.match(body, /data-carousel-empty hidden>No participants are waiting for a duck/);
+  assert.match(body, /data-carousel-empty hidden>No paired ducks are saved on this device yet/);
+  assert.match(body, /Register another participant/);
+  assert.match(body, /src="\/assets\/participant\.js"/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
 });
 
 test("gates the inventory intake station and renders its canonical noindex markup", async () => {
@@ -115,6 +143,10 @@ test("gates the inventory intake station and renders its canonical noindex marku
     assert.match(body, /Reserved for race/);
     assert.match(body, /Added this session/);
     assert.match(body, /Start NFC provisioning/);
+    assert.match(body, /End NFC provisioning/);
+    assert.match(body, /data-end-intake-nfc hidden disabled/);
+    assert.match(body, /role="status" aria-live="polite" aria-atomic="true"/);
+    assert.match(body, /data-end-intake-nfc[^>]*class="button secondary station-control"|class="button secondary station-control"[^>]*data-end-intake-nfc/);
     assert.match(body, /Android Chrome over HTTPS only/);
     assert.match(body, /data-intake-takeover hidden/);
     assert.match(body, /Take over pending sticker/);

@@ -1,4 +1,28 @@
-export const registrationScript = String.raw`
+export const registrationHandoffHelpersScript = String.raw`
+const registrationHandoffKey = "quickducks.registration-handoff";
+const registrationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const registrationPrivatePathPattern = /^\/r\/[A-Za-z0-9_-]{43,128}$/;
+const registrationCreateHandoff = (value) => {
+  if (
+    !value || typeof value !== "object" || Array.isArray(value)
+    || typeof value.registrationId !== "string" || !registrationIdPattern.test(value.registrationId)
+    || typeof value.privateStatusPath !== "string" || !registrationPrivatePathPattern.test(value.privateStatusPath)
+  ) return null;
+  return { registrationId: value.registrationId, privateStatusPath: value.privateStatusPath };
+};
+const registrationStoreHandoff = (storage, value) => {
+  const handoff = registrationCreateHandoff(value);
+  if (handoff === null) return false;
+  try {
+    storage.setItem(registrationHandoffKey, JSON.stringify(handoff));
+    return true;
+  } catch {
+    return false;
+  }
+};
+`;
+
+export const registrationScript = registrationHandoffHelpersScript + String.raw`
 const form = document.querySelector("[data-registration-form]");
 const eventName = document.querySelector("[data-event-name]");
 const eventDate = document.querySelector("[data-event-date]");
@@ -145,12 +169,388 @@ form.addEventListener("submit", async (event) => {
       submitButton.disabled = false;
       return;
     }
-    location.assign(body.privateStatusPath);
+    const handoff = registrationCreateHandoff(body);
+    if (handoff === null) {
+      setMessage("Registration was saved, but its private status details were invalid. Ask race staff for help before leaving this page.", true);
+      return;
+    }
+    try { registrationStoreHandoff(globalThis.sessionStorage, handoff); } catch {}
+    location.assign("/my-ducks?registered=" + encodeURIComponent(handoff.registrationId));
   } catch {
     setMessage("The network interrupted registration. Try again; the same request will be retried safely.", true);
     submitButton.disabled = false;
   }
 });
+`;
+
+export const participantHandoffHelpersScript = String.raw`
+const participantHandoffKey = "quickducks.registration-handoff";
+const participantRegistrationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const participantPrivatePathPattern = /^\/r\/[A-Za-z0-9_-]{43,128}$/;
+const participantValidateHandoff = (value, expectedRegistrationId, appOrigin) => {
+  if (
+    !value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).length !== 2
+    || !Object.hasOwn(value, "registrationId") || !Object.hasOwn(value, "privateStatusPath")
+    || typeof expectedRegistrationId !== "string" || !participantRegistrationIdPattern.test(expectedRegistrationId)
+    || value.registrationId !== expectedRegistrationId
+    || typeof value.privateStatusPath !== "string" || !participantPrivatePathPattern.test(value.privateStatusPath)
+  ) return null;
+  try {
+    const configured = new URL(appOrigin);
+    const privateUrl = new URL(value.privateStatusPath, configured.origin);
+    if (
+      configured.pathname !== "/" || configured.search || configured.hash
+      || privateUrl.origin !== configured.origin || privateUrl.username || privateUrl.password
+      || privateUrl.search || privateUrl.hash
+      || privateUrl.pathname !== value.privateStatusPath
+      || privateUrl.href !== configured.origin + value.privateStatusPath
+    ) return null;
+  } catch {
+    return null;
+  }
+  return { registrationId: value.registrationId, privateStatusPath: value.privateStatusPath };
+};
+const participantConsumeHandoff = (storage, expectedRegistrationId, appOrigin) => {
+  try {
+    const serialized = storage.getItem(participantHandoffKey);
+    if (serialized === null) return null;
+    const handoff = participantValidateHandoff(JSON.parse(serialized), expectedRegistrationId, appOrigin);
+    if (handoff === null) return null;
+    storage.removeItem(participantHandoffKey);
+    return handoff;
+  } catch {
+    return null;
+  }
+};
+`;
+
+export const participantScript = participantHandoffHelpersScript + String.raw`
+const participantNav = document.querySelector("[data-my-ducks-nav]");
+const participantRoot = document.querySelector("[data-my-ducks-page]");
+const participantFreshness = document.querySelector("[data-my-ducks-freshness]");
+const participantSuccess = document.querySelector("[data-registration-success]");
+const participantSections = Array.from(document.querySelectorAll("[data-participant-section]"));
+let participantRegisteredId = participantRoot
+  ? new URLSearchParams(location.search).get("registered")
+  : null;
+let participantCurrentId = null;
+let participantPrivateStatusPath = null;
+let participantHasLoaded = false;
+let participantVersion = null;
+let participantRefreshRunning = null;
+let participantRefreshQueued = false;
+let participantPollTimer = null;
+let participantReconnectTimer = null;
+let participantReconnectAttempt = 0;
+let participantSocket = null;
+let participantConnected = false;
+
+const participantText = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value == null ? "" : String(value);
+  if (className) element.className = className;
+  return element;
+};
+
+const participantHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase()
+  .replace(/^./, (character) => character.toUpperCase());
+const participantRoundLabel = (round) => round === "FINAL" ? "Final" : "Round one";
+const participantHeatStatus = (status) => ({
+  PLANNED: "Coming up",
+  LOADING: "Ducks are being prepared",
+  READY: "Ready to call",
+  CALLING: "Calling racers now",
+  RUNNING: "Racing now",
+  AWAITING_RESULT: "Race finished; checking the result",
+  FINALIZED: "Result official",
+  CANCELLED: "Not running",
+})[status] || "Status being checked";
+
+const participantAddFact = (container, label, value) => {
+  const fact = participantText("div", "", "fact");
+  fact.append(participantText("dt", label), participantText("dd", value));
+  container.append(fact);
+};
+
+const participantAddRaceFacts = (card, status) => {
+  if (!status) {
+    card.append(participantText("p", "Race status is not currently public.", "muted"));
+    return;
+  }
+  const facts = participantText("dl", "", "facts");
+  participantAddFact(facts, "Duck", status.duck
+    ? "Duck #" + status.duck.visibleNumber
+    : "Waiting for duck assignment");
+  const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
+  participantAddFact(facts, "Assigned heat", assigned
+    ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
+    : "Heat not assigned yet");
+  participantAddFact(facts, "Race activity", status.currentHeat
+    ? participantRoundLabel(status.currentHeat.round) + " · Heat " + status.currentHeat.number
+      + " · " + participantHeatStatus(status.currentHeat.status)
+    : "No heat is active right now");
+  participantAddFact(facts, "Race status", participantHumanize(status.outcome));
+  card.append(facts);
+};
+
+const participantCard = (registration) => {
+  const current = registration.registrationId === participantCurrentId;
+  const card = participantText("article", "", "duck-card participant-card" + (current ? " is-current" : ""));
+  card.dataset.registrationId = registration.registrationId;
+  if (current) {
+    card.tabIndex = -1;
+    card.setAttribute("aria-current", "true");
+    card.append(participantText("span", "Just registered", "success-tag"));
+  }
+  card.append(
+    participantText("h3", registration.firstName + " " + registration.lastName),
+    participantText("p", "Staff lookup code: " + registration.lookupCode),
+    participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"),
+  );
+  participantAddRaceFacts(card, registration.raceStatus);
+  return card;
+};
+
+const participantUpdateControls = (section) => {
+  const track = section.querySelector("[data-participant-track]");
+  const previous = section.querySelector("[data-carousel-previous]");
+  const next = section.querySelector("[data-carousel-next]");
+  previous.disabled = track.scrollLeft <= 4;
+  next.disabled = track.scrollLeft >= track.scrollWidth - track.clientWidth - 4;
+};
+
+const participantMove = (section, direction) => {
+  const track = section.querySelector("[data-participant-track]");
+  const cards = Array.from(track.children);
+  if (cards.length === 0) return;
+  let closest = 0;
+  let distance = Infinity;
+  for (const [index, card] of cards.entries()) {
+    const nextDistance = Math.abs(card.offsetLeft - track.scrollLeft);
+    if (nextDistance < distance) {
+      closest = index;
+      distance = nextDistance;
+    }
+  }
+  const target = cards[Math.max(0, Math.min(cards.length - 1, closest + direction))];
+  target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "start" });
+};
+
+for (const section of participantSections) {
+  const track = section.querySelector("[data-participant-track]");
+  section.querySelector("[data-carousel-previous]").addEventListener("click", () => participantMove(section, -1));
+  section.querySelector("[data-carousel-next]").addEventListener("click", () => participantMove(section, 1));
+  track.addEventListener("scroll", () => participantUpdateControls(section), { passive: true });
+  track.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault();
+      participantMove(section, event.key === "ArrowLeft" ? -1 : 1);
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      const cards = Array.from(track.children);
+      const target = event.key === "Home" ? cards[0] : cards.at(-1);
+      if (target) target.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "start" });
+    }
+  });
+}
+window.addEventListener("resize", () => {
+  for (const section of participantSections) participantUpdateControls(section);
+});
+
+const participantRenderSection = (kind, registrations) => {
+  const section = participantSections.find((item) => item.dataset.participantSection === kind);
+  const track = section.querySelector("[data-participant-track]");
+  const empty = section.querySelector("[data-carousel-empty]");
+  const controls = section.querySelector("[data-carousel-controls]");
+  track.replaceChildren(...registrations.map(participantCard));
+  const hasRegistrations = registrations.length > 0;
+  track.hidden = !hasRegistrations;
+  controls.hidden = !hasRegistrations;
+  empty.hidden = hasRegistrations;
+  empty.textContent = kind === "awaiting"
+    ? "No participants are waiting for a duck."
+    : "No paired ducks are saved on this device yet.";
+  if (hasRegistrations) requestAnimationFrame(() => participantUpdateControls(section));
+};
+
+const participantCleanRegisteredQuery = () => {
+  history.replaceState(history.state, "", location.pathname + location.hash);
+};
+
+const participantRender = (registrations) => {
+  const version = JSON.stringify(registrations);
+  const justRegistered = participantRegisteredId
+    ? registrations.find((registration) => registration.registrationId === participantRegisteredId)
+    : null;
+  if (justRegistered) {
+    participantCurrentId = justRegistered.registrationId;
+    if (participantPrivateStatusPath === null) {
+      let handoff = null;
+      try {
+        handoff = participantConsumeHandoff(globalThis.sessionStorage, justRegistered.registrationId, location.origin);
+      } catch {}
+      if (handoff !== null) participantPrivateStatusPath = handoff.privateStatusPath;
+    }
+  }
+  if (participantCurrentId && !registrations.some((registration) => registration.registrationId === participantCurrentId)) {
+    participantCurrentId = null;
+    participantSuccess.hidden = true;
+  }
+  if (version !== participantVersion || justRegistered) {
+    participantVersion = version;
+    participantRenderSection("awaiting", registrations.filter((registration) => !registration.paired));
+    participantRenderSection("paired", registrations.filter((registration) => registration.paired));
+  }
+  participantFreshness.textContent = registrations.length === 0
+    ? "No registrations are saved on this device yet."
+    : "Updated just now.";
+  if (!justRegistered) return;
+
+  participantSuccess.replaceChildren(
+    participantText("strong", "Registration saved. "),
+    participantText("span", justRegistered.firstName + " " + justRegistered.lastName + " is highlighted below."),
+  );
+  if (participantPrivateStatusPath !== null) {
+    const privateLink = participantText("a", "Open private status", "card-link");
+    privateLink.href = participantPrivateStatusPath;
+    participantSuccess.append(participantText("span", " "), privateLink);
+  }
+  participantSuccess.hidden = false;
+  participantRegisteredId = null;
+  const card = Array.from(document.querySelectorAll("[data-registration-id]"))
+    .find((item) => item.dataset.registrationId === justRegistered.registrationId);
+  if (card) requestAnimationFrame(() => {
+    card.focus({ preventScroll: true });
+    card.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+    participantCleanRegisteredQuery();
+  });
+  else participantCleanRegisteredQuery();
+};
+
+const participantFetch = async () => {
+  const response = await fetch(participantRoot
+    ? "/api/v1/registrations/mine"
+    : "/api/v1/registrations/mine/presence", {
+    headers: { accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error("refresh failed");
+  const body = await response.json();
+  if (!participantRoot) {
+    if (!body || typeof body.hasRegistrations !== "boolean") throw new Error("invalid presence response");
+    if (participantNav) participantNav.hidden = !body.hasRegistrations;
+    return;
+  }
+  if (!body || !Array.isArray(body.registrations)) throw new Error("invalid collection response");
+  participantHasLoaded = true;
+  if (participantNav) participantNav.hidden = body.registrations.length === 0;
+  if (!document.hidden) participantRender(body.registrations);
+};
+
+const participantRefreshWork = async () => {
+  try {
+    await participantFetch();
+  } catch {
+    if (participantFreshness) participantFreshness.textContent = "Saved registrations are temporarily unavailable. This page will keep checking.";
+  }
+};
+
+const participantRefresh = () => {
+  if (document.hidden) return Promise.resolve(false);
+  if (participantRefreshRunning) {
+    participantRefreshQueued = true;
+    return participantRefreshRunning;
+  }
+  participantRefreshRunning = (async () => {
+    try {
+      do {
+        participantRefreshQueued = false;
+        await participantRefreshWork();
+      } while (participantRefreshQueued && !document.hidden);
+      return true;
+    } finally {
+      participantRefreshRunning = null;
+    }
+  })();
+  return participantRefreshRunning;
+};
+
+const participantPausePolling = () => {
+  if (participantPollTimer !== null) clearTimeout(participantPollTimer);
+  participantPollTimer = null;
+};
+
+const participantSchedulePolling = (connected = participantConnected) => {
+  participantConnected = connected;
+  participantPausePolling();
+  if (document.hidden) return;
+  participantPollTimer = setTimeout(async () => {
+    participantPollTimer = null;
+    try {
+      if (!document.hidden) await participantRefresh();
+    } finally {
+      participantSchedulePolling();
+    }
+  }, participantConnected ? 30000 : 5000);
+};
+
+const participantReconnectDelay = () => {
+  const base = Math.min(1000 * (2 ** participantReconnectAttempt), 15000);
+  participantReconnectAttempt = Math.min(participantReconnectAttempt + 1, 4);
+  return Math.round(Math.min(15000, base * (0.8 + (0.4 * Math.random()))));
+};
+
+const participantConnect = () => {
+  if (!("WebSocket" in globalThis) || document.hidden) {
+    participantConnected = false;
+    participantSchedulePolling(false);
+    return;
+  }
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(protocol + "//" + location.host + "/api/v1/live");
+  participantSocket = socket;
+  socket.addEventListener("open", () => {
+    participantReconnectAttempt = 0;
+    participantConnected = true;
+    participantSchedulePolling(true);
+    if (participantHasLoaded) participantFreshness.textContent = "Updates are arriving live.";
+  });
+  socket.addEventListener("message", () => { participantRefresh(); });
+  socket.addEventListener("close", () => {
+    if (participantSocket === socket) participantSocket = null;
+    participantConnected = false;
+    participantSchedulePolling(false);
+    participantFreshness.textContent = participantHasLoaded
+      ? "Reconnecting; this page is still checking for updates."
+      : "Saved registrations are temporarily unavailable. This page will keep checking.";
+    clearTimeout(participantReconnectTimer);
+    if (!document.hidden) participantReconnectTimer = setTimeout(participantConnect, participantReconnectDelay());
+  });
+  socket.addEventListener("error", () => { socket.close(); });
+};
+
+if (participantRoot) {
+  if (participantRegisteredId && !participantRegistrationIdPattern.test(participantRegisteredId)) {
+    participantRegisteredId = null;
+    participantCleanRegisteredQuery();
+  }
+  participantRefresh();
+  participantSchedulePolling(false);
+  participantConnect();
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      participantPausePolling();
+      clearTimeout(participantReconnectTimer);
+      return;
+    }
+    participantRefresh();
+    participantSchedulePolling(participantConnected);
+    if (participantSocket === null) participantConnect();
+  });
+} else {
+  participantFetch().catch(() => {});
+}
 `;
 
 export const liveRuntimeHelpersScript = String.raw`
@@ -387,38 +787,11 @@ const liveRefreshPersonal = async () => {
   else personal.append(liveText("p", "This duck does not have public race status right now.", "muted"));
 };
 
-const liveRefreshMyDucks = async () => {
-  const section = document.querySelector("[data-my-ducks]");
-  const list = document.querySelector("[data-my-ducks-list]");
-  if (!section || !list) return;
-  const body = await liveFetchJson("/api/v1/registrations/mine");
-  if (document.hidden) return;
-  list.replaceChildren();
-  if (!Array.isArray(body.registrations) || body.registrations.length === 0) {
-    section.hidden = true;
-    return;
-  }
-  for (const registration of body.registrations) {
-    const card = liveText("article", "", "duck-card");
-    card.append(
-      liveText("h3", registration.firstName + " " + registration.lastName),
-      liveText("p", "Staff lookup code: " + registration.lookupCode),
-      liveText("p", "Registration: " + liveHumanize(registration.registrationStatus), "muted"),
-    );
-    const status = liveText("div", "");
-    liveRaceFacts(status, registration.raceStatus, false);
-    card.append(status);
-    list.append(card);
-  }
-  section.hidden = false;
-};
-
 const liveRefreshWork = async () => {
   try {
     const board = await liveFetchJson("/api/v1/race-board");
     const secondary = await Promise.allSettled([
       liveRefreshPersonal(),
-      liveRefreshMyDucks(),
     ]);
     if (document.hidden) return;
     liveRenderBoard(board);
@@ -1227,16 +1600,21 @@ const intakeParseCanonicalTagUrl = (value, appOrigin) => {
   }
 };
 
-const intakeCanonicalUrlFromMessage = (message, appOrigin, decode) => {
-  if (!message || !message.records) return null;
+const intakeCanonicalUrlsFromMessage = (message, appOrigin, decode) => {
+  if (!message || !message.records) return [];
+  const canonicalUrls = [];
+  const seen = new Set();
   for (const record of message.records) {
     if (record.recordType !== "url" && record.recordType !== "text") continue;
     try {
       const canonical = intakeParseCanonicalTagUrl(decode(record), appOrigin);
-      if (canonical) return canonical;
+      if (canonical && !seen.has(canonical)) {
+        seen.add(canonical);
+        canonicalUrls.push(canonical);
+      }
     } catch {}
   }
-  return null;
+  return canonicalUrls;
 };
 
 const intakeSafeTakeoverCandidate = (record) => {
@@ -1254,7 +1632,7 @@ const intakeSafeTakeoverCandidate = (record) => {
 
 const intakeCreateProvisioningMachine = ({
   eventId, location, recover, start, classify, write, confirm, refresh,
-  accepted, message, state, feedback,
+  accepted, message, state, feedback, changed = () => {},
   commandId = () => crypto.randomUUID(),
   scheduleReady = (callback) => setTimeout(callback, 900),
 }) => {
@@ -1278,6 +1656,7 @@ const intakeCreateProvisioningMachine = ({
       tagUrl: record.tagUrl,
       writeResolved: false,
     };
+    changed();
     return pending;
   };
 
@@ -1291,13 +1670,27 @@ const intakeCreateProvisioningMachine = ({
 
   const beginRemove = () => {
     removing = true;
+    changed();
     state("remove");
     message("Success. Remove this duck before presenting the next sticker.", false);
     scheduleReady(() => {
       removing = false;
       state("ready");
       message("Ready. Tap the next blank writable sticker.", false);
+      changed();
     });
+  };
+
+  const alreadyRegistered = () => {
+    pending = null;
+    nextStartCommandId = commandId();
+    accepted({ outcome: "already" });
+    feedback("already");
+    state("ready");
+    message("This duck is already registered in inventory. Ready to scan the next duck.", true);
+    changed();
+    void refresh().catch(() => {});
+    return { accepted: true, outcome: "already" };
   };
 
   const refreshAfterOutcome = async () => {
@@ -1308,8 +1701,11 @@ const intakeCreateProvisioningMachine = ({
     }
   };
 
-  const reading = async ({ serialNumber, canonicalUrl }) => {
+  const reading = async ({ serialNumber, canonicalUrls }) => {
     const transientSerial = typeof serialNumber === "string" && serialNumber ? serialNumber : null;
+    const distinctCanonicalUrls = Array.isArray(canonicalUrls)
+      ? Array.from(new Set(canonicalUrls.filter((value) => typeof value === "string")))
+      : [];
     if (inFlight || removing) return { accepted: false, reason: "busy" };
     if (transientSerial !== null && transientSerial === lastSerial) {
       return { accepted: false, reason: "repeated" };
@@ -1324,58 +1720,86 @@ const intakeCreateProvisioningMachine = ({
         return { accepted: false, reason: "event" };
       }
 
-      let classification = null;
-      if (canonicalUrl) {
-        if (pending && canonicalUrl !== pending.tagUrl) {
-          state("error");
-          message("Finish the pending sticker before tapping another QuickDucks tag. Do not overwrite this sticker.", true);
-          return { accepted: false, reason: "mismatch" };
-        }
+      if (distinctCanonicalUrls.length > 0) {
         state("checking");
-        message("Checking the QuickDucks URL already on this sticker.", false);
+        message("Checking every QuickDucks URL already on this sticker.", false);
+        const classifications = [];
         try {
-          classification = await classify({ eventId: selectedEventId, tagUrl: canonicalUrl });
+          for (const tagUrl of distinctCanonicalUrls) {
+            classifications.push({
+              tagUrl,
+              result: await classify({ eventId: selectedEventId, tagUrl }),
+            });
+          }
         } catch {
           lastSerial = null;
           state("error");
-          message("The existing sticker could not be classified online. Retap the same sticker; nothing was written.", true);
+          message("Every existing QuickDucks URL must be classified online. Retap the same sticker; nothing was written.", true);
           return { accepted: false, reason: "classify-uncertain" };
         }
-        if (classification.kind === "already") {
-          pending = null;
-          nextStartCommandId = commandId();
-          accepted({ outcome: "already" });
-          await refreshAfterOutcome();
-          feedback("already");
-          beginRemove();
-          return { accepted: true, outcome: "already" };
-        }
-        if (classification.kind !== "pending") {
+
+        const mismatch = classifications.find(({ result }) => result.kind === "mismatch");
+        if (mismatch) {
           state("error");
-          message(classification.message || "That QuickDucks sticker does not belong to this provisioning station. Do not overwrite it.", true);
+          message(mismatch.result.message || "That QuickDucks sticker does not belong to this provisioning station. Do not overwrite it.", true);
           return { accepted: false, reason: "mismatch" };
         }
-        if (!pending) {
-          try {
-            await recoverPending();
-          } catch {
-            lastSerial = null;
-            state("error");
-            message("The pending sticker could not be recovered online. Retap it after connectivity returns.", true);
-            return { accepted: false, reason: "recover-uncertain" };
+        const exactLocalPending = pending !== null
+          && distinctCanonicalUrls.length === 1
+          && distinctCanonicalUrls[0] === pending.tagUrl;
+        if (pending && !exactLocalPending) {
+          state("error");
+          message("Finish the pending sticker before tapping another or mixed QuickDucks tag. Nothing was written.", true);
+          return { accepted: false, reason: "mismatch" };
+        }
+
+        const already = classifications.filter(({ result }) => result.kind === "already");
+        const pendingClassifications = classifications.filter(({ result }) => result.kind === "pending");
+        const reusable = classifications.filter(({ result }) => result.kind === "reusable");
+        if (pendingClassifications.length > 0 && distinctCanonicalUrls.length !== 1) {
+          state("error");
+          message("This sticker mixes a pending QuickDucks URL with other records. Nothing was written; retap only the exact pending sticker.", true);
+          return { accepted: false, reason: "mismatch" };
+        }
+        if (already.length > 1) {
+          state("error");
+          message("This sticker contains multiple different registered QuickDucks URLs. Nothing was written.", true);
+          return { accepted: false, reason: "mismatch" };
+        }
+        if (already.length > 0 && !exactLocalPending) {
+          return alreadyRegistered();
+        }
+
+        if (already.length === 1 && exactLocalPending) {
+          pending.writeResolved = true;
+        } else if (pendingClassifications.length > 0) {
+          const classification = pendingClassifications[0];
+          if (!pending) {
+            try {
+              await recoverPending();
+            } catch {
+              lastSerial = null;
+              state("error");
+              message("The pending sticker could not be recovered online. Retap it after connectivity returns.", true);
+              return { accepted: false, reason: "recover-uncertain" };
+            }
           }
-        }
-        if (
-          !pending
-          || pending.duckId !== classification.duckId
-          || pending.provisioningCommandId !== classification.provisioningCommandId
-          || pending.tagUrl !== canonicalUrl
-        ) {
+          if (
+            !pending
+            || pending.duckId !== classification.result.duckId
+            || pending.provisioningCommandId !== classification.result.provisioningCommandId
+            || pending.tagUrl !== classification.tagUrl
+          ) {
+            state("error");
+            message("That pending QuickDucks sticker belongs to different inventory. Do not overwrite it.", true);
+            return { accepted: false, reason: "mismatch" };
+          }
+          pending.writeResolved = true;
+        } else if (reusable.length !== distinctCanonicalUrls.length) {
           state("error");
-          message("That pending QuickDucks sticker belongs to different inventory. Do not overwrite it.", true);
+          message("This sticker has inconsistent QuickDucks URLs. Nothing was written.", true);
           return { accepted: false, reason: "mismatch" };
         }
-        pending.writeResolved = true;
       }
 
       if (!pending) {
@@ -1388,12 +1812,7 @@ const intakeCreateProvisioningMachine = ({
             location: location() || null,
           });
           if (created.status === "CONFIRMED") {
-            nextStartCommandId = commandId();
-            accepted({ outcome: "already" });
-            await refreshAfterOutcome();
-            feedback("already");
-            beginRemove();
-            return { accepted: true, outcome: "already" };
+            return alreadyRegistered();
           }
           if (!adopt(created)) throw new Error("invalid-pending");
         } catch {
@@ -1405,7 +1824,7 @@ const intakeCreateProvisioningMachine = ({
       }
 
       if (pending.writeResolved) {
-        if (canonicalUrl !== pending.tagUrl) {
+        if (distinctCanonicalUrls.length !== 1 || distinctCanonicalUrls[0] !== pending.tagUrl) {
           state("error");
           message("Confirmation is still pending. Retap the same sticker that was just written; no new duck was allocated.", true);
           return { accepted: false, reason: "wrong-confirmation-tag" };
@@ -1426,9 +1845,8 @@ const intakeCreateProvisioningMachine = ({
 
       state("confirming");
       message("The sticker was written. Confirming its race reservation online.", false);
-      let result;
       try {
-        result = await confirm({
+        await confirm({
           commandId: pending.confirmCommandId,
           eventId: selectedEventId,
           duckId: pending.duckId,
@@ -1446,14 +1864,15 @@ const intakeCreateProvisioningMachine = ({
 
       pending = null;
       nextStartCommandId = commandId();
-      accepted({ outcome: result.replayed ? "already" : "added" });
+      accepted({ outcome: "added" });
       await refreshAfterOutcome();
-      feedback(result.replayed ? "already" : "added");
+      feedback("added");
       beginRemove();
       void recoverPending().catch(() => {});
-      return { accepted: true, outcome: result.replayed ? "already" : "added" };
+      return { accepted: true, outcome: "added" };
     } finally {
       inFlight = false;
+      changed();
     }
   };
 
@@ -1461,12 +1880,20 @@ const intakeCreateProvisioningMachine = ({
     reading,
     recover: recoverPending,
     adoptTakeover: adopt,
+    end() {
+      if (inFlight || removing || pending !== null) return false;
+      lastSerial = null;
+      nextStartCommandId = commandId();
+      changed();
+      return true;
+    },
     resetForEvent() {
-      if (inFlight) return false;
+      if (inFlight || removing || pending !== null) return false;
       pending = null;
       removing = false;
       lastSerial = null;
       nextStartCommandId = commandId();
+      changed();
       return true;
     },
     hasPending() { return pending !== null; },
@@ -1476,33 +1903,64 @@ const intakeCreateProvisioningMachine = ({
 
 const intakeCreateNfcStation = ({ createReader, decode, appOrigin, onReading, onReadingError, onStartError, onActive }) => {
   let active = false;
+  let starting = false;
   let reader = null;
   let handleReading = null;
+  let controller = null;
   const start = async () => {
-    if (active) return false;
+    if (active || starting) return false;
     const candidate = createReader();
-    handleReading = (event) => void onReading({
+    const candidateController = new AbortController();
+    const candidateHandleReading = (event) => void onReading({
       serialNumber: event.serialNumber,
-      canonicalUrl: intakeCanonicalUrlFromMessage(event.message, appOrigin, decode),
+      canonicalUrls: intakeCanonicalUrlsFromMessage(event.message, appOrigin, decode),
     });
     reader = candidate;
-    reader.addEventListener("reading", handleReading);
+    controller = candidateController;
+    handleReading = candidateHandleReading;
+    starting = true;
+    reader.addEventListener("reading", candidateHandleReading);
     reader.addEventListener("readingerror", onReadingError);
     try {
-      await reader.scan();
+      await reader.scan({ signal: candidateController.signal });
+      if (reader !== candidate || candidateController.signal.aborted) return false;
+      starting = false;
       active = true;
       onActive();
       return true;
-    } catch (error) {
-      reader.removeEventListener("reading", handleReading);
-      reader.removeEventListener("readingerror", onReadingError);
-      reader = null;
-      onStartError(error);
+    } catch {
+      const stopped = candidateController.signal.aborted;
+      if (reader === candidate) {
+        candidate.removeEventListener("reading", candidateHandleReading);
+        candidate.removeEventListener("readingerror", onReadingError);
+        reader = null;
+        handleReading = null;
+        controller = null;
+        starting = false;
+      }
+      if (!stopped) onStartError();
       return false;
     }
   };
   return {
     start,
+    stop() {
+      if (!active && !starting) return false;
+      const currentReader = reader;
+      const currentHandleReading = handleReading;
+      const currentController = controller;
+      active = false;
+      starting = false;
+      reader = null;
+      handleReading = null;
+      controller = null;
+      if (currentReader && currentHandleReading) {
+        currentReader.removeEventListener("reading", currentHandleReading);
+        currentReader.removeEventListener("readingerror", onReadingError);
+      }
+      currentController?.abort();
+      return true;
+    },
     async write(tagUrl) {
       if (!active || reader === null) throw new Error("nfc-not-active");
       await reader.write({ records: [{ recordType: "url", data: tagUrl }] });
@@ -1517,6 +1975,7 @@ const intakeRoot = document.querySelector("[data-inventory-intake]");
 const intakeEventSelect = document.querySelector("[data-intake-event]");
 const intakeLocation = document.querySelector("[data-intake-location]");
 const intakeNfcButton = document.querySelector("[data-start-intake-nfc]");
+const intakeEndNfcButton = document.querySelector("[data-end-intake-nfc]");
 const intakeState = document.querySelector("[data-intake-state]");
 const intakeMessage = document.querySelector("[data-intake-message]");
 const intakeReservedCount = document.querySelector("[data-reserved-count]");
@@ -1529,8 +1988,13 @@ const intakeAppOrigin = intakeRoot.dataset.appOrigin;
 let intakeAddedCount = 0;
 let intakeSelectedEvent = null;
 let intakeStarted = false;
+let intakeStarting = false;
+let intakeSupported = false;
+let intakeEventsAvailable = false;
 let intakeAudio = null;
 let intakeTakeoverCandidate = null;
+let intakeNfcStation = null;
+let intakeMachine = null;
 
 const intakeApi = async (url, options) => {
   const response = await fetch(url, { ...options, cache: "no-store" });
@@ -1558,12 +2022,26 @@ const intakeSetState = (value) => {
     checking: "Checking sticker",
     confirming: "Confirming",
     error: "Needs attention",
+    ended: "Ended",
     ready: "Ready",
     remove: "Remove duck",
     reserving: "Reserving URL",
     writing: "Writing sticker",
   };
   intakeState.textContent = labels[value] || "Not started";
+};
+
+const intakeUpdateControls = () => {
+  const active = intakeStarted && intakeNfcStation?.isActive() === true;
+  const pending = intakeMachine?.hasPending() === true;
+  const busy = intakeMachine?.isBusy() === true;
+  const running = active || intakeStarting;
+  intakeNfcButton.disabled = !intakeSupported || !intakeEventsAvailable || running;
+  intakeNfcButton.textContent = active ? "NFC provisioning active" : "Start NFC provisioning";
+  intakeEndNfcButton.hidden = !active;
+  intakeEndNfcButton.disabled = !active || busy || pending;
+  intakeEventSelect.disabled = !intakeEventsAvailable || running || pending;
+  intakeLocation.disabled = running;
 };
 
 const intakePost = (path, body) => intakeApi(path, {
@@ -1625,8 +2103,7 @@ const intakeFeedback = () => {
   } catch {}
 };
 
-let intakeNfcStation = null;
-const intakeMachine = intakeCreateProvisioningMachine({
+intakeMachine = intakeCreateProvisioningMachine({
   eventId: () => intakeEventSelect.value,
   location: () => intakeLocation.value.trim(),
   recover: async (eventId) => {
@@ -1644,8 +2121,12 @@ const intakeMachine = intakeCreateProvisioningMachine({
   refresh: intakeRefreshStation,
   accepted: intakeAddHistory,
   message: intakeSetMessage,
-  state: intakeSetState,
+  state: (value) => {
+    intakeSetState(value);
+    intakeUpdateControls();
+  },
   feedback: intakeFeedback,
+  changed: intakeUpdateControls,
 });
 
 intakeTakeoverButton.addEventListener("click", async () => {
@@ -1703,11 +2184,13 @@ const intakeRecoverSelected = async () => {
   intakeSetMessage(pending
     ? "A pending sticker is waiting. Press Start, then retap that same sticker."
     : "Press Start once, then tap one blank writable sticker per duck.", false);
+  intakeUpdateControls();
 };
 
 const intakeLoadEvents = async () => {
   const body = await intakeApi("/api/v1/staff/events");
   const available = body.events.filter((event) => intakePreRaceStatuses.has(event.status));
+  intakeEventsAvailable = available.length > 0;
   intakeEventSelect.replaceChildren();
   if (available.length !== 1) {
     const prompt = document.createElement("option");
@@ -1721,9 +2204,9 @@ const intakeLoadEvents = async () => {
     option.textContent = event.name + " · " + event.status.replaceAll("_", " ").toLowerCase();
     intakeEventSelect.append(option);
   }
-  intakeEventSelect.disabled = available.length === 0;
   if (available.length === 1) intakeEventSelect.value = available[0].id;
   await intakeRecoverSelected();
+  intakeUpdateControls();
 };
 
 intakeEventSelect.addEventListener("change", async () => {
@@ -1737,15 +2220,15 @@ intakeEventSelect.addEventListener("change", async () => {
 
 let intakeTopLevel = false;
 try { intakeTopLevel = window.top === window.self; } catch {}
-const intakeSupported = "NDEFReader" in globalThis && isSecureContext && intakeTopLevel;
+intakeSupported = "NDEFReader" in globalThis && isSecureContext && intakeTopLevel;
 if (!intakeSupported) {
-  intakeNfcButton.disabled = true;
   intakeSetState("error");
   intakeSetMessage("This station requires current Android Chrome, an NFC-capable device, HTTPS, a top-level tab, and a visible page. There is no manual fallback.", true);
 }
+intakeUpdateControls();
 
 intakeNfcButton.addEventListener("click", async () => {
-  if (!intakeSupported || intakeStarted) return;
+  if (!intakeSupported || intakeStarted || intakeStarting) return;
   if (
     !intakeSelectedEvent
     || intakeSelectedEvent.id !== intakeEventSelect.value
@@ -1767,13 +2250,34 @@ intakeNfcButton.addEventListener("click", async () => {
       void intakeAudio.resume();
     } catch {}
   }
+  intakeStarting = true;
+  intakeUpdateControls();
   const started = await intakeNfcStation.start();
-  if (!started) return;
+  intakeStarting = false;
+  if (!started) {
+    intakeUpdateControls();
+    return;
+  }
   intakeStarted = true;
-  intakeEventSelect.disabled = true;
-  intakeLocation.disabled = true;
-  intakeNfcButton.disabled = true;
-  intakeNfcButton.textContent = "NFC provisioning active";
+  intakeUpdateControls();
+});
+
+intakeEndNfcButton.addEventListener("click", () => {
+  if (!intakeStarted) return;
+  if (!intakeMachine.end()) {
+    intakeUpdateControls();
+    if (intakeMachine.hasPending()) {
+      intakeSetMessage("Finish the pending sticker before ending NFC provisioning.", true);
+    }
+    return;
+  }
+  intakeNfcStation.stop();
+  intakeStarted = false;
+  if (intakeAudio && typeof intakeAudio.close === "function") void intakeAudio.close().catch(() => {});
+  intakeAudio = null;
+  intakeSetState("ended");
+  intakeSetMessage("NFC provisioning ended. Press Start to resume when ready.", false);
+  intakeUpdateControls();
 });
 
 intakeLoadEvents().catch(() => intakeSetMessage("The station could not load events. Stay online, then refresh this page.", true));

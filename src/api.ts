@@ -427,7 +427,12 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
 
   const registrations = await env.DB.prepare(
     `SELECT r.id AS registration_id, re.id AS race_entry_id,
-            r.first_name, r.last_name, r.lookup_code, r.status
+            r.first_name, r.last_name, r.lookup_code, r.status,
+            EXISTS (
+              SELECT 1
+                FROM duck_assignments da
+               WHERE da.race_entry_id = re.id AND da.valid_to IS NULL
+            ) AS is_paired
        FROM browser_collection_registrations bcr
        JOIN registrations r ON r.id = bcr.registration_id
        JOIN race_entries re ON re.registration_id = r.id
@@ -440,6 +445,7 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
     last_name: string;
     lookup_code: string;
     status: string;
+    is_paired: number;
   }>();
 
   const items = await Promise.all(registrations.results.map(async (row) => ({
@@ -448,10 +454,30 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
     lastName: row.last_name,
     lookupCode: row.lookup_code,
     registrationStatus: row.status,
+    paired: row.is_paired === 1,
     raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),
   })));
 
   return json({ registrations: items }, 200, {
+    "set-cookie": browserCollectionCookie(collection.cookieToken),
+  });
+};
+
+const getMyRegistrationPresence = async (request: Request, env: Env): Promise<Response> => {
+  const existingCollection = await getBrowserCollection(request, env);
+  if (existingCollection === null) {
+    return json({ hasRegistrations: false }, 200, {
+      "set-cookie": clearBrowserCollectionCookie(),
+    });
+  }
+  const collection = await refreshBrowserCollection(env, existingCollection);
+  const registration = await env.DB.prepare(
+    `SELECT 1 AS has_registration
+       FROM browser_collection_registrations
+      WHERE collection_id = ?
+      LIMIT 1`,
+  ).bind(collection.id).first<{ has_registration: number }>();
+  return json({ hasRegistrations: registration !== null }, 200, {
     "set-cookie": browserCollectionCookie(collection.cookieToken),
   });
 };
@@ -541,6 +567,10 @@ const handleApiRequest = async (
 
   if (url.pathname === "/api/v1/registrations/mine" && request.method === "GET") {
     return getMyRegistrations(request, env);
+  }
+
+  if (url.pathname === "/api/v1/registrations/mine/presence" && request.method === "GET") {
+    return getMyRegistrationPresence(request, env);
   }
 
   if (url.pathname === "/api/v1/race-status/search" && request.method === "GET") {

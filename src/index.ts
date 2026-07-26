@@ -9,6 +9,7 @@ import {
   finishLineScript,
   inventoryIntakeScript,
   liveScript,
+  participantScript,
   registrationScript,
   staffDuckScript,
   staffHomeScript,
@@ -26,6 +27,7 @@ import {
   renderStaffDuck,
   renderFinishLine,
   renderInventoryIntake,
+  renderMyDucks,
   renderStaffHome,
   renderStaffLogin,
   renderStaffPairing,
@@ -145,18 +147,20 @@ export const createWorker = (
       });
     }
 
-    if (["/assets/register.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)) {
+    if (["/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)) {
       const script = url.pathname === "/assets/register.js"
         ? registrationScript
-        : url.pathname === "/assets/staff-home.js"
-          ? staffHomeScript
-          : url.pathname === "/assets/live.js"
-            ? liveScript
-            : url.pathname === "/assets/start-line.js"
-              ? startLineScript
-              : url.pathname === "/assets/finish-line.js"
-                ? finishLineScript
-                : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
+        : url.pathname === "/assets/participant.js"
+          ? participantScript
+          : url.pathname === "/assets/staff-home.js"
+            ? staffHomeScript
+            : url.pathname === "/assets/live.js"
+              ? liveScript
+              : url.pathname === "/assets/start-line.js"
+                ? startLineScript
+                : url.pathname === "/assets/finish-line.js"
+                  ? finishLineScript
+                  : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
@@ -169,7 +173,7 @@ export const createWorker = (
     }
 
     if (url.pathname === "/robots.txt") {
-      return new Response("User-agent: *\nAllow: /\nDisallow: /r/\nDisallow: /api/\nDisallow: /staff\nDisallow: /auth/\n", {
+      return new Response("User-agent: *\nAllow: /\nDisallow: /my-ducks\nDisallow: /r/\nDisallow: /api/\nDisallow: /staff\nDisallow: /auth/\n", {
         headers: {
           ...securityHeaders,
           "cache-control": "public, max-age=86400",
@@ -199,6 +203,9 @@ export const createWorker = (
     if (url.pathname === "/register" && request.method === "GET") {
       const siteKey = env.TURNSTILE_SITE_KEY?.trim();
       return html(renderRegistration(siteKey && env.TURNSTILE_SECRET_KEY ? siteKey : undefined), 200, true);
+    }
+    if (url.pathname === "/my-ducks" && request.method === "GET") {
+      return html(renderMyDucks(), 200, true);
     }
     if (url.pathname === "/r/mock" && request.method === "GET") return html(renderStatus(), 200, true);
     if (url.pathname === "/t/mock" && request.method === "GET") return html(renderDuck(), 200, true);
