@@ -79,6 +79,117 @@ test("renders the clickable registration and status mockups", async () => {
   assert.equal(confirmation.headers.get("x-robots-tag"), "noindex, nofollow");
 });
 
+test("redirects an anonymous unpaired duck scan home", async () => {
+  const unpairedEnv = {
+    ...env,
+    DB: {
+      prepare: () => ({
+        bind() { return this; },
+        async first() { return null; },
+      }),
+    },
+  };
+  const response = await worker.fetch(
+    new Request(`https://quickducks.com/t/${"a".repeat(32)}`),
+    unpairedEnv,
+  );
+
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), "/");
+});
+
+test("renders paired duck heat and race status without contact data", async () => {
+  const pairedEnv = {
+    ...env,
+    DB: {
+      prepare: (sql) => ({
+        bind() { return this; },
+        async first() {
+          if (sql.includes("FROM heats")) {
+            return { round: "ROUND_ONE", heat_number: 5, status: "RUNNING" };
+          }
+          return {
+            event_id: "event_test",
+            event_slug: "summer-duck-race",
+            event_name: "Summer Duck Race",
+            event_date: "2026-08-30",
+            event_status: "ROUND_ONE",
+            public_name_policy: "FIRST_NAME_LAST_INITIAL",
+            first_name: "Daisy",
+            last_name: "Duck",
+            registration_status: "ACTIVE",
+            race_entry_id: "entry_test",
+            visible_number: 42,
+            round_one_heat_number: 7,
+            round_one_heat_status: "PLANNED",
+            round_one_place: null,
+            final_heat_number: null,
+            final_heat_status: null,
+            final_place: null,
+          };
+        },
+      }),
+    },
+  };
+  const response = await worker.fetch(
+    new Request(`https://quickducks.com/t/${"a".repeat(32)}`),
+    pairedEnv,
+  );
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(body, /Daisy D\./);
+  assert.match(body, /Heat 7/);
+  assert.match(body, /Heat 5/);
+  assert.doesNotMatch(body, /Email|Phone|lookup code/i);
+});
+
+test("renders a valid private registration status path", async () => {
+  const privateEnv = {
+    ...env,
+    DB: {
+      prepare: () => ({
+        bind() { return this; },
+        async first() {
+          return {
+            first_name: "Daisy",
+            last_name: "Duck",
+            status: "SUBMITTED",
+            lookup_code: "ABCD2345",
+            submitted_at: "2026-07-26T00:00:00.000Z",
+            event_name: "Summer Duck Race",
+            event_date: "2026-08-30",
+            duck_keep_preference: "UNDECIDED",
+          };
+        },
+      }),
+    },
+  };
+  const response = await worker.fetch(
+    new Request(`https://quickducks.com/r/${"a".repeat(43)}`),
+    privateEnv,
+  );
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(body, /Daisy/);
+  assert.match(body, /ABCD2345/);
+  assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
+});
+
+test("renders protected staff pairing preview with code and name lookup", async () => {
+  const response = await worker.fetch(
+    new Request("https://quickducks.com/mock/staff/ducks/128/pair"),
+    env,
+  );
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(body, /Participant duck code/);
+  assert.match(body, /Search participant name/);
+  assert.match(body, /Staff authentication required/);
+});
+
 test("keeps the database health check", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/health"), env);
 

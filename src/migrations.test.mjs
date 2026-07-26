@@ -6,7 +6,8 @@ import test from "node:test";
 const migrationNames = [
   "0001_staff_identity.sql",
   "0002_registration_foundation.sql",
-  "0003_duck_pairing_and_race_status.sql",
+  "0003_assignment_and_heat_status.sql",
+  "0004_pairing_status_and_purge.sql",
 ];
 
 const createDatabase = () => {

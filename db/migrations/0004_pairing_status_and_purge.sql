@@ -5,30 +5,13 @@ ALTER TABLE events ADD COLUMN public_name_policy TEXT NOT NULL DEFAULT 'FIRST_NA
   public_name_policy IN ('FIRST_NAME_ONLY', 'FIRST_NAME_LAST_INITIAL', 'FULL_NAME')
 );
 
-CREATE UNIQUE INDEX race_entries_event_id_idx ON race_entries(event_id, id);
 CREATE UNIQUE INDEX race_commands_event_id_idx ON race_commands(event_id, id);
-
-CREATE TABLE event_ducks (
-  id TEXT PRIMARY KEY,
-  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
-  duck_id TEXT NOT NULL REFERENCES ducks(id) ON DELETE RESTRICT,
-  reserved_at TEXT NOT NULL,
-  reserved_by_staff_profile_id TEXT REFERENCES staff_profiles(id) ON DELETE RESTRICT,
-  released_at TEXT,
-  released_by_staff_profile_id TEXT REFERENCES staff_profiles(id) ON DELETE RESTRICT,
-  release_reason TEXT,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  CHECK (
-    (released_at IS NULL AND released_by_staff_profile_id IS NULL AND release_reason IS NULL)
-    OR released_at IS NOT NULL
-  )
-);
-
-CREATE UNIQUE INDEX event_ducks_open_duck_idx
-  ON event_ducks(duck_id) WHERE released_at IS NULL;
 CREATE UNIQUE INDEX event_ducks_event_id_idx ON event_ducks(event_id, id);
-CREATE UNIQUE INDEX event_ducks_event_duck_idx ON event_ducks(event_id, id, duck_id);
-CREATE INDEX event_ducks_event_idx ON event_ducks(event_id, released_at);
+
+ALTER TABLE event_ducks ADD COLUMN reserved_by_staff_profile_id TEXT
+  REFERENCES staff_profiles(id) ON DELETE RESTRICT;
+ALTER TABLE event_ducks ADD COLUMN released_by_staff_profile_id TEXT
+  REFERENCES staff_profiles(id) ON DELETE RESTRICT;
 
 CREATE TABLE duck_event_dispositions (
   id TEXT PRIMARY KEY,
@@ -49,42 +32,14 @@ CREATE TABLE duck_event_dispositions (
 CREATE INDEX duck_event_dispositions_event_idx
   ON duck_event_dispositions(event_id, disposition);
 
-CREATE TABLE duck_assignments (
-  id TEXT PRIMARY KEY,
-  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE RESTRICT,
-  race_entry_id TEXT NOT NULL,
-  event_duck_id TEXT NOT NULL,
-  duck_id TEXT NOT NULL REFERENCES ducks(id) ON DELETE RESTRICT,
-  valid_from TEXT NOT NULL,
-  valid_to TEXT,
-  end_reason TEXT CHECK (
-    end_reason IS NULL OR end_reason IN ('LOST', 'DAMAGED', 'SWAPPED', 'CORRECTED', 'RETIRED')
-  ),
-  assigned_by_staff_profile_id TEXT NOT NULL REFERENCES staff_profiles(id) ON DELETE RESTRICT,
-  ended_by_staff_profile_id TEXT REFERENCES staff_profiles(id) ON DELETE RESTRICT,
-  source_command_id TEXT NOT NULL UNIQUE,
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  FOREIGN KEY (event_id, race_entry_id)
-    REFERENCES race_entries(event_id, id) ON DELETE RESTRICT,
-  FOREIGN KEY (event_id, event_duck_id, duck_id)
-    REFERENCES event_ducks(event_id, id, duck_id) ON DELETE RESTRICT,
-  FOREIGN KEY (event_id, source_command_id)
-    REFERENCES race_commands(event_id, id) ON DELETE RESTRICT,
-  CHECK (
-    (valid_to IS NULL AND end_reason IS NULL AND ended_by_staff_profile_id IS NULL)
-    OR (valid_to IS NOT NULL AND end_reason IS NOT NULL)
-  ),
-  CHECK (valid_to IS NULL OR valid_to >= valid_from)
-);
+ALTER TABLE duck_assignments ADD COLUMN ended_by_staff_profile_id TEXT
+  REFERENCES staff_profiles(id) ON DELETE RESTRICT;
+CREATE UNIQUE INDEX duck_assignments_source_command_idx
+  ON duck_assignments(source_command_id);
 
-CREATE UNIQUE INDEX duck_assignments_open_entry_idx
-  ON duck_assignments(race_entry_id) WHERE valid_to IS NULL;
-CREATE UNIQUE INDEX duck_assignments_open_duck_idx
-  ON duck_assignments(duck_id) WHERE valid_to IS NULL;
-CREATE UNIQUE INDEX duck_assignments_event_id_idx ON duck_assignments(event_id, id);
-CREATE UNIQUE INDEX duck_assignments_event_entry_idx
-  ON duck_assignments(event_id, id, race_entry_id);
-CREATE INDEX duck_assignments_event_idx ON duck_assignments(event_id, valid_to);
+-- Production has no heat data; replace the provisional v3 heat model before the first event.
+DROP TABLE heat_entries;
+DROP TABLE heats;
 
 CREATE TABLE heats (
   id TEXT PRIMARY KEY,
@@ -92,7 +47,7 @@ CREATE TABLE heats (
   round TEXT NOT NULL CHECK (round IN ('ROUND_ONE', 'FINAL')),
   heat_number INTEGER NOT NULL CHECK (heat_number > 0),
   status TEXT NOT NULL DEFAULT 'PLANNED' CHECK (
-    status IN ('PLANNED', 'LOADING', 'READY', 'CALLING', 'RUNNING', 'AWAITING_RESULT', 'FINALIZED')
+    status IN ('PLANNED', 'LOADING', 'READY', 'CALLING', 'RUNNING', 'AWAITING_RESULT', 'FINALIZED', 'CANCELLED')
   ),
   target_size INTEGER CHECK (target_size IS NULL OR target_size > 0),
   started_at TEXT,

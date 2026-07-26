@@ -143,20 +143,22 @@ Public routes remain accessible:
 /t/*
 ```
 
-Cloudflare Access protects staff pages and staff APIs:
+Amazon Cognito authentication protects staff pages and staff APIs:
 
 ```text
 /staff/*
 /api/staff/*
 ```
 
-Access establishes staff identity. The application still checks the user's
-event role in D1 for every mutation. Access to the staff hostname or path does
-not automatically grant administrator, provisioning, or race-official rights.
+Cognito establishes staff identity. The Worker verifies each access token and
+requires a matching staff profile for every protected read or mutation. The
+profile's administrator flag separately protects complete-race purge.
 
 The public `/t/<token>` GET route never mutates race data. A logged-in staff
 page submits a separate authenticated POST command after resolving a scanned
-tag.
+tag. Anonymous unpaired tags redirect to `/`; anonymous paired tags open public
+race status. The staff application uses the protected duck endpoint to choose
+pairing or inspection after verifying the Cognito access token.
 
 ## GitHub Configuration
 

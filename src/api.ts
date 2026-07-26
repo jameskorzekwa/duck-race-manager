@@ -14,7 +14,11 @@ import {
   prepareBrowserCollection,
   refreshBrowserCollection,
 } from "./browser-collection.ts";
-import { getPublicStatusByRaceEntry, getPublicStatusByTag } from "./race-status.ts";
+import {
+  getPublicStatusByRaceEntry,
+  getPublicStatusByTag,
+  type PublicRaceStatus,
+} from "./race-status.ts";
 import { handleStaffApi } from "./staff-api.ts";
 import type { Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
 
@@ -86,6 +90,14 @@ const eventResponse = (event: EventRecord): Record<string, unknown> => ({
   registrationClosesAt: event.registration_closes_at,
   emailRequired: event.email_required === 1,
 });
+
+export const findDuckRaceStatus = async (
+  token: string,
+  env: Env,
+): Promise<PublicRaceStatus | null> => {
+  if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return null;
+  return getPublicStatusByTag(env, token);
+};
 
 interface TurnstileResult {
   success?: boolean;
@@ -341,18 +353,25 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   );
 };
 
-const getRegistrationStatus = async (token: string, env: Env): Promise<Response> => {
-  if (!isPrivateToken(token)) return json({ error: "Not found." }, 404);
+export const findRegistrationStatus = async (
+  token: string,
+  env: Env,
+): Promise<RegistrationStatusRecord | null> => {
+  if (!isPrivateToken(token)) return null;
   const tokenHash = await hashToken(token);
-  const registration = await env.DB.prepare(
+  return env.DB.prepare(
     `SELECT r.first_name, r.last_name, r.status, r.lookup_code,
             r.submitted_at, e.name AS event_name, e.event_date,
             re.duck_keep_preference
        FROM registrations r
        JOIN events e ON e.id = r.event_id
        JOIN race_entries re ON re.registration_id = r.id
-      WHERE r.private_token_hash = ?`,
+       WHERE r.private_token_hash = ?`,
   ).bind(tokenHash).first<RegistrationStatusRecord>();
+};
+
+const getRegistrationStatus = async (token: string, env: Env): Promise<Response> => {
+  const registration = await findRegistrationStatus(token, env);
   if (registration === null) return json({ error: "Not found." }, 404);
 
   return json({
@@ -446,7 +465,6 @@ const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Pro
   )).filter((status) => status !== null);
   return json({ results });
 };
-
 export const handleApi = async (request: Request, env: Env): Promise<Response> => {
   const url = new URL(request.url);
 

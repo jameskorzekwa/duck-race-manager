@@ -395,7 +395,10 @@ test("creates registration, race-entry, command, and audit records atomically", 
   const response = await handleApi(
     new Request("https://quickducks.com/api/v1/registrations", {
       method: "POST",
-      headers: { "content-type": "application/json", origin: "https://quickducks.com" },
+      headers: {
+        "content-type": "application/json",
+        origin: "https://quickducks.com",
+      },
       body: JSON.stringify({
         eventId: openEvent.id,
         commandId: crypto.randomUUID(),
@@ -463,8 +466,10 @@ test("replays a completed command without reusing a Turnstile token", async () =
     if (sql.includes("FROM race_commands")) {
       return {
         result_id: "registration_existing",
-        lookup_code: "DUCK2026",
+        lookup_code: "DCKS2345",
         private_token_hash: privateTokenHash,
+        first_name: "Daisy",
+        last_name: "Duck",
       };
     }
     return null;

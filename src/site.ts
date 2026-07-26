@@ -1,3 +1,6 @@
+import type { PublicRaceStatus } from "./race-status.ts";
+import type { RegistrationStatusRecord } from "./types.ts";
+
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;",
@@ -143,7 +146,7 @@ export const renderHome = (): string => page({
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p><a class="card-link" href="/register">Preview the form →</a></article>
-      <article class="card"><strong>At check-in</strong><h3>Your duck carries its identity</h3><p class="muted">Tap your duck’s permanent NFC or QR tag to open its safe, read-only page.</p><a class="card-link" href="/t/mock">Preview a duck scan →</a></article>
+      <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/mock/staff/ducks/128/pair">Preview staff pairing →</a></article>
       <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p><a class="card-link" href="/r/mock">Preview status →</a></article>
     </section>
     <section class="status-section" data-my-ducks hidden>
@@ -179,6 +182,7 @@ export const renderRegistration = (): string => page({
       <h1 class="page-title">Summer Duck Race</h1>
       <p class="lede">Sunday, August 30 · Registration takes about one minute.</p>
       <div class="privacy"><strong>Private by design.</strong><span>Your email and phone number are visible only to logged-in authorized race staff. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
+      <div class="notice"><strong>Registering more than one participant?</strong> Finish this form once for each person. You can use the same phone, email, or browser, and QuickDucks will keep their codes together on this device.</div>
       <form method="get" action="/r/mock">
         <div class="field-grid">
           <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"></label>
@@ -195,7 +199,14 @@ export const renderRegistration = (): string => page({
     </section>`,
 });
 
-export const renderStatus = (): string => page({
+export const renderStatus = (registration?: RegistrationStatusRecord): string => {
+  const firstName = registration?.first_name ?? "Jamie";
+  const lookupCode = registration?.lookup_code ?? "DUCK8234";
+  const eventName = registration?.event_name ?? "Summer Duck Race";
+  const registrationStatus = registration?.status === "ACTIVE"
+    ? "Active — duck assigned"
+    : "Submitted — waiting for duck assignment";
+  return page({
   title: "Registration status",
   description: "Private QuickDucks registration status mockup.",
   robots: "noindex,nofollow",
@@ -203,29 +214,73 @@ export const renderStatus = (): string => page({
     <section class="page-panel">
       ${duck()}
       <p class="eyebrow">Private status preview</p>
-      <h1 class="page-title">You’re in the queue, Jamie.</h1>
-      <p class="lede">Keep this page private. This is your status link for the Summer Duck Race.</p>
-      <div class="notice"><strong>Staff lookup code</strong><br><span class="code">DUCK8234</span><br><span class="muted">Save this code or bookmark this page.</span></div>
-      <dl class="facts"><div class="fact"><dt>Status</dt><dd>Submitted — waiting for duck assignment</dd></div><div class="fact"><dt>Race date</dt><dd>Sunday, August 30</dd></div></dl>
+      <h1 class="page-title">You’re in the queue, ${escapeHtml(firstName)}.</h1>
+      <p class="lede">Keep this page private. This is your status link for ${escapeHtml(eventName)}.</p>
+      <div class="notice"><strong>Staff lookup code</strong><br><span class="code">${escapeHtml(lookupCode)}</span><br><span class="muted">Save this code or bookmark this page.</span></div>
+      <dl class="facts"><div class="fact"><dt>Status</dt><dd>${registrationStatus}</dd></div><div class="fact"><dt>Race date</dt><dd>Sunday, August 30</dd></div></dl>
       <p class="muted">You’ll see your duck and heat here after staff assigns them. Email and phone stay staff-only, and the complete race dataset is deleted after return processing.</p>
-      <a class="button secondary" href="/">Back to home</a>
+      <div class="actions"><a class="button" href="/register">Register another participant</a><a class="button secondary" href="/">Back to home</a></div>
     </section>`,
-});
+  });
+};
 
-export const renderDuck = (): string => page({
-  title: "Duck #128",
+const mockRaceStatus: PublicRaceStatus = {
+  event: {
+    id: "event_mock",
+    slug: "summer-duck-race",
+    name: "Summer Duck Race",
+    eventDate: "2026-08-30",
+    status: "ROUND_ONE",
+  },
+  participantDisplayName: "Jamie R.",
+  duck: { visibleNumber: 128 },
+  assignedHeat: {
+    roundOne: { number: 7, status: "PLANNED" },
+    final: null,
+  },
+  currentHeat: { round: "ROUND_ONE", number: 5, status: "RUNNING" },
+  outcome: "NOT_RACED",
+};
+
+const roundLabel = (round: string): string => round === "FINAL" ? "Final" : "Round one";
+const outcomeLabel = (outcome: string): string =>
+  outcome.replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+
+const publicStatusFacts = (status: PublicRaceStatus): string => {
+  const assignment = status.duck === null
+    ? "Waiting for duck assignment"
+    : `Duck #${status.duck.visibleNumber}`;
+  const heat = status.assignedHeat.final ?? status.assignedHeat.roundOne;
+  const heatLabel = heat === null
+    ? "Heat not assigned yet"
+    : `${status.assignedHeat.final === null ? "Round one" : "Final"} · Heat ${heat.number}`;
+  const running = status.currentHeat === null
+    ? "Racing has not started"
+    : `${roundLabel(status.currentHeat.round)} · Heat ${status.currentHeat.number}`;
+  return `<dl class="facts"><div class="fact"><dt>Participant</dt><dd>${escapeHtml(status.participantDisplayName)}</dd></div><div class="fact"><dt>Duck</dt><dd>${assignment}</dd></div><div class="fact"><dt>Assigned heat</dt><dd>${heatLabel}</dd></div><div class="fact"><dt>Currently running</dt><dd>${running}</dd></div><div class="fact"><dt>Race status</dt><dd>${outcomeLabel(status.outcome)}</dd></div></dl>`;
+};
+
+export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string => page({
+  title: status.duck === null ? "Race status" : `Duck #${status.duck.visibleNumber}`,
   description: "Public QuickDucks NFC duck-page mockup.",
   robots: "noindex,nofollow",
   content: `
     <section class="page-panel">
       ${duck()}
-      <p class="eyebrow">Permanent duck ID</p>
-      <h1 class="page-title">Duck #128</h1>
-      <p class="lede">This tag belongs to a real QuickDucks race duck.</p>
-      <div class="notice"><strong>Tag verified.</strong> Your participant, heat, assignment, and location details stay private here.</div>
-      <div class="privacy"><strong>Safe to scan.</strong><span>You can scan this read-only page without changing registration or race status.</span></div>
+      <p class="eyebrow">Public race status</p>
+      <h1 class="page-title">${status.duck === null ? "Waiting for a duck" : `Duck #${status.duck.visibleNumber}`}</h1>
+      <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
+      ${publicStatusFacts(status)}
+      <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, or private links.</span></div>
       <br><a class="button secondary" href="/">Visit QuickDucks</a>
     </section>`,
+});
+
+export const renderStaffPairing = (): string => page({
+  title: "Pair Duck #128",
+  description: "Protected staff duck-pairing mockup.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel"><p class="eyebrow">Protected staff preview</p><h1 class="page-title">Pair Duck #128</h1><p class="lede">This duck is available. Find the participant before confirming the assignment.</p><div class="privacy"><strong>Staff authentication required.</strong><span>The working version will verify the staff session and event role before showing codes or accepting a pairing command.</span></div><div class="facts"><div class="fact"><dt>Duck</dt><dd>#128 · Available</dd></div><div class="fact"><dt>Event</dt><dd>Summer Duck Race</dd></div></div><form><label>Participant duck code<input name="lookup_code" autocomplete="off" maxlength="16" placeholder="ABCD2345"></label><button class="button" type="button">Find participant by code</button></form><hr style="margin:2rem 0;border:0;border-top:2px solid #b8c6c9"><form><label>Forgotten code? Search participant name<input name="participant_name" autocomplete="off" maxlength="161" placeholder="Jamie Rivera"></label><button class="button secondary" type="button">Search by name</button></form><div class="notice"><strong>Final confirmation required.</strong> Pairing will show participant and duck together before an authenticated command changes race data.</div></section>`,
 });
 
 export const renderNotFound = (): string => page({
