@@ -149,6 +149,20 @@ cookie created only after Cognito authorization-code, state, and PKCE checks.
 Cookie-authenticated mutation requests require the exact application origin.
 Explicit Bearer access tokens remain supported for trusted API clients.
 
+## Staff Access Administration
+
+```http
+GET  /api/v1/staff/profiles
+POST /api/v1/staff/profiles
+```
+
+Both routes require a verified system-administrator profile. Listing returns
+staff email, display name, role, and creation time but never the Cognito subject
+or AWS details. Creation accepts an idempotent command UUID, email, display
+name, and either `STAFF` or `ADMIN`. It creates or safely resumes a passwordless
+Cognito identity, writes the matching D1 authorization profile, and retains an
+administrator access audit. Regular staff cannot list or grant access.
+
 ## Return Review and Purge Readiness
 
 ```http

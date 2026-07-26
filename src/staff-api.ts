@@ -1,5 +1,9 @@
 import type { StaffActor } from "./auth.ts";
 import { isCommandId } from "./registration.ts";
+import {
+  cognitoStaffProvisioner,
+  type StaffIdentityProvisioner,
+} from "./staff-access.ts";
 import type { Env } from "./types.ts";
 
 const headers = {
@@ -26,6 +30,133 @@ const readJson = async (request: Request): Promise<Record<string, unknown> | nul
   } catch {
     return null;
   }
+};
+
+interface StaffProfileRow {
+  id: string;
+  email: string;
+  display_name: string | null;
+  is_system_admin: number;
+  created_at: string;
+}
+
+const staffProfileResponse = (profile: StaffProfileRow): Record<string, unknown> => ({
+  id: profile.id,
+  email: profile.email,
+  displayName: profile.display_name,
+  role: profile.is_system_admin === 1 ? "ADMIN" : "STAFF",
+  createdAt: profile.created_at,
+});
+
+const listStaffProfiles = async (env: Env, actor: StaffActor): Promise<Response> => {
+  if (!actor.isSystemAdmin) return json({ error: "Administrator permission required." }, 403);
+  const profiles = await env.DB.prepare(
+    `SELECT id, email, display_name, is_system_admin, created_at
+       FROM staff_profiles
+      ORDER BY is_system_admin DESC, COALESCE(display_name, email) COLLATE NOCASE, email COLLATE NOCASE
+      LIMIT 200`,
+  ).all<StaffProfileRow>();
+  return json({ staff: profiles.results.map(staffProfileResponse) });
+};
+
+const addStaffProfile = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  provisioner: StaffIdentityProvisioner,
+): Promise<Response> => {
+  if (!actor.isSystemAdmin) return json({ error: "Administrator permission required." }, 403);
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const email = typeof payload?.email === "string" ? payload.email.trim().toLowerCase() : "";
+  const displayName = typeof payload?.displayName === "string"
+    ? payload.displayName.trim().replace(/\s+/g, " ")
+    : "";
+  const role = payload?.role;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    || displayName.length === 0 || displayName.length > 100
+    || (role !== "STAFF" && role !== "ADMIN")
+  ) {
+    return json({ error: "Command, valid email, display name, and staff role are required." }, 400);
+  }
+
+  const replay = await env.DB.prepare(
+    `SELECT p.id, p.email, p.display_name, p.is_system_admin, p.created_at
+       FROM staff_access_commands c
+       JOIN staff_profiles p ON p.id = c.target_staff_profile_id
+      WHERE c.id = ? AND c.command_type = 'ADD_STAFF'
+      LIMIT 1`,
+  ).bind(commandId).first<StaffProfileRow>();
+  if (replay !== null) {
+    const replayRole = replay.is_system_admin === 1 ? "ADMIN" : "STAFF";
+    if (replay.email !== email || replay.display_name !== displayName || replayRole !== role) {
+      return json({ error: "This command identifier was already used for another staff account." }, 409);
+    }
+    return json({ staff: staffProfileResponse(replay), replayed: true });
+  }
+
+  const existingProfile = await env.DB.prepare(
+    "SELECT id FROM staff_profiles WHERE email = ? COLLATE NOCASE LIMIT 1",
+  ).bind(email).first<{ id: string }>();
+  if (existingProfile !== null) return json({ error: "That email already has staff access." }, 409);
+
+  let identity;
+  try {
+    identity = await provisioner.create(email, displayName, env);
+  } catch {
+    return json({ error: "Cognito could not provision this staff account. Try again." }, 502);
+  }
+
+  const now = new Date().toISOString();
+  const profileId = crypto.randomUUID();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO staff_profiles
+          (id, cognito_sub, email, display_name, is_system_admin, created_by_staff_profile_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(profileId, identity.cognitoSub, email, displayName, role === "ADMIN" ? 1 : 0, actor.id),
+      env.DB.prepare(
+        `INSERT INTO staff_access_commands
+          (id, command_type, target_staff_profile_id, requested_by_staff_profile_id, requested_at, completed_at)
+         VALUES (?, 'ADD_STAFF', ?, ?, ?, ?)`,
+      ).bind(commandId, profileId, actor.id, now, now),
+      env.DB.prepare(
+        `INSERT INTO staff_access_audit_events
+          (id, command_id, actor_staff_profile_id, target_staff_profile_id, action, occurred_at, details_json)
+         VALUES (?, ?, ?, ?, 'STAFF_ACCESS_GRANTED', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(),
+        commandId,
+        actor.id,
+        profileId,
+        now,
+        JSON.stringify({ role }),
+      ),
+    ]);
+  } catch {
+    if (identity.created) {
+      try {
+        await provisioner.delete(identity.username, env);
+      } catch {
+        // The Cognito identity remains unauthorized without a staff profile.
+      }
+    }
+    return json({ error: "Staff access conflicted with another update. Refresh and try again." }, 409);
+  }
+
+  return json({
+    staff: staffProfileResponse({
+      id: profileId,
+      email,
+      display_name: displayName,
+      is_system_admin: role === "ADMIN" ? 1 : 0,
+      created_at: now,
+    }),
+    replayed: false,
+  }, 201);
 };
 
 interface StaffDuckRow {
@@ -994,8 +1125,16 @@ export const handleStaffApi = async (
   request: Request,
   env: Env,
   actor: StaffActor,
+  provisioner: StaffIdentityProvisioner = cognitoStaffProvisioner,
 ): Promise<Response> => {
   const url = new URL(request.url);
+
+  if (url.pathname === "/api/v1/staff/profiles" && request.method === "GET") {
+    return listStaffProfiles(env, actor);
+  }
+  if (url.pathname === "/api/v1/staff/profiles" && request.method === "POST") {
+    return addStaffProfile(request, env, actor, provisioner);
+  }
 
   if (url.pathname === "/api/v1/staff/events/return-review" && request.method === "GET") {
     return returnReview(env);

@@ -78,6 +78,16 @@ Resources:
       Domain: !Sub quickducks-staff-${AWS::AccountId}
       ManagedLoginVersion: 2
 
+  StaffManagedLoginBranding:
+    Type: AWS::Cognito::ManagedLoginBranding
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    DependsOn: StaffUserPoolDomain
+    Properties:
+      UserPoolId: !Ref StaffUserPool
+      ClientId: !Ref StaffWebClient
+      UseCognitoProvidedValues: true
+
   SesIdentity:
     Type: AWS::SES::EmailIdentity
     Properties:
@@ -101,7 +111,7 @@ Resources:
         - Key: Project
           Value: quickducks
       Policies:
-        - PolicyName: SendQuickDucksEmail
+        - PolicyName: QuickDucksWorkerAwsAccess
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -110,6 +120,12 @@ Resources:
                   - ses:SendEmail
                   - ses:SendRawEmail
                 Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/quickducks.com
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminGetUser
+                Resource: !GetAtt StaffUserPool.Arn
 
 Outputs:
   UserPoolId:
