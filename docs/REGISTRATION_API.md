@@ -144,6 +144,11 @@ command is idempotent and atomically creates the event reservation, versioned
 duck assignment, registration transition, inventory transition, audit, and
 immediate-mode heat entry when applicable.
 
+Browser staff sessions use a `Secure`, `HttpOnly`, `SameSite=Lax`, host-only
+cookie created only after Cognito authorization-code, state, and PKCE checks.
+Cookie-authenticated mutation requests require the exact application origin.
+Explicit Bearer access tokens remain supported for trusted API clients.
+
 ## Complete Race Purge
 
 ```http
@@ -166,7 +171,9 @@ and registered again.
 
 ## Runtime Configuration
 
-Production requires encrypted Worker secret `TURNSTILE_SECRET_KEY`. The future
-UI also needs the corresponding public `TURNSTILE_SITE_KEY` binding.
+Production registration requires encrypted Worker secret
+`TURNSTILE_SECRET_KEY` and the corresponding public `TURNSTILE_SITE_KEY`
+binding. The form remains disabled without the public key, while the API fails
+closed without the secret.
 Automatic Workers invocation logs stay disabled because fetch-event logs include
 request URLs, and private status credentials are carried in URL paths.

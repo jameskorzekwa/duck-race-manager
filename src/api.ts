@@ -465,15 +465,27 @@ const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Pro
   )).filter((status) => status !== null);
   return json({ results });
 };
-export const handleApi = async (request: Request, env: Env): Promise<Response> => {
+export const handleApi = async (
+  request: Request,
+  env: Env,
+  authenticate: typeof authenticateStaff = authenticateStaff,
+): Promise<Response> => {
   const url = new URL(request.url);
 
   if (url.pathname.startsWith("/api/v1/staff/")) {
-    const actor = await authenticateStaff(request, env);
+    const actor = await authenticate(request, env);
     if (actor === null) {
       return json({ error: "Staff authentication required." }, 401, {
         "www-authenticate": "Bearer",
       });
+    }
+    if (
+      actor.authentication === "cookie"
+      && request.method !== "GET"
+      && request.method !== "HEAD"
+      && request.headers.get("origin") !== new URL(env.APP_ORIGIN).origin
+    ) {
+      return json({ error: "Same-origin staff request required." }, 403);
     }
     return handleStaffApi(request, env, actor);
   }

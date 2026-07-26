@@ -203,6 +203,12 @@ lookup code, and scanned tag token. Staff authorization, event state,
 assignment uniqueness, tag state, inventory eligibility, and command
 idempotency are rechecked server-side.
 
+The browser receives the access token only as a host-only HttpOnly staff-session
+cookie after a Cognito authorization-code and PKCE exchange. Staff APIs also
+accept an explicit Bearer token for trusted non-browser clients. Mutations made
+with the browser cookie require the exact QuickDucks origin, preventing a
+cross-site form from submitting a pairing or purge command.
+
 Authenticated staff registration search may return full name, email, and phone
 for event operations. Those columns are never selected by anonymous name search
 or public duck status queries.

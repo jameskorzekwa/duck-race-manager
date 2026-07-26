@@ -11,6 +11,7 @@ const actor = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
+  authentication: "bearer",
 };
 
 const makeDb = (first, all = () => ({ results: [] })) => {
@@ -77,6 +78,46 @@ test("rejects anonymous staff API requests", async () => {
 
   assert.equal(response.status, 401);
   assert.equal(response.headers.get("www-authenticate"), "Bearer");
+});
+
+test("authenticates staff from the host-only session cookie", async () => {
+  const db = makeDb(() => ({
+    id: actor.id,
+    cognito_sub: actor.cognitoSub,
+    email: actor.email,
+    display_name: actor.displayName,
+    is_system_admin: 0,
+  }));
+  const request = new Request("https://quickducks.com/staff", {
+    headers: { cookie: "__Host-quickducks_staff=valid.jwt.token" },
+  });
+  const result = await authenticateStaff(request, makeEnv(db), async (token) => {
+    assert.equal(token, "valid.jwt.token");
+    return { sub: actor.cognitoSub };
+  });
+
+  assert.deepEqual(result, { ...actor, authentication: "cookie" });
+});
+
+test("requires same-origin protection for cookie-authenticated staff mutations", async () => {
+  const db = makeDb(() => null);
+  const cookieActor = { ...actor, authentication: "cookie" };
+  const blocked = await handleApi(
+    new Request("https://quickducks.com/api/v1/staff/unknown", { method: "POST" }),
+    makeEnv(db),
+    async () => cookieActor,
+  );
+  const allowed = await handleApi(
+    new Request("https://quickducks.com/api/v1/staff/unknown", {
+      method: "POST",
+      headers: { origin: "https://quickducks.com" },
+    }),
+    makeEnv(db),
+    async () => cookieActor,
+  );
+
+  assert.equal(blocked.status, 403);
+  assert.equal(allowed.status, 404);
 });
 
 test("staff name search may return contact details", async () => {
