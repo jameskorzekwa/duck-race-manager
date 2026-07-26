@@ -1,7 +1,10 @@
 import {
   AdminCreateUserCommand,
   AdminDeleteUserCommand,
+  AdminDisableUserCommand,
+  AdminEnableUserCommand,
   AdminGetUserCommand,
+  AdminUserGlobalSignOutCommand,
   CognitoIdentityProviderClient,
   UsernameExistsException,
 } from "@aws-sdk/client-cognito-identity-provider";
@@ -17,6 +20,12 @@ export interface ProvisionedStaffIdentity {
 export interface StaffIdentityProvisioner {
   create(email: string, displayName: string, env: Env): Promise<ProvisionedStaffIdentity>;
   delete(username: string, env: Env): Promise<void>;
+}
+
+export interface StaffIdentityLifecycle {
+  disable(username: string, env: Env): Promise<void>;
+  enable(username: string, env: Env): Promise<void>;
+  globalSignOut(username: string, env: Env): Promise<void>;
 }
 
 const client = (env: Env): CognitoIdentityProviderClient => new CognitoIdentityProviderClient({
@@ -85,3 +94,30 @@ export const createCognitoStaffProvisioner = (
 });
 
 export const cognitoStaffProvisioner = createCognitoStaffProvisioner();
+
+export const createCognitoStaffLifecycle = (
+  clientForEnv: typeof client = client,
+): StaffIdentityLifecycle => ({
+  async disable(username, env) {
+    await clientForEnv(env).send(new AdminDisableUserCommand({
+      UserPoolId: env.COGNITO_USER_POOL_ID,
+      Username: username,
+    }));
+  },
+
+  async enable(username, env) {
+    await clientForEnv(env).send(new AdminEnableUserCommand({
+      UserPoolId: env.COGNITO_USER_POOL_ID,
+      Username: username,
+    }));
+  },
+
+  async globalSignOut(username, env) {
+    await clientForEnv(env).send(new AdminUserGlobalSignOutCommand({
+      UserPoolId: env.COGNITO_USER_POOL_ID,
+      Username: username,
+    }));
+  },
+});
+
+export const cognitoStaffLifecycle = createCognitoStaffLifecycle();
