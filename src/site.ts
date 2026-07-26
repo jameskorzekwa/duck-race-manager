@@ -150,7 +150,7 @@ export const renderHome = (registrations: BrowserRegistration[] = []): string =>
     </section>
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p><a class="card-link" href="/register">Preview the form →</a></article>
-      <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/staff/mock/ducks/128/pair">Preview staff pairing →</a></article>
+      <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/mock/staff/ducks/128/pair">Preview staff pairing →</a></article>
       <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p><a class="card-link" href="/r/mock">Preview status →</a></article>
     </section>`,
 });

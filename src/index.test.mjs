@@ -187,7 +187,7 @@ test("opens a persisted private status path from the home-page cookie", async ()
 
 test("renders protected staff pairing preview with code and name lookup", async () => {
   const response = await worker.fetch(
-    new Request("https://quickducks.com/staff/mock/ducks/128/pair"),
+    new Request("https://quickducks.com/mock/staff/ducks/128/pair"),
     env,
   );
   const body = await response.text();

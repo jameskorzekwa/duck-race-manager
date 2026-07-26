@@ -117,7 +117,7 @@ export default {
     if (url.pathname === "/t/mock-unpaired" && request.method === "GET") {
       return new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } });
     }
-    if (url.pathname === "/staff/mock/ducks/128/pair" && request.method === "GET") {
+    if (url.pathname === "/mock/staff/ducks/128/pair" && request.method === "GET") {
       return html(renderStaffPairing(), 200, true);
     }
 
