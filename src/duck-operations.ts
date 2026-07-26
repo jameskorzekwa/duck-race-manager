@@ -1215,10 +1215,8 @@ const startProvisioning = async (
 
 interface ProvisioningTagRow {
   duck_id: string;
-  visible_number: number;
   tag_status: string;
   inventory_status: string;
-  event_id: string | null;
   provisioning_command_id: string | null;
   provisioning_event_id: string | null;
   provisioning_owner_id: string | null;
@@ -1235,16 +1233,8 @@ const classifyProvisioningTag = async (
   if (!validEventId(eventId) || token === null) {
     return json({ error: "A valid event and canonical QuickDucks tag URL are required." }, 400);
   }
-  const pending = await getPendingProvisioning(env, eventId, actor.id);
-  if (pending !== null && pending.tag_token !== token) {
-    return json({
-      kind: "mismatch",
-      message: "Finish the pending sticker before tapping another QuickDucks tag. Do not overwrite this sticker.",
-    });
-  }
   const tag = await env.DB.prepare(
-    `SELECT d.id AS duck_id, d.visible_number, d.inventory_status,
-            dt.status AS tag_status, ed.event_id,
+    `SELECT d.id AS duck_id, d.inventory_status, dt.status AS tag_status,
              rc.id AS provisioning_command_id,
              rc.event_id AS provisioning_event_id,
              json_extract((
@@ -1257,21 +1247,16 @@ const classifyProvisioningTag = async (
                 ORDER BY owner_ae.occurred_at DESC, owner_ae.id DESC
                 LIMIT 1
              ), '$.staff_profile_id') AS provisioning_owner_id
-        FROM duck_tags dt
-       JOIN ducks d ON d.id = dt.duck_id
-       LEFT JOIN event_ducks ed
-         ON ed.duck_id = d.id AND ed.released_at IS NULL
-       LEFT JOIN race_commands rc
-         ON rc.result_id = d.id AND rc.command_type = '${provisioningStartCommand}'
+         FROM duck_tags dt
+        JOIN ducks d ON d.id = dt.duck_id
+        LEFT JOIN race_commands rc
+          ON rc.result_id = d.id AND rc.command_type = '${provisioningStartCommand}'
        WHERE dt.token = ?
       ORDER BY CASE dt.status WHEN 'ACTIVE' THEN 0 WHEN 'RESERVED' THEN 1 ELSE 2 END
       LIMIT 1`,
   ).bind(token).first<ProvisioningTagRow>();
   if (tag === null) {
-    return json({ kind: "mismatch", message: "That QuickDucks URL is unknown. Do not overwrite this sticker." });
-  }
-  if (tag.tag_status === "ACTIVE" && tag.event_id === eventId) {
-    return json({ kind: "already", duck: { id: tag.duck_id, visibleNumber: tag.visible_number } });
+    return json({ kind: "reusable" });
   }
   if (
     tag.tag_status === "RESERVED"
@@ -1282,7 +1267,7 @@ const classifyProvisioningTag = async (
   ) {
     return json({ kind: "pending", duckId: tag.duck_id, provisioningCommandId: tag.provisioning_command_id });
   }
-  return json({ kind: "mismatch", message: "That QuickDucks sticker belongs to different inventory. Do not overwrite it." });
+  return json({ kind: "already" });
 };
 
 const confirmProvisioning = async (

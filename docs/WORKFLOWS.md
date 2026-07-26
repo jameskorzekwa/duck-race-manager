@@ -183,7 +183,13 @@ On success, the participant receives:
 - A private path of the form `/r/<private-token>`.
 - Membership in the current browser's registration collection.
 
-No duck or heat is assigned by public registration.
+Before leaving `/register`, the browser strictly validates the returned
+registration UUID and same-origin relative `/r/<private-token>` path. It attempts
+to save only those two values as a transient `sessionStorage` handoff, tolerates
+storage being unavailable, and redirects to the required
+`/my-ducks?registered=<registration-uuid>` destination. The private path and
+token are never placed in the redirect URL, browser history, or logs. No duck or
+heat is assigned by public registration.
 
 **Operator step:** keep registration lifecycle state aligned with the intended
 schedule. Timestamps gate submission but do not automatically open or close the
@@ -217,7 +223,15 @@ host-only, and has a one-year sliding lifetime. Only a hash of its token is
 stored in D1. The collection can link many registrations created in the same
 browser.
 
-The home page's `My ducks` section shows, for each collected registration:
+The primary navigation reveals **My Ducks** only after a lightweight collection
+probe returns `{ hasRegistrations: true }`. Non-My-Ducks pages use this probe;
+it applies the same cookie validation, invalid-cookie clearing, and sliding
+expiry refresh as the full collection endpoint, but queries only whether one
+collection link exists. It never selects or returns names, lookup codes, race
+entries, status details, contact fields, or private paths.
+
+The dedicated noindex `/my-ducks` page loads the full safe collection. It shows,
+for each collected registration:
 
 - Full participant name from the private browser collection.
 - Staff lookup code.
@@ -225,7 +239,25 @@ The home page's `My ducks` section shows, for each collected registration:
 - Privacy-filtered race status, including duck, heat, current heat, and outcome
   when public race status is available.
 
-The section refreshes after a live race signal. While the live connection is
+Cards are grouped into separate horizontally swipeable **Awaiting Participants**
+and paired **My Ducks** sections with keyboard and previous/next controls. A live
+or polling refresh immediately regroups a card when staff pair or unpair its
+participant. Both authoritative empty-state messages remain hidden until the
+first successful full collection response. If that initial request fails, the
+page shows only an unavailable/delayed update message and keeps checking.
+
+After the registration redirect, the page highlights the matching registration.
+Only after that UUID appears in a successful full collection response does the
+page validate and consume the matching handoff. A valid handoff must contain
+exactly the matching registration UUID and a same-origin relative
+`/r/<valid-private-token>` path. Safe consumption removes it from
+`sessionStorage` and adds an accessible **Open private status** link to the
+just-registered notice so the participant can open and bookmark it. Invalid,
+cross-origin, absolute, malformed, mismatched, unreadable, or non-removable
+handoffs are never exposed. Full collection and presence responses never return
+the private path or token.
+
+The page refreshes after a live race signal. While the live connection is
 healthy, an approximately 30-second integrity refresh covers missed signals;
 while it is unavailable or disconnected, polling increases to approximately
 every five seconds. Polling and rendering pause in a hidden tab and resume with
@@ -580,6 +612,13 @@ QuickDucks automatically writes exactly one URL record containing the canonical
 as physical-write verification and does not call `makeReadOnly`, preserving the
 controlled tag-replacement workflow.
 
+**End NFC provisioning** is visible only while Web NFC scanning is active. It
+aborts the browser scan and restores **Start NFC provisioning** without clearing
+confirmed counts or history. It is disabled while a reading or removal state is
+active and whenever the station owns a pending server reservation; the operator
+must finish that exact sticker before ending, so the control cannot silently
+abandon a `PENDING_WRITE` item.
+
 The browser allows one operation in flight and has no scan queue. It uses an NFC
 hardware serial only as an in-memory same-reading debounce and never as duck
 identity. A failed or interrupted write retains the same pending URL and both
@@ -591,17 +630,33 @@ physical write as complete and proceeds directly to confirmation without another
 `write()` call. The station pre-arms recovery after success but does not allocate
 the next duck until the next physical reading.
 
-If a reading already contains an exact canonical QuickDucks URL, the browser
-classifies it through the protected provisioning endpoint before any write. With
-no pending operation, an active tag reserved for the selected event reports
-**Already provisioned**, refreshes the authoritative count, and does not increment
-**Added this session**. While provisioning is pending, only the current actor's
-exact pending URL can finish it. Every other canonical URL, including another
-active selected-event tag, produces a sticky **finish the pending sticker**
-mismatch without clearing command IDs, allocating a duck, cloning the pending URL,
-or changing either count. Unknown, different-event, or different-actor canonical
-URLs are likewise never adopted or overwritten. Blank tags and unrelated NDEF
-content may be overwritten after the station starts.
+If a reading contains canonical QuickDucks URLs, the browser deduplicates them
+and classifies every distinct URL in physical record order through the protected
+provisioning endpoint before any reservation, write, or confirmation. With no
+pending operation, any classified tag row that still identifies a duck in the
+current dataset flashes **This duck is already registered in inventory**,
+immediately returns to **Ready**, and does not allocate, write, confirm, or
+increment **Added this session**. This includes active, retired, released,
+different-event, and another operator's pending tags, regardless of whether an
+absent/reusable record appears before or after the known record.
+
+While this station owns a pending operation, only a reading containing exactly
+its one pending URL can finish it. A pending URL mixed with a reusable URL, or
+multiple inconsistent known URLs, fails safely after complete classification
+without writing, confirming, clearing command IDs, or changing either count. If
+the exact local pending URL now classifies as already, the station resolves the
+same confirmation command instead of treating the tag as unrelated. A replayed
+confirmation response completes that current addition exactly once, increments
+session history/count once, enters **Remove duck**, and then returns to
+**Ready**. Only a separately scanned current tag receives the count-neutral
+already-registered warning.
+
+An exact canonical URL absent from the current dataset is reusable rather than a
+permanent duplicate. This is the expected state for a physical duck after complete
+race purge: the normal two-phase flow allocates new inventory and overwrites the
+old URL with newly generated provisioning information. No tombstone or
+cross-race compatibility row is retained. Blank tags and unrelated NDEF content
+are likewise writable after the station starts.
 
 The station's session count and DOM-built history contain outcomes only, never
 the raw token or permanent URL. Provisioning is online-only and requires current

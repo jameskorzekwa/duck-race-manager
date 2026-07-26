@@ -277,6 +277,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   }), 200, "browser registration collection");
   assert.equal(mineBeforePairing.registrations.length, participants.length);
   assert.ok(mineBeforePairing.registrations.every((item) => item.raceStatus.outcome === "AWAITING_DUCK_PAIRING"));
+  assert.ok(mineBeforePairing.registrations.every((item) => item.paired === false));
   assert.equal(/email|phone/i.test(JSON.stringify(mineBeforePairing)), false);
 
   const publicBeforePairing = await jsonBody(await api(
@@ -332,6 +333,12 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     assert.equal(pairing.heatAssignmentPending, true);
     assert.equal(pairing.duck.visibleNumber, participant.visibleNumber);
   }
+
+  const mineAfterPairing = await jsonBody(await api("/api/v1/registrations/mine", {
+    cookie: browserCookie,
+  }), 200, "paired browser registration collection");
+  assert.ok(mineAfterPairing.registrations.every((item) => item.paired === true));
+  assert.ok(mineAfterPairing.registrations.every((item) => item.raceStatus.duck !== null));
 
   const duplicatePairing = await post(`/api/v1/staff/ducks/${participants[0].tagToken}/assignments`, {
     commandId: crypto.randomUUID(),

@@ -369,6 +369,76 @@ test("simultaneous migrated-SQLite provisioning starts recover or allocate witho
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
+test("duplicate preflight recognizes any known current-dataset tag without mutation", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const token = "k".repeat(43);
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff_test', 'staff-sub', 'staff@example.com');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event_test', 'test-race', 'Test Race', 'America/Denver', 'REGISTRATION_OPEN');
+    INSERT INTO ducks
+      (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+    VALUES ('duck_existing', 42, 'AVAILABLE', '2026-07-26T00:00:00Z', 'GOOD');
+    INSERT INTO duck_tags
+      (id, duck_id, token, status, written_at, verified_at, activated_at)
+    VALUES
+      ('tag_existing', 'duck_existing', '${token}', 'ACTIVE',
+       '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+  `);
+  const before = {
+    ducks: database.prepare("SELECT COUNT(*) AS count FROM ducks").get().count,
+    tags: database.prepare("SELECT COUNT(*) AS count FROM duck_tags").get().count,
+    commands: database.prepare("SELECT COUNT(*) AS count FROM race_commands").get().count,
+    reservations: database.prepare("SELECT COUNT(*) AS count FROM event_ducks").get().count,
+  };
+  const duckBefore = database.prepare(
+    "SELECT visible_number, inventory_status, physical_condition, revision FROM ducks WHERE id = 'duck_existing'",
+  ).get();
+  const classify = () => handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/provisioning/classify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventId: "event_test", tagUrl: `https://quickducks.com/t/${token}` }),
+    }),
+    makeEnv(sqliteD1(database)),
+    actor,
+  );
+
+  const active = await classify();
+  assert.equal(active.status, 200);
+  assert.deepEqual(await active.json(), { kind: "already" });
+  assert.deepEqual(database.prepare(
+    "SELECT visible_number, inventory_status, physical_condition, revision FROM ducks WHERE id = 'duck_existing'",
+  ).get(), duckBefore);
+  database.exec("UPDATE duck_tags SET status = 'RETIRED', retired_at = '2026-07-26T01:00:00Z' WHERE id = 'tag_existing'");
+  assert.deepEqual(await (await classify()).json(), { kind: "already" });
+  assert.deepEqual(database.prepare(
+    "SELECT visible_number, inventory_status, physical_condition, revision FROM ducks WHERE id = 'duck_existing'",
+  ).get(), duckBefore);
+  assert.equal(database.prepare("SELECT status FROM duck_tags WHERE id = 'tag_existing'").get().status, "RETIRED");
+  assert.deepEqual({
+    ducks: database.prepare("SELECT COUNT(*) AS count FROM ducks").get().count,
+    tags: database.prepare("SELECT COUNT(*) AS count FROM duck_tags").get().count,
+    commands: database.prepare("SELECT COUNT(*) AS count FROM race_commands").get().count,
+    reservations: database.prepare("SELECT COUNT(*) AS count FROM event_ducks").get().count,
+  }, before);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+
+  const purgedUrl = `https://quickducks.com/t/${"z".repeat(43)}`;
+  const reusable = await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/provisioning/classify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ eventId: "event_test", tagUrl: purgedUrl }),
+    }),
+    makeEnv(sqliteD1(database)),
+    actor,
+  );
+  assert.deepEqual(await reusable.json(), { kind: "reusable" });
+});
+
 test("provisioning routes retain the duck-manager role gate", async () => {
   const db = makeDb();
   const response = await handleDuckOperations(
@@ -547,7 +617,7 @@ test("aged abandoned provisioning takeover transfers exact ownership safely in m
   const originalRecovery = await handleDuckOperations(recoveryRequest(), env, owner);
   assert.equal((await originalRecovery.json()).provisioning, null);
   const originalClassification = await handleDuckOperations(classifyRequest(original.tagUrl), env, owner);
-  assert.equal((await originalClassification.json()).kind, "mismatch");
+  assert.equal((await originalClassification.json()).kind, "already");
   const originalConfirmation = await handleDuckOperations(
     confirmRequest(crypto.randomUUID(), original), env, owner,
   );
@@ -1135,7 +1205,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   const unknownClassification = await handleDuckOperations(
     classifyRequest(`https://quickducks.com/t/${"z".repeat(43)}`), env, actor,
   );
-  assert.equal((await unknownClassification.json()).kind, "mismatch");
+  assert.equal((await unknownClassification.json()).kind, "reusable");
 
   const confirmCommandId = crypto.randomUUID();
   database.exec("UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event_test'");
@@ -1258,8 +1328,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   const concurrentProvisioning = await concurrentStart.json();
   const activeWhilePending = await handleDuckOperations(classifyRequest(provisioning.tagUrl), env, actor);
   const activeWhilePendingBody = await activeWhilePending.json();
-  assert.equal(activeWhilePendingBody.kind, "mismatch");
-  assert.match(activeWhilePendingBody.message, /Finish the pending sticker/);
+  assert.equal(activeWhilePendingBody.kind, "already");
   const concurrentResults = await Promise.all([
     handleDuckOperations(confirmRequest(crypto.randomUUID(), concurrentProvisioning), env, actor),
     handleDuckOperations(confirmRequest(crypto.randomUUID(), concurrentProvisioning), env, actor),

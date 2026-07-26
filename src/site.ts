@@ -76,6 +76,17 @@ h3 { font-size:1.3rem; letter-spacing:-.03em; }
 .duck-card { padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
 .duck-card h3 { margin-bottom:.55rem; }
 .duck-card p { margin-bottom:.35rem; line-height:1.45; }
+.page-panel.my-ducks-panel { max-width:70rem; }
+.participant-section { margin:2rem 0; padding-top:1.5rem; border-top:3px solid var(--ink); }
+.participant-section-head { display:flex; flex-wrap:wrap; align-items:end; justify-content:space-between; gap:.8rem; margin-bottom:.8rem; }
+.participant-section-head h2 { margin:0; }
+.carousel-controls { display:flex; gap:.55rem; }
+.participant-track { position:relative; display:flex; gap:1rem; padding:.25rem .25rem 1rem; overflow-x:auto; overscroll-behavior-inline:contain; scroll-padding-inline:.25rem; scroll-snap-type:x mandatory; scrollbar-color:var(--water-dark) #dce9e9; }
+.participant-track:focus-visible { border-radius:.8rem; outline:4px solid #83d8ec; outline-offset:2px; }
+.participant-card { flex:0 0 min(30rem,calc(100% - 3rem)); min-width:0; scroll-snap-align:start; scroll-snap-stop:always; }
+.participant-card.is-current { border-color:var(--orange); background:#fff8c5; box-shadow:4px 4px 0 var(--ink); }
+.participant-card:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
+.success-tag { display:inline-block; margin-bottom:.65rem; padding:.3rem .55rem; border:2px solid var(--ink); border-radius:999px; background:var(--yellow); font-size:.75rem; font-weight:950; letter-spacing:.06em; text-transform:uppercase; }
 .search-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.75rem; align-items:end; margin-top:1rem; }
 .search-form .button { min-height:3.2rem; }
 .search-message { margin:.9rem 0 0; }
@@ -187,7 +198,7 @@ details.operation-card[open] > summary { margin-bottom:1rem; }
 .station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .search-form { grid-template-columns:1fr; } .staff-access-card .actions { width:100%; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .search-form { grid-template-columns:1fr; } .staff-access-card .actions { width:100%; } }
 @media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-glide 3.1s ease-in-out infinite; } .hero-water { animation:water-swell 4.2s ease-in-out infinite; } .hero::before { animation:current 2.8s linear infinite; } @keyframes duck-glide { 0%,100% { transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); } 50% { transform:translateX(calc(var(--duck-center) + 6px)) translateY(-9px) rotate(1deg); } } @keyframes water-swell { 0%,100% { transform:translateY(0); } 50% { transform:translateY(4px); } } @keyframes current { to { background-position:-10rem 50%; } } }
 `;
 
@@ -214,10 +225,11 @@ const page = ({ title, description, content, robots = "index,follow" }: PageOpti
   <body>
     <header class="shell site-head">
       <a class="brand" href="/">${duck("brand-duck")}<span>QuickDucks</span></a>
-      <nav class="nav" aria-label="Primary"><a href="/">Home</a><a href="/register">Register</a><a href="/staff">Staff</a></nav>
+      <nav class="nav" aria-label="Primary"><a href="/">Home</a><a href="/register">Register</a><a href="/my-ducks" data-my-ducks-nav hidden>My Ducks</a><a href="/staff">Staff</a></nav>
     </header>
     <main class="shell">${content}</main>
     <footer class="shell site-foot">Built for quick check-ins, clear heats, and happy ducks.</footer>
+    <script src="/assets/participant.js" defer></script>
   </body>
 </html>`;
 
@@ -253,13 +265,6 @@ export const renderHome = (): string => page({
       <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/staff">Open staff tools →</a></article>
       <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p><a class="card-link" href="/r/mock">Preview status →</a></article>
     </section>
-    <section class="status-section" data-my-ducks hidden>
-      <p class="eyebrow">Saved on this device</p>
-      <h2>My ducks</h2>
-      <p class="muted">Every registration made in this browser stays separate, even when participants share an email address or phone number.</p>
-      <div class="privacy"><strong>Private by design.</strong><span>Email and phone are visible only to logged-in authorized race staff. They never appear here or in public status.</span></div>
-      <div class="duck-list" data-my-ducks-list></div>
-    </section>
     <section class="status-section" aria-labelledby="find-status-title">
       <p class="eyebrow">Lost your saved list?</p>
       <h2 id="find-status-title">Find race status by name</h2>
@@ -273,6 +278,50 @@ export const renderHome = (): string => page({
       <div class="privacy"><strong>Your data is temporary.</strong><span>After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
     </section>
     <script src="/assets/live.js" defer></script><script src="/assets/home.js" defer></script>`,
+});
+
+export const renderMyDucks = (): string => page({
+  title: "My Ducks",
+  description: "Registrations and race status saved on this browser.",
+  robots: "noindex,nofollow",
+  content: `
+    <section class="page-panel my-ducks-panel" data-my-ducks-page>
+      ${duck()}
+      <p class="eyebrow">Saved on this device</p>
+      <h1 class="page-title">My Ducks</h1>
+      <p class="lede">Swipe through every participant registered in this browser and follow each duck from pairing to finish.</p>
+      <div class="privacy"><strong>Private by design.</strong><span>Email and phone never appear here. Immediately after registration, this tab can show the one-time private status link so you can bookmark it; saved collection responses never include that link.</span></div>
+      <div class="notice" data-registration-success aria-live="polite" hidden></div>
+      <p class="freshness" data-my-ducks-freshness aria-live="polite">Loading saved registrations…</p>
+
+      <section class="participant-section" data-participant-section="awaiting" aria-labelledby="awaiting-participants-title">
+        <div class="participant-section-head">
+          <h2 id="awaiting-participants-title">Awaiting Participants</h2>
+          <div class="carousel-controls" data-carousel-controls hidden>
+            <button class="button secondary small" type="button" data-carousel-previous aria-controls="awaiting-participants">Previous</button>
+            <button class="button secondary small" type="button" data-carousel-next aria-controls="awaiting-participants">Next</button>
+          </div>
+        </div>
+        <p class="muted">Registrations waiting for staff to pair a physical duck.</p>
+        <p class="empty-state" data-carousel-empty hidden>No participants are waiting for a duck.</p>
+        <div class="participant-track" id="awaiting-participants" data-participant-track tabindex="0" aria-label="Awaiting participant registrations" hidden></div>
+      </section>
+
+      <section class="participant-section" data-participant-section="paired" aria-labelledby="paired-participants-title">
+        <div class="participant-section-head">
+          <h2 id="paired-participants-title">My Ducks</h2>
+          <div class="carousel-controls" data-carousel-controls hidden>
+            <button class="button secondary small" type="button" data-carousel-previous aria-controls="paired-participants">Previous</button>
+            <button class="button secondary small" type="button" data-carousel-next aria-controls="paired-participants">Next</button>
+          </div>
+        </div>
+        <p class="muted">Participants already paired with their race duck.</p>
+        <p class="empty-state" data-carousel-empty hidden>No paired ducks are saved on this device yet.</p>
+        <div class="participant-track" id="paired-participants" data-participant-track tabindex="0" aria-label="Paired participant registrations" hidden></div>
+      </section>
+
+      <div class="actions"><a class="button" href="/register">Register another participant</a></div>
+    </section>`,
 });
 
 export const renderRegistration = (turnstileSiteKey?: string): string => page({
@@ -669,14 +718,17 @@ export const renderInventoryIntake = (displayName: string, appOrigin: string): s
     <div class="notice"><strong>Android Chrome over HTTPS only.</strong> Keep this top-level page visible and online. QuickDucks generates the duck UUID, internal number, and permanent URL automatically; there is no offline queue or manual token fallback.</div>
     <label>Race event<select data-intake-event aria-describedby="intake-event-help"><option value="">Loading available events…</option></select><span id="intake-event-help">Only draft or registration-stage events accept inventory intake.</span></label>
     <label>Station location (optional)<input data-intake-location maxlength="100" autocomplete="off" placeholder="Intake table"><span>This one location is applied automatically to stickers provisioned during this station run.</span></label>
-    <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
+    <div class="actions">
+      <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
+      <button class="button secondary station-control" type="button" data-end-intake-nfc hidden disabled>End NFC provisioning</button>
+    </div>
     <article class="operation-card danger-zone" data-intake-takeover hidden>
       <h2>Abandoned sticker recovery</h2>
       <p class="muted" data-intake-takeover-message></p>
       <p>Race directors and administrators can explicitly take ownership. Do this only after confirming the previous station is no longer working on the sticker.</p>
       <button class="button danger" type="button" data-takeover-provisioning>Take over pending sticker</button>
     </article>
-    <article class="operation-card" aria-live="polite"><p class="eyebrow">Station state</p><h2 data-intake-state>Not started</h2><p class="message-line muted" data-intake-message>Select a race, then press Start once.</p></article>
+    <article class="operation-card" role="status" aria-live="polite" aria-atomic="true"><p class="eyebrow">Station state</p><h2 data-intake-state>Not started</h2><p class="message-line muted" data-intake-message>Select a race, then press Start once.</p></article>
     <div class="station-counters" aria-label="Inventory counts">
       <div class="station-counter"><span>Reserved for race</span><strong data-reserved-count>0</strong></div>
       <div class="station-counter"><span>Added this session</span><strong data-session-count>0</strong></div>
