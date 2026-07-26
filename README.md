@@ -66,6 +66,7 @@ delivery phases, and acceptance criteria.
 - [Staff UX and duck recovery](docs/STAFF_UX_AND_DUCK_RECOVERY.md)
 - [Race lifecycle and duck reuse](docs/RACE_LIFECYCLE_AND_DUCK_REUSE.md)
 - [Infrastructure](docs/INFRASTRUCTURE.md)
+- [Registration API](docs/REGISTRATION_API.md)
 
 ## License
 

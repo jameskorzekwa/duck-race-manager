@@ -29,7 +29,12 @@ Expected Worker secrets:
 ```text
 AWS_ACCESS_KEY_ID
 AWS_SECRET_ACCESS_KEY
+TURNSTILE_SECRET_KEY
 ```
+
+The public Turnstile site key is a non-secret Worker variable added when the
+registration UI is configured. The registration API fails closed until the
+encrypted Turnstile secret exists.
 
 ## AWS Deployment
 
