@@ -62,6 +62,55 @@ const makeEnv = (db, extras = {}) => ({
   ...extras,
 });
 
+const staffActor = {
+  id: "staff_test",
+  cognitoSub: "staff-sub",
+  email: "staff@example.com",
+  displayName: "Staff Member",
+  isSystemAdmin: false,
+  authentication: "bearer",
+};
+
+test("routes authenticated staff operation modules before the legacy fallback", async () => {
+  const event = {
+    id: "event_test",
+    slug: "test-race",
+    name: "Test Duck Race",
+    event_date: "2026-08-30",
+    timezone: "America/Denver",
+    status: "DRAFT",
+    registration_opens_at: null,
+    registration_closes_at: null,
+    email_required: 0,
+    heat_assignment_mode: "POST_CLOSE_BALANCED",
+    round_one_heat_capacity: 10,
+    final_heat_capacity: 10,
+    public_name_policy: "FIRST_NAME_LAST_INITIAL",
+    revision: 0,
+    created_at: "2026-07-26T00:00:00Z",
+    updated_at: "2026-07-26T00:00:00Z",
+  };
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/staff/events"),
+    makeEnv(makeDb(() => null, () => ({ results: [event] }))),
+    async () => staffActor,
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).events[0].id, event.id);
+});
+
+test("keeps legacy staff routes behind the composed operation router", async () => {
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/staff/events/return-review"),
+    makeEnv(makeDb(() => null)),
+    async () => staffActor,
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { event: null });
+});
+
 test("returns the current event without private configuration", async () => {
   const db = makeDb(() => openEvent);
   const response = await handleApi(

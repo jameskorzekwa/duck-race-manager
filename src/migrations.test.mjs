@@ -9,6 +9,12 @@ const migrationNames = [
   "0003_assignment_and_heat_status.sql",
   "0004_pairing_status_and_purge.sql",
   "0005_staff_access_management.sql",
+  "0006_participant_operations.sql",
+  "0007_duck_inventory_operations.sql",
+  "0008_event_operations.sql",
+  "0009_heat_result_operations.sql",
+  "0010_staff_lifecycle.sql",
+  "0011_support_operations.sql",
 ];
 
 const createDatabase = () => {
@@ -93,6 +99,7 @@ test("staff access commands retain administrator and target relationships", () =
     INSERT INTO staff_profiles (id, cognito_sub, email, is_system_admin)
     VALUES
       ('admin', 'admin-sub', 'admin@example.com', 1),
+      ('admin-2', 'admin-2-sub', 'admin-2@example.com', 1),
       ('staff', 'staff-sub', 'staff@example.com', 0);
     INSERT INTO staff_access_commands
       (id, command_type, target_staff_profile_id, requested_by_staff_profile_id, requested_at, completed_at)

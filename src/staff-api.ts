@@ -1067,6 +1067,12 @@ const purgeEvent = async (
   if (event.status !== "ARCHIVED") {
     return json({ error: "The event must pass return review and be marked purge-ready first." }, 409);
   }
+  const purgeClaim = await env.DB.prepare(
+    "SELECT status FROM event_purge_claims WHERE event_id = ? AND status = 'PURGING'",
+  ).bind(eventId).first<{ status: string }>();
+  if (purgeClaim === null) {
+    return json({ error: "The event must have an active purge claim before permanent deletion." }, 409);
+  }
   if (payload.confirmation !== `DELETE ${event.name}`) {
     return json({ error: `Type DELETE ${event.name} to confirm permanent deletion.` }, 422);
   }
@@ -1092,12 +1098,18 @@ const purgeEvent = async (
   try {
     await env.DB.batch([
       env.DB.prepare("DELETE FROM browser_collection_registrations"),
+      env.DB.prepare("DELETE FROM email_attempts WHERE event_id = ?").bind(eventId),
+      env.DB.prepare("DELETE FROM email_notifications WHERE event_id = ?").bind(eventId),
+      env.DB.prepare("DELETE FROM heat_result_history WHERE event_id = ?").bind(eventId),
       env.DB.prepare("DELETE FROM heat_results WHERE event_id = ?").bind(eventId),
       env.DB.prepare("DELETE FROM heat_entries WHERE event_id = ?").bind(eventId),
       env.DB.prepare("DELETE FROM heats WHERE event_id = ?").bind(eventId),
+      env.DB.prepare("DELETE FROM return_batch_items WHERE event_id = ?").bind(eventId),
+      env.DB.prepare("DELETE FROM return_batches WHERE event_id = ?").bind(eventId),
       env.DB.prepare("DELETE FROM duck_event_dispositions WHERE event_id = ?").bind(eventId),
       env.DB.prepare("DELETE FROM duck_assignments WHERE event_id = ?").bind(eventId),
       env.DB.prepare("DELETE FROM event_ducks WHERE event_id = ?").bind(eventId),
+      env.DB.prepare("DELETE FROM duck_inventory_events WHERE event_id = ?").bind(eventId),
       env.DB.prepare("DELETE FROM audit_events"),
       env.DB.prepare("DELETE FROM race_entries WHERE event_id = ?").bind(eventId),
       env.DB.prepare("DELETE FROM registrations WHERE event_id = ?").bind(eventId),

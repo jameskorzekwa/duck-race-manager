@@ -64,7 +64,7 @@ export const authenticateStaff = async (
     const profile = await env.DB.prepare(
       `SELECT id, cognito_sub, email, display_name, is_system_admin
          FROM staff_profiles
-        WHERE cognito_sub = ?`,
+        WHERE cognito_sub = ? AND is_active = 1`,
     ).bind(payload.sub).first<{
       id: string;
       cognito_sub: string;

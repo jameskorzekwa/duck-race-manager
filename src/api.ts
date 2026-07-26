@@ -19,7 +19,13 @@ import {
   getPublicStatusByTag,
   type PublicRaceStatus,
 } from "./race-status.ts";
+import { handleDuckOperations } from "./duck-operations.ts";
+import { handleEventOperations } from "./event-operations.ts";
+import { handleHeatOperations } from "./heat-operations.ts";
+import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
+import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
+import { handleSupportOperations } from "./support-operations.ts";
 import type { Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
 
 const apiHeaders = {
@@ -486,6 +492,18 @@ export const handleApi = async (
       && request.headers.get("origin") !== new URL(env.APP_ORIGIN).origin
     ) {
       return json({ error: "Same-origin staff request required." }, 403);
+    }
+    const operationHandlers = [
+      handleStaffLifecycleOperations,
+      handleEventOperations,
+      handleParticipantOperations,
+      handleDuckOperations,
+      handleHeatOperations,
+      handleSupportOperations,
+    ] as const;
+    for (const handler of operationHandlers) {
+      const response = await handler(request, env, actor);
+      if (response !== null) return response;
     }
     return handleStaffApi(request, env, actor);
   }

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { authenticateStaff } from "./auth.ts";
@@ -50,6 +52,53 @@ const makeEnv = (db) => ({
   COGNITO_USER_POOL_ID: "us-east-1_example",
   COGNITO_USER_POOL_CLIENT_ID: "client-example",
   DB: db,
+});
+
+const migrationNames = [
+  "0001_staff_identity.sql",
+  "0002_registration_foundation.sql",
+  "0003_assignment_and_heat_status.sql",
+  "0004_pairing_status_and_purge.sql",
+  "0005_staff_access_management.sql",
+  "0006_participant_operations.sql",
+  "0007_duck_inventory_operations.sql",
+  "0008_event_operations.sql",
+  "0009_heat_result_operations.sql",
+  "0010_staff_lifecycle.sql",
+  "0011_support_operations.sql",
+];
+
+const sqliteD1 = (database) => ({
+  prepare(sql) {
+    return {
+      sql,
+      args: [],
+      bind(...args) {
+        this.args = args;
+        return this;
+      },
+      async first() {
+        return database.prepare(this.sql).get(...this.args) ?? null;
+      },
+      async all() {
+        return { results: database.prepare(this.sql).all(...this.args) };
+      },
+    };
+  },
+  async batch(items) {
+    database.exec("BEGIN");
+    try {
+      const results = items.map((item) => {
+        const result = database.prepare(item.sql).run(...item.args);
+        return { success: true, meta: { changes: Number(result.changes) } };
+      });
+      database.exec("COMMIT");
+      return results;
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  },
 });
 
 test("authenticates a Cognito subject only when a matching staff profile exists", async () => {
@@ -837,6 +886,7 @@ test("purge deletes the complete race, duck, tag, browser, and audit dataset", a
     if (sql.includes("SELECT id, name, status FROM events")) {
       return { id: "event_test", name: "Test Duck Race", status: "ARCHIVED" };
     }
+    if (sql.includes("FROM event_purge_claims")) return { status: "PURGING" };
     if (sql.includes("WHERE id !=")) return null;
     if (sql.includes("LEFT JOIN duck_event_dispositions")) return null;
     return null;
@@ -855,8 +905,14 @@ test("purge deletes the complete race, duck, tag, browser, and audit dataset", a
   assert.equal(db.batches.length, 1);
   const sql = db.batches[0].map((statement) => statement.sql).join("\n");
   assert.match(sql, /DELETE FROM browser_collection_registrations/);
+  assert.match(sql, /DELETE FROM email_attempts/);
+  assert.match(sql, /DELETE FROM email_notifications/);
+  assert.match(sql, /DELETE FROM heat_result_history/);
   assert.match(sql, /DELETE FROM heat_results/);
+  assert.match(sql, /DELETE FROM return_batch_items/);
+  assert.match(sql, /DELETE FROM return_batches/);
   assert.match(sql, /DELETE FROM duck_assignments/);
+  assert.match(sql, /DELETE FROM duck_inventory_events/);
   assert.match(sql, /DELETE FROM registrations/);
   assert.match(sql, /DELETE FROM audit_events/);
   assert.equal(db.batches[0].find((statement) => statement.sql.includes("audit_events")).sql, "DELETE FROM audit_events");
@@ -865,4 +921,40 @@ test("purge deletes the complete race, duck, tag, browser, and audit dataset", a
   assert.match(sql, /DELETE FROM ducks/);
   assert.match(sql, /DELETE FROM browser_registration_collections/);
   assert.equal(response.headers.get("clear-site-data"), '"cache", "cookies", "storage"');
+});
+
+test("final purge executes against the complete migrated schema", async () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  for (const name of migrationNames) {
+    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
+  }
+  database.exec(`
+    INSERT INTO staff_profiles
+      (id, cognito_sub, email, display_name, is_system_admin, is_active)
+    VALUES
+      ('staff_test', 'staff-sub', 'staff@example.com', 'Staff Member', 1, 1);
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event_test', 'test-race', 'Test Duck Race', 'UTC', 'ARCHIVED');
+    INSERT INTO event_purge_claims
+      (event_id, command_id, status, claimed_by_staff_profile_id, claimed_at)
+    VALUES
+      ('event_test', 'claim-command', 'PURGING', 'staff_test', '2026-07-26T00:00:00Z');
+  `);
+
+  const response = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test/purge", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirmation: "DELETE Test Duck Race" }),
+    }),
+    makeEnv(sqliteD1(database)),
+    { ...actor, isSystemAdmin: true },
+  );
+
+  assert.equal(response.status, 204);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM events").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM event_purge_claims").get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
 });

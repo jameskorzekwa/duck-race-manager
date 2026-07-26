@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createCognitoStaffProvisioner } from "./staff-access.ts";
+import {
+  createCognitoStaffLifecycle,
+  createCognitoStaffProvisioner,
+} from "./staff-access.ts";
 
 const env = {
   AWS_ACCESS_KEY_ID: "test-access-key",
@@ -84,4 +87,30 @@ test("deletes a newly created Cognito identity during compensation", async () =>
     UserPoolId: env.COGNITO_USER_POOL_ID,
     Username: "cognito-user",
   });
+});
+
+test("disables, enables, and globally signs out the selected Cognito identity", async () => {
+  const commands = [];
+  const lifecycle = createCognitoStaffLifecycle(() => ({
+    async send(command) {
+      commands.push(command);
+      return {};
+    },
+  }));
+
+  await lifecycle.disable("staff@example.com", env);
+  await lifecycle.globalSignOut("staff@example.com", env);
+  await lifecycle.enable("staff@example.com", env);
+
+  assert.deepEqual(commands.map((command) => command.constructor.name), [
+    "AdminDisableUserCommand",
+    "AdminUserGlobalSignOutCommand",
+    "AdminEnableUserCommand",
+  ]);
+  for (const command of commands) {
+    assert.deepEqual(command.input, {
+      UserPoolId: env.COGNITO_USER_POOL_ID,
+      Username: "staff@example.com",
+    });
+  }
 });
