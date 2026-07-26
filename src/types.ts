@@ -6,6 +6,7 @@ export interface Env {
   COGNITO_DOMAIN: string;
   DB: D1Database;
   EMAIL_QUEUE: Queue;
+  PUBLIC_SEARCH_RATE_LIMITER: RateLimit;
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
 }
@@ -25,8 +26,6 @@ export interface EventRecord {
 export interface RegistrationStatusRecord {
   first_name: string;
   last_name: string;
-  email: string | null;
-  phone: string | null;
   status: string;
   lookup_code: string;
   submitted_at: string;

@@ -348,14 +348,19 @@ Staff must be able to distinguish:
 ### Safe Inspection
 
 Authorized staff can select `Inspect Duck` and scan by NFC, QR, or visible duck
-number. An authenticated staff member who opens a duck tag without an active
-mutating scan operation is also taken to the read-only inspection page.
+number. An authenticated staff member who opens an assigned duck tag without
+an active mutating scan operation is taken to the read-only inspection page.
+An eligible unassigned duck instead opens pairing for that exact duck, where
+staff enter the participant's short code or search the current event by name.
 
 Inspection never changes assignment, heat, location, or result state. All
 corrective actions require separate role-checked commands and confirmation.
 
-Public users who scan the same tag see only the generic public duck page and no
-participant, operational, or location information.
+An anonymous scan of an unassigned, retired, unknown, or invalid tag returns to
+the home page and reveals no inventory information. An assigned tag opens
+public race status with the visible duck number, assigned heat, currently
+running heat, and finalized race progression. Contact information, private
+links, staff-only history, synchronization state, and location remain hidden.
 
 ### Inspection Summary
 
@@ -454,7 +459,8 @@ cache.
 - A participant receives at most one email of each type for a heat.
 - Email failure cannot change race state or block the onsite announcement.
 - Duck inspection is read-only and safe to repeat.
-- Public duck inspection reveals no participant or operational information.
+- Public duck status exists only for actively assigned entries and reveals no
+  contact, private-link, staff-history, synchronization, or location data.
 - Replacing a duck preserves the race entry and heat slot.
 - Each heat result retains the duck assignment used for that race.
 

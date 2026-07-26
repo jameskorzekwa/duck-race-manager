@@ -1,6 +1,7 @@
 import { handleApi } from "./api.ts";
 import {
   faviconSvg,
+  homeScript,
   manifestJson,
   renderDuck,
   renderHome,
@@ -33,7 +34,7 @@ const html = (body: string, status = 200, noindex = false): Response =>
     headers: {
       ...securityHeaders,
       "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; style-src 'unsafe-inline'; upgrade-insecure-requests",
+      "content-security-policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'unsafe-inline'; upgrade-insecure-requests",
       "content-type": "text/html; charset=utf-8",
       ...(noindex ? { "x-robots-tag": "noindex, nofollow" } : {}),
     },
@@ -44,7 +45,7 @@ export default {
     const url = new URL(request.url);
     const appOrigin = new URL(env.APP_ORIGIN);
 
-    if (url.protocol !== "https:" || url.host !== appOrigin.host) {
+    if (url.origin !== appOrigin.origin) {
       const destination = new URL(`${url.pathname}${url.search}`, appOrigin);
 
       return new Response(null, {
@@ -73,6 +74,16 @@ export default {
           ...securityHeaders,
           "cache-control": "public, max-age=86400",
           "content-type": "application/manifest+json; charset=utf-8",
+        },
+      });
+    }
+
+    if (url.pathname === "/assets/home.js") {
+      return new Response(homeScript, {
+        headers: {
+          ...securityHeaders,
+          "cache-control": "public, max-age=3600",
+          "content-type": "text/javascript; charset=utf-8",
         },
       });
     }

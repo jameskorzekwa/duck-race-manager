@@ -17,7 +17,7 @@ No participant information is stored on an NFC tag.
 
 ## Status
 
-The project is currently in planning. See
+The project is in early implementation. See
 [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) for the product scope,
 architecture, NFC design, race workflows, data model, security requirements,
 delivery phases, and acceptance criteria.
@@ -37,8 +37,8 @@ delivery phases, and acceptance criteria.
 - Provide a read-only duck inspection workflow for misplaced ducks.
 - Preserve a participant's heat and race status when replacing a lost duck.
 - Optimize staff workflows for speed and people with limited technical skill.
-- Create each annual race from prior settings without deleting race history.
-- Reuse returned ducks while recording ducks kept by participants.
+- Create each annual race from non-race defaults after permanently deleting the prior race dataset.
+- Re-register physically returned ducks from scratch for each new race.
 
 ## Planned Applications
 
@@ -52,7 +52,7 @@ delivery phases, and acceptance criteria.
 - Read-only duck status inspection and recovery tools
 - Guided lost-duck replacement, tag replacement, and duck swapping
 - Role-specific, scan-first staff screens with plain-language recovery
-- Guided new-race setup, archived race history, and reusable duck inventory
+- Guided post-race return processing, complete data purge, and empty new-race setup
 - Round-one winner recording and finalist promotion
 - Final verification and first/second/third place recording
 - Public heat results and final podium
@@ -67,6 +67,7 @@ delivery phases, and acceptance criteria.
 - [Race lifecycle and duck reuse](docs/RACE_LIFECYCLE_AND_DUCK_REUSE.md)
 - [Infrastructure](docs/INFRASTRUCTURE.md)
 - [Registration API](docs/REGISTRATION_API.md)
+- [Scan, pairing, and participant status](docs/SCAN_PAIRING_AND_PARTICIPANT_STATUS.md)
 
 ## License
 

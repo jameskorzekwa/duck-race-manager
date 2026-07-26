@@ -5,7 +5,18 @@ import {
   randomLookupCode,
   validateRegistration,
 } from "./registration.ts";
-import type { DuckRecord, Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
+import { authenticateStaff } from "./auth.ts";
+import {
+  browserCollectionCookie,
+  clearBrowserCollectionCookie,
+  collectionStatements,
+  getBrowserCollection,
+  prepareBrowserCollection,
+  refreshBrowserCollection,
+} from "./browser-collection.ts";
+import { getPublicStatusByRaceEntry, getPublicStatusByTag } from "./race-status.ts";
+import { handleStaffApi } from "./staff-api.ts";
+import type { Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
 
 const apiHeaders = {
   "cache-control": "no-store",
@@ -128,13 +139,16 @@ const registrationResponse = (
   lookupCode: string,
   privateToken: string,
   replayed: boolean,
+  browserToken: string,
 ): Response => json({
   registrationId,
   status: "SUBMITTED",
   lookupCode,
   privateStatusPath: `/r/${privateToken}`,
   replayed,
-}, replayed ? 200 : 201);
+}, replayed ? 200 : 201, {
+  "set-cookie": browserCollectionCookie(browserToken),
+});
 
 const createRegistration = async (request: Request, env: Env): Promise<Response> => {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
@@ -156,7 +170,11 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   try {
     const body = await request.text();
     if (body.length > 16_384) return json({ error: "Request body is too large." }, 413);
-    payload = JSON.parse(body) as RegistrationPayload;
+    const parsed = JSON.parse(body) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return json({ error: "Request body must be a JSON object." }, 400);
+    }
+    payload = parsed as RegistrationPayload;
   } catch {
     return json({ error: "Request body must be valid JSON." }, 400);
   }
@@ -183,9 +201,23 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
     private_token_hash: string;
   }>();
   if (previous !== null) {
-    return previous.private_token_hash === tokenHash
-      ? registrationResponse(previous.result_id, previous.lookup_code, payload.privateToken, true)
-      : json({ error: "Command identifier has already been used." }, 409);
+    if (previous.private_token_hash !== tokenHash) {
+      return json({ error: "Command identifier has already been used." }, 409);
+    }
+    const collection = await prepareBrowserCollection(request, env);
+    await env.DB.batch(await collectionStatements(
+      env,
+      collection,
+      previous.result_id,
+      new Date().toISOString(),
+    ));
+    return registrationResponse(
+      previous.result_id,
+      previous.lookup_code,
+      payload.privateToken,
+      true,
+      collection.cookieToken,
+    );
   }
 
   const event = await getOpenEvent(env, payload.eventId);
@@ -229,9 +261,10 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   const raceEntryId = crypto.randomUUID();
   const lookupCode = randomLookupCode();
   const value = validation.value;
+  const collection = await prepareBrowserCollection(request, env);
 
   try {
-    await env.DB.batch([
+    const statements = [
       env.DB.prepare(
         `INSERT INTO race_commands
           (id, event_id, command_type, result_id, requested_at, completed_at)
@@ -271,7 +304,9 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         now,
         JSON.stringify({ created_via: "PUBLIC", duck_keep_preference: value.duckKeepPreference }),
       ),
-    ]);
+      ...await collectionStatements(env, collection, registrationId, now),
+    ];
+    await env.DB.batch(statements);
   } catch {
     const replay = await env.DB.prepare(
       `SELECT c.result_id, r.lookup_code, r.private_token_hash
@@ -284,19 +319,33 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
       private_token_hash: string;
     }>();
     if (replay !== null && replay.private_token_hash === tokenHash) {
-      return registrationResponse(replay.result_id, replay.lookup_code, payload.privateToken, true);
+      const replayCollection = await prepareBrowserCollection(request, env);
+      await env.DB.batch(await collectionStatements(env, replayCollection, replay.result_id, now));
+      return registrationResponse(
+        replay.result_id,
+        replay.lookup_code,
+        payload.privateToken,
+        true,
+        replayCollection.cookieToken,
+      );
     }
     return json({ error: "Registration could not be saved. Please retry with the same command identifier." }, 409);
   }
 
-  return registrationResponse(registrationId, lookupCode, payload.privateToken, false);
+  return registrationResponse(
+    registrationId,
+    lookupCode,
+    payload.privateToken,
+    false,
+    collection.cookieToken,
+  );
 };
 
 const getRegistrationStatus = async (token: string, env: Env): Promise<Response> => {
   if (!isPrivateToken(token)) return json({ error: "Not found." }, 404);
   const tokenHash = await hashToken(token);
   const registration = await env.DB.prepare(
-    `SELECT r.first_name, r.last_name, r.email, r.phone, r.status, r.lookup_code,
+    `SELECT r.first_name, r.last_name, r.status, r.lookup_code,
             r.submitted_at, e.name AS event_name, e.event_date,
             re.duck_keep_preference
        FROM registrations r
@@ -309,8 +358,6 @@ const getRegistrationStatus = async (token: string, env: Env): Promise<Response>
   return json({
     firstName: registration.first_name,
     lastName: registration.last_name,
-    email: registration.email,
-    phone: registration.phone,
     status: registration.status,
     lookupCode: registration.lookup_code,
     submittedAt: registration.submitted_at,
@@ -321,24 +368,97 @@ const getRegistrationStatus = async (token: string, env: Env): Promise<Response>
 };
 
 const getDuck = async (token: string, env: Env): Promise<Response> => {
-  if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return json({ error: "Not found." }, 404);
-  const duck = await env.DB.prepare(
-    `SELECT d.visible_number, t.status AS tag_status
-       FROM duck_tags t
-       JOIN ducks d ON d.id = t.duck_id
-      WHERE t.token = ?
-        AND t.status IN ('ACTIVE', 'RETIRED')`,
-  ).bind(token).first<DuckRecord>();
-  if (duck === null) return json({ error: "Not found." }, 404);
+  if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return json({ destination: "HOME" });
+  const status = await getPublicStatusByTag(env, token);
+  return status === null
+    ? json({ destination: "HOME" })
+    : json({ destination: "RACE_STATUS", raceStatus: status });
+};
 
-  return json({
-    visibleNumber: duck.visible_number,
-    tagStatus: duck.tag_status,
+const getMyRegistrations = async (request: Request, env: Env): Promise<Response> => {
+  const existingCollection = await getBrowserCollection(request, env);
+  if (existingCollection === null) {
+    return json({ registrations: [] }, 200, {
+      "set-cookie": clearBrowserCollectionCookie(),
+    });
+  }
+  const collection = await refreshBrowserCollection(env, existingCollection);
+
+  const registrations = await env.DB.prepare(
+    `SELECT r.id AS registration_id, re.id AS race_entry_id,
+            r.first_name, r.last_name, r.lookup_code, r.status
+       FROM browser_collection_registrations bcr
+       JOIN registrations r ON r.id = bcr.registration_id
+       JOIN race_entries re ON re.registration_id = r.id
+      WHERE bcr.collection_id = ?
+      ORDER BY bcr.added_at`,
+  ).bind(collection.id).all<{
+    registration_id: string;
+    race_entry_id: string;
+    first_name: string;
+    last_name: string;
+    lookup_code: string;
+    status: string;
+  }>();
+
+  const items = await Promise.all(registrations.results.map(async (row) => ({
+    registrationId: row.registration_id,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    lookupCode: row.lookup_code,
+    registrationStatus: row.status,
+    raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),
+  })));
+
+  return json({ registrations: items }, 200, {
+    "set-cookie": browserCollectionCookie(collection.cookieToken),
   });
+};
+
+const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Promise<Response> => {
+  const eventId = url.searchParams.get("eventId")?.trim() ?? "";
+  const name = url.searchParams.get("name")?.trim().replace(/\s+/g, " ") ?? "";
+  if (eventId.length === 0 || eventId.length > 128 || name.length < 2 || name.length > 161) {
+    return json({ error: "Event and at least two name characters are required." }, 400);
+  }
+  const clientKey = request.headers.get("cf-connecting-ip") ?? "unknown-client";
+  const rateLimit = await env.PUBLIC_SEARCH_RATE_LIMITER.limit({ key: `${eventId}:${clientKey}` });
+  if (!rateLimit.success) return json({ error: "Too many searches. Please wait and try again." }, 429);
+  const matches = await env.DB.prepare(
+    `SELECT DISTINCT re.id AS race_entry_id
+       FROM registrations r
+       JOIN race_entries re ON re.registration_id = r.id
+       JOIN events e ON e.id = r.event_id
+      WHERE r.event_id = ?
+        AND r.status IN ('SUBMITTED', 'ACTIVE')
+        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
+        AND (
+          r.first_name = ? COLLATE NOCASE
+          OR r.last_name = ? COLLATE NOCASE
+          OR (r.first_name || ' ' || r.last_name) = ? COLLATE NOCASE
+        )
+      ORDER BY r.last_name COLLATE NOCASE, r.first_name COLLATE NOCASE
+      LIMIT 10`,
+  ).bind(eventId, name, name, name).all<{ race_entry_id: string }>();
+
+  const results = (await Promise.all(
+    matches.results.map((row) => getPublicStatusByRaceEntry(env, row.race_entry_id)),
+  )).filter((status) => status !== null);
+  return json({ results });
 };
 
 export const handleApi = async (request: Request, env: Env): Promise<Response> => {
   const url = new URL(request.url);
+
+  if (url.pathname.startsWith("/api/v1/staff/")) {
+    const actor = await authenticateStaff(request, env);
+    if (actor === null) {
+      return json({ error: "Staff authentication required." }, 401, {
+        "www-authenticate": "Bearer",
+      });
+    }
+    return handleStaffApi(request, env, actor);
+  }
 
   if (url.pathname === "/api/v1/events/current" && request.method === "GET") {
     const event = await getCurrentEvent(env);
@@ -347,6 +467,14 @@ export const handleApi = async (request: Request, env: Env): Promise<Response> =
 
   if (url.pathname === "/api/v1/registrations" && request.method === "POST") {
     return createRegistration(request, env);
+  }
+
+  if (url.pathname === "/api/v1/registrations/mine" && request.method === "GET") {
+    return getMyRegistrations(request, env);
+  }
+
+  if (url.pathname === "/api/v1/race-status/search" && request.method === "GET") {
+    return searchPublicRaceStatus(request, url, env);
   }
 
   const registrationMatch = url.pathname.match(/^\/api\/v1\/registrations\/([A-Za-z0-9_-]+)$/);

@@ -61,6 +61,15 @@ h3 { font-size:1.3rem; letter-spacing:-.03em; }
 .card { padding:1.4rem; border:3px solid var(--ink); border-radius:1.2rem; background:var(--paper); }
 .card strong { display:block; margin-bottom:.35rem; color:var(--water-dark); font-size:.76rem; letter-spacing:.09em; text-transform:uppercase; }
 .card-link { display:inline-block; margin-top:.7rem; font-weight:900; }
+.status-section { margin:2rem 0 4rem; padding:clamp(1.2rem,4vw,2rem); border:3px solid var(--ink); border-radius:1.2rem; background:var(--paper); }
+.status-section h2 { margin-bottom:.7rem; }
+.duck-list { display:grid; gap:1rem; margin-top:1.2rem; }
+.duck-card { padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
+.duck-card h3 { margin-bottom:.55rem; }
+.duck-card p { margin-bottom:.35rem; line-height:1.45; }
+.search-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.75rem; align-items:end; margin-top:1rem; }
+.search-form .button { min-height:3.2rem; }
+.search-message { margin:.9rem 0 0; }
 .page-panel { max-width:49rem; margin:2rem auto 5rem; padding:clamp(1.2rem,5vw,3rem); border:3px solid var(--ink); border-radius:1.5rem; background:var(--paper); box-shadow:8px 8px 0 var(--ink); }
 .page-panel > .duck-mark { float:right; width:8rem; color:var(--water-dark); }
 .page-title { max-width:12ch; font-size:clamp(2.7rem,10vw,5.4rem); }
@@ -84,7 +93,7 @@ input:focus { outline:4px solid #83d8ec; outline-offset:1px; }
 .privacy strong { flex:none; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero::after { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero::after { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .search-form { grid-template-columns:1fr; } }
 @media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-glide 3.1s ease-in-out infinite; } .hero::after { animation:water-swell 4.2s ease-in-out infinite; } .hero::before { animation:current 2.8s linear infinite; } @keyframes duck-glide { 0%,100% { transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); } 50% { transform:translateX(calc(var(--duck-center) + 6px)) translateY(-9px) rotate(1deg); } } @keyframes water-swell { 0%,100% { transform:translateY(0) rotate(-2deg); } 50% { transform:translateY(4px) rotate(-1deg); } } @keyframes current { to { background-position:-10rem 50%; } } }
 `;
 
@@ -136,7 +145,27 @@ export const renderHome = (): string => page({
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p><a class="card-link" href="/register">Preview the form →</a></article>
       <article class="card"><strong>At check-in</strong><h3>Your duck carries its identity</h3><p class="muted">Tap your duck’s permanent NFC or QR tag to open its safe, read-only page.</p><a class="card-link" href="/t/mock">Preview a duck scan →</a></article>
       <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p><a class="card-link" href="/r/mock">Preview status →</a></article>
-    </section>`,
+    </section>
+    <section class="status-section" data-my-ducks hidden>
+      <p class="eyebrow">Saved on this device</p>
+      <h2>My ducks</h2>
+      <p class="muted">Every registration made in this browser stays separate, even when participants share an email address or phone number.</p>
+      <div class="privacy"><strong>Private by design.</strong><span>Email and phone are visible only to logged-in authorized race staff. They never appear here or in public status.</span></div>
+      <div class="duck-list" data-my-ducks-list></div>
+    </section>
+    <section class="status-section" aria-labelledby="find-status-title">
+      <p class="eyebrow">Lost your saved list?</p>
+      <h2 id="find-status-title">Find race status by name</h2>
+      <p class="muted">Enter an exact first name, last name, or full name. Results show race status only, never email, phone, private links, lookup codes, or staff data.</p>
+      <form class="search-form" data-status-search>
+        <label>Participant name<input name="name" autocomplete="name" minlength="2" maxlength="161" required></label>
+        <button class="button" type="submit">Find status</button>
+      </form>
+      <p class="search-message muted" data-search-message aria-live="polite"></p>
+      <div class="duck-list" data-search-results></div>
+      <div class="privacy"><strong>Your data is temporary.</strong><span>After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
+    </section>
+    <script src="/assets/home.js" defer></script>`,
 });
 
 export const renderRegistration = (): string => page({
@@ -149,7 +178,7 @@ export const renderRegistration = (): string => page({
       <p class="eyebrow">Registration preview</p>
       <h1 class="page-title">Summer Duck Race</h1>
       <p class="lede">Sunday, August 30 · Registration takes about one minute.</p>
-      <div class="privacy"><strong>Private by design.</strong><span>Your contact information never appears on the public NFC page.</span></div>
+      <div class="privacy"><strong>Private by design.</strong><span>Your email and phone number are visible only to logged-in authorized race staff. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
       <form method="get" action="/r/mock">
         <div class="field-grid">
           <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"></label>
@@ -176,9 +205,9 @@ export const renderStatus = (): string => page({
       <p class="eyebrow">Private status preview</p>
       <h1 class="page-title">You’re in the queue, Jamie.</h1>
       <p class="lede">Keep this page private. This is your status link for the Summer Duck Race.</p>
-      <div class="notice"><strong>Staff lookup code</strong><br><span class="code">DUCK-824</span><br><span class="muted">Save this code or bookmark this page.</span></div>
+      <div class="notice"><strong>Staff lookup code</strong><br><span class="code">DUCK8234</span><br><span class="muted">Save this code or bookmark this page.</span></div>
       <dl class="facts"><div class="fact"><dt>Status</dt><dd>Submitted — waiting for duck assignment</dd></div><div class="fact"><dt>Race date</dt><dd>Sunday, August 30</dd></div></dl>
-      <p class="muted">You’ll see your duck and heat here after staff assigns them. Your contact details never appear on public duck pages.</p>
+      <p class="muted">You’ll see your duck and heat here after staff assigns them. Email and phone stay staff-only, and the complete race dataset is deleted after return processing.</p>
       <a class="button secondary" href="/">Back to home</a>
     </section>`,
 });
@@ -215,3 +244,86 @@ export const manifestJson = JSON.stringify({
   theme_color: "#ffd43b",
   icons: [{ src: "/favicon.svg", sizes: "any", type: "image/svg+xml" }],
 });
+
+export const homeScript = String.raw`
+const createText = (tag, text, className) => {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  if (className) element.className = className;
+  return element;
+};
+
+const describeStatus = (status) => {
+  if (!status) return "Race status is not currently public.";
+  const parts = [];
+  if (status.duck) parts.push("Duck #" + status.duck.visibleNumber);
+  if (status.assignedHeat.roundOne) parts.push("Heat " + status.assignedHeat.roundOne.number);
+  else if (status.duck) parts.push("Heat assignment pending");
+  parts.push(status.outcome.replaceAll("_", " ").toLowerCase());
+  return parts.join(" · ");
+};
+
+const appendStatusCard = (container, title, status, lookupCode) => {
+  const card = createText("article", "", "duck-card");
+  card.append(createText("h3", title));
+  if (lookupCode) card.append(createText("p", "Staff lookup code: " + lookupCode));
+  card.append(createText("p", describeStatus(status), "muted"));
+  if (status && status.currentHeat) {
+    card.append(createText("p", "Currently running: " + status.currentHeat.round.replaceAll("_", " ").toLowerCase() + " heat " + status.currentHeat.number, "muted"));
+  }
+  container.append(card);
+};
+
+const myDucks = document.querySelector("[data-my-ducks]");
+const myDucksList = document.querySelector("[data-my-ducks-list]");
+fetch("/api/v1/registrations/mine", { headers: { accept: "application/json" } })
+  .then((response) => response.ok ? response.json() : Promise.reject())
+  .then(({ registrations }) => {
+    if (!Array.isArray(registrations) || registrations.length === 0) return;
+    for (const registration of registrations) {
+      appendStatusCard(
+        myDucksList,
+        registration.firstName + " " + registration.lastName,
+        registration.raceStatus,
+        registration.lookupCode,
+      );
+    }
+    myDucks.hidden = false;
+  })
+  .catch(() => {});
+
+const searchForm = document.querySelector("[data-status-search]");
+const searchMessage = document.querySelector("[data-search-message]");
+const searchResults = document.querySelector("[data-search-results]");
+searchForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  searchResults.replaceChildren();
+  searchMessage.textContent = "Searching…";
+  const name = new FormData(searchForm).get("name");
+  try {
+    const eventResponse = await fetch("/api/v1/events/current", { headers: { accept: "application/json" } });
+    if (!eventResponse.ok) throw new Error();
+    const { event: currentEvent } = await eventResponse.json();
+    if (!currentEvent) {
+      searchMessage.textContent = "There is no public race to search right now.";
+      return;
+    }
+    const parameters = new URLSearchParams({ eventId: currentEvent.id, name: String(name) });
+    const response = await fetch("/api/v1/race-status/search?" + parameters, { headers: { accept: "application/json" } });
+    if (response.status === 429) {
+      searchMessage.textContent = "Too many searches. Please wait and try again.";
+      return;
+    }
+    if (!response.ok) throw new Error();
+    const { results } = await response.json();
+    if (!Array.isArray(results) || results.length === 0) {
+      searchMessage.textContent = "No matching public race status was found.";
+      return;
+    }
+    for (const result of results) appendStatusCard(searchResults, result.participantDisplayName, result, null);
+    searchMessage.textContent = results.length === 1 ? "1 match found." : results.length + " matches found.";
+  } catch {
+    searchMessage.textContent = "Status search is temporarily unavailable. Please try again.";
+  }
+});
+`;

@@ -39,7 +39,22 @@ test("renders the responsive landing-page mockup", async () => {
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
   assert.match(body, /Find your duck\. Follow the race\./);
+  assert.match(body, /My ducks/);
+  assert.match(body, /Find race status by name/);
+  assert.match(body, /src="\/assets\/home\.js"/);
   assert.match(body, /href="\/favicon\.svg"/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self'/);
+});
+
+test("serves the home-page status client", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/assets/home.js"), env);
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
+  assert.match(body, /\/api\/v1\/registrations\/mine/);
+  assert.match(body, /\/api\/v1\/race-status\/search/);
 });
 
 test("serves the rubber-duck favicon", async () => {
@@ -58,8 +73,9 @@ test("renders the clickable registration and status mockups", async () => {
 
   assert.match(registrationBody, /Preview confirmation/);
   assert.match(registrationBody, /You can disable these later/);
-  assert.doesNotMatch(registrationBody, /After the race/);
-  assert.match(await confirmation.text(), /DUCK-824/);
+  assert.match(registrationBody, /visible only to logged-in authorized race staff/);
+  assert.match(registrationBody, /permanently deletes the complete race/);
+  assert.match(await confirmation.text(), /DUCK8234/);
   assert.equal(confirmation.headers.get("x-robots-tag"), "noindex, nofollow");
 });
 

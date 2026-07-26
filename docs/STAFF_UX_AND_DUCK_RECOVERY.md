@@ -176,7 +176,7 @@ Required invariants:
 - One active race entry per registration and event.
 - One active duck assignment per race entry.
 - One active race entry per duck and event.
-- Heat entries reference race entries, not permanent physical ducks.
+- Heat entries reference race entries, not physical ducks.
 - Every heat result records the duck assignment actually used for that heat.
 - Replacing a duck does not silently change heat membership.
 - Replacing a tag does not create a new duck assignment.
@@ -230,9 +230,11 @@ Every duck-related screen provides one prominent `Scan duck` action plus
 smaller `Scan QR` and `Enter duck number` fallbacks. Staff never type tag tokens
 or database identifiers.
 
-Opening a duck URL while authenticated and without a mutating operation defaults
-to safe inspection. It must never guess that a scan means assign, replace, win,
-or add to a heat.
+Opening a duck URL while authenticated and without another mutating operation
+is role-aware. An eligible unassigned duck opens a pairing page for that duck;
+staff must still identify the participant and explicitly confirm one
+`ASSIGN_DUCK` command. An assigned or ineligible duck defaults to safe
+inspection. A scan never guesses replacement, winner, or heat-loading intent.
 
 ### One Task Per Screen
 
@@ -293,7 +295,7 @@ Common workflows should meet these design budgets on a prepared device:
 | Workflow | Target |
 | --- | --- |
 | Open a primary role action | One tap from home |
-| Pair participant and duck | Find/scan participant, scan duck, confirm |
+| Pair participant and duck | Scan duck, enter code or find participant, confirm |
 | Inspect duck | One scan from the global `Find duck` action |
 | Replace lost duck | Select replacement, scan new duck, confirm |
 | Load next heat duck on Android | Continuous scan with immediate local feedback |
