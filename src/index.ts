@@ -8,18 +8,39 @@ interface Env {
   EMAIL_QUEUE: Queue;
 }
 
+const securityHeaders = {
+  "cross-origin-opener-policy": "same-origin",
+  "permissions-policy": "camera=(), geolocation=(), microphone=()",
+  "referrer-policy": "no-referrer",
+  "strict-transport-security": "max-age=31536000",
+  "x-content-type-options": "nosniff",
+} as const;
+
 const json = (value: unknown, status = 200): Response =>
   Response.json(value, {
     status,
     headers: {
+      ...securityHeaders,
       "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
     },
   });
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const appOrigin = new URL(env.APP_ORIGIN);
+
+    if (url.protocol !== "https:" || url.host !== appOrigin.host) {
+      const destination = new URL(`${url.pathname}${url.search}`, appOrigin);
+
+      return new Response(null, {
+        status: 308,
+        headers: {
+          "cache-control": "public, max-age=3600",
+          location: destination.toString(),
+        },
+      });
+    }
 
     if (url.pathname === "/health") {
       const database = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
@@ -57,10 +78,9 @@ export default {
 </html>`,
         {
           headers: {
+            ...securityHeaders,
             "content-type": "text/html; charset=utf-8",
             "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
-            "referrer-policy": "no-referrer",
-            "x-content-type-options": "nosniff",
           },
         },
       );

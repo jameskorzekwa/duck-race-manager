@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "db:migrate:local": "wrangler d1 migrations apply quickducks-prod --local",
-    "db:migrate:remote": "wrangler d1 migrations apply quickducks-prod --remote"
+    "db:migrate:remote": "wrangler d1 migrations apply quickducks-prod --remote",
+    "test": "node --test src/index.test.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
