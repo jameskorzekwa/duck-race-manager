@@ -16,7 +16,7 @@ const section = (text, start, end) => {
 };
 
 test("AWS bootstrap uses exact GitHub environment trust and fixed role outputs", () => {
-  assert.match(bootstrap, /Default: jameskorzekwa\/duck-race-manager/);
+  assert.match(bootstrap, /Default: jameskorzekwa@38769771\/duck-race-manager@1312323923/);
   assert.match(bootstrap, /Default: production/);
   assert.match(bootstrap, /Default: quickducks-production/);
   assert.match(bootstrap, /Default: us-east-1_QuEKwmLhI/);
@@ -29,7 +29,7 @@ test("AWS bootstrap uses exact GitHub environment trust and fixed role outputs",
   assert.match(deploymentRole, /token\.actions\.githubusercontent\.com:aud: sts\.amazonaws\.com/);
   assert.match(
     deploymentRole,
-    /token\.actions\.githubusercontent\.com:sub: !Sub repo:\$\{GitHubRepository\}:environment:\$\{GitHubEnvironment\}/,
+    /token\.actions\.githubusercontent\.com:sub: !Sub repo:\$\{GitHubRepositorySubject\}:environment:\$\{GitHubEnvironment\}/,
   );
   assert.doesNotMatch(
     deploymentRole.match(/token\.actions\.githubusercontent\.com:sub:.*$/m)?.[0] ?? "",
@@ -122,6 +122,10 @@ test("GitHub deployment role controls only the application stack and execution r
   assert.doesNotMatch(deploymentRole, /cloudformation:(?:TagResource|UntagResource)/);
   assert.match(deploymentRole, /stack\/\$\{ApplicationStackName\}\/\*/);
   assert.match(deploymentRole, /cloudformation:ChangeSetName: awscli-cloudformation-package-deploy-\*/);
+  assert.match(
+    deploymentRole,
+    /Sid: ManageApplicationChangeSet[\s\S]*aws:ResourceTag\/Project: quickducks[\s\S]*aws:ResourceTag\/Environment: production/,
+  );
   assert.match(deploymentRole, /Action: iam:PassRole\n\s+Resource: !GetAtt CloudFormationExecutionRole\.Arn/);
   assert.match(deploymentRole, /iam:PassedToService: cloudformation\.amazonaws\.com/);
   assert.doesNotMatch(deploymentRole, /cognito-idp:|ses:/);

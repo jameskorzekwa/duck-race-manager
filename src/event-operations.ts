@@ -571,6 +571,7 @@ interface ReadinessStats {
   active_entry_count: number;
   active_entry_without_duck_count: number;
   active_entry_without_round_one_heat_count: number;
+  pending_provisioning_count: number;
   round_one_heat_count: number;
   round_one_unready_heat_count: number;
   round_one_unfinished_heat_count: number;
@@ -601,14 +602,26 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
              SELECT 1 FROM duck_assignments da
               WHERE da.race_entry_id = re.id AND da.valid_to IS NULL
            )) AS active_entry_without_duck_count,
-       (SELECT COUNT(*) FROM race_entries re
-          JOIN registrations r ON r.id = re.registration_id
-         WHERE re.event_id = e.id AND r.status = 'ACTIVE'
-           AND NOT EXISTS (
-             SELECT 1 FROM heat_entries he
-              WHERE he.race_entry_id = re.id AND he.round = 'ROUND_ONE'
-           )) AS active_entry_without_round_one_heat_count,
-       (SELECT COUNT(*) FROM heats h
+        (SELECT COUNT(*) FROM race_entries re
+           JOIN registrations r ON r.id = re.registration_id
+          WHERE re.event_id = e.id AND r.status = 'ACTIVE'
+            AND NOT EXISTS (
+              SELECT 1 FROM heat_entries he
+               WHERE he.race_entry_id = re.id AND he.round = 'ROUND_ONE'
+            )) AS active_entry_without_round_one_heat_count,
+        (SELECT COUNT(DISTINCT rc.id) FROM race_commands rc
+           JOIN (SELECT base_duck.*, 'NEEDS_TAG' AS physical_condition FROM ducks base_duck) d
+             ON d.id = rc.result_id
+            AND d.inventory_status = 'NEW'
+            AND d.physical_condition = 'NEEDS_TAG'
+           JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'RESERVED'
+          WHERE rc.event_id = e.id
+            AND rc.command_type = 'START_DUCK_PROVISIONING'
+            AND NOT EXISTS (
+              SELECT 1 FROM event_ducks ed
+               WHERE ed.duck_id = d.id AND ed.released_at IS NULL
+            )) AS pending_provisioning_count,
+        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') AS round_one_heat_count,
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
@@ -737,8 +750,22 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
       (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
      SELECT ?, e.id, 'START_ROUND_ONE', e.id, ?, ?, ?
        FROM events e
-      WHERE e.id = ? AND e.status = 'REGISTRATION_CLOSED'
-        AND EXISTS (
+       WHERE e.id = ? AND e.status = 'REGISTRATION_CLOSED'
+         AND NOT EXISTS (
+           SELECT 1 FROM race_commands rc
+             JOIN (SELECT base_duck.*, 'NEEDS_TAG' AS physical_condition FROM ducks base_duck) d
+               ON d.id = rc.result_id
+              AND d.inventory_status = 'NEW'
+              AND d.physical_condition = 'NEEDS_TAG'
+             JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'RESERVED'
+            WHERE rc.event_id = e.id
+              AND rc.command_type = 'START_DUCK_PROVISIONING'
+              AND NOT EXISTS (
+                SELECT 1 FROM event_ducks ed
+                 WHERE ed.duck_id = d.id AND ed.released_at IS NULL
+              )
+         )
+         AND EXISTS (
           SELECT 1 FROM race_entries re JOIN registrations r ON r.id = re.registration_id
            WHERE re.event_id = e.id AND r.status = 'ACTIVE'
         )
@@ -875,6 +902,11 @@ const readinessFor = (
       if (stats.submitted_registration_count > 0) blockers.push("Every submitted participant must be paired or withdrawn.");
       if (stats.active_entry_without_duck_count > 0) blockers.push("Every active participant needs an assigned duck.");
       if (stats.active_entry_without_round_one_heat_count > 0) blockers.push("Every active participant needs a round-one heat.");
+      if (stats.pending_provisioning_count > 0) {
+        blockers.push(stats.pending_provisioning_count === 1
+          ? "Finish the pending NFC sticker before starting round one."
+          : `Finish ${stats.pending_provisioning_count} pending NFC stickers before starting round one.`);
+      }
       if (stats.round_one_heat_count === 0) blockers.push("At least one round-one heat is required.");
       if (stats.round_one_heat_count > event.final_heat_capacity) {
         blockers.push("Round-one heat count cannot exceed final capacity.");

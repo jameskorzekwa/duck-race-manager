@@ -29,6 +29,8 @@ Replace `example.org` after the domain is purchased.
 Using one origin is intentional. It lets iPhone NFC links open the same origin
 where staff are logged in, lets one service worker handle offline tag routes,
 and avoids redirect and cross-domain cookie failures during race operations.
+The continuous inventory intake station is intentionally online-only and does
+not use a service worker or offline command queue.
 
 The `www` hostname should redirect to the canonical hostname. If `example.org`
 is canonical, production tags must contain `https://example.org/t/<token>` and
@@ -164,6 +166,33 @@ tag. Anonymous unpaired tags redirect to `/`; anonymous paired tags open public
 race status. The staff application uses the protected duck endpoint to choose
 pairing or inspection after verifying the Cognito access token.
 
+The protected `/staff/inventory-intake` page is available only to duck managers,
+race directors, and system administrators. It provisions blank writable NDEF
+stickers and has no desktop, pasted-token, or manual-number fallback. Android
+Web NFC requires current Android Chrome, a secure HTTPS context, an NFC-capable
+device, a top-level visible page, and a user gesture. The operator selects the
+race and optional station location, presses Start once, and then taps one blank
+sticker per duck without entering per-duck data.
+
+The server generates the duck UUID, next globally unique internal number, and
+cryptographically random 32-byte base64url token. The browser writes only the
+exact configured-origin `https://quickducks.com/t/<token>` URL. Web NFC
+`write()` resolution is the physical-write verification used for activation;
+the station does not call `makeReadOnly`, so tags remain writable for controlled
+replacement. Query strings, fragments, credentials, alternate origins, and
+redirected hostnames are rejected when an existing QuickDucks URL is scanned.
+
+Provisioning requires live staff authentication, same-origin mutation
+protection, and live API connectivity. A server-side `NEW`/`NEEDS_TAG` duck and
+`RESERVED` tag survive reload or a failed write but are not event-reserved or
+publicly active. Confirmation after a successful write atomically marks the duck
+good and race-reserved, activates the tag, and creates intake history. The
+current actor recovers that pending record and must retap the same sticker;
+QuickDucks never allocates another while it remains pending. There is no offline
+queue or service-worker retry. NFC hardware serials are used only for transient
+in-memory debouncing and are never persisted, transmitted, displayed, logged,
+or used as duck identity.
+
 ## GitHub Configuration
 
 The GitHub repository remains at:
@@ -188,7 +217,14 @@ Do not write production NFC tags until all checks pass:
 - The canonical domain opens on supported iPhones and Android phones.
 - `/t/<test-token>` is served directly without changing origins.
 - Staff login and role checks work on the canonical origin.
-- Android Web NFC can write a test tag with the canonical URL.
+- Android Chrome can start the protected provisioner from one user gesture in a
+  top-level visible HTTPS page and keep scanning for repeated physical taps.
+- A blank writable NDEF test sticker receives the exact canonical URL, activates
+  only after `write()` resolves, and remains writable for controlled replacement.
+- Reloading or losing connectivity with a pending sticker recovers the same URL
+  for the same actor and event without allocating another duck.
+- A canonical URL already assigned to different or unknown inventory is rejected
+  without being overwritten; there is no desktop/manual fallback.
 - iPhone background scanning opens the test tag correctly.
 - The PWA has been installed or cached and handles a tag route during a planned
   connectivity outage.

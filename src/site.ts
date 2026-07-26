@@ -100,6 +100,10 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .field-error { min-height:1.2em; color:#9f261c; font-size:.8rem; font-weight:800; }
 .staff-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.8rem; margin-bottom:1.2rem; padding:.8rem 1rem; border:2px solid var(--ink); border-radius:.8rem; background:#e4f4f8; }
 .staff-bar p { margin:0; }
+.staff-bar-actions { display:inline-flex; flex-wrap:wrap; align-items:center; gap:.45rem; }
+.staff-logout { display:inline; clear:none; }
+.staff-logout button { padding:.15rem; border:0; background:transparent; color:inherit; font:inherit; text-decoration:underline; cursor:pointer; }
+.staff-logout button:hover,.staff-logout button:focus-visible { border-radius:.2rem; outline:2px solid var(--ink); outline-offset:2px; }
 .result-list { display:grid; gap:.6rem; margin:.8rem 0; }
 .result-button { width:100%; padding:.8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; font-weight:850; text-align:left; cursor:pointer; }
 .result-button:hover,.result-button:focus-visible { outline:4px solid #83d8ec; outline-offset:1px; }
@@ -176,6 +180,11 @@ details.operation-card[open] > summary { margin-bottom:1rem; }
 .station-roster li { padding:1rem; border:3px solid var(--ink); border-radius:.7rem; background:#eaf7fa; font-size:1.12rem; font-weight:900; }
 .station-selection { padding:1rem; border:3px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; font-size:1.1rem; }
 .station-links { margin:1rem 0 1.4rem; padding:1rem; border:3px solid var(--ink); border-radius:.9rem; background:var(--yellow); }
+.station-counters { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; margin:1rem 0; }
+.station-counter { padding:1rem; border:3px solid var(--ink); border-radius:.8rem; background:var(--cream); text-align:center; }
+.station-counter strong { display:block; color:var(--ink); font-size:clamp(2rem,10vw,4rem); line-height:1; }
+.station-history { display:grid; gap:.55rem; padding:0; list-style:none; }
+.station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .search-form { grid-template-columns:1fr; } .staff-access-card .actions { width:100%; } }
@@ -434,6 +443,9 @@ const roleCheckboxes = operationalRoles.map((role) =>
   `<label class="check"><input type="checkbox" name="roles" value="${role}"><span class="label-text">${operationalRoleLabels[role]}</span></label>`
 ).join("");
 
+const staffLogoutForm = (): string =>
+  '<form class="staff-logout" method="post" action="/staff/logout"><button type="submit">Sign out</button></form>';
+
 export const renderStaffHome = (
   displayName: string,
   isSystemAdmin: boolean,
@@ -455,7 +467,7 @@ export const renderStaffHome = (
   robots: "noindex,nofollow",
   content: `
     <section class="page-panel operations-panel" data-operations-root data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
-      <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p><a href="/staff/logout">Sign out</a></div>
+      <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</div>
       ${duck()}
       <p class="eyebrow">Staff operations</p>
       <h1 class="page-title operations-title">Race control, in one place.</h1>
@@ -535,6 +547,7 @@ export const renderStaffHome = (
       <section class="console-section" id="inventory" aria-labelledby="inventory-title"${canInventory ? "" : " hidden"}>
         <p class="eyebrow">Physical ducks</p><h2 id="inventory-title">Inventory</h2>
         <p class="muted">Intake reserves a new duck for the selected event. Assigning an available duck reserves it automatically; there is no separate reserve command.</p>
+        ${canInventory ? '<article class="operation-card"><h3>Blank NFC provisioning station</h3><p class="muted">Use a dedicated Android Chrome device to write and register blank writable stickers, one tap per duck.</p><a class="button" href="/staff/inventory-intake">Open NFC provisioning station</a></article>' : ""}
         <details class="operation-card"><summary>Intake duck and active tag</summary>
           <form data-inventory-intake-form>
             <div class="field-grid"><label>Visible duck number<input name="visibleNumber" type="number" min="1" max="999999999" required></label><label>Physical condition<select name="condition"><option value="GOOD">Good</option><option value="NEEDS_TAG">Needs tag</option><option value="DAMAGED">Damaged</option><option value="RETIRED">Retired</option></select></label></div>
@@ -610,7 +623,7 @@ export const renderStartLine = (displayName: string, interactive = true): string
   description: "Focused protected QuickDucks start-line station.",
   robots: "noindex,nofollow",
   content: `<section class="page-panel station-panel" data-start-line>
-    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Start line</p><span><a href="/staff">Staff home</a> · <a href="/staff/logout">Sign out</a></span></div>
+    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Start line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     <p class="eyebrow">Start-line station</p><h1 class="page-title">Prepare the next heat.</h1>
     <p class="freshness" data-station-freshness aria-live="polite">Checking the race…</p>
     <p class="lede" data-station-event>Finding the active event and next heat.</p>
@@ -627,7 +640,7 @@ export const renderFinishLine = (displayName: string, interactive = true): strin
   description: "Focused protected QuickDucks finish-line station.",
   robots: "noindex,nofollow",
   content: `<section class="page-panel station-panel" data-finish-line>
-    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Finish line</p><span><a href="/staff">Staff home</a> · <a href="/staff/logout">Sign out</a></span></div>
+    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Finish line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
     <p class="freshness" data-station-freshness aria-live="polite">Checking the race…</p>
     <p class="lede" data-station-event>Finding a running heat.</p>
@@ -645,13 +658,42 @@ export const renderFinishLine = (displayName: string, interactive = true): strin
   </section>`,
 });
 
+export const renderInventoryIntake = (displayName: string, appOrigin: string): string => page({
+  title: "NFC provisioning",
+  description: "Focused protected QuickDucks blank NFC provisioning station.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel station-panel" data-inventory-intake data-app-origin="${escapeHtml(appOrigin)}">
+    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · NFC provisioning</p><div class="staff-bar-actions"><a href="/staff#inventory">Staff inventory</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+    <p class="eyebrow">Blank sticker station</p><h1 class="page-title">Tap, write, and move on.</h1>
+    <p class="lede">Choose the race and press Start once. Then hold one blank writable NFC sticker to this Android device until success, remove it, and present the next duck.</p>
+    <div class="notice"><strong>Android Chrome over HTTPS only.</strong> Keep this top-level page visible and online. QuickDucks generates the duck UUID, internal number, and permanent URL automatically; there is no offline queue or manual token fallback.</div>
+    <label>Race event<select data-intake-event aria-describedby="intake-event-help"><option value="">Loading available events…</option></select><span id="intake-event-help">Only draft or registration-stage events accept inventory intake.</span></label>
+    <label>Station location (optional)<input data-intake-location maxlength="100" autocomplete="off" placeholder="Intake table"><span>This one location is applied automatically to stickers provisioned during this station run.</span></label>
+    <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
+    <article class="operation-card danger-zone" data-intake-takeover hidden>
+      <h2>Abandoned sticker recovery</h2>
+      <p class="muted" data-intake-takeover-message></p>
+      <p>Race directors and administrators can explicitly take ownership. Do this only after confirming the previous station is no longer working on the sticker.</p>
+      <button class="button danger" type="button" data-takeover-provisioning>Take over pending sticker</button>
+    </article>
+    <article class="operation-card" aria-live="polite"><p class="eyebrow">Station state</p><h2 data-intake-state>Not started</h2><p class="message-line muted" data-intake-message>Select a race, then press Start once.</p></article>
+    <div class="station-counters" aria-label="Inventory counts">
+      <div class="station-counter"><span>Reserved for race</span><strong data-reserved-count>0</strong></div>
+      <div class="station-counter"><span>Added this session</span><strong data-session-count>0</strong></div>
+    </div>
+    <h2>Session history</h2><p class="muted">Only provisioning outcomes appear here. Permanent URLs and tokens are never displayed or stored by the browser.</p>
+    <ul class="station-history" data-intake-history><li>No ducks added in this page session.</li></ul>
+    <script src="/assets/inventory-intake.js" defer></script>
+  </section>`,
+});
+
 export const renderStaffDuck = (token: string, displayName: string): string => page({
   title: "Staff duck scan",
   description: "Protected QuickDucks duck pairing and inspection.",
   robots: "noindex,nofollow",
   content: `
     <section class="page-panel" data-staff-duck data-token="${escapeHtml(token)}">
-      <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Staff scan</p><span><a href="/staff">Staff home</a> · <a href="/staff/logout">Sign out</a></span></div>
+      <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Staff scan</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
       <p class="eyebrow">Protected duck record</p>
       <h1 class="page-title" data-staff-title>Checking this duck…</h1>
       <p class="lede" data-staff-message aria-live="polite">Verifying tag, inventory, and assignment state.</p>
@@ -659,7 +701,7 @@ export const renderStaffDuck = (token: string, displayName: string): string => p
       <section data-pairing-work hidden>
         <div class="privacy"><strong>Current event</strong><span data-pairing-event></span></div>
         <form method="post" action="/staff" data-registration-search>
-          <label>Participant code or name<input name="query" autocomplete="off" minlength="2" maxlength="80" required placeholder="ABCD2345 or Jamie Rivera"></label>
+          <label>Participant code, name, phone, or email<input name="query" autocomplete="off" minlength="2" maxlength="80" required placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com"><span>Contact details are visible only to authorized registration staff.</span></label>
           <button class="button secondary" type="submit">Find participant</button>
         </form>
         <div class="result-list" data-registration-results></div>
@@ -699,7 +741,7 @@ export const renderStaffPairing = (): string => page({
   title: "Pair Duck #128",
   description: "Protected staff duck-pairing mockup.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel"><p class="eyebrow">Protected staff preview</p><h1 class="page-title">Pair Duck #128</h1><p class="lede">This duck is available. Find the participant before confirming the assignment.</p><div class="privacy"><strong>Staff authentication required.</strong><span>Live scans verify the Cognito session and matching staff profile before showing codes or accepting a pairing command.</span></div><div class="facts"><div class="fact"><dt>Duck</dt><dd>#128 · Available</dd></div><div class="fact"><dt>Event</dt><dd>Summer Duck Race</dd></div></div><form><label>Participant duck code<input name="lookup_code" autocomplete="off" maxlength="16" placeholder="ABCD2345"></label><button class="button" type="button">Find participant by code</button></form><hr style="margin:2rem 0;border:0;border-top:2px solid #b8c6c9"><form><label>Forgotten code? Search participant name<input name="participant_name" autocomplete="off" maxlength="161" placeholder="Jamie Rivera"></label><button class="button secondary" type="button">Search by name</button></form><div class="notice"><strong>Final confirmation required.</strong> Pairing shows participant and duck together before an authenticated command changes race data.</div></section>`,
+  content: `<section class="page-panel"><p class="eyebrow">Protected staff preview</p><h1 class="page-title">Pair Duck #128</h1><p class="lede">This duck is available. Find the participant before confirming the assignment.</p><div class="privacy"><strong>Staff authentication required.</strong><span>Live scans verify the Cognito session and matching staff profile before showing codes or accepting a pairing command.</span></div><div class="facts"><div class="fact"><dt>Duck</dt><dd>#128 · Available</dd></div><div class="fact"><dt>Event</dt><dd>Summer Duck Race</dd></div></div><form><label>Participant code, name, phone, or email<input name="query" autocomplete="off" maxlength="80" placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com"></label><button class="button secondary" type="button">Find participant</button></form><div class="notice"><strong>Final confirmation required.</strong> Pairing shows participant and duck together before an authenticated command changes race data.</div></section>`,
 });
 
 export const renderNotFound = (): string => page({

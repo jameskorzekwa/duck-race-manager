@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { staffHomeScript } from "./client-scripts.ts";
+import {
+  renderFinishLine,
+  renderInventoryIntake,
+  renderStaffDuck,
+  renderStaffHome,
+  renderStartLine,
+} from "./site.ts";
 
 test("staff operations console script is valid, DOM-safe, and covers every operation module", () => {
   assert.doesNotThrow(() => new Function(staffHomeScript));
@@ -27,5 +34,21 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
     "/purge",
   ]) {
     assert.ok(staffHomeScript.includes(endpoint), `missing endpoint ${endpoint}`);
+  }
+});
+
+test("every staff page signs out through an accessible POST form without JavaScript", () => {
+  const pages = [
+    renderStaffHome("Staff Member", false, ["REGISTRATION"]),
+    renderStartLine("Staff Member"),
+    renderFinishLine("Staff Member"),
+    renderInventoryIntake("Staff Member", "https://quickducks.com"),
+    renderStaffDuck("tag-token", "Staff Member"),
+  ];
+
+  for (const markup of pages) {
+    assert.match(markup, /<form class="staff-logout" method="post" action="\/staff\/logout"><button type="submit">Sign out<\/button><\/form>/);
+    assert.doesNotMatch(markup, /<a[^>]+href="\/staff\/logout"/);
+    assert.doesNotMatch(markup, /<form class="staff-logout"[^>]+(?:onsubmit|data-)/);
   }
 });

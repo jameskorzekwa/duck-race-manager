@@ -126,8 +126,9 @@ staff data, inventory state, and location are never returned.
 The production Worker rate-limits name search to 20 requests per minute per
 event and client network key.
 
-Authenticated staff use a separate event-scoped code/name search and may see
-the full name, email, and phone required for registration operations.
+Authenticated staff use a separate event-scoped code, name, phone, or email
+search and may see the full name, email, and phone required for registration
+operations.
 
 ## Staff Scan and Pairing
 
@@ -144,10 +145,29 @@ command is idempotent and atomically creates the event reservation, versioned
 duck assignment, registration transition, inventory transition, audit, and
 immediate-mode heat entry when applicable.
 
-Browser staff sessions use a `Secure`, `HttpOnly`, `SameSite=Lax`, host-only
-cookie created only after Cognito authorization-code, state, and PKCE checks.
-Cookie-authenticated mutation requests require the exact application origin.
-Explicit Bearer access tokens remain supported for trusted API clients.
+Browser staff sessions use separate `Secure`, `HttpOnly`, `SameSite=Lax`,
+host-only access and refresh cookies created only after Cognito authorization-
+code, state, and PKCE checks. Access and ID tokens are valid for at most 15
+minutes. The browser silently rotates both cookies within Cognito's absolute
+seven-day refresh-token validity; rotation does not extend the seven-day session.
+The refresh token is never returned to JavaScript or stored in response bodies,
+URLs, logs, or D1. Cognito `400`/`401` refresh rejection or a malformed successful
+response clears both cookies. Network failures, `408`, `429`, and `5xx` responses
+preserve the existing refresh cookie unchanged for a later retry. Cookie-
+authenticated mutation requests require the exact application origin. Explicit
+Bearer access tokens remain supported for trusted API clients and are never
+refreshed.
+
+`POST /staff/logout` requires an exact application `Origin`, with a strict
+same-origin `Referer` fallback only when `Origin` is absent. Rejected requests do
+not revoke or clear anything. Accepted logout best-effort revokes the refresh
+token, clears both cookies, and redirects through Cognito even when revocation
+has a network failure or non-2xx response. This local-logout availability
+tradeoff leaves a copied access token with at most 15 minutes of residual
+validity: offline JWT verification does not observe Cognito revocation
+immediately. Every authenticated request still reloads the live
+`staff_profiles.is_active` value from D1, so deactivation fails closed
+immediately; Cognito revocation and global sign-out prevent future refresh.
 
 ## Staff Access Administration
 

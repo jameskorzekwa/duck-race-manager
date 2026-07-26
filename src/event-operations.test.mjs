@@ -40,6 +40,7 @@ const readyStats = {
   active_entry_count: 4,
   active_entry_without_duck_count: 0,
   active_entry_without_round_one_heat_count: 0,
+  pending_provisioning_count: 0,
   round_one_heat_count: 2,
   round_one_unready_heat_count: 0,
   round_one_unfinished_heat_count: 0,
@@ -87,6 +88,40 @@ const makeDb = (first, all = () => ({ results: [] })) => {
 };
 
 const makeEnv = (db) => ({ APP_ORIGIN: "https://quickducks.com", DB: db });
+
+const sqliteD1 = (database, beforeBatch = () => {}) => ({
+  prepare(sql) {
+    return {
+      sql,
+      args: [],
+      bind(...args) {
+        this.args = args;
+        return this;
+      },
+      async first() {
+        return database.prepare(this.sql).get(...this.args) ?? null;
+      },
+      async all() {
+        return { results: database.prepare(this.sql).all(...this.args) };
+      },
+    };
+  },
+  async batch(items) {
+    beforeBatch();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const results = items.map((item) => {
+        const result = database.prepare(item.sql).run(...item.args);
+        return { success: true, meta: { changes: Number(result.changes) } };
+      });
+      database.exec("COMMIT");
+      return results;
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  },
+});
 
 const jsonRequest = (path, method, body) => new Request(`https://quickducks.com${path}`, {
   method,
@@ -277,6 +312,7 @@ test("readiness reports actionable blockers without changing the event", async (
         ...readyStats,
         submitted_registration_count: 2,
         active_entry_without_round_one_heat_count: 1,
+        pending_provisioning_count: 1,
         round_one_heat_count: 0,
         any_heat_count: 0,
       };
@@ -293,6 +329,7 @@ test("readiness reports actionable blockers without changing the event", async (
   assert.equal(response.status, 200);
   assert.equal(body.readiness["start-round-one"].allowed, false);
   assert.match(body.readiness["start-round-one"].blockers.join(" "), /submitted participant/);
+  assert.match(body.readiness["start-round-one"].blockers.join(" "), /pending NFC sticker/);
   assert.equal(body.readiness["reopen-registration"].allowed, true);
   assert.equal(db.batches.length, 0);
 });
@@ -360,12 +397,119 @@ for (const [action, fromStatus, toStatus, commandType] of lifecycleCases) {
     assert.match(command.sql, new RegExp(`'${commandType}'`));
     if (action === "start-round-one") {
       assert.match(command.sql, /COUNT\(\*\).*ROUND_ONE.*<= e\.final_heat_capacity/s);
+      assert.match(command.sql, /START_DUCK_PROVISIONING/);
+      assert.match(command.sql, /d\.inventory_status = 'NEW'.*d\.physical_condition = 'NEEDS_TAG'.*dt\.status = 'RESERVED'/s);
+      assert.match(command.sql, /event_ducks ed.*ed\.released_at IS NULL/s);
     }
     assert.match(update.sql, new RegExp(`status = '${toStatus}'`));
     assert.doesNotMatch(update.sql, /SET status = \?/);
     assert.equal(command.args.includes("event_test"), true);
   });
 }
+
+test("atomic round-one start rejects provisioning begun after readiness preflight", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  database.exec("PRAGMA foreign_keys = ON");
+  for (const name of [
+    "0001_staff_identity.sql",
+    "0002_registration_foundation.sql",
+    "0003_assignment_and_heat_status.sql",
+    "0004_pairing_status_and_purge.sql",
+    "0005_staff_access_management.sql",
+    "0006_participant_operations.sql",
+    "0007_duck_inventory_operations.sql",
+    "0008_event_operations.sql",
+    "0009_heat_result_operations.sql",
+  ]) {
+    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
+  }
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff_test', 'staff-sub', 'staff@example.com');
+    INSERT INTO events
+      (id, slug, name, timezone, status, final_heat_capacity)
+    VALUES ('event_test', 'test-race', 'Test Race', 'America/Denver', 'REGISTRATION_CLOSED', 2);
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES
+      ('registration', 'event_test', 'Daisy', 'Duck', 'ACTIVE', 'DAISY123', 'private-hash',
+       '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry', 'event_test', 'registration');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES
+      ('pair-command', 'event_test', 'PAIR_DUCK', 'assignment',
+       '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO ducks
+      (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+    VALUES ('duck', 1, 'IN_USE', '2026-07-26T00:00:00Z', 'GOOD');
+    INSERT INTO event_ducks
+      (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck', 'event_test', 'duck', '2026-07-26T00:00:00Z', 'staff_test');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES
+      ('assignment', 'event_test', 'entry', 'event-duck', 'duck',
+       '2026-07-26T00:00:00Z', 'staff_test', 'pair-command');
+    INSERT INTO heats (id, event_id, round, heat_number, status)
+    VALUES ('heat', 'event_test', 'ROUND_ONE', 1, 'PLANNED');
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES
+      ('heat-entry', 'event_test', 'heat', 'entry', 'ROUND_ONE', 1,
+       'BALANCED_DRAW', '2026-07-26T00:00:00Z');
+  `);
+
+  let insertedPending = false;
+  const env = makeEnv(sqliteD1(database, () => {
+    if (insertedPending) return;
+    insertedPending = true;
+    database.exec(`
+      INSERT INTO race_commands
+        (id, event_id, command_type, result_id, requested_at, completed_at)
+      VALUES
+        ('pending-start', 'event_test', 'START_DUCK_PROVISIONING', 'pending-duck',
+         '2026-07-26T00:01:00Z', '2026-07-26T00:01:00Z');
+      INSERT INTO ducks
+        (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+      VALUES ('pending-duck', 2, 'NEW', '2026-07-26T00:01:00Z', 'NEEDS_TAG');
+      INSERT INTO duck_tags (id, duck_id, token, status)
+      VALUES ('pending-tag', 'pending-duck', 'pending-token', 'RESERVED');
+    `);
+  }));
+
+  const before = await handleEventOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test/readiness"),
+    env,
+    staff,
+  );
+  assert.equal((await before.json()).readiness["start-round-one"].allowed, true);
+
+  const transition = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/start-round-one", "POST", {
+      commandId: crypto.randomUUID(),
+    }),
+    env,
+    staff,
+  );
+  assert.equal(transition.status, 409);
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status, "REGISTRATION_CLOSED");
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_ROUND_ONE'").get().count, 0);
+
+  const after = await handleEventOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test/readiness"),
+    env,
+    staff,
+  );
+  const afterReadiness = (await after.json()).readiness["start-round-one"];
+  assert.equal(afterReadiness.allowed, false);
+  assert.match(afterReadiness.blockers.join(" "), /Finish the pending NFC sticker/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
 
 test("a lifecycle command does not write when readiness blockers remain", async () => {
   const db = makeDb((sql) => {

@@ -268,8 +268,6 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       privateToken,
       registrationId: registrationBody.registrationId,
       lookupCode: registrationBody.lookupCode,
-      tagToken: String.fromCharCode(65 + index).repeat(32),
-      visibleNumber: 101 + index,
     });
   }
   assert.equal(turnstileChecks, participants.length);
@@ -290,16 +288,27 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   const anonymousInventory = await api("/api/v1/staff/inventory/ducks");
   assert.equal(anonymousInventory.status, 401);
   for (const participant of participants) {
-    const intake = await jsonBody(await post("/api/v1/staff/inventory/ducks", {
+    const provisioning = await jsonBody(await post("/api/v1/staff/inventory/provisioning", {
       commandId: crypto.randomUUID(),
       eventId,
-      physicallyPresent: true,
-      visibleNumber: participant.visibleNumber,
-      tagToken: participant.tagToken,
-      condition: "GOOD",
       location: "Race intake",
-      notes: "Physically verified",
-    }), 201, `intake duck ${participant.visibleNumber}`);
+    }), 201, "start blank NFC provisioning");
+    participant.visibleNumber = provisioning.visibleNumber;
+    participant.tagToken = provisioning.tagUrl.split("/").at(-1);
+    const pendingPublicTag = await jsonBody(
+      await api(`/api/v1/ducks/${participant.tagToken}`),
+      200,
+      "pending tag remains publicly unresolved",
+    );
+    assert.deepEqual(pendingPublicTag, { destination: "HOME" });
+
+    const intake = await jsonBody(await post("/api/v1/staff/inventory/provisioning/confirm", {
+      commandId: crypto.randomUUID(),
+      eventId,
+      duckId: provisioning.duckId,
+      provisioningCommandId: provisioning.provisioningCommandId,
+      physicalWriteVerified: true,
+    }), 201, `confirm provisioned duck ${participant.visibleNumber}`);
     participant.duckId = intake.duck.id;
     assert.equal(intake.duck.inventoryStatus, "RESERVED_FOR_EVENT");
 
@@ -380,13 +389,9 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   }), 201, "start round one");
   assert.equal(roundStarted.event.status, "ROUND_ONE");
 
-  const lateIntake = await post("/api/v1/staff/inventory/ducks", {
+  const lateIntake = await post("/api/v1/staff/inventory/provisioning", {
     commandId: crypto.randomUUID(),
     eventId,
-    physicallyPresent: true,
-    visibleNumber: 999,
-    tagToken: "Z".repeat(32),
-    condition: "GOOD",
   });
   assert.equal(lateIntake.status, 409);
 
@@ -482,7 +487,11 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(finalStarted.event.status, "FINAL");
   const finalBoard = await jsonBody(await api("/api/v1/race-board"), 200, "planned final public board");
   assert.equal(finalBoard.event.finalHeats.length, 1);
-  assert.deepEqual(finalBoard.event.finalHeats[0].roster.map((entry) => entry.duckNumber).sort((a, b) => a - b), [101, 103, 105]);
+  const finalistNumbers = participants
+    .filter((participant) => finalistIds.includes(participant.raceEntryId))
+    .map((participant) => participant.visibleNumber)
+    .sort((a, b) => a - b);
+  assert.deepEqual(finalBoard.event.finalHeats[0].roster.map((entry) => entry.duckNumber).sort((a, b) => a - b), finalistNumbers);
   const finalList = await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats`, {
     token: staffToken,
   }), 200, "list final");
@@ -516,7 +525,10 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   const completedBoard = await jsonBody(await api("/api/v1/race-board"), 200, "completed public board");
   assert.equal(completedBoard.event.status, "COMPLETED");
   assert.equal(completedBoard.event.currentHeat, null);
-  assert.deepEqual(completedBoard.event.podium.map((entry) => entry.duckNumber), [101, 103, 105]);
+  assert.deepEqual(
+    completedBoard.event.podium.map((entry) => entry.duckNumber),
+    podium.map((entry) => participants.find((participant) => participant.raceEntryId === entry.raceEntryId).visibleNumber),
+  );
   assert.equal(/email|phone|lookup|token|staff|note|inventory|audit|raceEntry|assignment/i.test(JSON.stringify(completedBoard)), false);
   const publishedFinal = await jsonBody(await api(
     `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,

@@ -104,7 +104,8 @@ tests, dependency audit, or migrations. CI also runs
 
 - Email delivery is not operational until a queue consumer and SES send path
   exist; only a queue producer and support records are implemented.
-- Older documents may describe offline operation, Web NFC provisioning,
-  physical random draw, and in-race duck replacement. Do not claim these as
-  current without implementing and testing them.
+- Blank writable NFC provisioning is implemented only through the protected,
+  online Android Chrome inventory station. Older documents may describe offline
+  operation, physical random draw, and in-race duck replacement; do not claim
+  those as current without implementing and testing them.
 - Generated local state under `node_modules/` and `.wrangler/` is not source.

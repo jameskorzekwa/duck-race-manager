@@ -161,10 +161,12 @@ only the `sts.amazonaws.com` audience. `ThumbprintList` is intentionally omitted
 so IAM retrieves the top intermediate CA thumbprint.
 
 The fixed `quickducks-github-deploy` role trusts only this exact audience and
-the default environment subject:
+the default environment subject. GitHub repositories created after July 15,
+2026 include immutable owner and repository IDs in `sub`; do not replace them
+with the older name-only format:
 
 ```text
-repo:jameskorzekwa/duck-race-manager:environment:production
+repo:jameskorzekwa@38769771/duck-race-manager@1312323923:environment:production
 ```
 
 The repository and environment are parameters so another exact repository or
@@ -185,7 +187,7 @@ aws cloudformation deploy \
   --template-file infra/aws/github-actions-bootstrap.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
-    GitHubRepository=jameskorzekwa/duck-race-manager \
+    GitHubRepositorySubject=jameskorzekwa@38769771/duck-race-manager@1312323923 \
     GitHubEnvironment=production \
     ApplicationStackName=quickducks-production \
     StaffUserPoolId=us-east-1_QuEKwmLhI \
@@ -245,11 +247,15 @@ prompts for the token without placing it in the command or this repository.
 
 ### Separation Of Duties
 
-The GitHub role can validate local templates, create, describe, execute, and
-delete only AWS CLI-generated change sets for `quickducks-production`, read that
-one stack, supply its four controlled tags as part of change-set creation, and pass only
-`quickducks-cloudformation-execution` to CloudFormation. `GetTemplateSummary` is
-included because `aws cloudformation deploy` calls it for an existing stack.
+The GitHub role can validate local templates and create only AWS CLI-named
+change sets for `quickducks-production` with the exact execution role and
+controlled tags. CloudFormation does not expose `ChangeSetName` as an IAM
+condition for describe, execute, or delete, so those calls are instead limited
+to the exact stack ARN and its `Project=quickducks` and
+`Environment=production` resource tags. The role can read only that stack and
+pass only `quickducks-cloudformation-execution` to CloudFormation.
+`GetTemplateSummary` is included because `aws cloudformation deploy` calls it
+for an existing stack.
 The role has no direct `TagResource` or `UntagResource` permission and cannot
 call Cognito, SES, or IAM resource APIs directly.
 
@@ -406,9 +412,14 @@ this repository:
 
 - Account: Workers Scripts Write.
 - Account: D1 Write, for `quickducks-prod` migrations.
-- Account: Queues Write, for the queue binding and future consumer settings.
 - Account: Account Settings Read, if Wrangler requires account discovery.
 - Zone `quickducks.com`: Workers Routes Write, for both Custom Domains.
+
+Cloudflare accepts Workers Scripts Write for the existing Queue producer binding,
+so no separate Queues permission is required by this release workflow. If a
+future workflow creates, deletes, or changes Queue resources directly, add the
+then-current Queues write permission separately rather than broadening this
+deployment token in advance.
 
 Workers Scripts Write must permit the deployment to apply the declared Durable
 Object class migration. No separate Durable Object credential, secret, or

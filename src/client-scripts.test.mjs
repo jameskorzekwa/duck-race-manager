@@ -7,6 +7,8 @@ import {
   finishNfcHelpersScript,
   finishScanSerializationScript,
   finishSelectionValidationScript,
+  inventoryIntakeHelpersScript,
+  inventoryIntakeScript,
   liveScript,
   liveRuntimeHelpersScript,
   registrationScript,
@@ -23,18 +25,311 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotThrow(() => new Function(liveScript));
   assert.doesNotThrow(() => new Function(startLineScript));
   assert.doesNotThrow(() => new Function(finishLineScript));
+  assert.doesNotThrow(() => new Function(inventoryIntakeScript));
   assert.match(registrationScript, /\/api\/v1\/registrations/);
   assert.match(registrationScript, /publicNamePolicy/);
   assert.match(registrationScript, /Your name will appear publicly as/);
   assert.match(registrationScript, /Your email and phone stay private/);
   assert.match(staffDuckScript, /\/api\/v1\/staff\/ducks/);
   assert.match(staffDuckScript, /\/api\/v1\/staff\/registrations\/search/);
+  assert.match(staffDuckScript, /registration\.email/);
+  assert.match(staffDuckScript, /registration\.phone/);
+  assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   assert.match(staffDuckScript, /\/dispositions/);
   assert.match(staffHomeScript, /\/api\/v1\/staff\/events\/return-review/);
   assert.match(staffHomeScript, /\/purge-ready/);
   assert.match(staffHomeScript, /\/api\/v1\/staff\/profiles/);
   assert.match(staffHomeScript, /Regular staff/);
   assert.match(staffHomeScript, /Administrator/);
+  assert.match(inventoryIntakeScript, /\/api\/v1\/staff\/inventory\/provisioning/);
+  assert.match(inventoryIntakeScript, /provisioning\/classify/);
+  assert.match(inventoryIntakeScript, /provisioning\/confirm/);
+  assert.match(inventoryIntakeScript, /provisioning\/takeover/);
+  assert.match(inventoryIntakeScript, /window\.confirm/);
+  assert.match(inventoryIntakeScript, /data-takeover-provisioning/);
+  assert.match(inventoryIntakeScript, /recordType: "url", data: tagUrl/);
+  assert.doesNotMatch(inventoryIntakeScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  assert.doesNotMatch(inventoryIntakeScript, /localStorage|sessionStorage|serviceWorker|makeReadOnly|console\./);
+  assert.doesNotMatch(inventoryIntakeScript, /tagToken|physicallyPresent|console\./);
+});
+
+const inventoryHelpers = () => new Function(
+  `${inventoryIntakeHelpersScript}; return { intakeParseCanonicalTagUrl, intakeCanonicalUrlFromMessage, intakeSafeTakeoverCandidate, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
+)();
+
+test("inventory takeover metadata is redacted and never auto-adopted", async () => {
+  const { intakeSafeTakeoverCandidate } = inventoryHelpers();
+  const candidate = {
+    duckId: "duck-abandoned",
+    provisioningCommandId: "11111111-1111-4111-8111-111111111111",
+    visibleNumber: 42,
+    status: "PENDING_WRITE",
+    takeoverAvailable: true,
+  };
+  assert.deepEqual(intakeSafeTakeoverCandidate(candidate), {
+    duckId: candidate.duckId,
+    provisioningCommandId: candidate.provisioningCommandId,
+    visibleNumber: candidate.visibleNumber,
+  });
+  assert.equal(intakeSafeTakeoverCandidate({ ...candidate, tagUrl: "https://quickducks.com/t/secret" }), null);
+
+  const { calls, machine } = makeProvisioningMachine({ recover: () => candidate });
+  assert.equal(await machine.recover(), null);
+  assert.equal(machine.hasPending(), false);
+  assert.deepEqual(calls.starts, []);
+  assert.deepEqual(calls.writes, []);
+  assert.deepEqual(calls.confirms, []);
+});
+
+test("inventory intake parser accepts only exact canonical tag URLs", () => {
+  const { intakeParseCanonicalTagUrl } = inventoryHelpers();
+  const token = "Abc_123-xyz".repeat(2);
+  const canonical = `https://quickducks.com/t/${token}`;
+  assert.equal(intakeParseCanonicalTagUrl(canonical, "https://quickducks.com"), canonical);
+  for (const rejected of [
+    `  ${canonical}  `,
+    `http://quickducks.com/t/${token}`,
+    `https://www.quickducks.com/t/${token}`,
+    `https://user@quickducks.com/t/${token}`,
+    `${canonical}?next=1`,
+    `${canonical}#fragment`,
+    `https://quickducks.com/t/${"a".repeat(21)}`,
+    `https://quickducks.com/t/${"a".repeat(129)}`,
+    `https://quickducks.com/t/${token}/`,
+    `https://quickducks.com/T/${token}`,
+    `https://quickducks.com/t/${token}%2Fextra`,
+    `/t/${token}`,
+  ]) assert.equal(intakeParseCanonicalTagUrl(rejected, "https://quickducks.com"), null, rejected);
+});
+
+test("inventory NFC station scans continuously and writes the exact canonical URL record", async () => {
+  const { intakeCreateNfcStation } = inventoryHelpers();
+  class FakeReader {
+    listeners = new Map();
+    scans = 0;
+    writes = [];
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    removeEventListener(name, listener) { if (this.listeners.get(name) === listener) this.listeners.delete(name); }
+    async scan() { this.scans += 1; }
+    async write(message) { this.writes.push(message); }
+    emit(name, event) { return this.listeners.get(name)?.(event); }
+  }
+  const reader = new FakeReader();
+  const readings = [];
+  let active = 0;
+  const station = intakeCreateNfcStation({
+    createReader: () => reader,
+    decode: (record) => record.value,
+    appOrigin: "https://quickducks.com",
+    onReading: (reading) => { readings.push(reading); },
+    onReadingError: () => {},
+    onStartError: () => assert.fail("scan should start"),
+    onActive: () => { active += 1; },
+  });
+
+  const tagUrl = `https://quickducks.com/t/${"a".repeat(43)}`;
+  assert.equal(await station.start(), true);
+  assert.equal(await station.start(), false);
+  reader.emit("reading", {
+    serialNumber: "transient-hardware-value",
+    message: { records: [{ recordType: "mime", value: "ignored" }, { recordType: "url", value: tagUrl }] },
+  });
+  await station.write(tagUrl);
+  assert.equal(reader.scans, 1);
+  assert.equal(active, 1);
+  assert.deepEqual(readings, [{ serialNumber: "transient-hardware-value", canonicalUrl: tagUrl }]);
+  assert.deepEqual(reader.writes, [{ records: [{ recordType: "url", data: tagUrl }] }]);
+  assert.equal(reader.listeners.has("reading"), true);
+});
+
+const makeProvisioningMachine = (overrides = {}) => {
+  const { intakeCreateProvisioningMachine } = inventoryHelpers();
+  const pending = {
+    duckId: "duck-1",
+    provisioningCommandId: "11111111-1111-4111-8111-111111111111",
+    visibleNumber: 42,
+    tagUrl: `https://quickducks.com/t/${"p".repeat(43)}`,
+    status: "PENDING_WRITE",
+  };
+  const calls = {
+    accepted: [], classifications: [], confirms: [], feedback: [], messages: [],
+    ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
+  };
+  let nextCommand = 0;
+  const machine = intakeCreateProvisioningMachine({
+    eventId: () => "event-1",
+    location: () => "Bin A",
+    recover: async (eventId) => {
+      calls.recoveries.push(eventId);
+      return overrides.recover ? overrides.recover(eventId) : null;
+    },
+    start: async (material) => {
+      calls.starts.push({ ...material });
+      return overrides.start ? overrides.start(material) : pending;
+    },
+    classify: async (material) => {
+      calls.classifications.push({ ...material });
+      return overrides.classify
+        ? overrides.classify(material)
+        : { kind: "pending", duckId: pending.duckId, provisioningCommandId: pending.provisioningCommandId };
+    },
+    write: async (tagUrl) => {
+      calls.writes.push(tagUrl);
+      if (overrides.write) return overrides.write(tagUrl);
+    },
+    confirm: async (material) => {
+      calls.confirms.push({ ...material });
+      return overrides.confirm ? overrides.confirm(material) : { replayed: false };
+    },
+    refresh: async () => {
+      calls.refreshes += 1;
+      if (overrides.refresh) return overrides.refresh();
+    },
+    accepted: (value) => calls.accepted.push(value),
+    message: (...value) => calls.messages.push(value),
+    state: (value) => calls.states.push(value),
+    feedback: (value) => calls.feedback.push(value),
+    commandId: () => `command-${++nextCommand}`,
+    scheduleReady: (callback) => calls.ready.push(callback),
+  });
+  return { calls, machine, pending };
+};
+
+test("blank NFC reading performs one generated start, exact write, and confirmation", async () => {
+  const { calls, machine, pending } = makeProvisioningMachine();
+  const result = await machine.reading({ serialNumber: "serial-a", canonicalUrl: null });
+
+  assert.deepEqual(result, { accepted: true, outcome: "added" });
+  assert.deepEqual(calls.starts, [{ commandId: "command-1", eventId: "event-1", location: "Bin A" }]);
+  assert.deepEqual(calls.writes, [pending.tagUrl]);
+  assert.deepEqual(calls.confirms, [{
+    commandId: "command-2",
+    eventId: "event-1",
+    duckId: pending.duckId,
+    provisioningCommandId: pending.provisioningCommandId,
+    physicalWriteVerified: true,
+  }]);
+  assert.deepEqual(calls.accepted, [{ outcome: "added" }]);
+  assert.equal(calls.refreshes, 1);
+  assert.deepEqual(calls.feedback, ["added"]);
+  assert.equal(calls.recoveries.length, 1);
+  assert.deepEqual(await machine.reading({ serialNumber: "serial-a", canonicalUrl: null }), { accepted: false, reason: "busy" });
+  calls.ready[0]();
+  assert.deepEqual(await machine.reading({ serialNumber: "serial-a", canonicalUrl: null }), { accepted: false, reason: "repeated" });
+});
+
+test("provisioning serializes physical reads without queueing a second sticker", async () => {
+  let releaseStart;
+  const { calls, machine, pending } = makeProvisioningMachine({
+    start: () => new Promise((resolve) => { releaseStart = () => resolve(pending); }),
+  });
+  const first = machine.reading({ serialNumber: "serial-a", canonicalUrl: null });
+  assert.deepEqual(await machine.reading({ serialNumber: "serial-b", canonicalUrl: null }), { accepted: false, reason: "busy" });
+  releaseStart();
+  assert.equal((await first).accepted, true);
+  assert.equal(calls.starts.length, 1);
+  assert.equal(calls.writes.length, 1);
+});
+
+test("failed NFC write retaps the same sticker with the same URL and no new allocation", async () => {
+  let attempts = 0;
+  const { calls, machine, pending } = makeProvisioningMachine({
+    write: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("tag moved");
+    },
+  });
+  assert.deepEqual(
+    await machine.reading({ serialNumber: "serial-a", canonicalUrl: null }),
+    { accepted: false, reason: "write-failed" },
+  );
+  assert.deepEqual(
+    await machine.reading({
+      serialNumber: "active-tag",
+      canonicalUrl: `https://quickducks.com/t/${"a".repeat(43)}`,
+    }),
+    { accepted: false, reason: "mismatch" },
+  );
+  assert.match(calls.messages.at(-1)[0], /Finish the pending sticker/);
+  assert.equal(calls.accepted.length, 0);
+  assert.equal(calls.refreshes, 0);
+  assert.deepEqual(
+    await machine.reading({ serialNumber: "serial-a", canonicalUrl: null }),
+    { accepted: true, outcome: "added" },
+  );
+  assert.equal(calls.starts.length, 1);
+  assert.equal(calls.classifications.length, 0);
+  assert.deepEqual(calls.writes, [pending.tagUrl, pending.tagUrl]);
+  assert.equal(calls.confirms.length, 1);
+});
+
+test("uncertain confirmation retries without rewrite or allocation and rejects a different sticker", async () => {
+  let confirmations = 0;
+  const { calls, machine, pending } = makeProvisioningMachine({
+    confirm: async () => {
+      confirmations += 1;
+      if (confirmations === 1) throw new TypeError("network lost");
+      return { replayed: false };
+    },
+  });
+  assert.equal((await machine.reading({ serialNumber: "serial-a", canonicalUrl: null })).reason, "confirm-uncertain");
+  assert.equal(
+    (await machine.reading({ serialNumber: "serial-b", canonicalUrl: null })).reason,
+    "wrong-confirmation-tag",
+  );
+  assert.equal(
+    (await machine.reading({
+      serialNumber: "active-tag",
+      canonicalUrl: `https://quickducks.com/t/${"a".repeat(43)}`,
+    })).reason,
+    "mismatch",
+  );
+  assert.match(calls.messages.at(-1)[0], /Finish the pending sticker/);
+  assert.equal(calls.accepted.length, 0);
+  assert.equal(calls.refreshes, 0);
+  assert.deepEqual(
+    await machine.reading({ serialNumber: "serial-a", canonicalUrl: pending.tagUrl }),
+    { accepted: true, outcome: "added" },
+  );
+  assert.equal(calls.starts.length, 1);
+  assert.deepEqual(calls.writes, [pending.tagUrl]);
+  assert.equal(calls.confirms.length, 2);
+  assert.deepEqual(calls.confirms[1], calls.confirms[0]);
+  assert.deepEqual(calls.classifications, [{ eventId: "event-1", tagUrl: pending.tagUrl }]);
+});
+
+test("reload recovery recognizes the exact pending URL and confirms without rewriting", async () => {
+  const { calls, machine, pending } = makeProvisioningMachine({ recover: () => pending });
+  assert.equal((await machine.recover()).tagUrl, pending.tagUrl);
+  assert.deepEqual(
+    await machine.reading({ serialNumber: "serial-a", canonicalUrl: pending.tagUrl }),
+    { accepted: true, outcome: "added" },
+  );
+  assert.equal(calls.starts.length, 0);
+  assert.deepEqual(calls.writes, []);
+  assert.equal(calls.confirms.length, 1);
+});
+
+test("canonical existing URLs are classified before any write or allocation", async () => {
+  const active = makeProvisioningMachine({ classify: async () => ({ kind: "already" }) });
+  assert.deepEqual(
+    await active.machine.reading({ serialNumber: "active", canonicalUrl: active.pending.tagUrl }),
+    { accepted: true, outcome: "already" },
+  );
+  assert.equal(active.calls.starts.length, 0);
+  assert.equal(active.calls.writes.length, 0);
+  assert.deepEqual(active.calls.accepted, [{ outcome: "already" }]);
+
+  const mismatch = makeProvisioningMachine({
+    classify: async () => ({ kind: "mismatch", message: "Unknown inventory." }),
+  });
+  assert.equal(
+    (await mismatch.machine.reading({ serialNumber: "unknown", canonicalUrl: mismatch.pending.tagUrl })).reason,
+    "mismatch",
+  );
+  assert.equal(mismatch.calls.starts.length, 0);
+  assert.equal(mismatch.calls.writes.length, 0);
+  assert.match(mismatch.calls.messages.at(-1)[0], /Unknown inventory/);
 });
 
 test("live clients build safe DOM and retain reconnect plus polling fallback", () => {

@@ -2,11 +2,11 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: Least-privilege GitHub Actions OIDC and CloudFormation roles for QuickDucks
 
 Parameters:
-  GitHubRepository:
+  GitHubRepositorySubject:
     Type: String
-    Default: jameskorzekwa/duck-race-manager
-    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
-    Description: Exact GitHub owner and repository allowed to deploy
+    Default: jameskorzekwa@38769771/duck-race-manager@1312323923
+    AllowedPattern: "^[A-Za-z0-9_.-]+@[0-9]+/[A-Za-z0-9_.-]+@[0-9]+$"
+    Description: Exact immutable GitHub owner and repository subject allowed to deploy
   GitHubEnvironment:
     Type: String
     Default: production
@@ -357,7 +357,7 @@ Resources:
             Condition:
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:environment:${GitHubEnvironment}
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepositorySubject}:environment:${GitHubEnvironment}
       Tags:
         - Key: Project
           Value: quickducks
@@ -398,8 +398,9 @@ Resources:
                   - cloudformation:ExecuteChangeSet
                 Resource: !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${ApplicationStackName}/*
                 Condition:
-                  StringLike:
-                    cloudformation:ChangeSetName: awscli-cloudformation-package-deploy-*
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
               - Sid: ReadApplicationStackForDeploy
                 Effect: Allow
                 Action:

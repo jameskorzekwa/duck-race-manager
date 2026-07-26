@@ -60,12 +60,12 @@ Resources:
       LogoutURLs:
         - !Ref AppOrigin
         - http://localhost:8787
-      AccessTokenValidity: 1
-      IdTokenValidity: 1
-      RefreshTokenValidity: 30
+      AccessTokenValidity: 15
+      IdTokenValidity: 15
+      RefreshTokenValidity: 7
       TokenValidityUnits:
-        AccessToken: hours
-        IdToken: hours
+        AccessToken: minutes
+        IdToken: minutes
         RefreshToken: days
       RefreshTokenRotation:
         Feature: ENABLED
