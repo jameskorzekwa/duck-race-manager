@@ -44,8 +44,9 @@ a { color:inherit; }
 .nav a { padding:.7rem .9rem; border:2px solid transparent; border-radius:999px; font-weight:850; text-decoration:none; }
 .nav a:hover,.nav a:focus-visible { border-color:var(--ink); outline:none; }
 .hero { position:relative; overflow:hidden; display:grid; align-items:center; min-height:34rem; padding:clamp(2rem,6vw,5rem); border:3px solid var(--ink); border-radius:2rem; background:var(--paper); box-shadow:9px 9px 0 var(--ink); }
-.hero::after { content:""; position:absolute; z-index:0; right:-10%; bottom:-5rem; left:-10%; height:12rem; border-radius:50% 50% 0 0; background:var(--water); transform:rotate(-2deg); }
 .hero::before { content:""; position:absolute; z-index:1; right:-20%; bottom:1rem; left:-20%; height:1.4rem; background-image:radial-gradient(ellipse 3.4rem .32rem at 3.4rem 50%,rgba(255,255,255,.92) 96%,transparent 100%); background-position:0 50%; background-repeat:repeat-x; background-size:10rem 1.4rem; opacity:.9; pointer-events:none; }
+.hero-water { position:absolute; z-index:0; right:-2px; bottom:-1px; left:-2px; width:calc(100% + 4px); height:10.5rem; color:var(--water); pointer-events:none; transform:translateY(0); }
+.hero-water path { fill:currentColor; }
 .hero-copy { position:relative; z-index:3; max-width:42rem; }
 .eyebrow { display:inline-flex; margin:0 0 1rem; padding:.48rem .78rem; border:2px solid var(--ink); border-radius:999px; background:var(--yellow); font-size:.8rem; font-weight:950; letter-spacing:.09em; text-transform:uppercase; }
 h1,h2,h3,p { margin-top:0; }
@@ -155,8 +156,8 @@ details.operation-card[open] > summary { margin-bottom:1rem; }
 .private-result { overflow-wrap:anywhere; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero::after { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .search-form { grid-template-columns:1fr; } .staff-access-card .actions { width:100%; } }
-@media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-glide 3.1s ease-in-out infinite; } .hero::after { animation:water-swell 4.2s ease-in-out infinite; } .hero::before { animation:current 2.8s linear infinite; } @keyframes duck-glide { 0%,100% { transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); } 50% { transform:translateX(calc(var(--duck-center) + 6px)) translateY(-9px) rotate(1deg); } } @keyframes water-swell { 0%,100% { transform:translateY(0) rotate(-2deg); } 50% { transform:translateY(4px) rotate(-1deg); } } @keyframes current { to { background-position:-10rem 50%; } } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .search-form { grid-template-columns:1fr; } .staff-access-card .actions { width:100%; } }
+@media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-glide 3.1s ease-in-out infinite; } .hero-water { animation:water-swell 4.2s ease-in-out infinite; } .hero::before { animation:current 2.8s linear infinite; } @keyframes duck-glide { 0%,100% { transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); } 50% { transform:translateX(calc(var(--duck-center) + 6px)) translateY(-9px) rotate(1deg); } } @keyframes water-swell { 0%,100% { transform:translateY(0); } 50% { transform:translateY(4px); } } @keyframes current { to { background-position:-10rem 50%; } } }
 `;
 
 interface PageOptions {
@@ -200,6 +201,9 @@ export const renderHome = (): string => page({
         <p class="lede">A fast, friendly home for community duck races. Register, keep your private code, and follow your duck from check-in to finish.</p>
         <div class="actions"><a class="button" href="/register">Register</a><a class="button secondary" href="#how-it-works">How it works</a></div>
       </div>
+      <svg class="hero-water" viewBox="0 0 1200 200" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+        <path d="M0 55 C75 10 150 10 225 55 C300 100 375 100 450 55 C525 10 600 10 675 55 C750 100 825 100 900 55 C975 10 1050 10 1200 55 V200 H0 Z"/>
+      </svg>
       ${duck("hero-duck")}
     </section>
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
