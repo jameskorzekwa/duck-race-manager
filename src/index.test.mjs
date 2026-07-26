@@ -54,8 +54,11 @@ test("serves the rubber-duck favicon", async () => {
 test("renders the clickable registration and status mockups", async () => {
   const registration = await worker.fetch(new Request("https://quickducks.com/register"), env);
   const confirmation = await worker.fetch(new Request("https://quickducks.com/r/mock"), env);
+  const registrationBody = await registration.text();
 
-  assert.match(await registration.text(), /Preview confirmation/);
+  assert.match(registrationBody, /Preview confirmation/);
+  assert.match(registrationBody, /You can disable these later/);
+  assert.doesNotMatch(registrationBody, /After the race/);
   assert.match(await confirmation.text(), /DUCK-824/);
   assert.equal(confirmation.headers.get("x-robots-tag"), "noindex, nofollow");
 });
