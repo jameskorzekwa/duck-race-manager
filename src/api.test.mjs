@@ -14,6 +14,7 @@ const openEvent = {
   registration_opens_at: null,
   registration_closes_at: null,
   email_required: 0,
+  public_name_policy: "FIRST_NAME_LAST_INITIAL",
 };
 
 const makeDb = (first, all = () => ({ results: [] })) => {
@@ -68,6 +69,7 @@ const staffActor = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
+  roles: ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"],
   authentication: "bearer",
 };
 
@@ -130,6 +132,7 @@ test("returns the current event without private configuration", async () => {
     registrationOpensAt: null,
     registrationClosesAt: null,
     emailRequired: false,
+    publicNamePolicy: "FIRST_NAME_LAST_INITIAL",
   });
   assert.doesNotMatch(db.statements[0].sql, /DRAFT/);
 });
@@ -345,16 +348,43 @@ test("one browser collection returns multiple independent registrations", async 
 });
 
 test("private registration status still keeps email and phone staff-only", async () => {
-  const db = makeDb(() => ({
-    first_name: "Daisy",
-    last_name: "Duck",
-    status: "SUBMITTED",
-    lookup_code: "DAISY123",
-    submitted_at: "2026-07-26T00:00:00.000Z",
-    event_name: "Test Duck Race",
-    event_date: "2026-08-30",
-    duck_keep_preference: "UNDECIDED",
-  }));
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM registrations r")) {
+      return {
+        first_name: "Daisy",
+        last_name: "Duck",
+        status: "ACTIVE",
+        lookup_code: "DAISY123",
+        submitted_at: "2026-07-26T00:00:00.000Z",
+        event_name: "Test Duck Race",
+        event_date: "2026-08-30",
+        race_entry_id: "entry_test",
+        duck_keep_preference: "UNDECIDED",
+      };
+    }
+    if (sql.includes("FROM heats")) {
+      return { round: "ROUND_ONE", heat_number: 4, status: "RUNNING" };
+    }
+    return {
+      event_id: "event_test",
+      event_slug: "test-race",
+      event_name: "Test Duck Race",
+      event_date: "2026-08-30",
+      event_status: "ROUND_ONE",
+      public_name_policy: "FIRST_NAME_LAST_INITIAL",
+      first_name: "Daisy",
+      last_name: "Duck",
+      registration_status: "ACTIVE",
+      race_entry_id: "entry_test",
+      visible_number: 42,
+      round_one_heat_number: 8,
+      round_one_heat_status: "PLANNED",
+      round_one_place: null,
+      final_heat_number: null,
+      final_heat_status: null,
+      final_place: null,
+    };
+  });
   const response = await handleApi(
     new Request(`https://quickducks.com/api/v1/registrations/${randomToken()}`),
     makeEnv(db),
@@ -362,9 +392,16 @@ test("private registration status still keeps email and phone staff-only", async
   const body = await response.json();
 
   assert.equal(body.firstName, "Daisy");
+  assert.equal(body.lastName, "Duck");
+  assert.equal(body.lookupCode, "DAISY123");
+  assert.equal(body.duckKeepPreference, "UNDECIDED");
+  assert.deepEqual(body.raceStatus.duck, { visibleNumber: 42 });
+  assert.equal(body.raceStatus.assignedHeat.roundOne.number, 8);
+  assert.deepEqual(body.raceStatus.currentHeat, { round: "ROUND_ONE", number: 4, status: "RUNNING" });
+  assert.equal(body.raceStatus.outcome, "NOT_RACED");
   assert.equal("email" in body, false);
   assert.equal("phone" in body, false);
-  assert.doesNotMatch(db.statements[0].sql, /email|phone/i);
+  assert.ok(db.statements.every((statement) => !/email|phone/i.test(statement.sql)));
 });
 
 test("rejects cross-origin registration before touching the database", async () => {
@@ -436,6 +473,8 @@ test("rejects oversized registration bodies before querying D1", async () => {
 
 test("creates registration, race-entry, command, and audit records atomically", async (context) => {
   const db = makeDb((sql) => sql.includes("status = 'REGISTRATION_OPEN'") ? openEvent : null);
+  let publicationCalls = 0;
+  let publicationTask;
   context.mock.method(globalThis, "fetch", async () => Response.json({
     success: true,
     hostname: "quickducks.com",
@@ -460,7 +499,22 @@ test("creates registration, race-entry, command, and audit records atomically", 
         turnstileToken: "verified-test-token",
       }),
     }),
-    makeEnv(db, { TURNSTILE_SECRET_KEY: "test-secret" }),
+    makeEnv(db, {
+      TURNSTILE_SECRET_KEY: "test-secret",
+      RACE_UPDATES: {
+        idFromName() { return "race-updates"; },
+        get() {
+          return {
+            async fetch() {
+              publicationCalls += 1;
+              throw new Error("notification unavailable");
+            },
+          };
+        },
+      },
+    }),
+    undefined,
+    { waitUntil(promise) { publicationTask = promise; } },
   );
   const body = await response.json();
 
@@ -479,6 +533,9 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.match(db.batches[0][5].sql, /INSERT OR IGNORE INTO browser_collection_registrations/);
   assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
   assert.match(response.headers.get("set-cookie") ?? "", /HttpOnly/);
+  assert.ok(publicationTask);
+  await assert.doesNotReject(publicationTask);
+  assert.equal(publicationCalls, 1);
 });
 
 test("rejects a Turnstile result for a different hostname", async (context) => {

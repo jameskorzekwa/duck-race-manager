@@ -15,8 +15,7 @@
     "AWS_REGION": "us-east-1",
     "COGNITO_USER_POOL_ID": "REPLACE_AFTER_AWS_DEPLOY",
     "COGNITO_USER_POOL_CLIENT_ID": "REPLACE_AFTER_AWS_DEPLOY",
-    "COGNITO_DOMAIN": "REPLACE_AFTER_AWS_DEPLOY",
-    "TURNSTILE_SITE_KEY": "REPLACE_AFTER_TURNSTILE_CREATE"
+    "COGNITO_DOMAIN": "REPLACE_AFTER_AWS_DEPLOY"
   },
   "d1_databases": [
     {
@@ -24,6 +23,20 @@
       "database_name": "quickducks-prod",
       "database_id": "REPLACE_AFTER_D1_CREATE",
       "migrations_dir": "db/migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RACE_UPDATES",
+        "class_name": "RaceUpdates"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RaceUpdates"]
     }
   ],
   "queues": {

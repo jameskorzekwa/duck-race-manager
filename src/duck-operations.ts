@@ -1,4 +1,5 @@
 import type { StaffActor } from "./auth.ts";
+import { canViewParticipantPii, requireAnyRole } from "./authorization.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -147,7 +148,7 @@ const duckSelect = `
     LEFT JOIN heats h ON h.id = he.heat_id
     LEFT JOIN duck_event_dispositions ded ON ded.event_duck_id = ed.id`;
 
-const summaryResponse = (row: DuckSummaryRow): Record<string, unknown> => ({
+const summaryResponse = (row: DuckSummaryRow, includePii: boolean): Record<string, unknown> => ({
   id: row.duck_id,
   visibleNumber: row.visible_number,
   inventoryStatus: row.inventory_status,
@@ -178,8 +179,7 @@ const summaryResponse = (row: DuckSummaryRow): Record<string, unknown> => ({
   participant: row.registration_id === null ? null : {
     registrationId: row.registration_id,
     raceEntryId: row.race_entry_id,
-    firstName: row.first_name,
-    lastName: row.last_name,
+    ...(includePii ? { firstName: row.first_name, lastName: row.last_name } : {}),
     status: row.registration_status,
   },
   heat: row.heat_id === null ? null : {
@@ -198,9 +198,9 @@ const summaryResponse = (row: DuckSummaryRow): Record<string, unknown> => ({
 const getDuckSummary = (env: Env, duckId: string): Promise<DuckSummaryRow | null> =>
   env.DB.prepare(`${duckSelect} WHERE d.id = ? LIMIT 1`).bind(duckId).first<DuckSummaryRow>();
 
-const listDucks = async (env: Env): Promise<Response> => {
+const listDucks = async (env: Env, includePii: boolean): Promise<Response> => {
   const ducks = await env.DB.prepare(`${duckSelect} ORDER BY d.visible_number`).all<DuckSummaryRow>();
-  return json({ ducks: ducks.results.map(summaryResponse) });
+  return json({ ducks: ducks.results.map((duck) => summaryResponse(duck, includePii)) });
 };
 
 const parseDetails = (value: string): unknown => {
@@ -211,7 +211,11 @@ const parseDetails = (value: string): unknown => {
   }
 };
 
-const getDuckHistory = async (env: Env, duckId: string): Promise<Record<string, unknown>> => {
+const getDuckHistory = async (
+  env: Env,
+  duckId: string,
+  includePii: boolean,
+): Promise<Record<string, unknown>> => {
   const [inventoryEvents, tags, reservations, assignments] = await Promise.all([
     env.DB.prepare(
       `SELECT die.id, die.action, die.occurred_at, die.details_json,
@@ -339,8 +343,7 @@ const getDuckHistory = async (env: Env, duckId: string): Promise<Record<string, 
       participant: {
         registrationId: row.registration_id,
         raceEntryId: row.race_entry_id,
-        firstName: row.first_name,
-        lastName: row.last_name,
+        ...(includePii ? { firstName: row.first_name, lastName: row.last_name } : {}),
         status: row.registration_status,
       },
       heat: row.heat_id === null ? null : {
@@ -354,13 +357,18 @@ const getDuckHistory = async (env: Env, duckId: string): Promise<Record<string, 
   };
 };
 
-const getDuckDetail = async (env: Env, duckId: string, historyOnly: boolean): Promise<Response> => {
+const getDuckDetail = async (
+  env: Env,
+  duckId: string,
+  historyOnly: boolean,
+  includePii: boolean,
+): Promise<Response> => {
   const duck = await getDuckSummary(env, duckId);
   if (duck === null) return json({ error: "Duck not found." }, 404);
-  const history = await getDuckHistory(env, duckId);
+  const history = await getDuckHistory(env, duckId, includePii);
   return historyOnly
     ? json({ duckId, history })
-    : json({ duck: summaryResponse(duck), history });
+    : json({ duck: summaryResponse(duck, includePii), history });
 };
 
 interface ExistingCommand {
@@ -1316,8 +1324,10 @@ const assignDuck = async (
     duck: { id: duckId, visibleNumber: duck.visible_number, revision: expectedRevision + 1 },
     participant: {
       raceEntryId,
-      firstName: entry.first_name,
-      lastName: entry.last_name,
+      ...(canViewParticipantPii(actor) ? {
+        firstName: entry.first_name,
+        lastName: entry.last_name,
+      } : {}),
     },
     replacedAssignmentId: entry.old_assignment_id,
     replayed: execution.replayed,
@@ -1640,9 +1650,12 @@ export const handleDuckOperations = async (
   if (actor === null) {
     return json({ error: "Staff authentication required." }, 401);
   }
+  const denied = requireAnyRole(actor, ["DUCK_MANAGER", "RACE_DIRECTOR"]);
+  if (denied !== null) return denied;
+  const includePii = canViewParticipantPii(actor);
 
   if (url.pathname === `${inventoryPath}/ducks`) {
-    if (request.method === "GET") return listDucks(env);
+    if (request.method === "GET") return listDucks(env, includePii);
     if (request.method === "POST") return intakeDuck(request, env, actor);
     return json({ error: "Method not allowed." }, 405);
   }
@@ -1661,7 +1674,7 @@ export const handleDuckOperations = async (
   );
   if (duckActionMatch !== null) {
     const [, duckId, action] = duckActionMatch;
-    if (action === "history" && request.method === "GET") return getDuckDetail(env, duckId, true);
+    if (action === "history" && request.method === "GET") return getDuckDetail(env, duckId, true, includePii);
     if (action === "label" && request.method === "GET") return getLabelData(env, duckId);
     if (action === "tags/replace" && request.method === "POST") return replaceTag(request, env, actor, duckId);
     if (action === "tags/retire" && request.method === "POST") return retireTag(request, env, actor, duckId);
@@ -1676,7 +1689,7 @@ export const handleDuckOperations = async (
     /^\/api\/v1\/staff\/inventory\/ducks\/([A-Za-z0-9_-]{1,128})$/,
   );
   if (duckMatch !== null) {
-    if (request.method === "GET") return getDuckDetail(env, duckMatch[1], false);
+    if (request.method === "GET") return getDuckDetail(env, duckMatch[1], false, includePii);
     if (request.method === "PATCH") return editDuck(request, env, actor, duckMatch[1]);
     return json({ error: "Method not allowed." }, 405);
   }

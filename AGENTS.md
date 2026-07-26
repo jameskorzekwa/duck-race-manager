@@ -1,0 +1,110 @@
+# PROJECT KNOWLEDGE BASE
+
+**Generated:** 2026-07-26
+**Commit:** `1fe8668`
+**Branch:** `feat/document-and-streamline-workflows`
+
+## OVERVIEW
+
+QuickDucks is a framework-free TypeScript Cloudflare Worker for public duck-race
+registration, live status, and authenticated race operations. D1 stores the
+race dataset; AWS Cognito authenticates staff; CloudFormation manages Cognito,
+SES, and the Worker's AWS identity.
+
+## STRUCTURE
+
+```text
+src/                 # Worker routing, APIs, rendered UI, browser scripts, tests
+db/migrations/       # Ordered D1 schema and database invariants
+docs/                # Current workflows, infrastructure runbooks, design history
+infra/aws/           # Cognito, SES, and IAM CloudFormation
+.github/workflows/   # Credential-free CI and version-tag production release
+wrangler.jsonc       # Production Worker, D1, queue, rate-limit, and domain bindings
+```
+
+## WHERE TO LOOK
+
+| Task | Location | Notes |
+| --- | --- | --- |
+| HTTP entry and security headers | `src/index.ts` | Canonical redirects and page/static routing |
+| Public registration and status API | `src/api.ts`, `src/race-status.ts` | Preserve public privacy projection |
+| Live board and refresh signals | `src/race-board.ts`, `src/live-updates.ts` | D1 remains authoritative; WebSockets carry refresh signals only |
+| Staff route composition | `src/api.ts` | Handler ordering and fallthrough are deliberate |
+| Event, participant, duck, heat, support operations | `src/*-operations.ts` | HTTP validation, SQL, audit, and responses stay together |
+| Scan pairing, single returns, final purge | `src/staff-api.ts` | Legacy fallback owns several active routes |
+| Staff roles | `src/authorization.ts`, `src/auth.ts` | Admin bypass plus composable operational roles |
+| HTML/CSS and browser behavior | `src/site.ts`, `src/client-scripts.ts` | No frontend build pipeline |
+| Current product behavior | `docs/WORKFLOWS.md` | Canonical over older design documents |
+| Deployment and rollback | `docs/INFRASTRUCTURE.md` | Covers GitHub, AWS, Cloudflare, and D1 |
+| Production bindings | `wrangler.jsonc` | Names and IDs are deployment contracts |
+
+## COMMANDS
+
+```sh
+npm ci
+npm run typecheck
+npm test
+npm run wrangler:validate
+npm run db:migrate:local
+```
+
+`npm run check` runs TypeScript and Wrangler validation only. It does not run
+tests, dependency audit, or migrations. CI also runs
+`npm audit --audit-level=high`.
+
+## ARCHITECTURE
+
+- `src/index.ts` routes `/api/v1/*` into `handleApi` after canonical-origin
+  enforcement.
+- Staff operation handlers return `Response | null`; `null` means continue to
+  the next handler. Keep the current ordering documented in `src/AGENTS.md`.
+- Significant mutations use a client UUID, guarded state/revision checks, one
+  D1 batch, command history, and a redacted audit event.
+- Live clients refetch authoritative APIs after a signal and retain a polling
+  fallback. Never put race state, participant data, or mutation commands on the
+  WebSocket channel.
+- API/database rows use `snake_case`; public responses map explicitly to
+  `camelCase`.
+- The application supports one active event dataset and purges the whole race
+  after physical return reconciliation.
+
+## SECURITY RULES
+
+- Never commit or log credentials, participant data, private/lookup/tag tokens,
+  request bodies, provider errors, or recovery material.
+- A Cognito identity is insufficient: staff authorization also requires an
+  active D1 profile and the required operational role.
+- Cookie-authenticated staff mutations require the exact application `Origin`.
+- Public output never includes contact details, lookup codes, private links,
+  notes, inventory locations, or audit history.
+- Keep Worker invocation logs disabled because private credentials occur in URL
+  paths.
+- Tag GETs are read-only. NFC/QR tags contain only the permanent canonical URL.
+- Purge is administrator-only, gated, irreversible, and clears the complete
+  event dataset. Never weaken its claim and typed-confirmation sequence.
+
+## REPOSITORY RULES
+
+- Add a new numbered migration; never edit or renumber a migration recorded in
+  production. Migrations deploy before Worker code and must be backward
+  compatible with the previously deployed Worker.
+- `docs/WORKFLOWS.md` describes implemented behavior. Older plans are design
+  history when they conflict.
+- Keep browser rendering DOM-safe: escape server HTML and use `textContent` /
+  `replaceChildren` for API data rather than HTML injection.
+- Preserve exact D1 binding/resource names unless a coordinated infrastructure
+  migration explicitly changes them.
+- Normal production releases use a reviewed semantic-version tag and the
+  protected GitHub `production` environment, not manual deploy commands.
+- Workflow edits must preserve empty top-level permissions, job-scoped
+  credentials, FIFO production concurrency, and the documented CloudFormation
+  -> D1 -> Worker -> smoke test -> GitHub release order.
+
+## CURRENT LIMITS
+
+- Email delivery is not operational until a queue consumer and SES send path
+  exist; only a queue producer and support records are implemented.
+- Older documents may describe offline operation, Web NFC provisioning,
+  physical random draw, and in-race duck replacement. Do not claim these as
+  current without implementing and testing them.
+- Generated local state under `node_modules/` and `.wrangler/` is not source.

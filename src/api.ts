@@ -26,12 +26,14 @@ import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 import { handleSupportOperations } from "./support-operations.ts";
+import { handleLiveConnection, scheduleRaceUpdate } from "./live-updates.ts";
+import { getPublicRaceBoard } from "./race-board.ts";
 import type { Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
 
 const apiHeaders = {
   "cache-control": "no-store",
   "cross-origin-opener-policy": "same-origin",
-  "permissions-policy": "camera=(), geolocation=(), microphone=()",
+  "permissions-policy": "camera=(), geolocation=(), microphone=(), nfc=(self)",
   "referrer-policy": "no-referrer",
   "strict-transport-security": "max-age=31536000",
   "x-content-type-options": "nosniff",
@@ -49,7 +51,8 @@ const json = (value: unknown, status = 200, extraHeaders: HeadersInit = {}): Res
 const getCurrentEvent = (env: Env): Promise<EventRecord | null> =>
   env.DB.prepare(
     `SELECT id, slug, name, event_date, timezone, status,
-            registration_opens_at, registration_closes_at, email_required
+            registration_opens_at, registration_closes_at, email_required,
+            public_name_policy
        FROM events
       WHERE status IN (
         'REGISTRATION_OPEN',
@@ -75,7 +78,8 @@ const getOpenEvent = (env: Env, eventId: string): Promise<EventRecord | null> =>
   const now = new Date().toISOString();
   return env.DB.prepare(
     `SELECT id, slug, name, event_date, timezone, status,
-            registration_opens_at, registration_closes_at, email_required
+            registration_opens_at, registration_closes_at, email_required,
+            public_name_policy
        FROM events
       WHERE id = ?
         AND status = 'REGISTRATION_OPEN'
@@ -95,6 +99,7 @@ const eventResponse = (event: EventRecord): Record<string, unknown> => ({
   registrationOpensAt: event.registration_opens_at,
   registrationClosesAt: event.registration_closes_at,
   emailRequired: event.email_required === 1,
+  publicNamePolicy: event.public_name_policy,
 });
 
 export const findDuckRaceStatus = async (
@@ -359,21 +364,31 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   );
 };
 
+export interface PrivateRegistrationStatus extends RegistrationStatusRecord {
+  raceStatus: PublicRaceStatus | null;
+}
+
 export const findRegistrationStatus = async (
   token: string,
   env: Env,
-): Promise<RegistrationStatusRecord | null> => {
+): Promise<PrivateRegistrationStatus | null> => {
   if (!isPrivateToken(token)) return null;
   const tokenHash = await hashToken(token);
-  return env.DB.prepare(
+  const row = await env.DB.prepare(
     `SELECT r.first_name, r.last_name, r.status, r.lookup_code,
-            r.submitted_at, e.name AS event_name, e.event_date,
-            re.duck_keep_preference
+             r.submitted_at, e.name AS event_name, e.event_date,
+             re.id AS race_entry_id, re.duck_keep_preference
        FROM registrations r
        JOIN events e ON e.id = r.event_id
        JOIN race_entries re ON re.registration_id = r.id
        WHERE r.private_token_hash = ?`,
-  ).bind(tokenHash).first<RegistrationStatusRecord>();
+  ).bind(tokenHash).first<RegistrationStatusRecord & { race_entry_id: string }>();
+  if (row === null) return null;
+  const { race_entry_id: raceEntryId, ...registration } = row;
+  return {
+    ...registration,
+    raceStatus: await getPublicStatusByRaceEntry(env, raceEntryId),
+  };
 };
 
 const getRegistrationStatus = async (token: string, env: Env): Promise<Response> => {
@@ -389,6 +404,7 @@ const getRegistrationStatus = async (token: string, env: Env): Promise<Response>
     eventName: registration.event_name,
     eventDate: registration.event_date,
     duckKeepPreference: registration.duck_keep_preference,
+    raceStatus: registration.raceStatus,
   });
 };
 
@@ -471,12 +487,14 @@ const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Pro
   )).filter((status) => status !== null);
   return json({ results });
 };
-export const handleApi = async (
+const handleApiRequest = async (
   request: Request,
   env: Env,
   authenticate: typeof authenticateStaff = authenticateStaff,
 ): Promise<Response> => {
   const url = new URL(request.url);
+
+  if (url.pathname === "/api/v1/live") return handleLiveConnection(request, env);
 
   if (url.pathname.startsWith("/api/v1/staff/")) {
     const actor = await authenticate(request, env);
@@ -513,6 +531,10 @@ export const handleApi = async (
     return event === null ? json({ event: null }) : json({ event: eventResponse(event) });
   }
 
+  if (url.pathname === "/api/v1/race-board" && request.method === "GET") {
+    return json(await getPublicRaceBoard(env));
+  }
+
   if (url.pathname === "/api/v1/registrations" && request.method === "POST") {
     return createRegistration(request, env);
   }
@@ -536,4 +558,18 @@ export const handleApi = async (
   }
 
   return json({ error: "Not found." }, 404);
+};
+
+export const handleApi = async (
+  request: Request,
+  env: Env,
+  authenticate: typeof authenticateStaff = authenticateStaff,
+  ctx?: ExecutionContext,
+): Promise<Response> => {
+  const response = await handleApiRequest(request, env, authenticate);
+  const path = new URL(request.url).pathname;
+  const mayChangeState = !["GET", "HEAD", "OPTIONS"].includes(request.method)
+    && !path.endsWith("/heats/round-one/plan-preview");
+  if (response.ok && mayChangeState) scheduleRaceUpdate(env, ctx);
+  return response;
 };

@@ -1,4 +1,5 @@
 import type { StaffActor } from "./auth.ts";
+import { requireAnyRole } from "./authorization.ts";
 import {
   hashToken,
   isCommandId,
@@ -602,8 +603,9 @@ const changeRegistrationStatus = async (
   registrationId: string,
   operation: StatusOperation,
 ): Promise<Response> => {
-  if ((operation === "reactivate" || operation === "disqualify") && !actor.isSystemAdmin) {
-    return json({ error: "Administrator permission required." }, 403);
+  if (operation === "reactivate" || operation === "disqualify") {
+    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
   }
   const payload = await readJson(request);
   if (payload === null) return json({ error: "A valid JSON request is required." }, 400);
@@ -639,6 +641,23 @@ const changeRegistrationStatus = async (
   if (!(configuration.allowedStatuses as readonly string[]).includes(current.status)) {
     return json({ error: "This registration cannot make that status transition." }, 409);
   }
+  const eligibilityChange = operation === "withdraw" || operation === "disqualify";
+  if (eligibilityChange) {
+    const protectedHeat = await env.DB.prepare(
+      `SELECT 1 AS protected
+         FROM heat_entries he
+         JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+        WHERE he.race_entry_id = ?
+          AND (h.roster_locked_at IS NOT NULL
+            OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
+        LIMIT 1`,
+    ).bind(current.race_entry_id).first<{ protected: number }>();
+    if (protectedHeat !== null) {
+      return json({
+        error: "This participant is already on a locked or completed heat. Keep them ACTIVE and resolve the heat or result with the race director.",
+      }, 409);
+    }
+  }
 
   const targetStatus = operation === "withdraw"
     ? "WITHDRAWN"
@@ -654,8 +673,16 @@ const changeRegistrationStatus = async (
          SELECT ?, r.event_id, ?, r.id, ?, ?
            FROM registrations r
            JOIN events e ON e.id = r.event_id
-          WHERE r.id = ? AND r.revision = ? AND r.status = ?
-            AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
+           WHERE r.id = ? AND r.revision = ? AND r.status = ?
+             AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
+             AND (? = 0 OR NOT EXISTS (
+               SELECT 1 FROM race_entries re
+               JOIN heat_entries he ON he.race_entry_id = re.id
+               JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+                WHERE re.registration_id = r.id
+                  AND (h.roster_locked_at IS NOT NULL
+                    OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
+             ))`,
       ).bind(
         commandId,
         configuration.commandType,
@@ -664,16 +691,28 @@ const changeRegistrationStatus = async (
         registrationId,
         expectedRevision,
         current.status,
+        eligibilityChange ? 1 : 0,
       ),
       env.DB.prepare(
         `UPDATE registrations
             SET status = ?, status_changed_at = ?, updated_at = ?, revision = revision + 1
-          WHERE id = ? AND revision = ? AND status = ?
-            AND event_id IN (
-              SELECT id FROM events
-               WHERE status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
-            )`,
-      ).bind(targetStatus, now, now, registrationId, expectedRevision, current.status),
+           WHERE id = ? AND revision = ? AND status = ?
+             AND event_id IN (
+               SELECT id FROM events
+                WHERE status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
+             )
+             AND (? = 0 OR NOT EXISTS (
+               SELECT 1 FROM race_entries re
+               JOIN heat_entries he ON he.race_entry_id = re.id
+               JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+                WHERE re.registration_id = registrations.id
+                  AND (h.roster_locked_at IS NOT NULL
+                    OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
+             ))`,
+      ).bind(
+        targetStatus, now, now, registrationId, expectedRevision, current.status,
+        eligibilityChange ? 1 : 0,
+      ),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -719,9 +758,13 @@ export const handleParticipantOperations = async (
     /^\/api\/v1\/staff\/events\/([^/]{1,128})\/registrations$/,
   );
   if (eventRegistrationsMatch !== null && request.method === "GET") {
+    const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return listRegistrations(url, env, eventRegistrationsMatch[1]);
   }
   if (eventRegistrationsMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return createWalkUp(request, env, actor, eventRegistrationsMatch[1]);
   }
 
@@ -731,6 +774,8 @@ export const handleParticipantOperations = async (
   if (registrationMatch === null) return null;
   const [, registrationId, operation] = registrationMatch;
   if (registrationId === "search" && operation === undefined) return null;
+  const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+  if (denied !== null) return denied;
   if (operation === undefined && request.method === "GET") {
     return detailRegistration(env, registrationId);
   }

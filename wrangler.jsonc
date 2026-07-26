@@ -25,6 +25,20 @@
       "migrations_dir": "db/migrations"
     }
   ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RACE_UPDATES",
+        "class_name": "RaceUpdates"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RaceUpdates"]
+    }
+  ],
   "queues": {
     "producers": [
       {

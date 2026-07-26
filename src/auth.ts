@@ -1,5 +1,6 @@
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 
+import { normalizeOperationalRoles, type OperationalRole } from "./authorization.ts";
 import type { Env } from "./types.ts";
 
 export interface StaffActor {
@@ -8,6 +9,7 @@ export interface StaffActor {
   email: string;
   displayName: string | null;
   isSystemAdmin: boolean;
+  roles: OperationalRole[];
   authentication: "bearer" | "cookie";
 }
 
@@ -73,6 +75,14 @@ export const authenticateStaff = async (
       is_system_admin: number;
     }>();
     if (profile === null) return null;
+    const assignments = await env.DB.prepare(
+      `SELECT role
+         FROM staff_role_assignments
+        WHERE staff_profile_id = ? AND revoked_at IS NULL
+        ORDER BY role`,
+    ).bind(profile.id).all<{ role: string }>();
+    const roles = normalizeOperationalRoles(assignments.results.map((assignment) => assignment.role));
+    if (roles === null) return null;
 
     return {
       id: profile.id,
@@ -80,6 +90,7 @@ export const authenticateStaff = async (
       email: profile.email,
       displayName: profile.display_name,
       isSystemAdmin: profile.is_system_admin === 1,
+      roles,
       authentication,
     };
   } catch {

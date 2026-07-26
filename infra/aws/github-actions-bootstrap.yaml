@@ -1,0 +1,423 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Least-privilege GitHub Actions OIDC and CloudFormation roles for QuickDucks
+
+Parameters:
+  GitHubRepository:
+    Type: String
+    Default: jameskorzekwa/duck-race-manager
+    AllowedPattern: "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    Description: Exact GitHub owner and repository allowed to deploy
+  GitHubEnvironment:
+    Type: String
+    Default: production
+    AllowedPattern: "^[A-Za-z0-9_.-]+$"
+    Description: Exact GitHub environment included in the OIDC subject
+  ApplicationStackName:
+    Type: String
+    Default: quickducks-production
+    AllowedPattern: "^[A-Za-z][-A-Za-z0-9]*$"
+    Description: The only application stack GitHub Actions may deploy
+  StaffUserPoolId:
+    Type: String
+    Default: us-east-1_QuEKwmLhI
+    AllowedPattern: "^us-east-1_[A-Za-z0-9]+$"
+    Description: Exact production user pool available to the Worker runtime
+
+Resources:
+  WorkerPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: quickducks-worker-ses-boundary
+      Description: Maximum runtime permissions for the QuickDucks Worker IAM user
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SendOnlyFromQuickDucksIdentity
+            Effect: Allow
+            Action:
+              - ses:SendEmail
+              - ses:SendRawEmail
+            Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+          - Sid: AdministerOnlyQuickDucksStaffPools
+            Effect: Allow
+            Action:
+              - cognito-idp:AdminCreateUser
+              - cognito-idp:AdminDeleteUser
+              - cognito-idp:AdminDisableUser
+              - cognito-idp:AdminEnableUser
+              - cognito-idp:AdminGetUser
+              - cognito-idp:AdminUserGlobalSignOut
+            Resource: !Sub arn:${AWS::Partition}:cognito-idp:us-east-1:${AWS::AccountId}:userpool/${StaffUserPoolId}
+
+  GitHubActionsOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      Tags:
+        - Key: Project
+          Value: quickducks
+        - Key: Environment
+          Value: production
+
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: quickducks-cloudformation-execution
+      Description: Executes only the resources declared by the QuickDucks application stack
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Tags:
+        - Key: Project
+          Value: quickducks
+        - Key: Environment
+          Value: production
+      Policies:
+        - PolicyName: QuickDucksCognitoResources
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateTaggedUserPool
+                Effect: Allow
+                Action: cognito-idp:CreateUserPool
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: TagNewUserPool
+                Effect: Allow
+                Action: cognito-idp:TagResource
+                Resource: !Sub arn:${AWS::Partition}:cognito-idp:us-east-1:${AWS::AccountId}:userpool/*
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: ManageTaggedUserPoolResources
+                Effect: Allow
+                Action:
+                  - cognito-idp:CreateManagedLoginBranding
+                  - cognito-idp:CreateUserPoolClient
+                  - cognito-idp:CreateUserPoolDomain
+                  - cognito-idp:DeleteManagedLoginBranding
+                  - cognito-idp:DeleteUserPool
+                  - cognito-idp:DeleteUserPoolClient
+                  - cognito-idp:DeleteUserPoolDomain
+                  - cognito-idp:DescribeManagedLoginBranding
+                  - cognito-idp:DescribeManagedLoginBrandingByClient
+                  - cognito-idp:DescribeUserPool
+                  - cognito-idp:DescribeUserPoolClient
+                  - cognito-idp:GetUserPoolMfaConfig
+                  - cognito-idp:ListTagsForResource
+                  - cognito-idp:SetUserPoolMfaConfig
+                  - cognito-idp:UpdateManagedLoginBranding
+                  - cognito-idp:UpdateUserPool
+                  - cognito-idp:UpdateUserPoolClient
+                  - cognito-idp:UpdateUserPoolDomain
+                Resource: !Sub arn:${AWS::Partition}:cognito-idp:us-east-1:${AWS::AccountId}:userpool/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+              - Sid: UpdateTaggedUserPoolTags
+                Effect: Allow
+                Action: cognito-idp:TagResource
+                Resource: !Sub arn:${AWS::Partition}:cognito-idp:us-east-1:${AWS::AccountId}:userpool/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+                  StringEqualsIfExists:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: RemoveOnlyReleaseUserPoolTags
+                Effect: Allow
+                Action: cognito-idp:UntagResource
+                Resource: !Sub arn:${AWS::Partition}:cognito-idp:us-east-1:${AWS::AccountId}:userpool/*
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Version
+                      - Commit
+                  "Null":
+                    aws:TagKeys: "false"
+              - Sid: DescribeUserPoolDomainByName
+                Effect: Allow
+                Action: cognito-idp:DescribeUserPoolDomain
+                Resource: "*"
+        - PolicyName: QuickDucksSesIdentity
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateTaggedSesIdentity
+                Effect: Allow
+                Action: ses:CreateEmailIdentity
+                Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: TagNewSesIdentity
+                Effect: Allow
+                Action: ses:TagResource
+                Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: ManageTaggedSesIdentity
+                Effect: Allow
+                Action:
+                  - ses:DeleteEmailIdentity
+                  - ses:GetEmailIdentity
+                  - ses:ListTagsForResource
+                  - ses:PutEmailIdentityDkimAttributes
+                  - ses:PutEmailIdentityDkimSigningAttributes
+                  - ses:PutEmailIdentityMailFromAttributes
+                Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+              - Sid: UpdateTaggedSesIdentityTags
+                Effect: Allow
+                Action: ses:TagResource
+                Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+                  StringEqualsIfExists:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: RemoveOnlyReleaseSesIdentityTags
+                Effect: Allow
+                Action: ses:UntagResource
+                Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Version
+                      - Commit
+                  "Null":
+                    aws:TagKeys: "false"
+        - PolicyName: QuickDucksWorkerIamUser
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CreateTaggedWorkerUser
+                Effect: Allow
+                Action: iam:CreateUser
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:user/quickducks-worker-ses
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                    iam:PermissionsBoundary: !Ref WorkerPermissionsBoundary
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: TagNewWorkerUser
+                Effect: Allow
+                Action: iam:TagUser
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:user/quickducks-worker-ses
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: ManageTaggedWorkerUserAndInlinePolicy
+                Effect: Allow
+                Action:
+                  - iam:DeleteUser
+                  - iam:DeleteUserPolicy
+                  - iam:GetLoginProfile
+                  - iam:GetUser
+                  - iam:GetUserPolicy
+                  - iam:ListAccessKeys
+                  - iam:ListAttachedUserPolicies
+                  - iam:ListGroupsForUser
+                  - iam:ListUserPolicies
+                  - iam:ListUserTags
+                  - iam:PutUserPolicy
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:user/quickducks-worker-ses
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+              - Sid: PutTaggedWorkerUserBoundary
+                Effect: Allow
+                Action: iam:PutUserPermissionsBoundary
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:user/quickducks-worker-ses
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+                    iam:PermissionsBoundary: !Ref WorkerPermissionsBoundary
+              - Sid: UpdateTaggedWorkerUserTags
+                Effect: Allow
+                Action: iam:TagUser
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:user/quickducks-worker-ses
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+                  StringEqualsIfExists:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: RemoveOnlyReleaseWorkerUserTags
+                Effect: Allow
+                Action: iam:UntagUser
+                Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:user/quickducks-worker-ses
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Project: quickducks
+                    aws:ResourceTag/Environment: production
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Version
+                      - Commit
+                  "Null":
+                    aws:TagKeys: "false"
+
+  GitHubDeploymentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: quickducks-github-deploy
+      Description: GitHub Actions change-set control for only the QuickDucks production stack
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref GitHubActionsOidcProvider
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubRepository}:environment:${GitHubEnvironment}
+      Tags:
+        - Key: Project
+          Value: quickducks
+        - Key: Environment
+          Value: production
+      Policies:
+        - PolicyName: QuickDucksApplicationStackDeployment
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ValidateLocalTemplates
+                Effect: Allow
+                Action: cloudformation:ValidateTemplate
+                Resource: "*"
+              - Sid: CreateApplicationChangeSet
+                Effect: Allow
+                Action: cloudformation:CreateChangeSet
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${ApplicationStackName}/*
+                Condition:
+                  ArnEquals:
+                    cloudformation:RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                  StringEquals:
+                    aws:RequestTag/Project: quickducks
+                    aws:RequestTag/Environment: production
+                  StringLike:
+                    cloudformation:ChangeSetName: awscli-cloudformation-package-deploy-*
+                  ForAllValues:StringEquals:
+                    aws:TagKeys:
+                      - Project
+                      - Environment
+                      - Version
+                      - Commit
+              - Sid: ManageApplicationChangeSet
+                Effect: Allow
+                Action:
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${ApplicationStackName}/*
+                Condition:
+                  StringLike:
+                    cloudformation:ChangeSetName: awscli-cloudformation-package-deploy-*
+              - Sid: ReadApplicationStackForDeploy
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - cloudformation:GetTemplateSummary
+                Resource: !Sub arn:${AWS::Partition}:cloudformation:us-east-1:${AWS::AccountId}:stack/${ApplicationStackName}/*
+              - Sid: PassOnlyQuickDucksExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CloudFormationExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+
+Outputs:
+  GitHubDeploymentRoleArn:
+    Description: Set this as the AWS_DEPLOY_ROLE_ARN GitHub Actions variable
+    Value: !GetAtt GitHubDeploymentRole.Arn
+  CloudFormationExecutionRoleArn:
+    Description: Set this as the AWS_CLOUDFORMATION_ROLE_ARN GitHub Actions variable
+    Value: !GetAtt CloudFormationExecutionRole.Arn

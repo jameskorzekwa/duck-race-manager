@@ -15,14 +15,19 @@ const migrationNames = [
   "0009_heat_result_operations.sql",
   "0010_staff_lifecycle.sql",
   "0011_support_operations.sql",
+  "0012_staff_role_assignments.sql",
 ];
+
+const applyMigrations = (database, names = migrationNames) => {
+  for (const name of names) {
+    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
+  }
+};
 
 const createDatabase = () => {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
-  for (const name of migrationNames) {
-    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
-  }
+  applyMigrations(database);
   return database;
 };
 
@@ -113,6 +118,87 @@ test("staff access commands retain administrator and target relationships", () =
 
   assert.throws(() => database.exec("DELETE FROM staff_profiles WHERE id = 'admin'"), /FOREIGN KEY constraint failed/);
   assert.throws(() => database.exec("DELETE FROM staff_profiles WHERE id = 'staff'"), /FOREIGN KEY constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0012 backfills historical command metadata without granting operational roles", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationNames.filter((name) => name !== "0012_staff_role_assignments.sql"));
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, is_system_admin)
+    VALUES
+      ('actor', 'actor-sub', 'actor@example.com', 1),
+      ('promoted', 'promoted-sub', 'promoted@example.com', 0),
+      ('demoted', 'demoted-sub', 'demoted@example.com', 1);
+    INSERT INTO staff_access_commands
+      (id, command_type, target_staff_profile_id, requested_by_staff_profile_id, requested_at, completed_at)
+    VALUES
+      ('grant-promoted', 'ADD_STAFF', 'promoted', 'actor', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z'),
+      ('grant-demoted', 'ADD_STAFF', 'demoted', 'actor', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z');
+    INSERT INTO staff_access_audit_events
+      (id, command_id, actor_staff_profile_id, target_staff_profile_id, action, occurred_at, details_json)
+    VALUES
+      ('grant-promoted-audit', 'grant-promoted', 'actor', 'promoted', 'STAFF_ACCESS_GRANTED',
+       '2026-07-01T00:00:00Z', '{"role":"STAFF"}'),
+      ('grant-demoted-audit', 'grant-demoted', 'actor', 'demoted', 'STAFF_ACCESS_GRANTED',
+       '2026-07-01T00:00:00Z', '{"role":"ADMIN"}');
+    INSERT INTO staff_lifecycle_commands
+      (id, command_type, target_staff_profile_id, requested_by_staff_profile_id,
+       requested_role, result_is_system_admin, result_is_active, requested_at, completed_at)
+    VALUES
+      ('promote', 'CHANGE_STAFF_ROLE', 'promoted', 'actor', 'ADMIN', 1, 1,
+       '2026-07-02T00:00:00Z', '2026-07-02T00:00:00Z'),
+      ('demote', 'CHANGE_STAFF_ROLE', 'demoted', 'actor', 'STAFF', 0, 1,
+       '2026-07-03T00:00:00Z', '2026-07-03T00:00:00Z'),
+      ('deactivate', 'DEACTIVATE_STAFF', 'promoted', 'actor', NULL, 1, 0,
+       '2026-07-04T00:00:00Z', '2026-07-04T00:00:00Z');
+    UPDATE staff_profiles SET is_system_admin = 1 WHERE id = 'promoted';
+    UPDATE staff_profiles SET is_system_admin = 0 WHERE id = 'demoted';
+  `);
+
+  applyMigrations(database, ["0012_staff_role_assignments.sql"]);
+
+  const allRoles = '["REGISTRATION","DUCK_MANAGER","ANNOUNCER","HEAT_RUNNER","RESULT_TAKER","RETURN_STEWARD","RACE_DIRECTOR"]';
+  assert.deepEqual(
+    database.prepare(
+      `SELECT id, requested_account_type, requested_roles_json
+         FROM staff_access_commands
+        ORDER BY id`,
+    ).all().map((row) => ({ ...row })),
+    [
+      { id: "grant-demoted", requested_account_type: "ADMIN", requested_roles_json: "[]" },
+      { id: "grant-promoted", requested_account_type: "STAFF", requested_roles_json: allRoles },
+    ],
+  );
+  assert.deepEqual(
+    database.prepare(
+      `SELECT id, requested_roles_json, expected_role_revision, result_role_revision
+         FROM staff_lifecycle_commands
+        ORDER BY id`,
+    ).all().map((row) => ({ ...row })),
+    [
+      {
+        id: "deactivate", requested_roles_json: null,
+        expected_role_revision: null, result_role_revision: null,
+      },
+      {
+        id: "demote", requested_roles_json: allRoles,
+        expected_role_revision: null, result_role_revision: null,
+      },
+      {
+        id: "promote", requested_roles_json: "[]",
+        expected_role_revision: null, result_role_revision: null,
+      },
+    ],
+  );
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM staff_role_assignments WHERE staff_profile_id = 'demoted'",
+  ).get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM staff_role_assignments WHERE staff_profile_id = 'promoted'",
+  ).get().count, 0);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

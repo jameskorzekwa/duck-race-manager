@@ -1,3 +1,4 @@
+import { operationalRoles, type OperationalRole } from "./authorization.ts";
 import type { PublicRaceStatus } from "./race-status.ts";
 import type { RegistrationStatusRecord } from "./types.ts";
 
@@ -154,8 +155,29 @@ details.operation-card[open] > summary { margin-bottom:1rem; }
 .roster-list { display:grid; gap:.45rem; padding:0; list-style:none; }
 .roster-list li { padding:.65rem; border-left:.35rem solid var(--water); background:#eaf7fa; }
 .private-result { overflow-wrap:anywhere; }
+.live-board { border-width:4px; background:#fff; box-shadow:7px 7px 0 var(--ink); }
+.live-board-title { max-width:none; margin-bottom:.5rem; }
+.freshness { display:inline-block; margin:.2rem 0 1rem; padding:.45rem .7rem; border:2px solid var(--water-dark); border-radius:999px; background:#e4f4f8; color:#245264; font-weight:900; }
+.board-round { margin-top:1.5rem; }
+.board-round h3 { font-size:1.65rem; }
+.board-grid { display:grid; gap:.8rem; }
+.board-heat { padding:1rem; border:3px solid var(--ink); border-radius:.85rem; background:var(--paper); }
+.board-heat.current { background:#fff1a8; box-shadow:4px 4px 0 var(--ink); }
+.board-heat h4 { margin:.1rem 0 .4rem; font-size:1.2rem; }
+.board-entry { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.4rem 1rem; margin:.35rem 0 0; padding:.45rem .6rem; border-left:.35rem solid var(--water); background:#fff; font-weight:800; }
+.podium { display:grid; gap:.65rem; margin:1rem 0; }
+.podium-place { padding:.8rem 1rem; border:3px solid var(--ink); border-radius:.75rem; background:var(--yellow); font-size:1.1rem; font-weight:950; }
+.station-panel { max-width:62rem; background:#fff; }
+.station-panel h1 { max-width:none; }
+.station-panel h2 { font-size:clamp(2rem,8vw,4rem); }
+.station-control { min-height:4rem; padding:1rem 1.3rem; font-size:clamp(1.15rem,4vw,1.45rem); }
+.station-action { display:grid; gap:1rem; margin:1.2rem 0; }
+.station-roster { display:grid; gap:.65rem; padding:0; list-style:none; }
+.station-roster li { padding:1rem; border:3px solid var(--ink); border-radius:.7rem; background:#eaf7fa; font-size:1.12rem; font-weight:900; }
+.station-selection { padding:1rem; border:3px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; font-size:1.1rem; }
+.station-links { margin:1rem 0 1.4rem; padding:1rem; border:3px solid var(--ink); border-radius:.9rem; background:var(--yellow); }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
-@media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } }
+@media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .search-form { grid-template-columns:1fr; } .staff-access-card .actions { width:100%; } }
 @media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-glide 3.1s ease-in-out infinite; } .hero-water { animation:water-swell 4.2s ease-in-out infinite; } .hero::before { animation:current 2.8s linear infinite; } @keyframes duck-glide { 0%,100% { transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); } 50% { transform:translateX(calc(var(--duck-center) + 6px)) translateY(-9px) rotate(1deg); } } @keyframes water-swell { 0%,100% { transform:translateY(0); } 50% { transform:translateY(4px); } } @keyframes current { to { background-position:-10rem 50%; } } }
 `;
@@ -190,6 +212,15 @@ const page = ({ title, description, content, robots = "index,follow" }: PageOpti
   </body>
 </html>`;
 
+const liveBoard = (): string => `
+  <section class="status-section live-board" data-live-board aria-labelledby="live-board-title">
+    <p class="eyebrow">Live race board</p>
+    <h2 class="live-board-title" id="live-board-title" data-live-board-title>Checking the race…</h2>
+    <p class="lede" data-live-board-summary>Loading the latest official race information.</p>
+    <p class="freshness" data-live-freshness aria-live="polite">Checking for fresh updates…</p>
+    <div data-live-board-content><p class="empty-state">The board will appear here when race information is available.</p></div>
+  </section>`;
+
 export const renderHome = (): string => page({
   title: "Race-day registration and results",
   description: "Register for the next QuickDucks race, check your heat, and follow race-day results.",
@@ -207,6 +238,7 @@ export const renderHome = (): string => page({
       ${duck("hero-duck")}
     </section>
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
+    ${liveBoard()}
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p><a class="card-link" href="/register">Open registration →</a></article>
       <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/staff">Open staff tools →</a></article>
@@ -231,7 +263,7 @@ export const renderHome = (): string => page({
       <div class="duck-list" data-search-results></div>
       <div class="privacy"><strong>Your data is temporary.</strong><span>After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
     </section>
-    <script src="/assets/home.js" defer></script>`,
+    <script src="/assets/live.js" defer></script><script src="/assets/home.js" defer></script>`,
 });
 
 export const renderRegistration = (turnstileSiteKey?: string): string => page({
@@ -251,11 +283,11 @@ export const renderRegistration = (turnstileSiteKey?: string): string => page({
           <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"><span class="field-error" data-field-error="first_name"></span></label>
           <label>Last name<input name="last_name" autocomplete="family-name" maxlength="80" required placeholder="Rivera"><span class="field-error" data-field-error="last_name"></span></label>
         </div>
+        <p class="muted" data-public-name-policy>Loading how your name will appear publicly…</p>
         <div class="field-grid">
           <label><span class="label-text" data-email-label>Email (optional)</span><input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>Used only for operational race updates.</span><span class="field-error" data-field-error="email"></span></label>
           <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="32" placeholder="(555) 010-2040"><span class="field-error" data-field-error="phone"></span></label>
         </div>
-        <label class="check"><input name="email_notifications_enabled" type="checkbox" checked><span>Get duck assignment, heat, and result updates by email. You can disable these later.</span></label>
         <label>After the race<select name="duck_keep_preference"><option value="UNDECIDED">I’m not sure yet</option><option value="RETURN">I plan to return the duck</option><option value="KEEP">I plan to keep the duck</option></select><span>This preference helps staff plan. Physical return processing remains authoritative.</span></label>
         ${turnstileSiteKey === undefined
           ? '<div class="turnstile-mock">Registration protection is still being configured.</div>'
@@ -267,7 +299,9 @@ export const renderRegistration = (turnstileSiteKey?: string): string => page({
     </section>`,
 });
 
-export const renderStatus = (registration?: RegistrationStatusRecord): string => {
+export const renderStatus = (
+  registration?: RegistrationStatusRecord & { raceStatus?: PublicRaceStatus | null },
+): string => {
   const firstName = registration?.first_name ?? "Jamie";
   const lookupCode = registration?.lookup_code ?? "DUCK8234";
   const eventName = registration?.event_name ?? "Summer Duck Race";
@@ -288,6 +322,10 @@ export const renderStatus = (registration?: RegistrationStatusRecord): string =>
     ? new Intl.DateTimeFormat("en-US", { dateStyle: "full", timeZone: "UTC" })
       .format(new Date(`${registration.event_date}T12:00:00Z`))
     : "To be announced";
+  const participantName = registration === undefined
+    ? "Jamie Rivera"
+    : `${registration.first_name} ${registration.last_name}`;
+  const raceStatus = registration?.raceStatus;
   return page({
   title: "Registration status",
   description: "Private QuickDucks participant registration status.",
@@ -299,10 +337,13 @@ export const renderStatus = (registration?: RegistrationStatusRecord): string =>
       <h1 class="page-title">${escapeHtml(heading)}</h1>
       <p class="lede">Keep this page private. This is your status link for ${escapeHtml(eventName)}.</p>
       <div class="notice"><strong>Staff lookup code</strong><br><span class="code">${escapeHtml(lookupCode)}</span><br><span class="muted">Save this code or bookmark this page.</span></div>
-      <dl class="facts"><div class="fact"><dt>Status</dt><dd>${registrationStatus}</dd></div><div class="fact"><dt>Race date</dt><dd>${escapeHtml(raceDate)}</dd></div></dl>
-      <p class="muted">You’ll see your duck and heat here after staff assigns them. Email and phone stay staff-only, and the complete race dataset is deleted after return processing.</p>
+      <div data-live-personal="private"><dl class="facts"><div class="fact"><dt>Participant</dt><dd>${escapeHtml(participantName)}</dd></div><div class="fact"><dt>Status</dt><dd>${registrationStatus}</dd></div><div class="fact"><dt>Race date</dt><dd>${escapeHtml(raceDate)}</dd></div></dl>
+        ${raceStatus === undefined ? "" : raceStatus === null
+          ? '<p class="muted">Race status is not currently public.</p>'
+          : publicStatusFacts(raceStatus, false)}</div>
+      <p class="muted">Duck, heat, and result facts match public race status. Email and phone stay staff-only, and the complete race dataset is deleted after return processing.</p>
       <div class="actions"><a class="button" href="/register">Register another participant</a><a class="button secondary" href="/">Back to home</a></div>
-    </section>`,
+    </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
   });
 };
 
@@ -328,7 +369,7 @@ const roundLabel = (round: string): string => round === "FINAL" ? "Final" : "Rou
 const outcomeLabel = (outcome: string): string =>
   outcome.replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
 
-const publicStatusFacts = (status: PublicRaceStatus): string => {
+const publicStatusFacts = (status: PublicRaceStatus, showParticipant = true): string => {
   const assignment = status.duck === null
     ? "Waiting for duck assignment"
     : `Duck #${status.duck.visibleNumber}`;
@@ -339,7 +380,10 @@ const publicStatusFacts = (status: PublicRaceStatus): string => {
   const running = status.currentHeat === null
     ? "Racing has not started"
     : `${roundLabel(status.currentHeat.round)} · Heat ${status.currentHeat.number}`;
-  return `<dl class="facts"><div class="fact"><dt>Participant</dt><dd>${escapeHtml(status.participantDisplayName)}</dd></div><div class="fact"><dt>Duck</dt><dd>${assignment}</dd></div><div class="fact"><dt>Assigned heat</dt><dd>${heatLabel}</dd></div><div class="fact"><dt>Currently running</dt><dd>${running}</dd></div><div class="fact"><dt>Race status</dt><dd>${outcomeLabel(status.outcome)}</dd></div></dl>`;
+  const participant = showParticipant
+    ? `<div class="fact"><dt>Participant</dt><dd>${escapeHtml(status.participantDisplayName)}</dd></div>`
+    : "";
+  return `<dl class="facts">${participant}<div class="fact"><dt>Duck</dt><dd>${assignment}</dd></div><div class="fact"><dt>Assigned heat</dt><dd>${heatLabel}</dd></div><div class="fact"><dt>Currently running</dt><dd>${running}</dd></div><div class="fact"><dt>Race status</dt><dd>${outcomeLabel(status.outcome)}</dd></div></dl>`;
 };
 
 export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string => page({
@@ -352,10 +396,10 @@ export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string =>
       <p class="eyebrow">Public race status</p>
       <h1 class="page-title">${status.duck === null ? "Waiting for a duck" : `Duck #${status.duck.visibleNumber}`}</h1>
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
-      ${publicStatusFacts(status)}
+      <div data-live-personal="duck">${publicStatusFacts(status)}</div>
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, or private links.</span></div>
       <div class="actions"><a class="button secondary" href="/">Visit QuickDucks</a></div>
-    </section>`,
+    </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
 });
 
 export const renderStaffLogin = (returnTo = "/staff"): string => page({
@@ -368,7 +412,7 @@ export const renderStaffLogin = (returnTo = "/staff"): string => page({
       <p class="eyebrow">Protected race operations</p>
       <h1 class="page-title">Staff sign in</h1>
       <p class="lede">Use your invited QuickDucks staff email. Cognito will send a one-time sign-in code.</p>
-      <div class="privacy"><strong>Authorized staff only.</strong><span>Participant email and phone are available only after Cognito verifies your account and QuickDucks finds a matching staff profile.</span></div>
+      <div class="privacy"><strong>Authorized staff only.</strong><span>QuickDucks verifies the Cognito account, active staff profile, and assigned operational roles. Participant email and phone require registration or race-director authority.</span></div>
       <div class="actions">
         <a class="button" href="${escapeHtml(`/staff/login/start?returnTo=${encodeURIComponent(returnTo)}`)}">Continue to secure sign in</a>
         <a class="button secondary" href="/">Back to public site</a>
@@ -376,23 +420,53 @@ export const renderStaffLogin = (returnTo = "/staff"): string => page({
     </section>`,
 });
 
-export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): string => page({
+const operationalRoleLabels: Record<OperationalRole, string> = {
+  REGISTRATION: "Registration",
+  DUCK_MANAGER: "Duck manager",
+  ANNOUNCER: "Announcer",
+  HEAT_RUNNER: "Heat runner",
+  RESULT_TAKER: "Result taker",
+  RETURN_STEWARD: "Return steward",
+  RACE_DIRECTOR: "Race director",
+};
+
+const roleCheckboxes = operationalRoles.map((role) =>
+  `<label class="check"><input type="checkbox" name="roles" value="${role}"><span class="label-text">${operationalRoleLabels[role]}</span></label>`
+).join("");
+
+export const renderStaffHome = (
+  displayName: string,
+  isSystemAdmin: boolean,
+  roles: readonly OperationalRole[],
+): string => {
+  const hasRole = (role: OperationalRole): boolean => isSystemAdmin || roles.includes(role);
+  const canUseConsole = isSystemAdmin || roles.length > 0;
+  const canRegistration = hasRole("REGISTRATION") || hasRole("RACE_DIRECTOR");
+  const canInventory = hasRole("DUCK_MANAGER") || hasRole("RACE_DIRECTOR");
+  const canRaceRead = hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER")
+    || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
+  const canStartLine = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
+  const canFinishLine = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
+  const canReturns = hasRole("RETURN_STEWARD") || hasRole("RACE_DIRECTOR");
+  const canDirectRace = hasRole("RACE_DIRECTOR");
+  return page({
   title: "Staff tools",
   description: "Protected QuickDucks staff race operations.",
   robots: "noindex,nofollow",
   content: `
-    <section class="page-panel operations-panel" data-operations-root data-system-admin="${isSystemAdmin ? "true" : "false"}">
+    <section class="page-panel operations-panel" data-operations-root data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p><a href="/staff/logout">Sign out</a></div>
       ${duck()}
       <p class="eyebrow">Staff operations</p>
       <h1 class="page-title operations-title">Race control, in one place.</h1>
       <p class="lede">Open the duck’s NFC or QR tag. QuickDucks will take you to pairing when it is available, or inspection when it is already assigned.</p>
+      ${(canStartLine || canFinishLine) ? `<div class="actions station-links" aria-label="Race-day stations">${canStartLine ? '<a class="button station-control" href="/staff/start-line">Open start line</a>' : ""}${canFinishLine ? '<a class="button secondary station-control" href="/staff/finish-line">Open finish line</a>' : ""}</div>` : ""}
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
       <div class="actions"><a class="button secondary" href="/mock/staff/ducks/128/pair">Preview pairing layout</a></div>
-      <nav class="console-nav" aria-label="Staff operations"><a href="#events">Event</a><a href="#participants">Participants</a><a href="#inventory">Inventory</a><a href="#heats">Heats</a><a href="#returns">Returns</a>${isSystemAdmin ? '<a href="#support">Support</a><a href="#access">Access</a>' : ""}</nav>
+      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants">Participants</a>' : ""}${canInventory ? '<a href="#inventory">Inventory</a>' : ""}${canRaceRead ? '<a href="#heats">Heats</a>' : ""}${canReturns ? '<a href="#returns">Returns</a>' : ""}${isSystemAdmin ? '<a href="#support">Support</a><a href="#access">Access</a>' : ""}</nav>
       <p class="message-line muted" data-console-message aria-live="polite">Loading operations…</p>
 
-      <section class="console-section" id="events" aria-labelledby="events-title">
+      <section class="console-section" id="events" aria-labelledby="events-title"${canUseConsole ? "" : " hidden"}>
         <p class="eyebrow">Event control</p><h2 id="events-title">Event</h2>
         <div class="section-tools">
           <label>Working event<select data-event-select aria-label="Working event"><option value="">Loading events…</option></select></label>
@@ -419,7 +493,7 @@ export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): st
               <button class="button" type="submit">Save draft configuration</button>
             </form>
           </details>` : ""}
-          <article class="operation-card"><h3>Readiness and lifecycle</h3><p class="muted">Every transition is checked again by the server.</p><div class="data-list" data-event-readiness></div></article>
+          <article class="operation-card"><h3>Readiness and lifecycle</h3><p class="muted">${canRaceRead ? "Every transition is checked again by the server." : "Use your assigned station section for operational work."}</p><div class="data-list" data-event-readiness></div></article>
           ${isSystemAdmin ? `<details class="operation-card danger-zone" data-delete-draft-card hidden><summary>Delete empty draft</summary>
             <p class="muted">Only a revision-matched draft with no race data or operational history can be deleted.</p>
             <form data-delete-draft-form><label>Type the required confirmation<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Delete empty draft</button></form>
@@ -427,7 +501,7 @@ export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): st
         </div>
       </section>
 
-      <section class="console-section" id="participants" aria-labelledby="participants-title">
+      <section class="console-section" id="participants" aria-labelledby="participants-title"${canRegistration ? "" : " hidden"}>
         <p class="eyebrow">Registration desk</p><h2 id="participants-title">Participants</h2>
         <form class="operation-card" data-participant-filter-form>
           <div class="field-grid"><label>Search<input name="q" maxlength="80" placeholder="Name, code, email, or phone"></label><label>Status<select name="status"><option value="">All statuses</option><option value="SUBMITTED">Submitted</option><option value="ACTIVE">Active</option><option value="WITHDRAWN">Withdrawn</option><option value="DISQUALIFIED">Disqualified</option></select></label></div>
@@ -439,7 +513,6 @@ export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): st
             <form data-walkup-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
               <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
-              <label class="check"><input name="emailNotificationsEnabled" type="checkbox" checked><span class="label-text">Email operational updates</span></label>
               <label>Duck preference<select name="duckKeepPreference"><option value="UNDECIDED">Undecided</option><option value="RETURN">Return</option><option value="KEEP">Keep</option></select></label>
               <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
               <button class="button" type="submit">Create walk-up</button>
@@ -450,7 +523,6 @@ export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): st
             <form data-participant-edit-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
               <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
-              <label class="check"><input name="emailNotificationsEnabled" type="checkbox"><span class="label-text">Email operational updates</span></label>
               <label>Duck preference<select name="duckKeepPreference"><option value="UNDECIDED">Undecided</option><option value="RETURN">Return</option><option value="KEEP">Keep</option></select></label>
               <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
               <button class="button secondary" type="submit">Save participant details</button>
@@ -460,7 +532,7 @@ export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): st
         </div>
       </section>
 
-      <section class="console-section" id="inventory" aria-labelledby="inventory-title">
+      <section class="console-section" id="inventory" aria-labelledby="inventory-title"${canInventory ? "" : " hidden"}>
         <p class="eyebrow">Physical ducks</p><h2 id="inventory-title">Inventory</h2>
         <p class="muted">Intake reserves a new duck for the selected event. Assigning an available duck reserves it automatically; there is no separate reserve command.</p>
         <details class="operation-card"><summary>Intake duck and active tag</summary>
@@ -491,17 +563,17 @@ export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): st
         </div>
       </section>
 
-      <section class="console-section" id="heats" aria-labelledby="heats-title">
+      <section class="console-section" id="heats" aria-labelledby="heats-title"${canRaceRead ? "" : " hidden"}>
         <p class="eyebrow">Race control</p><h2 id="heats-title">Heats and results</h2>
         <div class="console-grid">
-          <article class="operation-card"><h3>Balanced round-one plan</h3><p class="muted">For post-close balanced events, preview the exact roster before committing it.</p><div class="actions"><button class="button secondary small" type="button" data-plan-preview>Preview plan</button><button class="button small" type="button" data-plan-commit disabled>Commit preview</button></div><div class="data-list" data-plan-result></div></article>
+          <article class="operation-card"${canDirectRace ? "" : " hidden"}><h3>Balanced round-one plan</h3><p class="muted">For post-close balanced events, preview the exact roster before committing it.</p><div class="actions"><button class="button secondary small" type="button" data-plan-preview>Preview plan</button><button class="button small" type="button" data-plan-commit disabled>Commit preview</button></div><div class="data-list" data-plan-result></div></article>
           <article class="operation-card"><h3>Finalists</h3><button class="button secondary small" type="button" data-refresh-finalists>Verify finalists</button><div class="data-list" data-finalist-list></div></article>
         </div>
         <div class="section-tools"><button class="button secondary small" type="button" data-refresh-heats>Refresh heats</button></div>
         <div class="console-grid wide"><div class="data-list" data-heat-list></div><article class="operation-card" data-heat-detail hidden><h3 data-heat-name>Heat detail</h3><dl class="facts compact-facts" data-heat-facts></dl><div data-heat-controls></div><h3>Roster</h3><ul class="roster-list" data-heat-roster></ul><h3>Published results</h3><div class="data-list" data-heat-results></div></article></div>
       </section>
 
-      <section class="console-section" id="returns" aria-labelledby="returns-title">
+      <section class="console-section" id="returns" aria-labelledby="returns-title"${canReturns ? "" : " hidden"}>
         <p class="eyebrow">Physical reconciliation</p><h2 id="returns-title">Returns</h2>
         <div class="console-grid">
           <article class="operation-card" data-return-review data-system-admin="${isSystemAdmin ? "true" : "false"}" hidden>
@@ -524,12 +596,53 @@ export const renderStaffHome = (displayName: string, isSystemAdmin: boolean): st
       </section>
 
       <section class="console-section" id="access" aria-labelledby="access-title" data-staff-access>
-        <p class="eyebrow">Administrator</p><h2 id="access-title">Staff access</h2><p class="lede">Invite staff, change roles, or disable and restore Cognito access.</p><div class="privacy"><strong>Administrators have deletion authority.</strong><span>Only grant Administrator to people who may review returns, manage support, and permanently delete a completed race.</span></div>
-        <form class="operation-card" data-staff-access-form><div class="field-grid"><label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required></label><label>Display name<input name="displayName" autocomplete="off" maxlength="100" required></label></div><label>Role<select name="role" required><option value="STAFF">Regular staff</option><option value="ADMIN">Administrator</option></select></label><button class="button" type="submit">Add staff access</button></form>
+        <p class="eyebrow">Administrator</p><h2 id="access-title">Staff access</h2><p class="lede">Invite staff, combine operational roles, or disable and restore Cognito access.</p><div class="privacy"><strong>Roles are composable.</strong><span>Give regular staff every station role they need and no others. Administrators implicitly have every permission and do not have role assignments.</span></div>
+        <form class="operation-card" data-staff-access-form><div class="field-grid"><label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required></label><label>Display name<input name="displayName" autocomplete="off" maxlength="100" required></label></div><label>Account type<select name="role" required><option value="STAFF">Regular staff</option><option value="ADMIN">System administrator</option></select></label><fieldset data-create-role-set><legend>Operational roles</legend>${roleCheckboxes}</fieldset><button class="button" type="submit">Add staff access</button></form>
         <p class="message-line muted" data-staff-access-message aria-live="polite">Loading authorized staff…</p><div class="staff-access-list" data-staff-access-list></div>
       </section>` : ""}
-      <script src="/assets/staff-home.js" defer></script>
+      ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
     </section>`,
+  });
+};
+
+export const renderStartLine = (displayName: string, interactive = true): string => page({
+  title: "Start line",
+  description: "Focused protected QuickDucks start-line station.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel station-panel" data-start-line>
+    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Start line</p><span><a href="/staff">Staff home</a> · <a href="/staff/logout">Sign out</a></span></div>
+    <p class="eyebrow">Start-line station</p><h1 class="page-title">Prepare the next heat.</h1>
+    <p class="freshness" data-station-freshness aria-live="polite">Checking the race…</p>
+    <p class="lede" data-station-event>Finding the active event and next heat.</p>
+    <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
+    <h3>Roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
+    <div class="station-action" data-station-action></div>
+    <p class="message-line muted" data-station-message aria-live="polite">This station can only lock, ready, call, or start a heat.</p>
+    ${interactive ? '<script src="/assets/start-line.js" defer></script>' : ""}
+  </section>`,
+});
+
+export const renderFinishLine = (displayName: string, interactive = true): string => page({
+  title: "Finish line",
+  description: "Focused protected QuickDucks finish-line station.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel station-panel" data-finish-line>
+    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Finish line</p><span><a href="/staff">Staff home</a> · <a href="/staff/logout">Sign out</a></span></div>
+    <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
+    <p class="freshness" data-station-freshness aria-live="polite">Checking the race…</p>
+    <p class="lede" data-station-event>Finding a running heat.</p>
+    <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
+    <h3>Authoritative roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
+    <div class="station-action" data-finish-action></div>
+    <form data-finish-scan-form hidden>
+      <label>Tag URL or duck number<input class="station-control" name="duck" autocomplete="off" inputmode="url" maxlength="512" required placeholder="https://quickducks.com/t/… or 128"><span>Scan or paste the complete QuickDucks tag URL, or enter the number printed on the duck.</span></label>
+      <div class="actions"><button class="button secondary station-control" type="submit">Add this duck</button><button class="button secondary station-control" type="button" data-start-nfc hidden>Scan NFC tag</button></div>
+    </form>
+    <div class="data-list" data-finish-selections></div>
+    <button class="button station-control" type="button" data-submit-result disabled>Submit official result</button>
+    <p class="message-line muted" data-station-message aria-live="polite">A scan only selects a duck. Nothing is submitted until you press the final button.</p>
+    ${interactive ? '<script src="/assets/finish-line.js" defer></script>' : ""}
+  </section>`,
 });
 
 export const renderStaffDuck = (token: string, displayName: string): string => page({
@@ -634,24 +747,6 @@ const appendStatusCard = (container, title, status, lookupCode) => {
   }
   container.append(card);
 };
-
-const myDucks = document.querySelector("[data-my-ducks]");
-const myDucksList = document.querySelector("[data-my-ducks-list]");
-fetch("/api/v1/registrations/mine", { headers: { accept: "application/json" } })
-  .then((response) => response.ok ? response.json() : Promise.reject())
-  .then(({ registrations }) => {
-    if (!Array.isArray(registrations) || registrations.length === 0) return;
-    for (const registration of registrations) {
-      appendStatusCard(
-        myDucksList,
-        registration.firstName + " " + registration.lastName,
-        registration.raceStatus,
-        registration.lookupCode,
-      );
-    }
-    myDucks.hidden = false;
-  })
-  .catch(() => {});
 
 const searchForm = document.querySelector("[data-status-search]");
 const searchMessage = document.querySelector("[data-search-message]");

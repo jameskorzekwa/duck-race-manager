@@ -1,4 +1,5 @@
 import type { StaffActor } from "./auth.ts";
+import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -14,6 +15,8 @@ const json = (value: unknown, status = 200): Response =>
 
 const adminRequired = (actor: StaffActor): Response | null =>
   actor.isSystemAdmin ? null : json({ error: "Administrator permission required." }, 403);
+
+const raceReadRoles = ["ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RACE_DIRECTOR"] as const;
 
 const readJson = async (request: Request): Promise<Record<string, unknown> | null> => {
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return null;
@@ -753,8 +756,10 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
            WHERE re.event_id = e.id AND r.status = 'ACTIVE'
              AND NOT EXISTS (SELECT 1 FROM heat_entries he WHERE he.race_entry_id = re.id AND he.round = 'ROUND_ONE')
         )
-        AND EXISTS (SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'ROUND_ONE')
-        AND NOT EXISTS (
+         AND EXISTS (SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'ROUND_ONE')
+         AND (SELECT COUNT(*) FROM heats h
+               WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') <= e.final_heat_capacity
+         AND NOT EXISTS (
           SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
             AND h.status NOT IN ('PLANNED', 'LOADING', 'READY')
         )`,
@@ -871,6 +876,9 @@ const readinessFor = (
       if (stats.active_entry_without_duck_count > 0) blockers.push("Every active participant needs an assigned duck.");
       if (stats.active_entry_without_round_one_heat_count > 0) blockers.push("Every active participant needs a round-one heat.");
       if (stats.round_one_heat_count === 0) blockers.push("At least one round-one heat is required.");
+      if (stats.round_one_heat_count > event.final_heat_capacity) {
+        blockers.push("Round-one heat count cannot exceed final capacity.");
+      }
       if (stats.round_one_unready_heat_count > 0) blockers.push("Round-one heats must not have started.");
       break;
     case "start-final":
@@ -926,6 +934,9 @@ const runLifecycleCommand = async (
 ): Promise<Response> => {
   if (definition.requiresAdmin) {
     const denied = adminRequired(actor);
+    if (denied !== null) return denied;
+  } else {
+    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
     if (denied !== null) return denied;
   }
   const payload = await readJson(request);
@@ -1204,7 +1215,10 @@ export const handleEventOperations = async (
 ): Promise<Response | null> => {
   const url = new URL(request.url);
   if (url.pathname === "/api/v1/staff/events") {
-    if (request.method === "GET") return listEvents(env);
+    if (request.method === "GET") {
+      const denied = requireAnyRole(actor, operationalRoles);
+      return denied ?? listEvents(env);
+    }
     if (request.method === "POST") return createEvent(request, env, actor);
     return null;
   }
@@ -1220,7 +1234,8 @@ export const handleEventOperations = async (
     new RegExp(`^/api/v1/staff/events/${eventIdPattern}/readiness$`),
   );
   if (readinessMatch !== null && request.method === "GET") {
-    return eventReadiness(readinessMatch[1], env);
+    const denied = requireAnyRole(actor, raceReadRoles);
+    return denied ?? eventReadiness(readinessMatch[1], env);
   }
 
   const lifecycleMatch = url.pathname.match(
@@ -1233,7 +1248,10 @@ export const handleEventOperations = async (
 
   const detailMatch = url.pathname.match(new RegExp(`^/api/v1/staff/events/${eventIdPattern}$`));
   if (detailMatch !== null && detailMatch[1] !== "return-review") {
-    if (request.method === "GET") return eventDetail(detailMatch[1], env);
+    if (request.method === "GET") {
+      const denied = requireAnyRole(actor, operationalRoles);
+      return denied ?? eventDetail(detailMatch[1], env);
+    }
     if (request.method === "DELETE") return deleteDraft(request, detailMatch[1], env, actor);
   }
   return null;

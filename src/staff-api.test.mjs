@@ -13,6 +13,7 @@ const actor = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
+  roles: ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"],
   authentication: "bearer",
 };
 
@@ -66,6 +67,7 @@ const migrationNames = [
   "0009_heat_result_operations.sql",
   "0010_staff_lifecycle.sql",
   "0011_support_operations.sql",
+  "0012_staff_role_assignments.sql",
 ];
 
 const sqliteD1 = (database) => ({
@@ -108,7 +110,7 @@ test("authenticates a Cognito subject only when a matching staff profile exists"
     email: actor.email,
     display_name: actor.displayName,
     is_system_admin: 0,
-  }));
+  }), () => ({ results: actor.roles.map((role) => ({ role })) }));
   const request = new Request("https://quickducks.com/api/v1/staff/ducks/token", {
     headers: { authorization: "Bearer valid.jwt.token" },
   });
@@ -116,6 +118,24 @@ test("authenticates a Cognito subject only when a matching staff profile exists"
 
   assert.deepEqual(result, actor);
   assert.deepEqual(db.statements[0].args, [actor.cognitoSub]);
+});
+
+test("authentication rejects invalid D1 roles instead of broadening access", async () => {
+  const db = makeDb(() => ({
+    id: actor.id,
+    cognito_sub: actor.cognitoSub,
+    email: actor.email,
+    display_name: actor.displayName,
+    is_system_admin: 0,
+  }), () => ({ results: [{ role: "ADMIN" }] }));
+  const result = await authenticateStaff(
+    new Request("https://quickducks.com/api/v1/staff/events", {
+      headers: { authorization: "Bearer valid.jwt.token" },
+    }),
+    makeEnv(db),
+    async () => ({ sub: actor.cognitoSub }),
+  );
+  assert.equal(result, null);
 });
 
 test("rejects anonymous staff API requests", async () => {
@@ -136,7 +156,7 @@ test("authenticates staff from the host-only session cookie", async () => {
     email: actor.email,
     display_name: actor.displayName,
     is_system_admin: 0,
-  }));
+  }), () => ({ results: actor.roles.map((role) => ({ role })) }));
   const request = new Request("https://quickducks.com/staff", {
     headers: { cookie: "__Host-quickducks_staff=valid.jwt.token" },
   });
@@ -194,6 +214,7 @@ test("regular staff cannot list or add staff access", async () => {
         email: "new.staff@example.com",
         displayName: "New Staff",
         role: "STAFF",
+        roles: ["REGISTRATION"],
       }),
     }),
     makeEnv(db),
@@ -208,7 +229,7 @@ test("regular staff cannot list or add staff access", async () => {
 });
 
 test("administrators list staff without exposing Cognito subjects", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb(
     () => null,
     () => ({
@@ -218,6 +239,8 @@ test("administrators list staff without exposing Cognito subjects", async () => 
           email: "admin@example.com",
           display_name: "Admin Person",
           is_system_admin: 1,
+          role_revision: 0,
+          roles_csv: "",
           created_at: "2026-07-26T00:00:00Z",
         },
         {
@@ -225,6 +248,8 @@ test("administrators list staff without exposing Cognito subjects", async () => 
           email: "staff@example.com",
           display_name: "Staff Person",
           is_system_admin: 0,
+          role_revision: 2,
+          roles_csv: "DUCK_MANAGER,REGISTRATION",
           created_at: "2026-07-26T00:00:00Z",
         },
       ],
@@ -239,11 +264,14 @@ test("administrators list staff without exposing Cognito subjects", async () => 
 
   assert.equal(response.status, 200);
   assert.deepEqual(body.staff.map((profile) => profile.role), ["ADMIN", "STAFF"]);
+  assert.deepEqual(body.staff[0].roles, []);
+  assert.deepEqual(body.staff[1].roles, ["REGISTRATION", "DUCK_MANAGER"]);
+  assert.equal(body.staff[1].roleRevision, 2);
   assert.equal(JSON.stringify(body).includes("cognitoSub"), false);
 });
 
 test("an administrator creates passwordless regular staff with command and audit records", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb(() => null);
   const provisioner = {
     async create(email, displayName) {
@@ -264,6 +292,7 @@ test("an administrator creates passwordless regular staff with command and audit
         email: " New.Staff@Example.com ",
         displayName: "  New   Staff ",
         role: "STAFF",
+        roles: ["REGISTRATION", "DUCK_MANAGER"],
       }),
     }),
     makeEnv(db),
@@ -282,12 +311,16 @@ test("an administrator creates passwordless regular staff with command and audit
   const sql = db.batches[0].map((statement) => statement.sql).join("\n");
   assert.match(sql, /INSERT INTO staff_access_commands/);
   assert.match(sql, /INSERT INTO staff_access_audit_events/);
+  assert.equal(db.batches[0].filter((statement) => statement.sql.includes("INSERT INTO staff_role_assignments")).length, 2);
   const audit = db.batches[0].find((statement) => statement.sql.includes("staff_access_audit_events"));
-  assert.equal(JSON.parse(audit.args[5]).role, "STAFF");
+  assert.deepEqual(JSON.parse(audit.args[5]), {
+    accountType: "STAFF",
+    roles: ["REGISTRATION", "DUCK_MANAGER"],
+  });
 });
 
 test("an administrator can grant administrator role", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb(() => null);
   const response = await handleStaffApi(
     new Request("https://quickducks.com/api/v1/staff/profiles", {
@@ -298,6 +331,7 @@ test("an administrator can grant administrator role", async () => {
         email: "another.admin@example.com",
         displayName: "Another Admin",
         role: "ADMIN",
+        roles: [],
       }),
     }),
     makeEnv(db),
@@ -314,18 +348,23 @@ test("an administrator can grant administrator role", async () => {
   assert.equal((await response.json()).staff.role, "ADMIN");
   const profileInsert = db.batches[0].find((statement) => statement.sql.includes("INSERT INTO staff_profiles"));
   assert.equal(profileInsert.args[4], 1);
+  assert.equal(db.batches[0].some((statement) => statement.sql.includes("INSERT INTO staff_role_assignments")), false);
 });
 
 test("replaying a staff grant does not create another Cognito identity", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb((sql) => {
     if (sql.includes("FROM staff_access_commands")) {
       return {
         id: "staff_replay",
         email: "staff@example.com",
-        display_name: "Staff Person",
-        is_system_admin: 0,
-        created_at: "2026-07-26T00:00:00Z",
+         display_name: "Staff Person",
+         is_system_admin: 0,
+         role_revision: 0,
+         roles_csv: "",
+         requested_account_type: "STAFF",
+         requested_roles_json: '["REGISTRATION"]',
+         created_at: "2026-07-26T00:00:00Z",
       };
     }
     return null;
@@ -340,6 +379,7 @@ test("replaying a staff grant does not create another Cognito identity", async (
         email: "staff@example.com",
         displayName: "Staff Person",
         role: "STAFF",
+        roles: ["REGISTRATION"],
       }),
     }),
     makeEnv(db),
@@ -361,7 +401,7 @@ test("replaying a staff grant does not create another Cognito identity", async (
 });
 
 test("a failed D1 grant removes a newly created Cognito identity", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb(() => null);
   db.batch = async () => {
     throw new Error("conflict");
@@ -376,6 +416,7 @@ test("a failed D1 grant removes a newly created Cognito identity", async () => {
         email: "cleanup@example.com",
         displayName: "Cleanup Person",
         role: "STAFF",
+        roles: ["REGISTRATION"],
       }),
     }),
     makeEnv(db),
@@ -450,6 +491,73 @@ test("staff inspection does not offer pairing for an ineligible duck", async () 
   assert.equal((await response.json()).pairingRequired, false);
 });
 
+test("staff inspection ignores a historical closed assignment after unassignment", async () => {
+  const db = makeDb((sql) => ({
+    duck_id: "duck_test",
+    visible_number: 42,
+    inventory_status: "RESERVED_FOR_EVENT",
+    duck_revision: 2,
+    tag_status: "ACTIVE",
+    event_name: "Test Duck Race",
+    event_status: "REGISTRATION_OPEN",
+    assignment_id: sql.includes("da2.valid_to IS NULL") ? null : "closed_assignment",
+    assignment_valid_to: "2026-07-26T11:00:00Z",
+    event_id: "event_test",
+    race_entry_id: null,
+    first_name: null,
+    last_name: null,
+    email: null,
+    phone: null,
+    lookup_code: null,
+    registration_status: null,
+    disposition: null,
+  }));
+  const response = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}`),
+    makeEnv(db),
+    actor,
+  );
+  const body = await response.json();
+
+  assert.equal(body.pairingRequired, true);
+  assert.equal(body.assignment, null);
+  assert.match(db.statements[0].sql, /da2\.valid_to IS NULL/);
+});
+
+test("staff inspection still returns the current active assignment", async () => {
+  const db = makeDb(() => ({
+    duck_id: "duck_test",
+    visible_number: 42,
+    inventory_status: "IN_USE",
+    duck_revision: 1,
+    tag_status: "ACTIVE",
+    event_name: "Test Duck Race",
+    event_status: "REGISTRATION_OPEN",
+    assignment_id: "active_assignment",
+    assignment_valid_to: null,
+    event_id: "event_test",
+    race_entry_id: "entry_test",
+    first_name: "Daisy",
+    last_name: "Duck",
+    email: "daisy@example.com",
+    phone: "555-0100",
+    lookup_code: "DAASY234",
+    registration_status: "ACTIVE",
+    disposition: null,
+  }));
+  const response = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}`),
+    makeEnv(db),
+    actor,
+  );
+  const body = await response.json();
+
+  assert.equal(body.pairingRequired, false);
+  assert.equal(body.assignment.id, "active_assignment");
+  assert.equal(body.assignment.active, true);
+  assert.equal(body.assignment.participant.firstName, "Daisy");
+});
+
 test("staff pairs the scanned duck with a code-selected participant atomically", async () => {
   const db = makeDb((sql) => {
     if (sql.includes("FROM race_commands")) return null;
@@ -508,6 +616,60 @@ test("staff pairs the scanned duck with a code-selected participant atomically",
   assert.match(sql, /SET status = 'ACTIVE'/);
   assert.match(sql, /inventory_status = 'IN_USE'/);
   assert.match(sql, /DUCK_ASSIGNED/);
+});
+
+test("immediate pairing rejects before creating a round-one heat beyond final capacity", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) return null;
+    if (sql.includes("FROM duck_tags")) {
+      return {
+        id: "duck_test",
+        visible_number: 42,
+        inventory_status: "AVAILABLE",
+        revision: 0,
+        active_assignment_id: null,
+      };
+    }
+    if (sql.includes("FROM registrations")) {
+      return {
+        event_id: "event_test",
+        heat_assignment_mode: "IMMEDIATE_FIXED",
+        round_one_heat_capacity: 1,
+        final_heat_capacity: 1,
+        registration_id: "registration_test",
+        registration_status: "SUBMITTED",
+        registration_revision: 0,
+        race_entry_id: "entry_test",
+        race_entry_revision: 0,
+        first_name: "Daisy",
+        last_name: "Duck",
+        email: null,
+        phone: null,
+        lookup_code: "DAASY234",
+      };
+    }
+    if (sql.includes("FROM event_ducks")) return null;
+    if (sql.includes("COUNT(he.id) AS entry_count")) return null;
+    if (sql.includes("COUNT(*) AS heat_count")) return { last_number: 1, heat_count: 1 };
+    return null;
+  });
+  const response = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}/assignments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: "event_test",
+        lookupCode: "DAASY234",
+      }),
+    }),
+    makeEnv(db),
+    actor,
+  );
+
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /more round-one heats than the final can hold/i);
+  assert.equal(db.batches.length, 0);
 });
 
 test("staff cannot pair a reserved duck whose inventory state is unsafe", async () => {
@@ -769,7 +931,7 @@ test("return review identifies unresolved duck numbers without participant data"
 });
 
 test("purge readiness is blocked while a physical duck is unresolved", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb((sql) => {
     if (sql.includes("FROM race_commands")) return null;
     if (sql.includes("SELECT id, name, status FROM events")) {
@@ -798,7 +960,7 @@ test("purge readiness is blocked while a physical duck is unresolved", async () 
 });
 
 test("an administrator marks a fully reconciled event purge-ready", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb(
     (sql) => {
       if (sql.includes("FROM race_commands")) return null;
@@ -837,7 +999,7 @@ test("an administrator marks a fully reconciled event purge-ready", async () => 
 });
 
 test("an administrator can reopen purge readiness for a correction", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb((sql) => {
     if (sql.includes("FROM race_commands")) return null;
     if (sql.includes("SELECT id, name, status FROM events")) {
@@ -881,7 +1043,7 @@ test("only a system administrator can purge a race", async () => {
 });
 
 test("purge deletes the complete race, duck, tag, browser, and audit dataset", async () => {
-  const admin = { ...actor, isSystemAdmin: true };
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
   const db = makeDb((sql) => {
     if (sql.includes("SELECT id, name, status FROM events")) {
       return { id: "event_test", name: "Test Duck Race", status: "ARCHIVED" };
@@ -949,7 +1111,7 @@ test("final purge executes against the complete migrated schema", async () => {
       body: JSON.stringify({ confirmation: "DELETE Test Duck Race" }),
     }),
     makeEnv(sqliteD1(database)),
-    { ...actor, isSystemAdmin: true },
+    { ...actor, isSystemAdmin: true, roles: [] },
   );
 
   assert.equal(response.status, 204);

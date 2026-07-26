@@ -11,6 +11,7 @@ const actor = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
+  roles: ["DUCK_MANAGER"],
   authentication: "bearer",
 };
 
@@ -149,7 +150,7 @@ test("duck operations compose with the router and fail closed without staff", as
   assert.equal(db.statements.length, 0);
 });
 
-test("staff list includes tag, reservation, assignment, participant, heat, and disposition", async () => {
+test("duck-manager inventory includes relationships but redacts participant identity", async () => {
   const db = makeDb(
     () => null,
     (sql) => sql.includes("FROM ducks d") ? { results: [summaryRow] } : { results: [] },
@@ -165,12 +166,20 @@ test("staff list includes tag, reservation, assignment, participant, heat, and d
   assert.equal(body.ducks[0].tag.status, "ACTIVE");
   assert.equal(body.ducks[0].reservation.event.status, "REGISTRATION_CLOSED");
   assert.equal(body.ducks[0].assignment.id, "assignment_test");
-  assert.equal(body.ducks[0].participant.firstName, "Daisy");
+  assert.equal(body.ducks[0].participant.firstName, undefined);
+  assert.equal(body.ducks[0].participant.status, "ACTIVE");
   assert.equal(body.ducks[0].heat.number, 4);
   assert.equal(body.ducks[0].disposition, null);
   assert.equal(JSON.stringify(body).includes("token"), false);
   assert.match(db.statements[0].sql, /ORDER BY d\.visible_number/);
   assert.doesNotMatch(db.statements[0].sql, /LIMIT 200/);
+
+  const registrationManager = await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks"),
+    makeEnv(db),
+    { ...actor, roles: ["REGISTRATION", "DUCK_MANAGER"] },
+  );
+  assert.equal((await registrationManager.json()).ducks[0].participant.firstName, "Daisy");
 });
 
 test("duck detail returns append-only inventory and relationship history without raw tag tokens", async () => {

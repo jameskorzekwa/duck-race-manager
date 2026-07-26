@@ -9,6 +9,7 @@ export interface Env {
   DB: D1Database;
   EMAIL_QUEUE: Queue;
   PUBLIC_SEARCH_RATE_LIMITER: RateLimit;
+  RACE_UPDATES?: DurableObjectNamespace;
   TURNSTILE_SITE_KEY?: string;
   TURNSTILE_SECRET_KEY?: string;
 }
@@ -23,6 +24,7 @@ export interface EventRecord {
   registration_opens_at: string | null;
   registration_closes_at: string | null;
   email_required: number;
+  public_name_policy: "FIRST_NAME_ONLY" | "FIRST_NAME_LAST_INITIAL" | "FULL_NAME";
 }
 
 export interface RegistrationStatusRecord {

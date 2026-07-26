@@ -1,0 +1,500 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions: {}
+
+concurrency:
+  group: quickducks-production
+  queue: max
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      source-sha: ${{ steps.source.outputs.source-sha }}
+      version: ${{ steps.version.outputs.version }}
+    permissions:
+      contents: read
+    env:
+      CI: "true"
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tagged commit is on the default branch
+        id: source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$DEFAULT_BRANCH" ]]; then
+            printf 'The repository default branch is unavailable.\n' >&2
+            exit 1
+          fi
+          default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git show-ref --verify --quiet "$default_ref"; then
+            printf 'Full checkout does not contain default branch %s.\n' "$DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+          tagged_sha="$(git rev-parse HEAD)"
+          if ! git merge-base --is-ancestor "$tagged_sha" "$default_ref"; then
+            printf 'Tagged commit %s is not an ancestor of default branch %s.\n' "$tagged_sha" "$DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+          printf 'source-sha=%s\n' "$tagged_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate version tag
+        id: version
+        run: npm run release:validate-tag -- "$GITHUB_REF_NAME"
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      - name: Check TypeScript
+        run: npm run typecheck
+
+      - name: Run full test suite
+        run: npm test
+
+      - name: Validate all Worker bundles and Wrangler configurations
+        run: npm run wrangler:validate
+
+      - name: Validate D1 migrations locally
+        run: npm run db:migrate:local
+
+  deploy:
+    name: Deploy production
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_URL }}
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      deployed-at: ${{ steps.deployment-metadata.outputs.deployed-at }}
+      worker-version: ${{ steps.worker-metadata.outputs.worker-version }}
+    env:
+      AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+      AWS_CLOUDFORMATION_ROLE_ARN: ${{ vars.AWS_CLOUDFORMATION_ROLE_ARN }}
+      AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_STACK_NAME: ${{ vars.AWS_STACK_NAME }}
+      CI: "true"
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      SOURCE_SHA: ${{ needs.validate.outputs.source-sha }}
+      WRANGLER_SEND_METRICS: "false"
+      WWW_URL: ${{ vars.WWW_URL }}
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Validate production settings
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            AWS_ACCOUNT_ID
+            AWS_CLOUDFORMATION_ROLE_ARN
+            AWS_DEPLOY_ROLE_ARN
+            AWS_REGION
+            AWS_STACK_NAME
+            CLOUDFLARE_ACCOUNT_ID
+            CLOUDFLARE_API_TOKEN
+            PRODUCTION_URL
+            WWW_URL
+          )
+          for name in "${required[@]}"; do
+            if [[ -z "${!name:-}" ]]; then
+              printf 'Required production setting %s is empty.\n' "$name" >&2
+              exit 1
+            fi
+          done
+
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const config = JSON.parse(readFileSync("wrangler.jsonc", "utf8"));
+          const expectedAccountId = "106298360125";
+          if (process.env.AWS_ACCOUNT_ID !== expectedAccountId) throw new Error(`AWS_ACCOUNT_ID must be ${expectedAccountId}.`);
+          if (process.env.AWS_REGION !== "us-east-1") throw new Error("AWS_REGION must be us-east-1.");
+          if (process.env.AWS_STACK_NAME !== "quickducks-production") throw new Error("AWS_STACK_NAME must be quickducks-production.");
+
+          const expectedRoleArns = {
+            AWS_DEPLOY_ROLE_ARN: `arn:aws:iam::${expectedAccountId}:role/quickducks-github-deploy`,
+            AWS_CLOUDFORMATION_ROLE_ARN: `arn:aws:iam::${expectedAccountId}:role/quickducks-cloudformation-execution`,
+          };
+          for (const [name, expected] of Object.entries(expectedRoleArns)) {
+            if (process.env[name] !== expected) throw new Error(`${name} must match the bootstrap stack output ${expected}.`);
+          }
+
+          const production = new URL(process.env.PRODUCTION_URL);
+          const www = new URL(process.env.WWW_URL);
+          const assertOrigin = (name, url) => {
+            if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash || url.username || url.password) {
+              throw new Error(`${name} must be an HTTPS origin without a path, query, credentials, or fragment.`);
+            }
+          };
+
+          assertOrigin("PRODUCTION_URL", production);
+          assertOrigin("WWW_URL", www);
+          if (www.hostname !== `www.${production.hostname}`) throw new Error("WWW_URL must be the www host for PRODUCTION_URL.");
+          if (config.vars?.APP_ORIGIN !== production.origin) throw new Error("PRODUCTION_URL must match wrangler.jsonc vars.APP_ORIGIN.");
+          if (config.vars?.AWS_REGION !== process.env.AWS_REGION) throw new Error("AWS_REGION must match wrangler.jsonc vars.AWS_REGION.");
+
+          const routeHosts = new Set((config.routes ?? []).map(({ pattern }) => pattern));
+          if (!routeHosts.has(production.hostname) || !routeHosts.has(www.hostname)) {
+            throw new Error("wrangler.jsonc must contain custom-domain routes for PRODUCTION_URL and WWW_URL.");
+          }
+          NODE
+
+      - name: Verify production Worker secret names
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          secrets="$(npx wrangler secret list --config wrangler.jsonc --format json)"
+          printf '%s' "$secrets" | node scripts/check-worker-secrets.mjs
+
+      - name: Verify D1 role migration safety
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          discovery="$(npx wrangler d1 execute quickducks-prod \
+            --config wrangler.jsonc \
+            --remote \
+            --yes \
+            --json \
+            --command "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'staff_role_assignments') AS role_table_exists")"
+          role_table_exists="$(D1_DISCOVERY="$discovery" node --input-type=module <<'NODE'
+          const payload = JSON.parse(process.env.D1_DISCOVERY);
+          const value = payload?.[0]?.success === true && payload[0].results?.length === 1
+            ? payload[0].results[0].role_table_exists
+            : undefined;
+          if (value !== 0 && value !== 1 && value !== false && value !== true) {
+            throw new Error("D1 role-table discovery did not return one valid result.");
+          }
+          process.stdout.write(value === 1 || value === true ? "1" : "0");
+          NODE
+          )"
+
+          if [[ "$role_table_exists" == "1" ]]; then
+            command="SELECT 1 AS role_table_exists, EXISTS (SELECT 1 FROM staff_profiles WHERE is_active = 1 AND is_system_admin = 0) AS active_non_admin_exists, EXISTS (SELECT 1 FROM staff_profiles p WHERE p.is_active = 1 AND p.is_system_admin = 0 AND NOT EXISTS (SELECT 1 FROM staff_role_assignments a WHERE a.staff_profile_id = p.id AND a.revoked_at IS NULL)) AS unmapped_active_non_admin_exists"
+          else
+            command="SELECT 0 AS role_table_exists, EXISTS (SELECT 1 FROM staff_profiles WHERE is_active = 1 AND is_system_admin = 0) AS active_non_admin_exists, EXISTS (SELECT 1 FROM staff_profiles WHERE is_active = 1 AND is_system_admin = 0) AS unmapped_active_non_admin_exists"
+          fi
+          preflight="$(npx wrangler d1 execute quickducks-prod \
+            --config wrangler.jsonc \
+            --remote \
+            --yes \
+            --json \
+            --command "$command")"
+          printf '%s' "$preflight" | node scripts/check-d1-role-preflight.mjs
+
+      - name: Configure short-lived AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: quickducks-${{ github.run_id }}
+          allowed-account-ids: ${{ env.AWS_ACCOUNT_ID }}
+          mask-aws-account-id: true
+
+      - name: Validate CloudFormation templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          for template in infra/aws/github-actions-bootstrap.yaml infra/aws/quickducks.yaml; do
+            aws cloudformation validate-template \
+              --region "$AWS_REGION" \
+              --template-body "file://$template" \
+              --no-cli-pager \
+              > /dev/null
+          done
+
+      - name: Verify existing AWS stack and release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! stack="$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" \
+            --stack-name "$AWS_STACK_NAME" \
+            --query 'Stacks[0].{Outputs:Outputs,Parameters:Parameters,Tags:Tags}' \
+            --output json \
+            --no-cli-pager)"; then
+            printf 'Required CloudFormation stack %s does not exist in %s; refusing to create a new stack.\n' \
+              "$AWS_STACK_NAME" "$AWS_REGION" >&2
+            exit 1
+          fi
+
+          STACK_DESCRIPTION="$stack" node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { assessReleaseVersion, assertReleaseCommitAncestry } from "./scripts/release-version.mjs";
+
+          const config = JSON.parse(readFileSync("wrangler.jsonc", "utf8"));
+          const stack = JSON.parse(process.env.STACK_DESCRIPTION);
+          const outputs = Object.fromEntries((stack.Outputs ?? []).map(({ OutputKey, OutputValue }) => [OutputKey, OutputValue]));
+          const parameters = Object.fromEntries((stack.Parameters ?? []).map(({ ParameterKey, ParameterValue }) => [ParameterKey, ParameterValue]));
+          const tags = Object.fromEntries((stack.Tags ?? []).map(({ Key, Value }) => [Key, Value]));
+          const expected = {
+            UserPoolId: config.vars?.COGNITO_USER_POOL_ID,
+            UserPoolClientId: config.vars?.COGNITO_USER_POOL_CLIENT_ID,
+            CognitoDomain: config.vars?.COGNITO_DOMAIN,
+          };
+
+          for (const [key, value] of Object.entries(expected)) {
+            if (!value || outputs[key] !== value) throw new Error(`CloudFormation ${key} does not match wrangler.jsonc.`);
+          }
+          if (parameters.AppOrigin !== config.vars?.APP_ORIGIN) throw new Error("CloudFormation AppOrigin does not match wrangler.jsonc.");
+
+          const mode = assessReleaseVersion({
+            currentVersion: tags.Version,
+            currentCommit: tags.Commit,
+            incomingVersion: process.env.RELEASE_VERSION,
+            incomingCommit: process.env.SOURCE_SHA,
+          });
+          assertReleaseCommitAncestry({
+            currentCommit: tags.Commit,
+            incomingCommit: process.env.SOURCE_SHA,
+          });
+          console.log(`Release version preflight passed (${mode}).`);
+          NODE
+
+      - name: Deploy AWS infrastructure
+        run: |
+          aws cloudformation deploy \
+            --region "$AWS_REGION" \
+            --stack-name "$AWS_STACK_NAME" \
+            --template-file infra/aws/quickducks.yaml \
+            --role-arn "$AWS_CLOUDFORMATION_ROLE_ARN" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --parameter-overrides "AppOrigin=$PRODUCTION_URL" \
+            --tags Project=quickducks Environment=production "Version=$RELEASE_VERSION" "Commit=$SOURCE_SHA" \
+            --no-fail-on-empty-changeset \
+            --no-cli-pager
+
+      - name: Verify AWS outputs match Worker configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          stack="$(aws cloudformation describe-stacks \
+            --region "$AWS_REGION" \
+            --stack-name "$AWS_STACK_NAME" \
+            --query 'Stacks[0].{Outputs:Outputs,Parameters:Parameters,Tags:Tags}' \
+            --output json \
+            --no-cli-pager)"
+
+          STACK_DESCRIPTION="$stack" node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const config = JSON.parse(readFileSync("wrangler.jsonc", "utf8"));
+          const stack = JSON.parse(process.env.STACK_DESCRIPTION);
+          const outputs = Object.fromEntries((stack.Outputs ?? []).map(({ OutputKey, OutputValue }) => [OutputKey, OutputValue]));
+          const parameters = Object.fromEntries((stack.Parameters ?? []).map(({ ParameterKey, ParameterValue }) => [ParameterKey, ParameterValue]));
+          const tags = Object.fromEntries((stack.Tags ?? []).map(({ Key, Value }) => [Key, Value]));
+          const expected = {
+            UserPoolId: config.vars?.COGNITO_USER_POOL_ID,
+            UserPoolClientId: config.vars?.COGNITO_USER_POOL_CLIENT_ID,
+            CognitoDomain: config.vars?.COGNITO_DOMAIN,
+          };
+
+          for (const [key, value] of Object.entries(expected)) {
+            if (!value || outputs[key] !== value) throw new Error(`CloudFormation ${key} does not match wrangler.jsonc.`);
+          }
+          if (parameters.AppOrigin !== config.vars?.APP_ORIGIN) throw new Error("CloudFormation AppOrigin does not match wrangler.jsonc.");
+          if (tags.Version !== process.env.RELEASE_VERSION) throw new Error("CloudFormation Version tag does not match the release version.");
+          if (tags.Commit !== process.env.SOURCE_SHA) throw new Error("CloudFormation Commit tag does not match the tagged commit.");
+          NODE
+
+      - name: Apply production D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npm run db:migrate:remote
+
+      - name: Deploy Cloudflare Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
+        run: npm run deploy
+
+      - name: Read Worker deployment metadata
+        id: worker-metadata
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+
+          const records = readFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, "utf8")
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
+          const deployment = records.findLast(({ type }) => type === "deploy");
+          if (!deployment?.version_id) throw new Error("Wrangler did not report a deployed Worker version.");
+          appendFileSync(process.env.GITHUB_OUTPUT, `worker-version=${deployment.version_id}\n`);
+          NODE
+
+      - name: Smoke-test apex and www redirect
+        shell: bash
+        run: |
+          set -euo pipefail
+          health="$(curl --silent --show-error --fail \
+            --retry 5 --retry-all-errors --retry-delay 5 --max-time 20 \
+            "$PRODUCTION_URL/health")"
+          HEALTH_JSON="$health" node --input-type=module <<'NODE'
+          const health = JSON.parse(process.env.HEALTH_JSON);
+          if (health.service !== "quickducks" || health.status !== "ok" || health.database !== "connected") {
+            throw new Error(`Unexpected production health response: ${JSON.stringify(health)}`);
+          }
+          if (health.region !== process.env.AWS_REGION) throw new Error("Production health response reports the wrong AWS region.");
+          NODE
+
+          redirect="$(curl --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 5 --max-time 20 \
+            --output /dev/null --write-out '%{http_code} %{redirect_url}' \
+            "$WWW_URL/health")"
+          read -r status location <<< "$redirect"
+          if [[ "$status" != "308" || "$location" != "$PRODUCTION_URL/health" ]]; then
+            printf 'Expected www to return 308 to %s/health; received %s to %s.\n' \
+              "$PRODUCTION_URL" "$status" "$location" >&2
+            exit 1
+          fi
+
+          node scripts/smoke-websocket.mjs
+
+      - name: Record deployment time
+        id: deployment-metadata
+        run: printf 'deployed-at=%s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish GitHub release
+    needs:
+      - validate
+      - deploy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create or update release
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AWS_STACK_NAME: ${{ vars.AWS_STACK_NAME }}
+          DEPLOYED_AT: ${{ needs.deploy.outputs.deployed-at }}
+          PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
+          RELEASE_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source-sha }}
+          WORKER_VERSION: ${{ needs.deploy.outputs.worker-version }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const tag = process.env.RELEASE_TAG;
+            const version = process.env.RELEASE_VERSION;
+            const sha = process.env.SOURCE_SHA;
+            if (!['true', 'false'].includes(process.env.RELEASE_PRERELEASE)) {
+              throw new Error('Validated prerelease output is unavailable.');
+            }
+            const prerelease = process.env.RELEASE_PRERELEASE === 'true';
+            const markerStart = "<!-- quickducks-deployment:start -->";
+            const markerEnd = "<!-- quickducks-deployment:end -->";
+            const deployment = [
+              markerStart,
+              "## Production deployment",
+              `- Version: \`${version}\` (tag \`${tag}\`)`,
+              `- Commit: [\`${sha.slice(0, 12)}\`](https://github.com/${owner}/${repo}/commit/${sha})`,
+              `- Deployed: ${process.env.DEPLOYED_AT}`,
+              `- Application: ${process.env.PRODUCTION_URL}`,
+              `- Cloudflare Worker: \`quickducks\` version \`${process.env.WORKER_VERSION}\``,
+              "- Cloudflare D1: `quickducks-prod` migrations applied",
+              `- AWS CloudFormation: \`${process.env.AWS_STACK_NAME}\` in \`${process.env.AWS_REGION}\``,
+              `- Workflow: [run ${context.runId}](https://github.com/${owner}/${repo}/actions/runs/${context.runId})`,
+              markerEnd,
+            ].join("\n");
+
+            let existing;
+            try {
+              existing = (await github.rest.repos.getReleaseByTag({ owner, repo, tag })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+            if (existing) {
+              const currentBody = existing.body ?? "";
+              const markerPattern = new RegExp(`${markerStart}[\\s\\S]*?${markerEnd}`);
+              const body = markerPattern.test(currentBody)
+                ? currentBody.replace(markerPattern, deployment)
+                : `${deployment}${currentBody ? `\n\n${currentBody}` : ""}`;
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: existing.id,
+                tag_name: tag,
+                name: existing.name || tag,
+                body,
+                draft: false,
+                prerelease,
+              });
+              return;
+            }
+
+            const generated = await github.rest.repos.generateReleaseNotes({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: sha,
+            });
+            await github.rest.repos.createRelease({
+              owner,
+              repo,
+              tag_name: tag,
+              target_commitish: sha,
+              name: generated.data.name || tag,
+              body: `${deployment}\n\n${generated.data.body ?? ""}`.trim(),
+              draft: false,
+              prerelease,
+            });
