@@ -1,12 +1,5 @@
-interface Env {
-  APP_ORIGIN: string;
-  AWS_REGION: string;
-  COGNITO_USER_POOL_ID: string;
-  COGNITO_USER_POOL_CLIENT_ID: string;
-  COGNITO_DOMAIN: string;
-  DB: D1Database;
-  EMAIL_QUEUE: Queue;
-}
+import { handleApi } from "./api.ts";
+import type { Env } from "./types.ts";
 
 const securityHeaders = {
   "cross-origin-opener-policy": "same-origin",
@@ -52,6 +45,8 @@ export default {
         region: env.AWS_REGION,
       });
     }
+
+    if (url.pathname.startsWith("/api/v1/")) return handleApi(request, env);
 
     if (url.pathname === "/") {
       return new Response(

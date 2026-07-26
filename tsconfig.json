@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "lib": ["ES2023"],
+    "allowImportingTsExtensions": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "noEmit": true,
