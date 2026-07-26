@@ -11,9 +11,10 @@ const staff = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
+  roles: ["RACE_DIRECTOR"],
   authentication: "bearer",
 };
-const admin = { ...staff, id: "admin_test", isSystemAdmin: true };
+const admin = { ...staff, id: "admin_test", isSystemAdmin: true, roles: [] };
 
 const draftEvent = {
   id: "event_test",
@@ -296,6 +297,34 @@ test("readiness reports actionable blockers without changing the event", async (
   assert.equal(db.batches.length, 0);
 });
 
+test("round-one readiness and transition reject more heats than final capacity", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands") && sql.includes("request_fingerprint")) return null;
+    if (sql.includes("submitted_registration_count")) return readyStats;
+    return { ...draftEvent, status: "REGISTRATION_CLOSED", final_heat_capacity: 1 };
+  });
+  const readiness = await handleEventOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test/readiness"),
+    makeEnv(db),
+    staff,
+  );
+  const readinessBody = await readiness.json();
+
+  assert.equal(readinessBody.readiness["start-round-one"].allowed, false);
+  assert.match(readinessBody.readiness["start-round-one"].blockers.join(" "), /final capacity/i);
+
+  const transition = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/start-round-one", "POST", {
+      commandId: crypto.randomUUID(),
+    }),
+    makeEnv(db),
+    staff,
+  );
+  assert.equal(transition.status, 409);
+  assert.match((await transition.json()).readiness.blockers.join(" "), /final capacity/i);
+  assert.equal(db.batches.length, 0);
+});
+
 const lifecycleCases = [
   ["open-registration", "DRAFT", "REGISTRATION_OPEN", "OPEN_REGISTRATION"],
   ["close-registration", "REGISTRATION_OPEN", "REGISTRATION_CLOSED", "CLOSE_REGISTRATION"],
@@ -329,6 +358,9 @@ for (const [action, fromStatus, toStatus, commandType] of lifecycleCases) {
     const command = db.batches[0][0];
     const update = db.batches[0][1];
     assert.match(command.sql, new RegExp(`'${commandType}'`));
+    if (action === "start-round-one") {
+      assert.match(command.sql, /COUNT\(\*\).*ROUND_ONE.*<= e\.final_heat_capacity/s);
+    }
     assert.match(update.sql, new RegExp(`status = '${toStatus}'`));
     assert.doesNotMatch(update.sql, /SET status = \?/);
     assert.equal(command.args.includes("event_test"), true);

@@ -107,9 +107,12 @@ Resources:
     Type: AWS::IAM::User
     Properties:
       UserName: quickducks-worker-ses
+      PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/quickducks-worker-ses-boundary
       Tags:
         - Key: Project
           Value: quickducks
+        - Key: Environment
+          Value: production
       Policies:
         - PolicyName: QuickDucksWorkerAwsAccess
           PolicyDocument:

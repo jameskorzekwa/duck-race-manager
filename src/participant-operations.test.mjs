@@ -12,6 +12,9 @@ const migrationNames = [
   "0004_pairing_status_and_purge.sql",
   "0005_staff_access_management.sql",
   "0006_participant_operations.sql",
+  "0007_duck_inventory_operations.sql",
+  "0008_event_operations.sql",
+  "0009_heat_result_operations.sql",
 ];
 
 const staffActor = {
@@ -20,6 +23,7 @@ const staffActor = {
   email: "staff@example.com",
   displayName: "Registration Staff",
   isSystemAdmin: false,
+  roles: ["REGISTRATION"],
   authentication: "bearer",
 };
 
@@ -30,6 +34,7 @@ const adminActor = {
   email: "admin@example.com",
   displayName: "Race Administrator",
   isSystemAdmin: true,
+  roles: [],
 };
 
 const createDatabase = () => {
@@ -64,10 +69,16 @@ const createD1 = (database) => {
     statements.push(bound);
     return bound;
   };
-  return {
+  const api = {
     statements,
     prepare,
+    beforeBatch: null,
     async batch(items) {
+      if (this.beforeBatch) {
+        const hook = this.beforeBatch;
+        this.beforeBatch = null;
+        await hook(items);
+      }
       database.exec("BEGIN IMMEDIATE");
       try {
         const results = items.map((item) => item.run());
@@ -79,6 +90,7 @@ const createD1 = (database) => {
       }
     },
   };
+  return api;
 };
 
 const seed = (database) => {
@@ -401,4 +413,75 @@ test("withdraw, reactivate, and disqualify are authorized idempotent status comm
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM registrations WHERE id = ?").get("registration-one").count, 1);
   assert.equal(database.prepare("SELECT valid_to FROM duck_assignments WHERE id = ?").get("assignment-one").valid_to, null);
   database.close();
+});
+
+test("eligibility changes stop at heat lock and remain atomically blocked", async (context) => {
+  const { database, env, DB } = makeContext();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO heats
+      (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-one', 'event-open', 'ROUND_ONE', 1, 'PLANNED', 1);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry-one', 'event-open', 'heat-one', 'entry-one', 'ROUND_ONE', 1,
+            'BALANCED_DRAW', '2026-07-25T01:00:00Z');
+  `);
+
+  const allowed = await handleParticipantOperations(
+    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one/withdraw", "POST", {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 0,
+    }),
+    env,
+    staffActor,
+  );
+  assert.equal(allowed.status, 201);
+  const reactivated = await handleParticipantOperations(
+    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one/reactivate", "POST", {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 1,
+    }),
+    env,
+    adminActor,
+  );
+  assert.equal(reactivated.status, 201);
+
+  for (const status of ["LOADING", "RUNNING", "AWAITING_RESULT", "FINALIZED"]) {
+    database.prepare(`
+      UPDATE heats
+         SET status = ?, roster_locked_at = '2026-07-25T01:05:00Z',
+             finalized_at = CASE WHEN ? = 'FINALIZED' THEN '2026-07-25T01:10:00Z' ELSE NULL END
+       WHERE id = 'heat-one'
+    `).run(status, status);
+    for (const [operation, currentActor] of [["withdraw", staffActor], ["disqualify", adminActor]]) {
+      const response = await handleParticipantOperations(
+        jsonRequest(`https://quickducks.com/api/v1/staff/registrations/registration-one/${operation}`, "POST", {
+          commandId: crypto.randomUUID(),
+          expectedRevision: 2,
+        }),
+        env,
+        currentActor,
+      );
+      assert.equal(response.status, 409, `${operation} at ${status}`);
+      assert.match((await response.json()).error, /Keep them ACTIVE.*race director/i);
+      assert.equal(database.prepare("SELECT status FROM registrations WHERE id = 'registration-one'").get().status, "ACTIVE");
+    }
+  }
+
+  database.exec("UPDATE heats SET status = 'PLANNED', roster_locked_at = NULL, finalized_at = NULL WHERE id = 'heat-one'");
+  DB.beforeBatch = () => {
+    database.exec("UPDATE heats SET status = 'LOADING', roster_locked_at = '2026-07-25T01:15:00Z' WHERE id = 'heat-one'");
+  };
+  const racedLock = await handleParticipantOperations(
+    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one/withdraw", "POST", {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 2,
+    }),
+    env,
+    staffActor,
+  );
+  assert.equal(racedLock.status, 409);
+  assert.equal(database.prepare("SELECT status FROM registrations WHERE id = 'registration-one'").get().status, "ACTIVE");
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'WITHDRAW_REGISTRATION'").get().count, 1);
 });

@@ -4,7 +4,15 @@ import {
   handleApi,
 } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
-import { registrationScript, staffDuckScript, staffHomeScript } from "./client-scripts.ts";
+import { hasAnyRole } from "./authorization.ts";
+import {
+  finishLineScript,
+  liveScript,
+  registrationScript,
+  staffDuckScript,
+  staffHomeScript,
+  startLineScript,
+} from "./client-scripts.ts";
 import {
   faviconSvg,
   homeScript,
@@ -15,9 +23,11 @@ import {
   renderRegistration,
   renderStaffAuthError,
   renderStaffDuck,
+  renderFinishLine,
   renderStaffHome,
   renderStaffLogin,
   renderStaffPairing,
+  renderStartLine,
   renderStatus,
 } from "./site.ts";
 import {
@@ -29,9 +39,11 @@ import {
 } from "./staff-session.ts";
 import type { Env } from "./types.ts";
 
+export { RaceUpdates } from "./live-updates.ts";
+
 const securityHeaders = {
   "cross-origin-opener-policy": "same-origin",
-  "permissions-policy": "camera=(), geolocation=(), microphone=()",
+  "permissions-policy": "camera=(), geolocation=(), microphone=(), nfc=(self)",
   "referrer-policy": "no-referrer",
   "strict-transport-security": "max-age=31536000",
   "x-content-type-options": "nosniff",
@@ -68,8 +80,10 @@ const safeReturnTo = (value: string | null): string =>
     ? value
     : "/staff";
 
-export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+export const createWorker = (
+  authenticate: typeof authenticateStaff = authenticateStaff,
+): ExportedHandler<Env> => ({
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const appOrigin = new URL(env.APP_ORIGIN);
     const localHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
@@ -118,14 +132,22 @@ export default {
       });
     }
 
-    if (["/assets/register.js", "/assets/staff-duck.js", "/assets/staff-home.js"].includes(url.pathname)) {
+    if (["/assets/register.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js"].includes(url.pathname)) {
       const script = url.pathname === "/assets/register.js"
         ? registrationScript
-        : url.pathname === "/assets/staff-home.js" ? staffHomeScript : staffDuckScript;
+        : url.pathname === "/assets/staff-home.js"
+          ? staffHomeScript
+          : url.pathname === "/assets/live.js"
+            ? liveScript
+            : url.pathname === "/assets/start-line.js"
+              ? startLineScript
+              : url.pathname === "/assets/finish-line.js" ? finishLineScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": "public, max-age=3600",
+          "cache-control": ["/assets/staff-duck.js", "/assets/start-line.js", "/assets/finish-line.js"].includes(url.pathname)
+            ? "no-store"
+            : "public, max-age=3600",
           "content-type": "text/javascript; charset=utf-8",
         },
       });
@@ -152,7 +174,7 @@ export default {
       });
     }
 
-    if (url.pathname.startsWith("/api/v1/")) return handleApi(request, env);
+    if (url.pathname.startsWith("/api/v1/")) return handleApi(request, env, authenticate, ctx);
 
     if (url.pathname === "/" && request.method === "GET") {
       return html(renderHome());
@@ -173,7 +195,13 @@ export default {
       return html(renderStaffDuck("a".repeat(32), "Staff Preview"), 200, true);
     }
     if (url.pathname === "/mock/staff/home" && request.method === "GET") {
-      return html(renderStaffHome("Administrator Preview", true), 200, true);
+      return html(renderStaffHome("Administrator Preview", true, []), 200, true);
+    }
+    if (url.pathname === "/mock/staff/start-line" && request.method === "GET") {
+      return html(renderStartLine("Start-line Preview", false), 200, true);
+    }
+    if (url.pathname === "/mock/staff/finish-line" && request.method === "GET") {
+      return html(renderFinishLine("Finish-line Preview", false), 200, true);
     }
 
     if (url.pathname === "/staff/login/start" && request.method === "GET") {
@@ -201,19 +229,40 @@ export default {
     }
 
     if (url.pathname === "/staff" && request.method === "GET") {
-      const actor = await authenticateStaff(request, env);
+      const actor = await authenticate(request, env);
       return actor === null
         ? html(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo"))), 200, true)
-        : html(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin), 200, true);
+        : html(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles), 200, true);
+    }
+
+    if ((url.pathname === "/staff/start-line" || url.pathname === "/staff/finish-line") && request.method === "GET") {
+      const actor = await authenticate(request, env);
+      if (actor === null) {
+        const login = new URL("/staff", env.APP_ORIGIN);
+        login.searchParams.set("returnTo", `${url.pathname}${url.search}`);
+        return new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } });
+      }
+      const startLine = url.pathname === "/staff/start-line";
+      const allowed = startLine
+        ? hasAnyRole(actor, ["HEAT_RUNNER", "RACE_DIRECTOR"])
+        : hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+      if (!allowed) {
+        return html(renderStaffAuthError(`This account does not have permission to use the ${startLine ? "start-line" : "finish-line"} station.`), 403, true);
+      }
+      const displayName = actor.displayName ?? actor.email;
+      return html(startLine ? renderStartLine(displayName) : renderFinishLine(displayName), 200, true);
     }
 
     const staffDuckMatch = url.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
     if (staffDuckMatch !== null && request.method === "GET") {
-      const actor = await authenticateStaff(request, env);
+      const actor = await authenticate(request, env);
       if (actor === null) {
         const login = new URL("/staff", env.APP_ORIGIN);
         login.searchParams.set("returnTo", url.pathname);
         return new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } });
+      }
+      if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"])) {
+        return html(renderStaffAuthError("This account does not have permission to inspect staff duck records."), 403, true);
       }
       return html(renderStaffDuck(staffDuckMatch[1], actor.displayName ?? actor.email), 200, true);
     }
@@ -228,7 +277,7 @@ export default {
 
     const duckTagMatch = url.pathname.match(/^\/t\/([A-Za-z0-9_-]+)$/);
     if (duckTagMatch !== null && request.method === "GET") {
-      const actor = await authenticateStaff(request, env);
+      const actor = await authenticate(request, env);
       if (actor !== null) {
         return new Response(null, {
           status: 303,
@@ -243,4 +292,6 @@ export default {
 
     return html(renderNotFound(), 404, true);
   },
-} satisfies ExportedHandler<Env>;
+});
+
+export default createWorker();

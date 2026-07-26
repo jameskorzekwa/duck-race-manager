@@ -6,6 +6,9 @@ const formMessage = document.querySelector("[data-form-message]");
 const submitButton = form.querySelector("button[type='submit']");
 const emailInput = form.elements.email;
 const emailLabel = document.querySelector("[data-email-label]");
+const publicNamePolicy = document.querySelector("[data-public-name-policy]");
+const firstNameInput = form.elements.first_name;
+const lastNameInput = form.elements.last_name;
 const protectionReady = form.dataset.protectionReady === "true";
 let currentEvent = null;
 let pendingCommand = null;
@@ -39,6 +42,26 @@ const resetTurnstile = () => {
   }
 };
 
+const updatePublicNamePolicy = () => {
+  if (!currentEvent) return;
+  const firstName = firstNameInput.value.trim().replace(/\s+/g, " ") || "Jamie";
+  const lastName = lastNameInput.value.trim().replace(/\s+/g, " ") || "Rivera";
+  const format = currentEvent.publicNamePolicy === "FULL_NAME"
+    ? "full first and last name"
+    : currentEvent.publicNamePolicy === "FIRST_NAME_ONLY"
+      ? "first name only"
+      : "first name and last initial";
+  const example = currentEvent.publicNamePolicy === "FULL_NAME"
+    ? firstName + " " + lastName
+    : currentEvent.publicNamePolicy === "FIRST_NAME_ONLY"
+      ? firstName
+      : firstName + " " + lastName.slice(0, 1).toUpperCase() + ".";
+  publicNamePolicy.textContent = "Your name will appear publicly as " + example + " (" + format + "). Your email and phone stay private.";
+};
+
+firstNameInput.addEventListener("input", updatePublicNamePolicy);
+lastNameInput.addEventListener("input", updatePublicNamePolicy);
+
 fetch("/api/v1/events/current", { headers: { accept: "application/json" } })
   .then((response) => response.ok ? response.json() : Promise.reject())
   .then(({ event }) => {
@@ -56,6 +79,7 @@ fetch("/api/v1/events/current", { headers: { accept: "application/json" } })
       : "Race date to be announced";
     emailInput.required = event.emailRequired;
     emailLabel.textContent = event.emailRequired ? "Email" : "Email (optional)";
+    updatePublicNamePolicy();
     if (event.status !== "REGISTRATION_OPEN") {
       setMessage("Registration is currently closed.");
       submitButton.disabled = true;
@@ -98,7 +122,7 @@ form.addEventListener("submit", async (event) => {
     lastName: data.get("last_name"),
     email: data.get("email"),
     phone: data.get("phone"),
-    emailNotificationsEnabled: data.get("email_notifications_enabled") === "on",
+    emailNotificationsEnabled: false,
     duckKeepPreference: data.get("duck_keep_preference"),
     turnstileToken,
     clientTimestamp: new Date().toISOString(),
@@ -129,9 +153,1071 @@ form.addEventListener("submit", async (event) => {
 });
 `;
 
+export const liveRuntimeHelpersScript = String.raw`
+const livePollDelay = (connected) => connected ? 30000 : 5000;
+const liveReconnectDelay = (attempt, randomValue = Math.random()) => {
+  const base = Math.min(1000 * (2 ** attempt), 15000);
+  return Math.round(Math.min(15000, base * (0.8 + (0.4 * randomValue))));
+};
+const liveSuccessfulFreshness = (secondaryResults) => secondaryResults.some((result) => result.status === "rejected")
+  ? "The public race board is current, but personal details are delayed. This page will keep checking."
+  : "Updated just now.";
+const liveCreateRefreshQueue = (work, isHidden) => {
+  let running = null;
+  let queued = false;
+  return () => {
+    if (isHidden()) return Promise.resolve(false);
+    if (running) {
+      queued = true;
+      return running;
+    }
+    running = (async () => {
+      try {
+        do {
+          queued = false;
+          await work();
+        } while (queued && !isHidden());
+        return true;
+      } finally {
+        running = null;
+      }
+    })();
+    return running;
+  };
+};
+const liveCreatePollScheduler = (work, isHidden, setTimer = setTimeout, clearTimer = clearTimeout) => {
+  let timer = null;
+  let connected = false;
+  const pause = () => {
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+  };
+  const schedule = (nextConnected = connected) => {
+    connected = nextConnected;
+    pause();
+    if (isHidden()) return;
+    timer = setTimer(async () => {
+      timer = null;
+      try {
+        if (!isHidden()) await work();
+      } finally {
+        schedule();
+      }
+    }, livePollDelay(connected));
+  };
+  return { pause, schedule };
+};
+`;
+
+export const stationStateHelpersScript = String.raw`
+const startPickHeat = (heats, round) => {
+  const active = heats.filter((heat) => heat.round === round && heat.status !== "FINALIZED" && heat.status !== "CANCELLED");
+  return active.find((heat) => heat.status === "AWAITING_RESULT")
+    || active.find((heat) => heat.status === "RUNNING")
+    || active.find((heat) => ["PLANNED", "LOADING", "READY", "CALLING"].includes(heat.status))
+    || null;
+};
+const finishPickHeat = (heats, round) => heats.find((heat) => heat.round === round && heat.status === "AWAITING_RESULT")
+  || heats.find((heat) => heat.round === round && heat.status === "RUNNING")
+  || null;
+const stationHeatRenderKey = (event, detail) => [
+  event.id,
+  detail.heat.id,
+  detail.heat.revision,
+  detail.heat.status,
+].join(":");
+`;
+
+export const liveScript = liveRuntimeHelpersScript + String.raw`
+const liveBoardRoot = document.querySelector("[data-live-board]");
+const liveBoardTitle = document.querySelector("[data-live-board-title]");
+const liveBoardSummary = document.querySelector("[data-live-board-summary]");
+const liveBoardContent = document.querySelector("[data-live-board-content]");
+const liveFreshness = document.querySelector("[data-live-freshness]");
+let liveReconnectAttempt = 0;
+let liveReconnectTimer = null;
+let liveSocket = null;
+let liveConnected = false;
+let liveBoardVersion = null;
+
+const liveText = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value == null ? "" : String(value);
+  if (className) element.className = className;
+  return element;
+};
+
+const liveHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase()
+  .replace(/^./, (character) => character.toUpperCase());
+
+const liveRoundLabel = (round) => round === "FINAL" ? "Final" : "Round one";
+const livePlaceLabel = (place) => place === 1 ? "1st" : place === 2 ? "2nd" : "3rd";
+const liveHeatStatus = (status) => ({
+  PLANNED: "Coming up",
+  LOADING: "Ducks are being prepared",
+  READY: "Ready to call",
+  CALLING: "Calling racers now",
+  RUNNING: "Racing now",
+  AWAITING_RESULT: "Race finished; checking the result",
+  FINALIZED: "Result official",
+  CANCELLED: "Not running",
+})[status] || "Status being checked";
+
+const liveAddFact = (container, label, value) => {
+  const fact = liveText("div", "", "fact");
+  fact.append(liveText("dt", label), liveText("dd", value));
+  container.append(fact);
+};
+
+const liveRaceFacts = (container, status, includeParticipant) => {
+  if (!status) {
+    container.append(liveText("p", "Race status is not currently public.", "muted"));
+    return;
+  }
+  const facts = liveText("dl", "", "facts");
+  if (includeParticipant) liveAddFact(facts, "Participant", status.participantDisplayName);
+  liveAddFact(facts, "Duck", status.duck ? "Duck #" + status.duck.visibleNumber : "Waiting for duck assignment");
+  const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
+  liveAddFact(facts, "Assigned heat", assigned
+    ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
+    : "Heat not assigned yet");
+  liveAddFact(facts, "Race activity", status.currentHeat
+    ? liveRoundLabel(status.currentHeat.round) + " · Heat " + status.currentHeat.number + " · " + liveHeatStatus(status.currentHeat.status)
+    : "No heat is active right now");
+  liveAddFact(facts, "Race status", liveHumanize(status.outcome));
+  container.append(facts);
+};
+
+const liveHeatCard = (heat, currentHeat) => {
+  const isCurrent = currentHeat && currentHeat.round === heat.round && currentHeat.number === heat.number;
+  const card = liveText("article", "", "board-heat" + (isCurrent ? " current" : ""));
+  card.append(
+    liveText("h4", liveRoundLabel(heat.round) + " · Heat " + heat.number),
+    liveText("p", liveHeatStatus(heat.status), isCurrent ? "status-chip ready" : "status-chip"),
+  );
+  if (heat.roster.length === 0) {
+    card.append(liveText("p", "Roster not posted yet.", "muted"));
+  } else {
+    for (const entry of heat.roster) {
+      const row = liveText("p", "", "board-entry");
+      row.append(
+        liveText("span", entry.participantDisplayName),
+        liveText("span", (entry.duckNumber === null ? "Duck number pending" : "Duck #" + entry.duckNumber)
+          + (entry.place === null ? "" : " · " + livePlaceLabel(entry.place) + " place")),
+      );
+      card.append(row);
+    }
+  }
+  return card;
+};
+
+const liveRound = (label, heats, currentHeat) => {
+  const section = liveText("section", "", "board-round");
+  section.append(liveText("h3", label));
+  const grid = liveText("div", "", "board-grid");
+  for (const heat of heats) grid.append(liveHeatCard(heat, currentHeat));
+  section.append(grid);
+  return section;
+};
+
+const liveRenderBoard = (board) => {
+  const version = JSON.stringify(board);
+  if (version === liveBoardVersion) return;
+  liveBoardVersion = version;
+  liveBoardContent.replaceChildren();
+  if (!board.event) {
+    liveBoardTitle.textContent = "No race is live right now.";
+    liveBoardSummary.textContent = "The board will be ready when registration opens for the next event.";
+    liveBoardContent.append(liveText("p", "There are no race heats to show yet.", "empty-state"));
+    return;
+  }
+  const event = board.event;
+  liveBoardTitle.textContent = event.name;
+  liveBoardSummary.textContent = event.currentHeat
+    ? liveRoundLabel(event.currentHeat.round) + " Heat " + event.currentHeat.number + " · " + liveHeatStatus(event.currentHeat.status)
+    : event.roundOneHeats.length + event.finalHeats.length === 0
+      ? "Heats have not been posted yet."
+      : "No heat is active right now. The latest official results are below.";
+  if (event.podium.length > 0) {
+    const podium = liveText("section", "", "board-round");
+    podium.append(liveText("h3", "Official podium"));
+    const places = liveText("div", "", "podium");
+    for (const entry of event.podium) {
+      places.append(liveText("p", livePlaceLabel(entry.place) + " · " + entry.participantDisplayName
+        + (entry.duckNumber === null ? "" : " · Duck #" + entry.duckNumber), "podium-place"));
+    }
+    podium.append(places);
+    liveBoardContent.append(podium);
+  }
+  if (event.roundOneHeats.length > 0) liveBoardContent.append(liveRound("Round one", event.roundOneHeats, event.currentHeat));
+  if (event.finalHeats.length > 0) liveBoardContent.append(liveRound("Final", event.finalHeats, event.currentHeat));
+  if (event.roundOneHeats.length === 0 && event.finalHeats.length === 0) {
+    liveBoardContent.append(liveText("p", "Participants can still use this page before heats are made.", "empty-state"));
+  }
+};
+
+const liveFetchJson = async (url) => {
+  const response = await fetch(url, { headers: { accept: "application/json" }, cache: "no-store" });
+  if (!response.ok) throw new Error("refresh failed");
+  return response.json();
+};
+
+const liveRefreshPersonal = async () => {
+  const personal = document.querySelector("[data-live-personal]");
+  if (!personal) return;
+  const pathParts = location.pathname.split("/");
+  const token = pathParts.length === 3 ? pathParts[2] : "";
+  if (!token) return;
+  if (personal.dataset.livePersonal === "private") {
+    const body = await liveFetchJson("/api/v1/registrations/" + encodeURIComponent(token));
+    if (document.hidden) return;
+    personal.replaceChildren();
+    const facts = liveText("dl", "", "facts");
+    liveAddFact(facts, "Participant", body.firstName + " " + body.lastName);
+    liveAddFact(facts, "Registration", liveHumanize(body.status));
+    liveAddFact(facts, "Race date", body.eventDate || "To be announced");
+    personal.append(facts);
+    liveRaceFacts(personal, body.raceStatus, false);
+    return;
+  }
+  const body = await liveFetchJson("/api/v1/ducks/" + encodeURIComponent(token));
+  if (document.hidden) return;
+  personal.replaceChildren();
+  if (body.destination === "RACE_STATUS") liveRaceFacts(personal, body.raceStatus, true);
+  else personal.append(liveText("p", "This duck does not have public race status right now.", "muted"));
+};
+
+const liveRefreshMyDucks = async () => {
+  const section = document.querySelector("[data-my-ducks]");
+  const list = document.querySelector("[data-my-ducks-list]");
+  if (!section || !list) return;
+  const body = await liveFetchJson("/api/v1/registrations/mine");
+  if (document.hidden) return;
+  list.replaceChildren();
+  if (!Array.isArray(body.registrations) || body.registrations.length === 0) {
+    section.hidden = true;
+    return;
+  }
+  for (const registration of body.registrations) {
+    const card = liveText("article", "", "duck-card");
+    card.append(
+      liveText("h3", registration.firstName + " " + registration.lastName),
+      liveText("p", "Staff lookup code: " + registration.lookupCode),
+      liveText("p", "Registration: " + liveHumanize(registration.registrationStatus), "muted"),
+    );
+    const status = liveText("div", "");
+    liveRaceFacts(status, registration.raceStatus, false);
+    card.append(status);
+    list.append(card);
+  }
+  section.hidden = false;
+};
+
+const liveRefreshWork = async () => {
+  try {
+    const board = await liveFetchJson("/api/v1/race-board");
+    const secondary = await Promise.allSettled([
+      liveRefreshPersonal(),
+      liveRefreshMyDucks(),
+    ]);
+    if (document.hidden) return;
+    liveRenderBoard(board);
+    liveFreshness.textContent = liveSuccessfulFreshness(secondary);
+  } catch {
+    liveFreshness.textContent = "Updates are delayed. This page will keep checking.";
+  }
+};
+const liveRefresh = liveCreateRefreshQueue(liveRefreshWork, () => document.hidden);
+const livePoller = liveCreatePollScheduler(liveRefresh, () => document.hidden);
+
+const liveConnect = () => {
+  if (!("WebSocket" in globalThis) || document.hidden) {
+    liveConnected = false;
+    livePoller.schedule(false);
+    return;
+  }
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(protocol + "//" + location.host + "/api/v1/live");
+  liveSocket = socket;
+  socket.addEventListener("open", () => {
+    liveReconnectAttempt = 0;
+    liveConnected = true;
+    livePoller.schedule(true);
+    liveFreshness.textContent = "Updates are arriving live.";
+  });
+  socket.addEventListener("message", () => { liveRefresh(); });
+  socket.addEventListener("close", () => {
+    if (liveSocket === socket) liveSocket = null;
+    liveConnected = false;
+    livePoller.schedule(false);
+    liveFreshness.textContent = "Reconnecting; this page is still checking for updates.";
+    const delay = liveReconnectDelay(liveReconnectAttempt);
+    liveReconnectAttempt = Math.min(liveReconnectAttempt + 1, 4);
+    clearTimeout(liveReconnectTimer);
+    if (!document.hidden) liveReconnectTimer = setTimeout(liveConnect, delay);
+  });
+  socket.addEventListener("error", () => { socket.close(); });
+};
+
+if (liveBoardRoot) {
+  liveRefresh();
+  livePoller.schedule(false);
+  liveConnect();
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      livePoller.pause();
+      clearTimeout(liveReconnectTimer);
+      return;
+    }
+    liveRefresh();
+    livePoller.schedule(liveConnected);
+    if (liveSocket === null) liveConnect();
+  });
+}
+`;
+
+export const startLineScript = liveRuntimeHelpersScript + stationStateHelpersScript + String.raw`
+const startRoot = document.querySelector("[data-start-line]");
+const startFreshness = document.querySelector("[data-station-freshness]");
+const startEvent = document.querySelector("[data-station-event]");
+const startHeatTitle = document.querySelector("[data-station-heat]");
+const startFacts = document.querySelector("[data-station-facts]");
+const startRoster = document.querySelector("[data-station-roster]");
+const startAction = document.querySelector("[data-station-action]");
+const startMessage = document.querySelector("[data-station-message]");
+let startReconnectAttempt = 0;
+let startReconnectTimer = null;
+let startSocket = null;
+let startConnected = false;
+let startRenderKey = null;
+
+const startText = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value == null ? "" : String(value);
+  if (className) element.className = className;
+  return element;
+};
+const startHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+const startApi = async (url, options) => {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
+    throw new Error("signed-out");
+  }
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || "The race could not be refreshed.");
+  return body;
+};
+const startAddFact = (label, value) => {
+  const fact = startText("div", "", "fact");
+  fact.append(startText("dt", label), startText("dd", value));
+  startFacts.append(fact);
+};
+const startCommand = (path, revision) => startApi(path, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ commandId: crypto.randomUUID(), revision }),
+});
+const startRender = (event, detail) => {
+  const renderKey = stationHeatRenderKey(event, detail);
+  if (renderKey === startRenderKey) return;
+  startRenderKey = renderKey;
+  const restoreActionFocus = startAction.contains(document.activeElement);
+  startEvent.textContent = event.name + " · " + startHumanize(event.status);
+  startHeatTitle.textContent = (detail.heat.round === "FINAL" ? "Final" : "Round one") + " · Heat " + detail.heat.number;
+  startFacts.replaceChildren();
+  startAddFact("Heat status", startHumanize(detail.heat.status));
+  startAddFact("Roster count", detail.roster.length);
+  startRoster.replaceChildren();
+  for (const entry of detail.roster) {
+    startRoster.append(startText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
+      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned")));
+  }
+  if (detail.roster.length === 0) startRoster.append(startText("li", "This heat has no roster entries."));
+  startAction.replaceChildren();
+  const transition = {
+    PLANNED: ["lock", "Lock roster"],
+    LOADING: ["ready", "Mark heat ready"],
+    READY: ["call", "Call this heat"],
+    CALLING: ["start", "Start this heat"],
+  }[detail.heat.status];
+  if (!transition) {
+    startMessage.textContent = detail.heat.status === "AWAITING_RESULT"
+      ? "This heat is awaiting its official result. No other heat may start until the finish line publishes it."
+      : detail.heat.status === "RUNNING"
+      ? "This heat is running. The finish line must mark it finished."
+      : "The finish line is recording this heat. This station cannot finish races or enter results.";
+    return;
+  }
+  const button = startText("button", transition[1], "button station-control");
+  button.type = "button";
+  button.addEventListener("click", async () => {
+    if (transition[0] === "start") {
+      const round = detail.heat.round === "FINAL" ? "Final" : "Round one";
+      const readback = "Start " + round + " Heat " + detail.heat.number + " now? Read back: "
+        + detail.roster.length + " racer" + (detail.roster.length === 1 ? "" : "s")
+        + " in this heat. No next heat can start until its official result is published.";
+      if (!confirm(readback)) return;
+    }
+    button.disabled = true;
+    startMessage.textContent = transition[1] + "…";
+    try {
+      await startCommand("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats/" + encodeURIComponent(detail.heat.id) + "/" + transition[0], detail.heat.revision);
+      startMessage.textContent = "Saved. Loading the current heat.";
+      await startLoad();
+    } catch (error) {
+      if (error.message !== "signed-out") startMessage.textContent = error.message;
+      button.disabled = false;
+    }
+  });
+  startAction.append(button);
+  if (restoreActionFocus) button.focus();
+  startMessage.textContent = "Review the roster, then use the one available legal action.";
+};
+const startEmpty = (message) => {
+  startRenderKey = null;
+  startEvent.textContent = message;
+  startHeatTitle.textContent = "No heat needs the start line";
+  startFacts.replaceChildren();
+  startRoster.replaceChildren(startText("li", "The roster will appear when a heat is ready."));
+  startAction.replaceChildren();
+  startMessage.textContent = "This page will keep checking for the next heat.";
+};
+const startLoadWork = async () => {
+  try {
+    const events = await startApi("/api/v1/staff/events");
+    if (document.hidden) return;
+    const event = events.events.find((item) => ["ROUND_ONE", "FINAL"].includes(item.status));
+    if (!event) {
+      startEmpty("No race round is active right now.");
+      startFreshness.textContent = "Updated just now.";
+      return;
+    }
+    const listed = await startApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats");
+    if (document.hidden) return;
+    const heat = startPickHeat(listed.heats, event.status === "FINAL" ? "FINAL" : "ROUND_ONE");
+    if (!heat) {
+      startEmpty(event.name + " has no unfinished heat in this round.");
+      startFreshness.textContent = "Updated just now.";
+      return;
+    }
+    const detail = await startApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats/" + encodeURIComponent(heat.id));
+    if (document.hidden) return;
+    startRender(event, detail);
+    startFreshness.textContent = "Updated just now.";
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      startFreshness.textContent = "Updates are delayed. This page will keep checking.";
+      startMessage.textContent = error.message;
+    }
+  }
+};
+const startLoad = liveCreateRefreshQueue(startLoadWork, () => document.hidden);
+const startPoller = liveCreatePollScheduler(startLoad, () => document.hidden);
+const startConnect = () => {
+  if (!("WebSocket" in globalThis) || document.hidden) {
+    startConnected = false;
+    startPoller.schedule(false);
+    return;
+  }
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(protocol + "//" + location.host + "/api/v1/live");
+  startSocket = socket;
+  socket.addEventListener("open", () => {
+    startReconnectAttempt = 0;
+    startConnected = true;
+    startPoller.schedule(true);
+    startFreshness.textContent = "Updates are arriving live.";
+  });
+  socket.addEventListener("message", () => { startLoad(); });
+  socket.addEventListener("close", () => {
+    if (startSocket === socket) startSocket = null;
+    startConnected = false;
+    startPoller.schedule(false);
+    startFreshness.textContent = "Reconnecting; this station is still checking for updates.";
+    const delay = liveReconnectDelay(startReconnectAttempt);
+    startReconnectAttempt = Math.min(startReconnectAttempt + 1, 4);
+    clearTimeout(startReconnectTimer);
+    if (!document.hidden) startReconnectTimer = setTimeout(startConnect, delay);
+  });
+  socket.addEventListener("error", () => { socket.close(); });
+};
+if (startRoot) {
+  startLoad();
+  startPoller.schedule(false);
+  startConnect();
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      startPoller.pause();
+      clearTimeout(startReconnectTimer);
+      return;
+    }
+    startLoad();
+    startPoller.schedule(startConnected);
+    if (startSocket === null) startConnect();
+  });
+}
+`;
+
+export const finishSelectionValidationScript = String.raw`
+const finishSelectionProblem = (selected, roster, raceEntryId) => {
+  if (selected.some((item) => item.raceEntryId === raceEntryId)) return "duplicate";
+  if (!roster.some((entry) => entry.raceEntryId === raceEntryId)) return "wrong-heat";
+  return null;
+};
+`;
+
+export const finishHandoffHelpersScript = String.raw`
+const finishParseHandoff = (search) => {
+  const parameters = new URLSearchParams(search);
+  const tag = parameters.get("tag");
+  const eventId = parameters.get("eventId");
+  const heatId = parameters.get("heatId");
+  const revisionText = parameters.get("revision");
+  const expiresText = parameters.get("expiresAt");
+  const revision = revisionText === null ? NaN : Number(revisionText);
+  const expiresAt = expiresText === null ? NaN : Number(expiresText);
+  if (
+    !tag || !/^[A-Za-z0-9_-]{22,128}$/.test(tag)
+    || !eventId || eventId.length > 128 || !heatId || heatId.length > 128
+    || !Number.isSafeInteger(revision) || revision < 0
+    || !Number.isFinite(expiresAt)
+  ) return null;
+  return { tag, eventId, heatId, revision, expiresAt };
+};
+const finishBuildHandoffSearch = (stored, tag) => {
+  if (
+    !stored || stored.returnPath !== "/staff/finish-line"
+    || typeof stored.eventId !== "string" || stored.eventId.length === 0 || stored.eventId.length > 128
+    || typeof stored.heatId !== "string" || stored.heatId.length === 0 || stored.heatId.length > 128
+    || !Number.isSafeInteger(stored.revision) || stored.revision < 0
+    || !Number.isFinite(stored.expiresAt)
+    || !/^[A-Za-z0-9_-]{22,128}$/.test(tag)
+  ) return null;
+  return new URLSearchParams({
+    tag,
+    eventId: stored.eventId,
+    heatId: stored.heatId,
+    revision: String(stored.revision),
+    expiresAt: String(stored.expiresAt),
+  }).toString();
+};
+const finishHandoffProblem = (handoff, current, now = Date.now()) => {
+  if (!handoff) return "invalid";
+  if (handoff.expiresAt <= now) return "expired";
+  if (!current || handoff.eventId !== current.eventId || handoff.heatId !== current.heatId) return "wrong-heat";
+  if (handoff.revision !== current.revision) return "stale-revision";
+  if (current.status !== "AWAITING_RESULT") return "not-awaiting";
+  return null;
+};
+const finishHandoffMessage = (problem) => ({
+  invalid: "That handoff was invalid. Return to this finish station and scan the duck again.",
+  expired: "That handoff expired. Scan the duck again from the current finish station.",
+  "wrong-heat": "That scan belongs to a different heat. Check the displayed heat and scan the duck again.",
+  "stale-revision": "The heat changed after that scan. Review the current heat and scan the duck again.",
+  "not-awaiting": "Mark the displayed heat finished, then scan the duck again.",
+})[problem] || "The scan could not be used. Review the current heat and scan the duck again.";
+`;
+
+export const finishScanSerializationScript = String.raw`
+const finishSameScanContext = (left, right) => Boolean(left && right
+  && left.eventId === right.eventId
+  && left.heatId === right.heatId
+  && left.revision === right.revision
+  && left.intendedPlace === right.intendedPlace);
+const finishCreateSerializedSelector = ({ readContext, setBusy, lookup, accept, stale }) => {
+  let inFlight = false;
+  return async (value) => {
+    if (inFlight) return { accepted: false, reason: "busy" };
+    const captured = readContext();
+    if (!captured) return { accepted: false, reason: "unavailable" };
+    inFlight = true;
+    setBusy(true);
+    try {
+      const selection = await lookup(value, captured);
+      if (!finishSameScanContext(captured, readContext())) {
+        stale();
+        return { accepted: false, reason: "stale" };
+      }
+      const accepted = await accept(selection, captured);
+      if (accepted === false) return { accepted: false, reason: "rejected" };
+      return { accepted: true, place: captured.intendedPlace };
+    } finally {
+      inFlight = false;
+      setBusy(false);
+    }
+  };
+};
+`;
+
+export const finishNfcHelpersScript = String.raw`
+const finishCreateNfcScanner = ({ createReader, createController, decode, onValue, onUnsupported, onReadingError, onStartError, setActive }) => {
+  let active = false;
+  return async () => {
+    if (active) return false;
+    active = true;
+    setActive(true);
+    const reader = createReader();
+    const controller = createController();
+    let settled = false;
+    const cleanup = () => {
+      reader.removeEventListener("reading", handleReading);
+      reader.removeEventListener("readingerror", handleReadingError);
+      controller.abort();
+      active = false;
+      setActive(false);
+    };
+    const handleReading = async (event) => {
+      if (settled) return;
+      settled = true;
+      const record = event.message.records.find((item) => item.recordType === "url" || item.recordType === "text");
+      if (!record) {
+        onUnsupported();
+        cleanup();
+        return;
+      }
+      try {
+        await onValue(decode(record));
+      } finally {
+        cleanup();
+      }
+    };
+    const handleReadingError = () => {
+      if (settled) return;
+      settled = true;
+      onReadingError();
+      cleanup();
+    };
+    reader.addEventListener("reading", handleReading);
+    reader.addEventListener("readingerror", handleReadingError);
+    try {
+      await reader.scan({ signal: controller.signal });
+      return true;
+    } catch (error) {
+      if (!settled) {
+        settled = true;
+        onStartError(error);
+        cleanup();
+      }
+      return false;
+    }
+  };
+};
+`;
+
+export const finishLineScript = liveRuntimeHelpersScript + stationStateHelpersScript
+  + finishSelectionValidationScript + finishHandoffHelpersScript + finishScanSerializationScript
+  + finishNfcHelpersScript + String.raw`
+const finishRoot = document.querySelector("[data-finish-line]");
+const finishFreshness = document.querySelector("[data-station-freshness]");
+const finishEventLabel = document.querySelector("[data-station-event]");
+const finishHeatTitle = document.querySelector("[data-station-heat]");
+const finishFacts = document.querySelector("[data-station-facts]");
+const finishRoster = document.querySelector("[data-station-roster]");
+const finishAction = document.querySelector("[data-finish-action]");
+const finishScanForm = document.querySelector("[data-finish-scan-form]");
+const finishSelections = document.querySelector("[data-finish-selections]");
+const finishSubmit = document.querySelector("[data-submit-result]");
+const finishMessage = document.querySelector("[data-station-message]");
+const finishNfcButton = document.querySelector("[data-start-nfc]");
+const finishStorageKey = "quickducks.finishStation";
+let finishEvent = null;
+let finishHeat = null;
+let finishRosterEntries = [];
+let finishSelected = [];
+let finishReconnectAttempt = 0;
+let finishReconnectTimer = null;
+let finishSocket = null;
+let finishConnected = false;
+let finishRenderKey = null;
+let finishScanBusy = false;
+const finishInitialSearch = location.search;
+let finishPendingHandoff = finishParseHandoff(finishInitialSearch);
+let finishPendingHandoffProblem = finishInitialSearch && finishPendingHandoff === null ? "invalid" : null;
+if (finishInitialSearch) history.replaceState(null, "", location.pathname);
+
+const finishText = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value == null ? "" : String(value);
+  if (className) element.className = className;
+  return element;
+};
+const finishHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+const finishPlaceLabel = (place) => place === 1 ? "1st place" : place === 2 ? "2nd place" : "3rd place";
+const finishKeepContext = () => {
+  if (!finishEvent || !finishHeat || !["RUNNING", "AWAITING_RESULT"].includes(finishHeat.status)) return;
+  try {
+    localStorage.setItem(finishStorageKey, JSON.stringify({
+      returnPath: "/staff/finish-line",
+      eventId: finishEvent.id,
+      heatId: finishHeat.id,
+      revision: finishHeat.revision,
+      expiresAt: Date.now() + 60 * 1000,
+    }));
+  } catch {}
+};
+const finishClearContext = () => { try { localStorage.removeItem(finishStorageKey); } catch {} };
+const finishApi = async (url, options) => {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname + location.search));
+    throw new Error("signed-out");
+  }
+  let body = null;
+  try { body = await response.json(); } catch {}
+  if (!response.ok) throw new Error(body && body.error ? body.error : "The race could not be refreshed.");
+  return body;
+};
+const finishAddFact = (label, value) => {
+  const fact = finishText("div", "", "fact");
+  fact.append(finishText("dt", label), finishText("dd", value));
+  finishFacts.append(fact);
+};
+const finishRequiredPlaces = () => !finishHeat ? 0 : finishHeat.round === "ROUND_ONE" ? 1 : Math.min(3, finishRosterEntries.length);
+const finishSetScanBusy = (busy) => {
+  finishScanBusy = busy;
+  for (const control of finishScanForm.querySelectorAll("input, button")) control.disabled = busy;
+  finishNfcButton.disabled = busy;
+  for (const control of finishSelections.querySelectorAll("button")) control.disabled = busy;
+  const required = finishRequiredPlaces();
+  finishSubmit.disabled = busy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT" || finishSelected.length !== required;
+};
+const finishRenderSelections = () => {
+  const focusedRaceEntry = finishSelections.contains(document.activeElement)
+    ? document.activeElement.dataset.raceEntryId
+    : null;
+  finishSelections.replaceChildren();
+  for (const selection of finishSelected) {
+    const card = finishText("article", "", "station-selection");
+    card.append(
+      finishText("strong", finishPlaceLabel(selection.place)),
+      finishText("p", selection.participantDisplayName + " · Duck #" + selection.visibleNumber),
+    );
+    const remove = finishText("button", "Remove", "button secondary small");
+    remove.type = "button";
+    remove.dataset.raceEntryId = selection.raceEntryId;
+    remove.disabled = finishScanBusy;
+    remove.addEventListener("click", () => {
+      finishSelected = finishSelected.filter((item) => item.raceEntryId !== selection.raceEntryId)
+        .map((item, index) => ({ ...item, place: index + 1 }));
+      finishRenderSelections();
+      finishMessage.textContent = "Selection removed. Scan or enter the correct duck.";
+    });
+    card.append(remove);
+    finishSelections.append(card);
+    if (focusedRaceEntry === selection.raceEntryId) remove.focus();
+  }
+  const required = finishRequiredPlaces();
+  finishSubmit.disabled = finishScanBusy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT" || finishSelected.length !== required;
+  finishSubmit.textContent = finishHeat && finishHeat.round === "FINAL" ? "Submit official podium" : "Submit official winner";
+};
+const finishSelectionContext = () => {
+  if (
+    !finishEvent || !finishHeat || finishHeat.status !== "AWAITING_RESULT"
+    || finishSelected.length >= finishRequiredPlaces()
+  ) return null;
+  return {
+    eventId: finishEvent.id,
+    heatId: finishHeat.id,
+    revision: finishHeat.revision,
+    intendedPlace: finishSelected.length + 1,
+  };
+};
+const finishRunSerializedSelection = finishCreateSerializedSelector({
+  readContext: finishSelectionContext,
+  setBusy: finishSetScanBusy,
+  lookup: async (value, captured) => {
+    finishMessage.textContent = "Checking this duck against the official heat roster…";
+    const parameters = new URLSearchParams({ value: String(value).trim() });
+    const body = await finishApi("/api/v1/staff/events/" + encodeURIComponent(captured.eventId)
+      + "/heats/" + encodeURIComponent(captured.heatId) + "/finish-scan?" + parameters);
+    return body.selection;
+  },
+  accept: async (selection, captured) => {
+    const selectionProblem = finishSelectionProblem(finishSelected, finishRosterEntries, selection.raceEntryId);
+    if (selectionProblem === "duplicate") {
+      finishMessage.textContent = "That duck is already selected. Each place must be a different duck.";
+      return false;
+    }
+    if (selectionProblem === "wrong-heat") {
+      finishMessage.textContent = "That duck is not in the selected heat.";
+      return false;
+    }
+    finishSelected.push({ ...selection, place: captured.intendedPlace });
+    finishRenderSelections();
+    finishScanForm.elements.duck.value = "";
+    finishMessage.textContent = selection.participantDisplayName + " · Duck #" + selection.visibleNumber
+      + " selected for " + finishPlaceLabel(captured.intendedPlace) + ". Review before submitting.";
+    return true;
+  },
+  stale: () => {
+    finishMessage.textContent = "The heat changed while that duck was checked. Review the displayed heat and scan it again.";
+  },
+});
+const finishSelectValue = async (value) => {
+  if (!finishEvent || !finishHeat || finishHeat.status !== "AWAITING_RESULT") {
+    finishMessage.textContent = "Mark the running heat finished before selecting results.";
+    return;
+  }
+  if (finishSelected.length >= finishRequiredPlaces()) {
+    finishMessage.textContent = "Every required place is filled. Remove a selection to change it.";
+    return;
+  }
+  try {
+    return await finishRunSerializedSelection(value);
+  } catch (error) {
+    if (error.message !== "signed-out") finishMessage.textContent = error.message;
+  }
+};
+const finishRender = (event, detail) => {
+  const renderKey = stationHeatRenderKey(event, detail);
+  if (renderKey === finishRenderKey) {
+    finishKeepContext();
+    return;
+  }
+  const changedHeatContext = !finishHeat
+    || finishHeat.id !== detail.heat.id
+    || finishHeat.revision !== detail.heat.revision
+    || finishHeat.status !== detail.heat.status;
+  const restoreActionFocus = finishAction.contains(document.activeElement);
+  finishRenderKey = renderKey;
+  finishEvent = event;
+  finishHeat = detail.heat;
+  finishRosterEntries = detail.roster;
+  if (changedHeatContext) finishSelected = [];
+  else finishSelected = finishSelected.filter((selection) => finishRosterEntries.some((entry) => entry.raceEntryId === selection.raceEntryId));
+  finishEventLabel.textContent = event.name + " · " + finishHumanize(event.status);
+  finishHeatTitle.textContent = (finishHeat.round === "FINAL" ? "Final" : "Round one") + " · Heat " + finishHeat.number;
+  finishFacts.replaceChildren();
+  finishAddFact("Heat status", finishHumanize(finishHeat.status));
+  finishAddFact("Required result", finishHeat.round === "ROUND_ONE" ? "One winner" : finishRequiredPlaces() + " podium places");
+  finishRoster.replaceChildren();
+  for (const entry of finishRosterEntries) {
+    finishRoster.append(finishText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
+      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned")));
+  }
+  finishAction.replaceChildren();
+  finishScanForm.hidden = finishHeat.status !== "AWAITING_RESULT";
+  if (finishHeat.status === "RUNNING") {
+    const button = finishText("button", "Mark heat finished", "button station-control");
+    button.type = "button";
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      finishMessage.textContent = "Marking the heat finished…";
+      try {
+        await finishApi("/api/v1/staff/events/" + encodeURIComponent(finishEvent.id) + "/heats/" + encodeURIComponent(finishHeat.id) + "/finish", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commandId: crypto.randomUUID(), revision: finishHeat.revision }),
+        });
+        await finishLoad();
+        finishMessage.textContent = "Heat finished. Select every required place, review it, then submit once.";
+      } catch (error) {
+        if (error.message !== "signed-out") finishMessage.textContent = error.message;
+        button.disabled = false;
+      }
+    });
+    finishAction.append(button);
+    if (restoreActionFocus) button.focus();
+    finishMessage.textContent = "When the race physically finishes, press the one finish button.";
+  } else {
+    finishMessage.textContent = "Select " + finishRequiredPlaces() + " distinct " + (finishRequiredPlaces() === 1 ? "duck" : "ducks") + ", then review every place before submitting.";
+  }
+  finishRenderSelections();
+  finishKeepContext();
+};
+const finishEmpty = (message) => {
+  const emptyKey = "empty:" + message;
+  if (finishRenderKey === emptyKey) return;
+  finishRenderKey = emptyKey;
+  finishEvent = null;
+  finishHeat = null;
+  finishRosterEntries = [];
+  finishSelected = [];
+  finishEventLabel.textContent = message;
+  finishHeatTitle.textContent = "No heat needs the finish line";
+  finishFacts.replaceChildren();
+  finishRoster.replaceChildren(finishText("li", "A running or just-finished heat will appear here."));
+  finishAction.replaceChildren();
+  finishScanForm.hidden = true;
+  finishRenderSelections();
+  finishMessage.textContent = "This station will keep checking for a running heat.";
+};
+const finishConsumeHandoff = async () => {
+  if (finishPendingHandoffProblem) {
+    const problem = finishPendingHandoffProblem;
+    finishPendingHandoffProblem = null;
+    finishMessage.textContent = finishHandoffMessage(problem);
+    return;
+  }
+  if (!finishPendingHandoff) return;
+  const handoff = finishPendingHandoff;
+  finishPendingHandoff = null;
+  const problem = finishHandoffProblem(handoff, finishEvent && finishHeat ? {
+    eventId: finishEvent.id,
+    heatId: finishHeat.id,
+    revision: finishHeat.revision,
+    status: finishHeat.status,
+  } : null);
+  if (problem) {
+    finishMessage.textContent = finishHandoffMessage(problem);
+    return;
+  }
+  await finishSelectValue(location.origin + "/t/" + handoff.tag);
+};
+const finishLoadWork = async () => {
+  finishKeepContext();
+  try {
+    const events = await finishApi("/api/v1/staff/events");
+    if (document.hidden) return;
+    const event = events.events.find((item) => ["ROUND_ONE", "FINAL"].includes(item.status));
+    if (!event) {
+      finishEmpty("No race round is active right now.");
+      finishFreshness.textContent = "Updated just now.";
+      await finishConsumeHandoff();
+      return;
+    }
+    const listed = await finishApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats");
+    if (document.hidden) return;
+    const round = event.status === "FINAL" ? "FINAL" : "ROUND_ONE";
+    const heat = finishPickHeat(listed.heats, round);
+    if (!heat) {
+      finishEmpty(event.name + " has no running heat or result waiting.");
+      finishFreshness.textContent = "Updated just now.";
+      await finishConsumeHandoff();
+      return;
+    }
+    const detail = await finishApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats/" + encodeURIComponent(heat.id));
+    if (document.hidden) return;
+    finishRender(event, detail);
+    finishFreshness.textContent = "Updated just now.";
+    await finishConsumeHandoff();
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      finishFreshness.textContent = "Updates are delayed. This station will keep checking.";
+      finishMessage.textContent = error.message;
+    }
+  }
+};
+const finishLoad = liveCreateRefreshQueue(finishLoadWork, () => document.hidden);
+const finishPoller = liveCreatePollScheduler(finishLoad, () => document.hidden);
+finishScanForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await finishSelectValue(finishScanForm.elements.duck.value);
+});
+finishSubmit.addEventListener("click", async () => {
+  if (!finishEvent || !finishHeat || finishScanBusy || finishSelected.length !== finishRequiredPlaces()) return;
+  const readback = finishSelected.map((selection) => finishPlaceLabel(selection.place) + ": "
+    + selection.participantDisplayName + ", Duck #" + selection.visibleNumber).join("; ");
+  if (!confirm("Submit this official result now? Read back: " + readback + ". This publishes immediately.")) return;
+  const captured = {
+    eventId: finishEvent.id,
+    heatId: finishHeat.id,
+    revision: finishHeat.revision,
+    results: finishSelected.map((selection) => ({ raceEntryId: selection.raceEntryId, place: selection.place })),
+  };
+  finishSubmit.disabled = true;
+  finishMessage.textContent = "Submitting the reviewed official result…";
+  try {
+    await finishApi("/api/v1/staff/events/" + encodeURIComponent(captured.eventId) + "/heats/" + encodeURIComponent(captured.heatId) + "/results/finalize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        revision: captured.revision,
+        results: captured.results,
+      }),
+    });
+    finishClearContext();
+    finishSelected = [];
+    await finishLoad();
+    finishMessage.textContent = "Official result saved. The station has moved to the next available heat.";
+  } catch (error) {
+    if (error.message !== "signed-out") finishMessage.textContent = error.message;
+    finishSubmit.disabled = false;
+  }
+});
+if ("NDEFReader" in globalThis) {
+  finishNfcButton.hidden = false;
+  const finishStartNfcScan = finishCreateNfcScanner({
+    createReader: () => new NDEFReader(),
+    createController: () => new AbortController(),
+    decode: (record) => new TextDecoder(record.encoding || "utf-8").decode(record.data),
+    onValue: finishSelectValue,
+    onUnsupported: () => {
+      finishMessage.textContent = "That NFC tag did not contain a QuickDucks URL. Try scanning again or enter the duck number.";
+    },
+    onReadingError: () => {
+      finishMessage.textContent = "That NFC tag could not be read. Try scanning again or enter the duck number.";
+    },
+    onStartError: () => {
+      finishMessage.textContent = "NFC scanning could not start. Paste the tag URL or enter the duck number instead.";
+    },
+    setActive: (active) => {
+      finishNfcButton.disabled = active || finishScanBusy;
+      if (active) finishMessage.textContent = "Hold one duck tag near this device.";
+    },
+  });
+  finishNfcButton.addEventListener("click", finishStartNfcScan);
+}
+const finishConnect = () => {
+  if (!("WebSocket" in globalThis) || document.hidden) {
+    finishConnected = false;
+    finishPoller.schedule(false);
+    return;
+  }
+  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(protocol + "//" + location.host + "/api/v1/live");
+  finishSocket = socket;
+  socket.addEventListener("open", () => {
+    finishReconnectAttempt = 0;
+    finishConnected = true;
+    finishPoller.schedule(true);
+    finishFreshness.textContent = "Updates are arriving live.";
+  });
+  socket.addEventListener("message", () => { finishLoad(); });
+  socket.addEventListener("close", () => {
+    if (finishSocket === socket) finishSocket = null;
+    finishConnected = false;
+    finishPoller.schedule(false);
+    finishFreshness.textContent = "Reconnecting; this station is still checking for updates.";
+    const delay = liveReconnectDelay(finishReconnectAttempt);
+    finishReconnectAttempt = Math.min(finishReconnectAttempt + 1, 4);
+    clearTimeout(finishReconnectTimer);
+    if (!document.hidden) finishReconnectTimer = setTimeout(finishConnect, delay);
+  });
+  socket.addEventListener("error", () => { socket.close(); });
+};
+if (finishRoot) {
+  finishKeepContext();
+  finishLoad();
+  finishPoller.schedule(false);
+  finishConnect();
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      finishPoller.pause();
+      clearTimeout(finishReconnectTimer);
+      return;
+    }
+    finishLoad();
+    finishPoller.schedule(finishConnected);
+    if (finishSocket === null) finishConnect();
+  });
+}
+`;
+
 export const staffHomeScript = String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
+const assignedRoles = new Set((operationsRoot.dataset.roles || "").split(",").filter(Boolean));
+const hasRole = (role) => isSystemAdmin || assignedRoles.has(role);
+const canRegistration = hasRole("REGISTRATION") || hasRole("RACE_DIRECTOR");
+const canInventory = hasRole("DUCK_MANAGER") || hasRole("RACE_DIRECTOR");
+const canRaceRead = hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER") || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
+const canDirectRace = hasRole("RACE_DIRECTOR");
+const canRunHeat = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
+const canTakeResults = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
+const canReturns = hasRole("RETURN_STEWARD") || hasRole("RACE_DIRECTOR");
 const consoleMessage = document.querySelector("[data-console-message]");
 const eventSelect = document.querySelector("[data-event-select]");
 let currentEvent = null;
@@ -255,7 +1341,7 @@ const renderReadiness = (readiness) => {
     card.append(text("span", state.allowed ? "Ready" : "Blocked", "status-chip " + (state.allowed ? "ready" : "blocked")));
     if (state.requiresAdmin) card.append(text("span", "Administrator", "status-chip"));
     for (const blocker of state.blockers) card.append(text("p", blocker, "muted"));
-    if (!state.requiresAdmin || isSystemAdmin) {
+    if (canDirectRace && (!state.requiresAdmin || isSystemAdmin)) {
       const button = text("button", lifecycleLabels[action] || humanize(action), "button small");
       button.type = "button";
       button.disabled = !state.allowed;
@@ -318,7 +1404,9 @@ const loadEvents = async (preferredId) => {
     eventSummary.replaceChildren(empty("Create a draft event to begin."));
     readinessList.replaceChildren(empty("No lifecycle is available."));
     setMessage("No event dataset exists. An administrator can create one.");
-    const loads = [loadInventory(), loadReturnReview()];
+    const loads = [];
+    if (canInventory) loads.push(loadInventory());
+    if (canReturns) loads.push(loadReturnReview());
     if (isSystemAdmin) loads.push(loadStaffProfiles());
     await Promise.allSettled(loads);
     return;
@@ -337,12 +1425,16 @@ const loadEvents = async (preferredId) => {
 
 const loadEvent = async (eventId) => {
   setMessage("Loading selected event operations…");
-  const [detail, readiness] = await Promise.all([
-    api("/api/v1/staff/events/" + encodeURIComponent(eventId)),
-    api("/api/v1/staff/events/" + encodeURIComponent(eventId) + "/readiness"),
-  ]);
+  const detail = await api("/api/v1/staff/events/" + encodeURIComponent(eventId));
+  const readiness = canRaceRead
+    ? await api("/api/v1/staff/events/" + encodeURIComponent(eventId) + "/readiness")
+    : { readiness: {} };
   renderEvent(detail, readiness);
-  const loads = [loadParticipants(), loadInventory(), loadHeats(), loadFinalists(), loadReturnReview()];
+  const loads = [];
+  if (canRegistration) loads.push(loadParticipants());
+  if (canInventory) loads.push(loadInventory());
+  if (canRaceRead) loads.push(loadHeats(), loadFinalists());
+  if (canReturns) loads.push(loadReturnReview());
   if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit(), loadPurgeGate(), loadStaffProfiles());
   const results = await Promise.allSettled(loads);
   const failed = results.filter((result) => result.status === "rejected");
@@ -497,19 +1589,20 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.lastName.value = registration.lastName;
   participantEditForm.elements.email.value = registration.email || "";
   participantEditForm.elements.phone.value = registration.phone || "";
-  participantEditForm.elements.emailNotificationsEnabled.checked = registration.emailNotificationsEnabled;
   participantEditForm.elements.duckKeepPreference.value = registration.duckKeepPreference;
   participantEditForm.elements.notes.value = registration.notes || "";
   participantActions.replaceChildren();
-  addParticipantAction("Use for duck assignment", "button secondary small", () => {
-    document.querySelector("[data-inventory-assign-form]").elements.raceEntryId.value = registration.raceEntryId;
-    document.querySelector("#inventory").scrollIntoView({ behavior: "smooth" });
-  });
+  if (canInventory) {
+    addParticipantAction("Use for duck assignment", "button secondary small", () => {
+      document.querySelector("[data-inventory-assign-form]").elements.raceEntryId.value = registration.raceEntryId;
+      document.querySelector("#inventory").scrollIntoView({ behavior: "smooth" });
+    });
+  }
   if (["SUBMITTED", "ACTIVE"].includes(registration.status)) {
     addParticipantAction("Withdraw", "button danger small", (event) => changeParticipantStatus("withdraw", "Withdraw participant", true, event.currentTarget));
-    if (isSystemAdmin) addParticipantAction("Disqualify", "button danger small", (event) => changeParticipantStatus("disqualify", "Disqualify participant", true, event.currentTarget));
+    if (canDirectRace) addParticipantAction("Disqualify", "button danger small", (event) => changeParticipantStatus("disqualify", "Disqualify participant", true, event.currentTarget));
   }
-  if (isSystemAdmin && ["WITHDRAWN", "DISQUALIFIED"].includes(registration.status)) {
+  if (canDirectRace && ["WITHDRAWN", "DISQUALIFIED"].includes(registration.status)) {
     addParticipantAction("Reactivate", "button small", (event) => {
       const button = event.currentTarget;
       if (!confirm("Reactivate this participant?")) return;
@@ -553,7 +1646,7 @@ document.querySelector("[data-walkup-form]").addEventListener("submit", async (e
         lastName: String(values.get("lastName")),
         email: String(values.get("email")) || null,
         phone: String(values.get("phone")) || null,
-        emailNotificationsEnabled: values.get("emailNotificationsEnabled") === "on",
+        emailNotificationsEnabled: false,
         duckKeepPreference: String(values.get("duckKeepPreference")),
         notes: String(values.get("notes")) || null,
         clientTimestamp: new Date().toISOString(),
@@ -585,7 +1678,7 @@ participantEditForm.addEventListener("submit", async (event) => {
         lastName: String(values.get("lastName")),
         email: String(values.get("email")) || null,
         phone: String(values.get("phone")) || null,
-        emailNotificationsEnabled: values.get("emailNotificationsEnabled") === "on",
+        emailNotificationsEnabled: false,
         duckKeepPreference: String(values.get("duckKeepPreference")),
         notes: String(values.get("notes")) || null,
       }),
@@ -633,7 +1726,11 @@ const renderDuckDetail = (body) => {
     ["Location", duck.location || "Not set"],
     ["Tag", duck.tag ? humanize(duck.tag.status) : "No tag"],
     ["Reservation", duck.reservation ? duck.reservation.event.name + (duck.reservation.releasedAt ? " · released" : " · active") : "None"],
-    ["Participant", duck.participant ? duck.participant.firstName + " " + duck.participant.lastName : "Unassigned"],
+    ["Participant", duck.participant
+      ? duck.participant.firstName
+        ? duck.participant.firstName + " " + duck.participant.lastName
+        : "Assigned race entry " + duck.participant.raceEntryId
+      : "Unassigned"],
     ["Heat", duck.heat ? humanize(duck.heat.round) + " " + duck.heat.number : "None"],
     ["Revision", duck.revision],
   ]);
@@ -654,7 +1751,10 @@ const renderDuckDetail = (body) => {
     inventoryHistory.append(historyCard("Reservation · " + item.event.name, item.releasedAt ? "Released " + item.releasedAt : "Active since " + item.reservedAt));
   }
   for (const item of body.history.assignments) {
-    inventoryHistory.append(historyCard("Assignment · " + item.participant.firstName + " " + item.participant.lastName, item.validTo ? "Closed " + item.validTo : "Active since " + item.validFrom));
+    const participant = item.participant.firstName
+      ? item.participant.firstName + " " + item.participant.lastName
+      : "Race entry " + item.participant.raceEntryId;
+    inventoryHistory.append(historyCard("Assignment · " + participant, item.validTo ? "Closed " + item.validTo : "Active since " + item.validFrom));
   }
   if (!inventoryHistory.childElementCount) inventoryHistory.append(empty("No inventory history is recorded."));
 };
@@ -666,7 +1766,9 @@ const loadDuckDetail = async (duckId) => {
 
 const refreshSelectedDuck = async () => {
   const duckId = selectedDuck.id;
-  await Promise.all([loadInventory(), loadDuckDetail(duckId), loadParticipants()]);
+  const loads = [loadInventory(), loadDuckDetail(duckId)];
+  if (canRegistration) loads.push(loadParticipants());
+  await Promise.all(loads);
 };
 
 document.querySelector("[data-refresh-inventory]").addEventListener("click", () => loadInventory()
@@ -830,6 +1932,7 @@ const loadHeats = async () => {
 };
 
 const addRosterForm = (body) => {
+  if (!canDirectRace) return;
   if (body.heat.status !== "PLANNED" || body.heat.rosterLocked) return;
   const details = text("details", "", "operation-card");
   details.append(text("summary", "Replace unlocked roster"));
@@ -896,7 +1999,12 @@ const resultForm = (body, mode) => {
   form.append(button);
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (!confirm((mode === "finalize" ? "Publish" : "Replace") + " this official heat result?")) return;
+    const readback = selects.map(([place, select]) => {
+      const label = place === 1 ? "First place" : place === 2 ? "Second place" : "Third place";
+      return label + ": " + (select.selectedOptions[0]?.textContent || "not selected");
+    }).join("; ");
+    const action = mode === "finalize" ? "Publish this official result now" : "Replace the official result now";
+    if (!confirm(action + "? Read back: " + readback + ". This changes the public result immediately.")) return;
     const payload = {
       commandId: crypto.randomUUID(), revision: selectedHeat.revision,
       results: selects.map(([place, select]) => ({ raceEntryId: select.value, place })),
@@ -919,11 +2027,17 @@ const renderHeatControls = (body) => {
     PLANNED: ["lock", "Lock roster"], LOADING: ["ready", "Mark ready"], READY: ["call", "Call heat"],
     CALLING: ["start", "Start heat"], RUNNING: ["finish", "Finish heat"],
   }[body.heat.status];
-  if (transition) {
+  const canTransition = transition && (transition[0] === "finish" ? canTakeResults : canRunHeat);
+  if (canTransition) {
     const button = text("button", transition[1], "button small");
     button.type = "button";
     button.addEventListener("click", async () => {
-      if (!confirm(transition[1] + "?")) return;
+      const confirmation = transition[0] === "start"
+        ? "Start " + humanize(body.heat.round) + " Heat " + body.heat.number + " now? Read back: "
+          + body.roster.length + " racer" + (body.roster.length === 1 ? "" : "s")
+          + ". No next heat can start until this heat's official result is published."
+        : transition[1] + "?";
+      if (!confirm(confirmation)) return;
       await perform(button, transition[1] + "…", async () => {
         await api(
           "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/" + encodeURIComponent(selectedHeat.id) + "/" + transition[0],
@@ -947,8 +2061,8 @@ const renderHeatControls = (body) => {
   });
   heatControls.append(announcerButton);
   addRosterForm(body);
-  if (body.heat.status === "AWAITING_RESULT") heatControls.append(resultForm(body, "finalize"));
-  if (body.heat.status === "FINALIZED" && body.results.length > 0) {
+  if (canTakeResults && body.heat.status === "AWAITING_RESULT") heatControls.append(resultForm(body, "finalize"));
+  if (canDirectRace && body.heat.status === "FINALIZED" && body.results.length > 0) {
     heatControls.append(resultForm(body, "correct"));
     const reopenForm = text("form", "", "operation-card danger-zone");
     const label = text("label", "Reason to reopen result");
@@ -1076,7 +2190,9 @@ numberedDispositionForm.addEventListener("submit", async (event) => {
       commandOptions("POST", { commandId: crypto.randomUUID(), disposition: String(values.get("disposition")) }),
     );
     form.reset();
-    await Promise.all([loadReturnReview(), loadInventory()]);
+    const loads = [loadReturnReview()];
+    if (canInventory) loads.push(loadInventory());
+    await Promise.all(loads);
   });
 });
 
@@ -1156,7 +2272,9 @@ document.querySelector("[data-finalize-return-batch]").addEventListener("click",
     const result = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/return-batches/" + encodeURIComponent(batchId) + "/finalize", commandOptions("POST", { commandId: crypto.randomUUID() }));
     setMessage("Finalized " + result.batch.itemCount + " return items.", false, returnBatchMessage);
     returnBatchId.value = "";
-    await Promise.all([loadReturnReview(), loadInventory()]);
+    const loads = [loadReturnReview()];
+    if (canInventory) loads.push(loadInventory());
+    await Promise.all(loads);
   });
 });
 
@@ -1291,13 +2409,48 @@ const staffAccess = document.querySelector("[data-staff-access]");
 const staffAccessForm = document.querySelector("[data-staff-access-form]");
 const staffAccessMessage = document.querySelector("[data-staff-access-message]");
 const staffAccessList = document.querySelector("[data-staff-access-list]");
+const staffRoleLabels = {
+  REGISTRATION: "Registration",
+  DUCK_MANAGER: "Duck manager",
+  ANNOUNCER: "Announcer",
+  HEAT_RUNNER: "Heat runner",
+  RESULT_TAKER: "Result taker",
+  RETURN_STEWARD: "Return steward",
+  RACE_DIRECTOR: "Race director",
+};
 
-const staffLifecycle = async (profile, action, role, button) => {
+const roleSetControl = (selectedRoles) => {
+  const fieldset = document.createElement("fieldset");
+  const legend = text("legend", "Operational roles");
+  fieldset.append(legend);
+  for (const [value, label] of Object.entries(staffRoleLabels)) {
+    const option = text("label", "", "check");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = value;
+    checkbox.checked = selectedRoles.includes(value);
+    option.append(checkbox, text("span", label, "label-text"));
+    fieldset.append(option);
+  }
+  return fieldset;
+};
+
+const selectedRoleSet = (fieldset) => [...fieldset.querySelectorAll('input[type="checkbox"]:checked')]
+  .map((checkbox) => checkbox.value);
+
+const staffLifecycle = async (profile, action, roleChange, button) => {
   const description = action === "role" ? "change this account role" : action + " this staff account";
   if (!confirm("Really " + description + "?")) return;
   await perform(button, "Updating staff access…", async () => {
     const payload = { commandId: crypto.randomUUID() };
-    if (action === "role") payload.role = role;
+    if (action === "role") {
+      payload.role = roleChange.role;
+      payload.roles = roleChange.roles;
+      payload.revision = profile.roleRevision;
+      if (payload.role === "STAFF" && payload.roles.length === 0) {
+        throw new Error("Select at least one operational role for regular staff.");
+      }
+    }
     await api("/api/v1/staff/profiles/" + encodeURIComponent(profile.id) + "/" + action, commandOptions("POST", payload));
     await loadStaffProfiles();
   });
@@ -1313,17 +2466,26 @@ const loadStaffProfiles = async () => {
     identity.append(text("p", profile.displayName || profile.email), text("p", profile.email + " · " + (profile.active === false ? "Inactive" : "Active"), "muted"));
     const controls = text("div", "", "actions");
     const role = document.createElement("select");
-    role.setAttribute("aria-label", "Role for " + (profile.displayName || profile.email));
-    role.append(new Option("Regular staff", "STAFF"), new Option("Administrator", "ADMIN"));
+    role.setAttribute("aria-label", "Account type for " + (profile.displayName || profile.email));
+    role.append(new Option("Regular staff", "STAFF"), new Option("System administrator", "ADMIN"));
     role.value = profile.role;
+    const roleSet = roleSetControl(profile.roles || []);
+    roleSet.disabled = role.value === "ADMIN";
+    role.addEventListener("change", () => { roleSet.disabled = role.value === "ADMIN"; });
     const saveRole = text("button", "Save role", "button secondary small"); saveRole.type = "button";
-    saveRole.addEventListener("click", () => staffLifecycle(profile, "role", role.value, saveRole));
+    saveRole.addEventListener("click", () => staffLifecycle(profile, "role", {
+      role: role.value,
+      roles: role.value === "ADMIN" ? [] : selectedRoleSet(roleSet),
+    }, saveRole));
     const activeAction = profile.active === false ? "reactivate" : "deactivate";
     const activeButton = text("button", profile.active === false ? "Reactivate" : "Deactivate", profile.active === false ? "button small" : "button danger small");
     activeButton.type = "button";
     activeButton.addEventListener("click", () => staffLifecycle(profile, activeAction, null, activeButton));
-    controls.append(role, saveRole, activeButton);
-    card.append(identity, text("span", profile.role === "ADMIN" ? "Administrator" : "Regular staff", "role-tag"), controls);
+    controls.append(role, roleSet, saveRole, activeButton);
+    const roleSummary = profile.role === "ADMIN"
+      ? "System administrator"
+      : (profile.roles || []).map((value) => staffRoleLabels[value]).join(", ");
+    card.append(identity, text("span", roleSummary || "No operational roles", "role-tag"), controls);
     staffAccessList.append(card);
   }
   setMessage(body.staff.length + " authorized staff account" + (body.staff.length === 1 ? "." : "s."), false, staffAccessMessage);
@@ -1335,8 +2497,13 @@ if (staffAccessForm) staffAccessForm.addEventListener("submit", async (event) =>
   const button = form.querySelector("button");
   const values = new FormData(form);
   await perform(button, "Creating Cognito account and staff access…", async () => {
+    const accountType = String(values.get("role"));
+    const roles = accountType === "ADMIN" ? [] : values.getAll("roles").map(String);
+    if (accountType === "STAFF" && roles.length === 0) {
+      throw new Error("Select at least one operational role for regular staff.");
+    }
     const result = await api("/api/v1/staff/profiles", commandOptions("POST", {
-      commandId: crypto.randomUUID(), email: String(values.get("email")), displayName: String(values.get("displayName")), role: String(values.get("role")),
+      commandId: crypto.randomUUID(), email: String(values.get("email")), displayName: String(values.get("displayName")), role: accountType, roles,
     }));
     form.reset();
     await loadStaffProfiles();
@@ -1344,12 +2511,38 @@ if (staffAccessForm) staffAccessForm.addEventListener("submit", async (event) =>
   });
 });
 
+if (staffAccessForm) {
+  const accountType = staffAccessForm.elements.role;
+  const roleSet = staffAccessForm.querySelector("[data-create-role-set]");
+  const updateRoleSet = () => { roleSet.disabled = accountType.value === "ADMIN"; };
+  accountType.addEventListener("change", updateRoleSet);
+  updateRoleSet();
+}
+
 loadEvents().catch((error) => {
   if (error.message !== "signed-out") setMessage(error.message, true);
 });
 `;
 
-export const staffDuckScript = String.raw`
+export const staffDuckScript = finishHandoffHelpersScript + String.raw`
+const finishStationStorageKey = "quickducks.finishStation";
+const finishStationTagMatch = location.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]{22,128})$/);
+let finishStationHandoff = false;
+try {
+  const stored = JSON.parse(localStorage.getItem(finishStationStorageKey) || "null");
+  const handoffSearch = finishStationTagMatch
+    ? finishBuildHandoffSearch(stored, finishStationTagMatch[1])
+    : null;
+  if (handoffSearch === null) localStorage.removeItem(finishStationStorageKey);
+  else {
+    localStorage.removeItem(finishStationStorageKey);
+    finishStationHandoff = true;
+    location.replace("/staff/finish-line?" + handoffSearch);
+  }
+} catch {
+  try { localStorage.removeItem(finishStationStorageKey); } catch {}
+}
+if (!finishStationHandoff) {
 const root = document.querySelector("[data-staff-duck]");
 const token = root.dataset.token;
 const pageTitle = document.querySelector("[data-staff-title]");
@@ -1387,7 +2580,7 @@ const addFact = (label, value) => {
 };
 
 const showDisposition = (data) => {
-  if (!data.event || !["COMPLETED", "RETURN_PROCESSING"].includes(data.event.status)) return false;
+  if (!data.permissions.recordDisposition || !data.event || !["COMPLETED", "RETURN_PROCESSING"].includes(data.event.status)) return false;
   dispositionArea.hidden = false;
   dispositionArea.dataset.eventId = data.event.id;
   document.querySelector("[data-disposition-event]").textContent = data.event.name;
@@ -1407,14 +2600,14 @@ const showDisposition = (data) => {
 };
 
 const showInspection = (data) => {
-  const participant = data.assignment.participant;
+  const participant = data.assignment.participant || {};
   pageTitle.textContent = "Inspect Duck #" + data.duck.visibleNumber;
   message.textContent = "This duck is already paired. Review the assignment below.";
   addFact("Duck", "#" + data.duck.visibleNumber);
   addFact("Inventory", data.duck.inventoryStatus.replaceAll("_", " ").toLowerCase());
-  addFact("Participant", participant.firstName + " " + participant.lastName);
-  addFact("Lookup code", participant.lookupCode);
-  addFact("Registration", participant.registrationStatus.replaceAll("_", " ").toLowerCase());
+  if (participant.firstName) addFact("Participant", participant.firstName + " " + participant.lastName);
+  if (participant.lookupCode) addFact("Lookup code", participant.lookupCode);
+  if (participant.registrationStatus) addFact("Registration", participant.registrationStatus.replaceAll("_", " ").toLowerCase());
   if (!data.assignment.active) addFact("Assignment", "closed");
   if (data.disposition) addFact("Disposition", data.disposition.replaceAll("_", " ").toLowerCase());
   if (participant.email) addFact("Email", participant.email);
@@ -1557,4 +2750,5 @@ dispositionForm.addEventListener("submit", async (event) => {
 });
 
 load();
+}
 `;

@@ -20,6 +20,7 @@ const actor = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
+  roles: ["REGISTRATION"],
   authentication: "bearer",
 };
 

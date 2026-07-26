@@ -12,6 +12,7 @@ const actor = {
   email: "admin.actor@example.com",
   displayName: "Admin Actor",
   isSystemAdmin: true,
+  roles: [],
   authentication: "bearer",
 };
 
@@ -21,6 +22,8 @@ const profile = {
   display_name: "Staff Target",
   is_system_admin: 0,
   is_active: 1,
+  role_revision: 0,
+  roles_csv: "REGISTRATION",
   created_at: "2026-07-25T00:00:00.000Z",
 };
 
@@ -50,7 +53,7 @@ const makeDb = (first = () => null, all = () => ({ results: [] })) => {
     },
     async batch(items) {
       batches.push(items);
-      return items.map(() => ({ success: true }));
+      return items.map(() => ({ success: true, meta: { changes: 1 } }));
     },
   };
 };
@@ -98,12 +101,12 @@ test("returns null for routes outside staff lifecycle operations", async () => {
 });
 
 test("regular staff cannot list, change roles, deactivate, or reactivate staff", async () => {
-  const regularStaff = { ...actor, isSystemAdmin: false };
+  const regularStaff = { ...actor, isSystemAdmin: false, roles: ["RACE_DIRECTOR"] };
   const db = makeDb();
   const calls = [];
   const routes = [
     request("/api/v1/staff/profiles", undefined, "GET"),
-    request(`/api/v1/staff/profiles/${profile.id}/role`, { commandId, role: "ADMIN" }),
+    request(`/api/v1/staff/profiles/${profile.id}/role`, { commandId, role: "ADMIN", roles: [], revision: 0 }),
     request(`/api/v1/staff/profiles/${profile.id}/deactivate`, { commandId }),
     request(`/api/v1/staff/profiles/${profile.id}/reactivate`, { commandId }),
   ];
@@ -139,6 +142,8 @@ test("administrator list responses preserve existing fields and add active state
     email: profile.email,
     displayName: profile.display_name,
     role: "STAFF",
+    roles: ["REGISTRATION"],
+    roleRevision: 0,
     createdAt: profile.created_at,
     active: true,
   });
@@ -149,12 +154,14 @@ test("administrator list responses preserve existing fields and add active state
 test("an administrator changes a role with an idempotency record and retained audit", async () => {
   let targetReads = 0;
   const db = makeDb((sql) => {
-    if (!sql.includes("WHERE id = ?") || !sql.includes("FROM staff_profiles")) return null;
+    if (!sql.includes("WHERE p.id = ?") || !sql.includes("FROM staff_profiles")) return null;
     targetReads += 1;
-    return targetReads === 1 ? profile : { ...profile, is_system_admin: 1 };
+    return targetReads === 1
+      ? profile
+      : { ...profile, is_system_admin: 1, role_revision: 1, roles_csv: "" };
   });
   const response = await handleStaffLifecycleOperations(
-    request(`/api/v1/staff/profiles/${profile.id}/role`, { commandId, role: "ADMIN" }),
+    request(`/api/v1/staff/profiles/${profile.id}/role`, { commandId, role: "ADMIN", roles: [], revision: 0 }),
     makeEnv(db),
     actor,
   );
@@ -169,8 +176,15 @@ test("an administrator changes a role with an idempotency record and retained au
   assert.match(sql, /INSERT INTO staff_lifecycle_commands/);
   assert.match(sql, /INSERT INTO staff_lifecycle_audit_events/);
   const audit = db.batches[0].find((statement) => statement.sql.includes("staff_lifecycle_audit_events"));
-  assert.equal(audit.args[4], "STAFF_ROLE_CHANGED");
-  assert.deepEqual(JSON.parse(audit.args[6]), { previousRole: "STAFF", role: "ADMIN" });
+  assert.match(audit.sql, /STAFF_ROLE_CHANGED/);
+  assert.deepEqual(JSON.parse(audit.args[5]), {
+    previousRole: "STAFF",
+    previousRoles: ["REGISTRATION"],
+    role: "ADMIN",
+    roles: [],
+    previousRevision: 0,
+    revision: 1,
+  });
 });
 
 test("command replay returns the stored result without another Cognito call or audit", async () => {
@@ -178,11 +192,16 @@ test("command replay returns the stored result without another Cognito call or a
     command_type: "DEACTIVATE_STAFF",
     target_staff_profile_id: profile.id,
     requested_role: null,
+    requested_roles_json: null,
+    expected_role_revision: null,
+    result_role_revision: null,
     result_is_system_admin: 0,
     result_is_active: 0,
     id: profile.id,
     email: profile.email,
     display_name: profile.display_name,
+    role_revision: profile.role_revision,
+    roles_csv: profile.roles_csv,
     created_at: profile.created_at,
   };
   const db = makeDb((sql) => sql.includes("FROM staff_lifecycle_commands c") ? replay : null);
@@ -203,17 +222,19 @@ test("command replay returns the stored result without another Cognito call or a
 });
 
 test("the final active administrator cannot be demoted or deactivated", async () => {
-  const finalAdmin = { ...profile, id: "final_admin", is_system_admin: 1 };
+  const finalAdmin = { ...profile, id: "final_admin", is_system_admin: 1, roles_csv: "" };
   const db = makeDb((sql) => {
     if (sql.includes("FROM staff_lifecycle_commands c")) return null;
-    if (sql.includes("WHERE id = ?") && sql.includes("FROM staff_profiles")) return finalAdmin;
+    if (sql.includes("WHERE p.id = ?") && sql.includes("FROM staff_profiles")) return finalAdmin;
     if (sql.includes("WHERE id != ?")) return null;
     return null;
   });
   const calls = [];
 
   const demote = await handleStaffLifecycleOperations(
-    request(`/api/v1/staff/profiles/${finalAdmin.id}/role`, { commandId, role: "STAFF" }),
+    request(`/api/v1/staff/profiles/${finalAdmin.id}/role`, {
+      commandId, role: "STAFF", roles: ["RACE_DIRECTOR"], revision: 0,
+    }),
     makeEnv(db),
     actor,
     identity(calls),
@@ -241,13 +262,16 @@ test("administrators cannot demote or deactivate themselves", async () => {
     id: actor.id,
     email: actor.email,
     is_system_admin: 1,
+    roles_csv: "",
   };
-  const db = makeDb((sql) => sql.includes("WHERE id = ?") && sql.includes("FROM staff_profiles")
+  const db = makeDb((sql) => sql.includes("WHERE p.id = ?") && sql.includes("FROM staff_profiles")
     ? ownProfile
     : null);
 
   const demote = await handleStaffLifecycleOperations(
-    request(`/api/v1/staff/profiles/${actor.id}/role`, { commandId, role: "STAFF" }),
+    request(`/api/v1/staff/profiles/${actor.id}/role`, {
+      commandId, role: "STAFF", roles: ["RACE_DIRECTOR"], revision: 0,
+    }),
     makeEnv(db),
     actor,
   );
@@ -269,7 +293,7 @@ test("administrators cannot demote or deactivate themselves", async () => {
 test("deactivation disables Cognito, signs out sessions, and then saves inactive state", async () => {
   let targetReads = 0;
   const db = makeDb((sql) => {
-    if (!sql.includes("WHERE id = ?") || !sql.includes("FROM staff_profiles")) return null;
+    if (!sql.includes("WHERE p.id = ?") || !sql.includes("FROM staff_profiles")) return null;
     targetReads += 1;
     return targetReads === 1 ? profile : { ...profile, is_active: 0 };
   });
@@ -294,7 +318,7 @@ test("deactivation disables Cognito, signs out sessions, and then saves inactive
 });
 
 test("a failed global sign-out re-enables Cognito and saves no lifecycle state", async () => {
-  const db = makeDb((sql) => sql.includes("WHERE id = ?") && sql.includes("FROM staff_profiles")
+  const db = makeDb((sql) => sql.includes("WHERE p.id = ?") && sql.includes("FROM staff_profiles")
     ? profile
     : null);
   const calls = [];
@@ -320,7 +344,7 @@ test("a failed global sign-out re-enables Cognito and saves no lifecycle state",
 });
 
 test("a failed D1 deactivation compensates by re-enabling Cognito", async () => {
-  const db = makeDb((sql) => sql.includes("WHERE id = ?") && sql.includes("FROM staff_profiles")
+  const db = makeDb((sql) => sql.includes("WHERE p.id = ?") && sql.includes("FROM staff_profiles")
     ? profile
     : null);
   db.batch = async () => {
@@ -344,7 +368,7 @@ test("a failed D1 deactivation compensates by re-enabling Cognito", async () => 
 
 test("a failed D1 reactivation compensates by disabling Cognito", async () => {
   const inactive = { ...profile, is_active: 0 };
-  const db = makeDb((sql) => sql.includes("WHERE id = ?") && sql.includes("FROM staff_profiles")
+  const db = makeDb((sql) => sql.includes("WHERE p.id = ?") && sql.includes("FROM staff_profiles")
     ? inactive
     : null);
   db.batch = async () => {
@@ -367,7 +391,7 @@ test("a failed D1 reactivation compensates by disabling Cognito", async () => {
 
 test("a Cognito enable failure leaves inactive D1 state untouched", async () => {
   const inactive = { ...profile, is_active: 0 };
-  const db = makeDb((sql) => sql.includes("WHERE id = ?") && sql.includes("FROM staff_profiles")
+  const db = makeDb((sql) => sql.includes("WHERE p.id = ?") && sql.includes("FROM staff_profiles")
     ? inactive
     : null);
   const calls = [];
@@ -390,11 +414,93 @@ const createLifecycleDatabase = () => {
     "0001_staff_identity.sql",
     "0005_staff_access_management.sql",
     "0010_staff_lifecycle.sql",
+    "0012_staff_role_assignments.sql",
   ]) {
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
   }
   return database;
 };
+
+const sqliteD1 = (database, beforeBatch) => ({
+  prepare(sql) {
+    return {
+      sql,
+      args: [],
+      bind(...args) {
+        this.args = args;
+        return this;
+      },
+      async first() {
+        return database.prepare(sql).get(...this.args) ?? null;
+      },
+      async all() {
+        return { results: database.prepare(sql).all(...this.args) };
+      },
+    };
+  },
+  async batch(statements) {
+    beforeBatch();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const results = statements.map((statement) => {
+        const result = database.prepare(statement.sql).run(...statement.args);
+        return { success: true, meta: { changes: Number(result.changes) } };
+      });
+      database.exec("COMMIT");
+      return results;
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  },
+});
+
+test("role replacement rejects a revision changed between its pre-read and guarded batch", async (context) => {
+  const database = createLifecycleDatabase();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, display_name, is_system_admin)
+    VALUES
+      ('${actor.id}', '${actor.cognitoSub}', '${actor.email}', '${actor.displayName}', 1),
+      ('${profile.id}', 'target-sub', '${profile.email}', '${profile.display_name}', 0);
+    INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+    VALUES ('target-registration', '${profile.id}', 'REGISTRATION', '2026-07-25T00:00:00Z');
+  `);
+  let batchCalls = 0;
+  const DB = sqliteD1(database, () => {
+    batchCalls += 1;
+    database.exec(`
+      UPDATE staff_profiles SET role_revision = 1 WHERE id = '${profile.id}';
+      INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+      VALUES ('concurrent-duck-manager', '${profile.id}', 'DUCK_MANAGER', '2026-07-25T00:01:00Z');
+    `);
+  });
+
+  const response = await handleStaffLifecycleOperations(
+    request(`/api/v1/staff/profiles/${profile.id}/role`, {
+      commandId, role: "ADMIN", roles: [], revision: 0,
+    }),
+    makeEnv(DB),
+    actor,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 409);
+  assert.match(body.error, /conflicted with another update/);
+  assert.equal(batchCalls, 1);
+  assert.deepEqual(
+    { ...database.prepare("SELECT is_system_admin, role_revision FROM staff_profiles WHERE id = ?").get(profile.id) },
+    { is_system_admin: 0, role_revision: 1 },
+  );
+  assert.deepEqual(
+    database.prepare(
+      "SELECT role FROM staff_role_assignments WHERE staff_profile_id = ? AND revoked_at IS NULL ORDER BY role",
+    ).all(profile.id).map((row) => ({ ...row })),
+    [{ role: "DUCK_MANAGER" }, { role: "REGISTRATION" }],
+  );
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_lifecycle_commands").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_lifecycle_audit_events").get().count, 0);
+});
 
 test("the migration enforces a final-active-administrator invariant", () => {
   const database = createLifecycleDatabase();

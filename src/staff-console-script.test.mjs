@@ -8,6 +8,11 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
   assert.doesNotMatch(staffHomeScript, /innerHTML|insertAdjacentHTML|outerHTML/);
   assert.match(staffHomeScript, /textContent/);
   assert.match(staffHomeScript, /replaceChildren/);
+  assert.match(staffHomeScript, /assignedRoles/);
+  assert.match(staffHomeScript, /canRunHeat/);
+  assert.match(staffHomeScript, /canTakeResults/);
+  assert.match(staffHomeScript, /staffRoleLabels/);
+  assert.match(staffHomeScript, /Select at least one operational role/);
 
   for (const endpoint of [
     "/api/v1/staff/events",

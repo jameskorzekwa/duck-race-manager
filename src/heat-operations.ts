@@ -1,4 +1,6 @@
 import type { StaffActor } from "./auth.ts";
+import { requireAnyRole } from "./authorization.ts";
+import { publicDisplayName } from "./race-board.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -151,11 +153,12 @@ const rosterSql = `SELECT he.id AS heat_entry_id, he.race_entry_id, he.slot_numb
   FROM heat_entries he
   JOIN race_entries re ON re.id = he.race_entry_id
   JOIN registrations r ON r.id = re.registration_id
-  LEFT JOIN duck_assignments da ON da.id = (
-    SELECT da2.id FROM duck_assignments da2
-     WHERE da2.event_id = he.event_id AND da2.race_entry_id = he.race_entry_id
-     ORDER BY da2.valid_from DESC LIMIT 1
-  )
+   LEFT JOIN duck_assignments da ON da.id = (
+     SELECT da2.id FROM duck_assignments da2
+      WHERE da2.event_id = he.event_id AND da2.race_entry_id = he.race_entry_id
+        AND da2.valid_to IS NULL
+      ORDER BY da2.valid_from DESC LIMIT 1
+   )
   LEFT JOIN ducks d ON d.id = da.duck_id
  WHERE he.event_id = ? AND he.heat_id = ?
  ORDER BY he.slot_number`;
@@ -240,6 +243,103 @@ const announcerRoster = async (env: Env, eventId: string, heatId: string): Promi
   });
 };
 
+const finishScan = async (url: URL, env: Env, eventId: string, heatId: string): Promise<Response> => {
+  const value = url.searchParams.get("value")?.trim() ?? "";
+  if (value.length === 0 || value.length > 512) {
+    return json({ error: "Enter a duck number or the complete QuickDucks tag URL." }, 400);
+  }
+
+  let visibleNumber: number | null = null;
+  let tagToken: string | null = null;
+  if (/^[1-9]\d{0,8}$/.test(value)) {
+    visibleNumber = Number(value);
+  } else {
+    try {
+      const tagUrl = new URL(value);
+      const match = tagUrl.pathname.match(/^\/t\/([A-Za-z0-9_-]{22,128})$/);
+      if (
+        tagUrl.origin !== new URL(env.APP_ORIGIN).origin
+        || tagUrl.search.length > 0
+        || tagUrl.hash.length > 0
+        || match === null
+      ) throw new Error("invalid tag URL");
+      tagToken = match[1];
+    } catch {
+      return json({ error: "Use the complete QuickDucks tag URL or a visible duck number." }, 400);
+    }
+  }
+
+  const heat = await getHeatSummary(env, eventId, heatId);
+  if (heat === null) return json({ error: "Heat not found." }, 404);
+  if (heat.status !== "AWAITING_RESULT") {
+    return json({ error: "Mark this heat finished before scanning its result. Then scan the duck again." }, 409);
+  }
+
+  const selection = await env.DB.prepare(
+    `SELECT he.race_entry_id, r.first_name, r.last_name, r.status AS registration_status,
+            e.public_name_policy,
+            d.visible_number
+       FROM heat_entries he
+       JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+       JOIN events e ON e.id = h.event_id
+       JOIN race_entries re ON re.id = he.race_entry_id
+       JOIN registrations r ON r.id = re.registration_id
+       JOIN duck_assignments da
+         ON da.event_id = he.event_id AND da.race_entry_id = he.race_entry_id
+        AND da.valid_to IS NULL
+       JOIN ducks d ON d.id = da.duck_id
+       LEFT JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'ACTIVE'
+      WHERE he.event_id = ? AND he.heat_id = ?
+        AND ((? IS NOT NULL AND dt.token = ?) OR (? IS NOT NULL AND d.visible_number = ?))
+      LIMIT 1`,
+  ).bind(
+    eventId,
+    heatId,
+    tagToken,
+    tagToken,
+    visibleNumber,
+    visibleNumber,
+  ).first<{
+    race_entry_id: string;
+    first_name: string;
+    last_name: string;
+    public_name_policy: string;
+    registration_status: string;
+    visible_number: number;
+  }>();
+  if (selection !== null) {
+    if (selection.registration_status !== "ACTIVE") {
+      return json({
+        error: "That roster entry is no longer active. Do not record a result; ask the race director to resolve the roster.",
+      }, 422);
+    }
+    return json({
+      selection: {
+        raceEntryId: selection.race_entry_id,
+        participantDisplayName: publicDisplayName(
+          selection.public_name_policy,
+          selection.first_name,
+          selection.last_name,
+        ),
+        visibleNumber: selection.visible_number,
+      },
+    });
+  }
+
+  const knownDuck = await env.DB.prepare(
+    `SELECT 1 AS known
+       FROM event_ducks ed
+       JOIN ducks d ON d.id = ed.duck_id
+       LEFT JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'ACTIVE'
+      WHERE ed.event_id = ?
+        AND ((? IS NOT NULL AND dt.token = ?) OR (? IS NOT NULL AND d.visible_number = ?))
+      LIMIT 1`,
+  ).bind(eventId, tagToken, tagToken, visibleNumber, visibleNumber).first<{ known: number }>();
+  return knownDuck === null
+    ? json({ error: "That duck was not found for this race." }, 404)
+    : json({ error: "That duck is not in the selected heat." }, 422);
+};
+
 interface PlanEntryRow {
   race_entry_id: string;
   duck_assignment_id: string;
@@ -262,13 +362,15 @@ interface RoundOnePlan {
 
 const createRoundOnePlan = async (env: Env, eventId: string): Promise<RoundOnePlan | Response> => {
   const event = await env.DB.prepare(
-    `SELECT id, status, heat_assignment_mode, round_one_heat_capacity
+    `SELECT id, status, heat_assignment_mode, round_one_heat_capacity,
+            final_heat_capacity
        FROM events WHERE id = ?`,
   ).bind(eventId).first<{
     id: string;
     status: string;
     heat_assignment_mode: string;
     round_one_heat_capacity: number;
+    final_heat_capacity: number;
   }>();
   if (event === null) return json({ error: "Event not found." }, 404);
   if (event.status !== "REGISTRATION_CLOSED") {
@@ -298,6 +400,11 @@ const createRoundOnePlan = async (env: Env, eventId: string): Promise<RoundOnePl
   }
 
   const heatCount = Math.ceil(entries.results.length / event.round_one_heat_capacity);
+  if (heatCount > event.final_heat_capacity) {
+    return json({
+      error: `Round one requires ${heatCount} heats, which exceeds the final capacity of ${event.final_heat_capacity}.`,
+    }, 409);
+  }
   const baseSize = Math.floor(entries.results.length / heatCount);
   const largerHeatCount = entries.results.length % heatCount;
   const heats: PlannedHeat[] = [];
@@ -643,13 +750,71 @@ const transitionHeat = async (
   if (transition === "lock" && heat.roster_size === 0) {
     return json({ error: "A heat must have at least one roster entry before it is locked." }, 409);
   }
+  if (transition === "lock") {
+    const inactiveRoster = await env.DB.prepare(
+      `SELECT 1 AS inactive
+         FROM heat_entries he
+         JOIN race_entries re ON re.id = he.race_entry_id
+         JOIN registrations r ON r.id = re.registration_id
+        WHERE he.event_id = ? AND he.heat_id = ? AND r.status != 'ACTIVE'
+        LIMIT 1`,
+    ).bind(eventId, heatId).first<{ inactive: number }>();
+    if (inactiveRoster !== null) {
+      return json({
+        error: "Every roster participant must be ACTIVE. Update this planned, unlocked roster before locking it.",
+      }, 409);
+    }
+  }
+  if (transition === "start") {
+    const blockingHeat = await env.DB.prepare(
+      `SELECT status
+         FROM heats
+        WHERE event_id = ? AND id != ? AND status IN ('RUNNING', 'AWAITING_RESULT')
+        LIMIT 1`,
+    ).bind(eventId, heatId).first<{ status: string }>();
+    if (blockingHeat !== null) {
+      return json({
+        error: blockingHeat.status === "AWAITING_RESULT"
+          ? "Publish the official result for the previous heat before starting this heat."
+          : "Another heat is still running. Finish it and publish its result before starting this heat.",
+      }, 409);
+    }
+  }
 
   const now = new Date().toISOString();
   const commandLockGuard = transition === "lock"
-    ? "AND h.roster_locked_at IS NULL AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = h.id)"
+    ? `AND h.roster_locked_at IS NULL
+       AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = h.id)
+       AND NOT EXISTS (
+         SELECT 1 FROM heat_entries he
+         JOIN race_entries re ON re.id = he.race_entry_id
+         JOIN registrations r ON r.id = re.registration_id
+          WHERE he.heat_id = h.id AND r.status != 'ACTIVE'
+       )`
     : "";
   const updateLockGuard = transition === "lock"
-    ? "AND roster_locked_at IS NULL AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = heats.id)"
+    ? `AND roster_locked_at IS NULL
+       AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = heats.id)
+       AND NOT EXISTS (
+         SELECT 1 FROM heat_entries he
+         JOIN race_entries re ON re.id = he.race_entry_id
+         JOIN registrations r ON r.id = re.registration_id
+          WHERE he.heat_id = heats.id AND r.status != 'ACTIVE'
+       )`
+    : "";
+  const commandStartGuard = transition === "start"
+    ? `AND NOT EXISTS (
+         SELECT 1 FROM heats other
+          WHERE other.event_id = h.event_id AND other.id != h.id
+            AND other.status IN ('RUNNING', 'AWAITING_RESULT')
+       )`
+    : "";
+  const updateStartGuard = transition === "start"
+    ? `AND NOT EXISTS (
+         SELECT 1 FROM heats other
+          WHERE other.event_id = heats.event_id AND other.id != heats.id
+            AND other.status IN ('RUNNING', 'AWAITING_RESULT')
+       )`
     : "";
   let updateSql = `UPDATE heats SET status = ?, revision = revision + 1,
       source_command_id = ?, updated_at = ?`;
@@ -664,7 +829,8 @@ const transitionHeat = async (
     updateSql += ", finished_at = ?";
     updateArgs.push(now);
   }
-  updateSql += ` WHERE id = ? AND event_id = ? AND status = ? AND revision = ? ${updateLockGuard}`;
+  updateSql += ` WHERE id = ? AND event_id = ? AND status = ? AND revision = ?
+    ${updateLockGuard} ${updateStartGuard}`;
   updateArgs.push(heatId, eventId, definition.expected, revision);
 
   try {
@@ -678,7 +844,7 @@ const transitionHeat = async (
           WHERE h.id = ? AND h.event_id = ? AND h.status = ? AND h.revision = ?
             AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
               OR (h.round = 'FINAL' AND e.status = 'FINAL'))
-            ${commandLockGuard}`,
+             ${commandLockGuard} ${commandStartGuard}`,
       ).bind(
         commandId, eventId, definition.command, heatId, now, now, actor.id,
         requestFingerprint, heatId, eventId, definition.expected, revision,
@@ -696,7 +862,7 @@ const transitionHeat = async (
     ]);
   } catch {
     const message = transition === "start"
-      ? "Another heat is running or this heat changed. Finish it before starting this heat."
+      ? "Another heat is running or awaiting its official result, or this heat changed. Refresh both stations before trying again."
       : "The heat transition conflicted with another update. Refresh and try again.";
     return json({ error: message }, 409);
   }
@@ -756,7 +922,8 @@ const resultContext = (
 
 interface ResultRosterRow {
   race_entry_id: string;
-  duck_assignment_id: string;
+  duck_assignment_id: string | null;
+  registration_status: string;
 }
 
 const resultRoster = (
@@ -764,13 +931,17 @@ const resultRoster = (
   eventId: string,
   heatId: string,
 ): Promise<D1Result<ResultRosterRow>> => env.DB.prepare(
-  `SELECT he.race_entry_id, da.id AS duck_assignment_id
+  `SELECT he.race_entry_id, da.id AS duck_assignment_id,
+          r.status AS registration_status
      FROM heat_entries he
-     JOIN duck_assignments da ON da.id = (
-       SELECT da2.id FROM duck_assignments da2
-        WHERE da2.event_id = he.event_id AND da2.race_entry_id = he.race_entry_id
-        ORDER BY da2.valid_from DESC LIMIT 1
-     )
+     JOIN race_entries re ON re.id = he.race_entry_id
+     JOIN registrations r ON r.id = re.registration_id
+     LEFT JOIN duck_assignments da ON da.id = (
+        SELECT da2.id FROM duck_assignments da2
+         WHERE da2.event_id = he.event_id AND da2.race_entry_id = he.race_entry_id
+           AND da2.valid_to IS NULL
+         LIMIT 1
+      )
     WHERE he.event_id = ? AND he.heat_id = ?`,
 ).bind(eventId, heatId).all<ResultRosterRow>();
 
@@ -791,6 +962,15 @@ const validateResultSet = (
   const rosterIds = new Set(roster.map((entry) => entry.race_entry_id));
   if (results.some((result) => !rosterIds.has(result.raceEntryId))) {
     return json({ error: "Every result must identify a participant on this heat roster." }, 422);
+  }
+  const byRaceEntry = new Map(roster.map((entry) => [entry.race_entry_id, entry]));
+  if (results.some((result) => byRaceEntry.get(result.raceEntryId)?.registration_status !== "ACTIVE")) {
+    return json({
+      error: "Every selected result participant must still be ACTIVE. Refresh the heat and ask the race director to resolve inactive roster entries.",
+    }, 422);
+  }
+  if (results.some((result) => byRaceEntry.get(result.raceEntryId)?.duck_assignment_id === null)) {
+    return json({ error: "Every selected result participant must still have a current duck assignment." }, 422);
   }
   return null;
 };
@@ -866,16 +1046,29 @@ const finalizeResults = async (
 
   const now = new Date().toISOString();
   const resultRevision = context.result_revision + 1;
+  const selectedPlaceholders = results.map(() => "?").join(", ");
+  const activeResultGuard = `AND (
+    SELECT COUNT(DISTINCT selected.race_entry_id)
+      FROM heat_entries selected
+      JOIN race_entries re ON re.id = selected.race_entry_id
+      JOIN registrations r ON r.id = re.registration_id
+     WHERE selected.event_id = h.event_id AND selected.heat_id = h.id
+       AND selected.race_entry_id IN (${selectedPlaceholders}) AND r.status = 'ACTIVE'
+  ) = ?`;
   const statements: D1PreparedStatement[] = [env.DB.prepare(
     `INSERT INTO race_commands
       (id, event_id, command_type, result_id, requested_at, completed_at,
        actor_staff_profile_id, request_fingerprint)
      SELECT ?, ?, 'FINALIZE_HEAT_RESULT', ?, ?, ?, ?, ?
        FROM heats h JOIN events e ON e.id = h.event_id
-      WHERE h.id = ? AND h.event_id = ? AND h.status = 'AWAITING_RESULT' AND h.revision = ?
-        AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
-          OR (h.round = 'FINAL' AND e.status = 'FINAL'))`,
-  ).bind(commandId, eventId, heatId, now, now, actor.id, requestFingerprint, heatId, eventId, revision)];
+       WHERE h.id = ? AND h.event_id = ? AND h.status = 'AWAITING_RESULT' AND h.revision = ?
+         AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
+          OR (h.round = 'FINAL' AND e.status = 'FINAL'))
+         ${activeResultGuard}`,
+  ).bind(
+    commandId, eventId, heatId, now, now, actor.id, requestFingerprint,
+    heatId, eventId, revision, ...results.map((result) => result.raceEntryId), results.length,
+  )];
   const assignments = new Map(rosterResult.results.map((entry) => [entry.race_entry_id, entry.duck_assignment_id]));
   for (const result of results) {
     statements.push(env.DB.prepare(
@@ -910,8 +1103,19 @@ const finalizeResults = async (
   statements.push(env.DB.prepare(
     `UPDATE heats SET status = 'FINALIZED', finalized_at = ?, revision = revision + 1,
             source_command_id = ?, updated_at = ?
-      WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT' AND revision = ?`,
-  ).bind(now, commandId, now, heatId, eventId, revision));
+      WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT' AND revision = ?
+        AND (
+          SELECT COUNT(DISTINCT selected.race_entry_id)
+            FROM heat_entries selected
+            JOIN race_entries re ON re.id = selected.race_entry_id
+            JOIN registrations r ON r.id = re.registration_id
+           WHERE selected.event_id = heats.event_id AND selected.heat_id = heats.id
+             AND selected.race_entry_id IN (${selectedPlaceholders}) AND r.status = 'ACTIVE'
+        ) = ?`,
+  ).bind(
+    now, commandId, now, heatId, eventId, revision,
+    ...results.map((result) => result.raceEntryId), results.length,
+  ));
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id,
@@ -1345,16 +1549,28 @@ export const handleHeatOperations = async (
   if (eventMatch === null) return null;
   const eventId = eventMatch[1];
   const suffix = eventMatch[2];
+  const raceReadRoles = ["ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RACE_DIRECTOR"] as const;
 
-  if (suffix === "/heats" && request.method === "GET") return listHeats(env, eventId);
+  if (suffix === "/heats" && request.method === "GET") {
+    const denied = requireAnyRole(actor, raceReadRoles);
+    return denied ?? listHeats(env, eventId);
+  }
   if (suffix === "/heats/round-one/plan-preview" && request.method === "POST") {
-    return previewRoundOnePlan(env, eventId);
+    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
+    return denied ?? previewRoundOnePlan(env, eventId);
   }
   if (suffix === "/heats/round-one/plan-commit" && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return commitRoundOnePlan(request, env, actor, eventId);
   }
-  if (suffix === "/finalists" && request.method === "GET") return listFinalists(env, eventId);
+  if (suffix === "/finalists" && request.method === "GET") {
+    const denied = requireAnyRole(actor, raceReadRoles);
+    return denied ?? listFinalists(env, eventId);
+  }
   if (suffix === "/finalists/verification" && request.method === "GET") {
+    const denied = requireAnyRole(actor, raceReadRoles);
+    if (denied !== null) return denied;
     const summary = await verificationSummary(env, eventId);
     return summary instanceof Response ? summary : json({ verification: summary });
   }
@@ -1363,24 +1579,45 @@ export const handleHeatOperations = async (
   if (heatMatch === null) return null;
   const heatId = heatMatch[1];
   const operation = heatMatch[2] ?? "";
-  if (operation === "" && request.method === "GET") return getHeatDetail(env, eventId, heatId);
+  if (operation === "" && request.method === "GET") {
+    const denied = requireAnyRole(actor, raceReadRoles);
+    return denied ?? getHeatDetail(env, eventId, heatId);
+  }
   if (operation === "/announcer-roster" && request.method === "GET") {
-    return announcerRoster(env, eventId, heatId);
+    const denied = requireAnyRole(actor, raceReadRoles);
+    return denied ?? announcerRoster(env, eventId, heatId);
+  }
+  if (operation === "/finish-scan" && request.method === "GET") {
+    const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+    return denied ?? finishScan(url, env, eventId, heatId);
   }
   if (operation === "/roster" && request.method === "PUT") {
+    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return updateRoster(request, env, actor, eventId, heatId);
   }
   if (operation === "/results/finalize" && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return finalizeResults(request, env, actor, eventId, heatId);
   }
   if (operation === "/results/reopen" && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return reopenResults(request, env, actor, eventId, heatId);
   }
   if (operation === "/results/correct" && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return correctResults(request, env, actor, eventId, heatId);
   }
   const transition = operation.match(/^\/(lock|ready|call|start|finish)$/)?.[1] as TransitionName | undefined;
   if (transition !== undefined && request.method === "POST") {
+    const roles = transition === "finish"
+      ? ["RESULT_TAKER", "RACE_DIRECTOR"] as const
+      : ["HEAT_RUNNER", "RACE_DIRECTOR"] as const;
+    const denied = requireAnyRole(actor, roles);
+    if (denied !== null) return denied;
     return transitionHeat(request, env, actor, eventId, heatId, transition);
   }
   return null;

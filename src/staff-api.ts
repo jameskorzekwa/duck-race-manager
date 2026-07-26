@@ -1,4 +1,11 @@
 import type { StaffActor } from "./auth.ts";
+import {
+  canViewParticipantPii,
+  hasAnyRole,
+  normalizeOperationalRoles,
+  requireAnyRole,
+  type OperationalRole,
+} from "./authorization.ts";
 import { isCommandId } from "./registration.ts";
 import {
   cognitoStaffProvisioner,
@@ -37,26 +44,45 @@ interface StaffProfileRow {
   email: string;
   display_name: string | null;
   is_system_admin: number;
+  role_revision: number;
+  roles_csv: string;
   created_at: string;
+  requested_account_type?: "ADMIN" | "STAFF";
+  requested_roles_json?: string;
 }
 
-const staffProfileResponse = (profile: StaffProfileRow): Record<string, unknown> => ({
+const rolesFromCsv = (value: string | undefined): OperationalRole[] => {
+  const roles = value === undefined || value === "" ? [] : value.split(",");
+  return normalizeOperationalRoles(roles) ?? [];
+};
+
+const staffProfileResponse = (
+  profile: StaffProfileRow,
+  accountType: "ADMIN" | "STAFF" = profile.is_system_admin === 1 ? "ADMIN" : "STAFF",
+  roles: OperationalRole[] = rolesFromCsv(profile.roles_csv),
+): Record<string, unknown> => ({
   id: profile.id,
   email: profile.email,
   displayName: profile.display_name,
-  role: profile.is_system_admin === 1 ? "ADMIN" : "STAFF",
+  role: accountType,
+  roles: accountType === "ADMIN" ? [] : roles,
+  roleRevision: profile.role_revision ?? 0,
   createdAt: profile.created_at,
 });
 
 const listStaffProfiles = async (env: Env, actor: StaffActor): Promise<Response> => {
   if (!actor.isSystemAdmin) return json({ error: "Administrator permission required." }, 403);
   const profiles = await env.DB.prepare(
-    `SELECT id, email, display_name, is_system_admin, created_at
-       FROM staff_profiles
-      ORDER BY is_system_admin DESC, COALESCE(display_name, email) COLLATE NOCASE, email COLLATE NOCASE
+    `SELECT p.id, p.email, p.display_name, p.is_system_admin, p.role_revision,
+            p.created_at, COALESCE(GROUP_CONCAT(a.role, ','), '') AS roles_csv
+       FROM staff_profiles p
+       LEFT JOIN staff_role_assignments a
+         ON a.staff_profile_id = p.id AND a.revoked_at IS NULL
+      GROUP BY p.id
+      ORDER BY p.is_system_admin DESC, COALESCE(p.display_name, p.email) COLLATE NOCASE, p.email COLLATE NOCASE
       LIMIT 200`,
   ).all<StaffProfileRow>();
-  return json({ staff: profiles.results.map(staffProfileResponse) });
+  return json({ staff: profiles.results.map((profile) => staffProfileResponse(profile)) });
 };
 
 const addStaffProfile = async (
@@ -73,28 +99,37 @@ const addStaffProfile = async (
     ? payload.displayName.trim().replace(/\s+/g, " ")
     : "";
   const role = payload?.role;
+  const roles = role === "STAFF"
+    ? normalizeOperationalRoles(payload?.roles, true)
+    : normalizeOperationalRoles(payload?.roles ?? []);
   if (
     typeof commandId !== "string" || !isCommandId(commandId)
     || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
     || displayName.length === 0 || displayName.length > 100
     || (role !== "STAFF" && role !== "ADMIN")
+    || roles === null || (role === "ADMIN" && roles.length !== 0)
   ) {
-    return json({ error: "Command, valid email, display name, and staff role are required." }, 400);
+    return json({ error: "Command, valid email, display name, account type, and operational roles are required." }, 400);
   }
+  const rolesJson = JSON.stringify(roles);
 
   const replay = await env.DB.prepare(
-    `SELECT p.id, p.email, p.display_name, p.is_system_admin, p.created_at
+    `SELECT p.id, p.email, p.display_name, p.is_system_admin, p.role_revision,
+            p.created_at, '' AS roles_csv,
+            c.requested_account_type, c.requested_roles_json
        FROM staff_access_commands c
        JOIN staff_profiles p ON p.id = c.target_staff_profile_id
       WHERE c.id = ? AND c.command_type = 'ADD_STAFF'
       LIMIT 1`,
   ).bind(commandId).first<StaffProfileRow>();
   if (replay !== null) {
-    const replayRole = replay.is_system_admin === 1 ? "ADMIN" : "STAFF";
-    if (replay.email !== email || replay.display_name !== displayName || replayRole !== role) {
+    if (
+      replay.email !== email || replay.display_name !== displayName
+      || replay.requested_account_type !== role || replay.requested_roles_json !== rolesJson
+    ) {
       return json({ error: "This command identifier was already used for another staff account." }, 409);
     }
-    return json({ staff: staffProfileResponse(replay), replayed: true });
+    return json({ staff: staffProfileResponse(replay, role, roles), replayed: true });
   }
 
   const existingProfile = await env.DB.prepare(
@@ -112,7 +147,7 @@ const addStaffProfile = async (
   const now = new Date().toISOString();
   const profileId = crypto.randomUUID();
   try {
-    await env.DB.batch([
+    const statements: D1PreparedStatement[] = [
       env.DB.prepare(
         `INSERT INTO staff_profiles
           (id, cognito_sub, email, display_name, is_system_admin, created_by_staff_profile_id)
@@ -120,9 +155,10 @@ const addStaffProfile = async (
       ).bind(profileId, identity.cognitoSub, email, displayName, role === "ADMIN" ? 1 : 0, actor.id),
       env.DB.prepare(
         `INSERT INTO staff_access_commands
-          (id, command_type, target_staff_profile_id, requested_by_staff_profile_id, requested_at, completed_at)
-         VALUES (?, 'ADD_STAFF', ?, ?, ?, ?)`,
-      ).bind(commandId, profileId, actor.id, now, now),
+          (id, command_type, target_staff_profile_id, requested_by_staff_profile_id,
+           requested_at, completed_at, requested_account_type, requested_roles_json)
+         VALUES (?, 'ADD_STAFF', ?, ?, ?, ?, ?, ?)`,
+      ).bind(commandId, profileId, actor.id, now, now, role, rolesJson),
       env.DB.prepare(
         `INSERT INTO staff_access_audit_events
           (id, command_id, actor_staff_profile_id, target_staff_profile_id, action, occurred_at, details_json)
@@ -133,9 +169,17 @@ const addStaffProfile = async (
         actor.id,
         profileId,
         now,
-        JSON.stringify({ role }),
+        JSON.stringify({ accountType: role, roles }),
       ),
-    ]);
+    ];
+    for (const operationalRole of roles) {
+      statements.push(env.DB.prepare(
+        `INSERT INTO staff_role_assignments
+          (id, staff_profile_id, role, assigned_at, assigned_by_staff_profile_id, source_access_command_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(crypto.randomUUID(), profileId, operationalRole, now, actor.id, commandId));
+    }
+    await env.DB.batch(statements);
   } catch {
     if (identity.created) {
       try {
@@ -153,8 +197,10 @@ const addStaffProfile = async (
       email,
       display_name: displayName,
       is_system_admin: role === "ADMIN" ? 1 : 0,
+      role_revision: 0,
+      roles_csv: roles.join(","),
       created_at: now,
-    }),
+    }, role, roles),
     replayed: false,
   }, 201);
 };
@@ -180,7 +226,7 @@ interface StaffDuckRow {
   disposition: string | null;
 }
 
-const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
+const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise<Response> => {
   if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return json({ error: "Duck not found." }, 404);
   const duck = await env.DB.prepare(
     `SELECT d.id AS duck_id, d.visible_number, d.inventory_status,
@@ -201,10 +247,10 @@ const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
        )
        LEFT JOIN events e ON e.id = ed.event_id
        LEFT JOIN duck_assignments da ON da.id = (
-         SELECT da2.id
-           FROM duck_assignments da2
-          WHERE da2.event_duck_id = ed.id
-          ORDER BY da2.valid_from DESC
+          SELECT da2.id
+            FROM duck_assignments da2
+           WHERE da2.event_duck_id = ed.id AND da2.valid_to IS NULL
+           ORDER BY da2.valid_from DESC
           LIMIT 1
        )
        LEFT JOIN race_entries re ON re.id = da.race_entry_id
@@ -216,7 +262,32 @@ const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
   ).bind(token).first<StaffDuckRow>();
   if (duck === null) return json({ error: "Duck not found." }, 404);
 
+  const includePii = canViewParticipantPii(actor);
+  const returnOnly = hasAnyRole(actor, ["RETURN_STEWARD"])
+    && !hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"]);
+  const assignment = duck.assignment_id === null ? null : returnOnly
+    ? { active: duck.assignment_valid_to === null }
+    : {
+      id: duck.assignment_id,
+      active: duck.assignment_valid_to === null,
+      eventId: duck.event_id,
+      raceEntryId: duck.race_entry_id,
+      participant: includePii ? {
+        firstName: duck.first_name,
+        lastName: duck.last_name,
+        email: duck.email,
+        phone: duck.phone,
+        lookupCode: duck.lookup_code,
+        registrationStatus: duck.registration_status,
+      } : {
+        registrationStatus: duck.registration_status,
+      },
+    };
   return json({
+    permissions: {
+      pair: hasAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]),
+      recordDisposition: hasAnyRole(actor, ["RETURN_STEWARD", "RACE_DIRECTOR"]),
+    },
     duck: {
       id: duck.duck_id,
       visibleNumber: duck.visible_number,
@@ -224,7 +295,8 @@ const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
       revision: duck.duck_revision,
       tagStatus: duck.tag_status,
     },
-    pairingRequired: duck.assignment_id === null
+    pairingRequired: hasAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"])
+      && duck.assignment_id === null
       && duck.disposition === null
       && duck.tag_status === "ACTIVE"
       && ["AVAILABLE", "RESERVED_FOR_EVENT"].includes(duck.inventory_status),
@@ -234,20 +306,7 @@ const getStaffDuck = async (token: string, env: Env): Promise<Response> => {
       status: duck.event_status,
     },
     disposition: duck.disposition,
-    assignment: duck.assignment_id === null ? null : {
-      id: duck.assignment_id,
-      active: duck.assignment_valid_to === null,
-      eventId: duck.event_id,
-      raceEntryId: duck.race_entry_id,
-      participant: {
-        firstName: duck.first_name,
-        lastName: duck.last_name,
-        email: duck.email,
-        phone: duck.phone,
-        lookupCode: duck.lookup_code,
-        registrationStatus: duck.registration_status,
-      },
-    },
+    assignment,
   });
 };
 
@@ -527,6 +586,7 @@ interface PairingContext {
   event_id: string;
   heat_assignment_mode: string;
   round_one_heat_capacity: number;
+  final_heat_capacity: number;
   registration_id: string;
   registration_status: string;
   registration_revision: number;
@@ -586,6 +646,7 @@ const pairDuck = async (
   const replay = await env.DB.prepare(
     `SELECT da.id AS assignment_id, d.visible_number,
             e.id AS event_id, e.heat_assignment_mode, e.round_one_heat_capacity,
+            e.final_heat_capacity,
             r.id AS registration_id, r.status AS registration_status,
             r.revision AS registration_revision,
             re.id AS race_entry_id, re.revision AS race_entry_revision,
@@ -647,6 +708,7 @@ const pairDuck = async (
 
   const context = await env.DB.prepare(
     `SELECT e.id AS event_id, e.heat_assignment_mode, e.round_one_heat_capacity,
+            e.final_heat_capacity,
             r.id AS registration_id, r.status AS registration_status,
             r.revision AS registration_revision,
             re.id AS race_entry_id, re.revision AS race_entry_revision,
@@ -737,10 +799,14 @@ const pairDuck = async (
     }>();
     if (existingHeat === null) {
       const last = await env.DB.prepare(
-        `SELECT COALESCE(MAX(heat_number), 0) AS last_number
+        `SELECT COALESCE(MAX(heat_number), 0) AS last_number,
+                COUNT(*) AS heat_count
            FROM heats
-          WHERE event_id = ? AND round = 'ROUND_ONE'`,
-      ).bind(eventId).first<{ last_number: number }>();
+           WHERE event_id = ? AND round = 'ROUND_ONE'`,
+      ).bind(eventId).first<{ last_number: number; heat_count: number }>();
+      if ((last?.heat_count ?? 0) >= context.final_heat_capacity) {
+        return json({ error: "Pairing would create more round-one heats than the final can hold." }, 409);
+      }
       heat = {
         id: crypto.randomUUID(),
         number: (last?.last_number ?? 0) + 1,
@@ -1149,7 +1215,8 @@ export const handleStaffApi = async (
   }
 
   if (url.pathname === "/api/v1/staff/events/return-review" && request.method === "GET") {
-    return returnReview(env);
+    const denied = requireAnyRole(actor, ["RETURN_STEWARD", "RACE_DIRECTOR"]);
+    return denied ?? returnReview(env);
   }
 
   const cancelPurgeReadyMatch = url.pathname.match(/^\/api\/v1\/staff\/events\/([^/]{1,128})\/purge-ready\/cancel$/);
@@ -1168,11 +1235,15 @@ export const handleStaffApi = async (
   }
 
   if (url.pathname === "/api/v1/staff/registrations/search" && request.method === "GET") {
+    const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return searchRegistrations(url, env);
   }
 
   const assignmentMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)\/assignments$/);
   if (assignmentMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return pairDuck(request, env, actor, assignmentMatch[1]);
   }
 
@@ -1180,6 +1251,8 @@ export const handleStaffApi = async (
     /^\/api\/v1\/staff\/events\/([^/]{1,128})\/ducks\/([1-9][0-9]{0,8})\/dispositions$/,
   );
   if (numberedDispositionMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RETURN_STEWARD", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return recordDuckDisposition(request, env, actor, {
       eventId: numberedDispositionMatch[1],
       visibleNumber: Number(numberedDispositionMatch[2]),
@@ -1188,12 +1261,16 @@ export const handleStaffApi = async (
 
   const dispositionMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)\/dispositions$/);
   if (dispositionMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RETURN_STEWARD", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return recordDuckDisposition(request, env, actor, { token: dispositionMatch[1] });
   }
 
   const duckMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
   if (duckMatch !== null && request.method === "GET") {
-    return getStaffDuck(duckMatch[1], env);
+    const denied = requireAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RETURN_STEWARD", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
+    return getStaffDuck(duckMatch[1], env, actor);
   }
 
   return json({ error: "Not found." }, 404);

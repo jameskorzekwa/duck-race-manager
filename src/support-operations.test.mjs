@@ -11,9 +11,10 @@ const actor = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
+  roles: ["RETURN_STEWARD"],
   authentication: "bearer",
 };
-const admin = { ...actor, id: "admin_test", isSystemAdmin: true };
+const admin = { ...actor, id: "admin_test", isSystemAdmin: true, roles: [] };
 
 const makeDb = (first = () => null, all = () => ({ results: [] })) => {
   const statements = [];

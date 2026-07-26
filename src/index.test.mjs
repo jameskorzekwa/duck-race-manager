@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker from "./index.ts";
+import worker, { createWorker } from "./index.ts";
 import { renderStaffHome } from "./site.ts";
 
 const env = {
@@ -57,7 +57,6 @@ test("serves the home-page status client", async () => {
 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
-  assert.match(body, /\/api\/v1\/registrations\/mine/);
   assert.match(body, /\/api\/v1\/race-status\/search/);
 });
 
@@ -65,13 +64,58 @@ test("serves registration and staff pairing browser clients", async () => {
   const registration = await worker.fetch(new Request("https://quickducks.com/assets/register.js"), env);
   const staff = await worker.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env);
   const staffHome = await worker.fetch(new Request("https://quickducks.com/assets/staff-home.js"), env);
+  const live = await worker.fetch(new Request("https://quickducks.com/assets/live.js"), env);
+  const startLine = await worker.fetch(new Request("https://quickducks.com/assets/start-line.js"), env);
+  const finishLine = await worker.fetch(new Request("https://quickducks.com/assets/finish-line.js"), env);
 
   assert.equal(registration.status, 200);
+  assert.equal(registration.headers.get("cache-control"), "public, max-age=3600");
   assert.match(await registration.text(), /\/api\/v1\/registrations/);
   assert.equal(staff.status, 200);
+  assert.equal(staff.headers.get("cache-control"), "no-store");
   assert.match(await staff.text(), /\/api\/v1\/staff\/ducks/);
   assert.equal(staffHome.status, 200);
   assert.match(await staffHome.text(), /\/api\/v1\/staff\/events\/return-review/);
+  assert.match(await live.text(), /\/api\/v1\/race-board/);
+  assert.equal(live.headers.get("cache-control"), "public, max-age=3600");
+  assert.match(await startLine.text(), /\/api\/v1\/live/);
+  assert.equal(startLine.headers.get("cache-control"), "no-store");
+  assert.match(await finishLine.text(), /NDEFReader/);
+  assert.equal(finishLine.headers.get("cache-control"), "no-store");
+});
+
+test("gates focused station pages by operational role", async () => {
+  const actor = (roles, isSystemAdmin = false) => ({
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Station Staff",
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  const page = (currentActor, path) => createWorker(async () => currentActor).fetch(
+    new Request(`https://quickducks.com${path}`), env,
+  );
+
+  const anonymous = await page(null, "/staff/start-line");
+  assert.equal(anonymous.status, 303);
+  assert.match(anonymous.headers.get("location") ?? "", /returnTo=%2Fstaff%2Fstart-line/);
+
+  const heatStart = await page(actor(["HEAT_RUNNER"]), "/staff/start-line");
+  const heatFinish = await page(actor(["HEAT_RUNNER"]), "/staff/finish-line");
+  assert.equal(heatStart.status, 200);
+  assert.match(await heatStart.text(), /Prepare the next heat/);
+  assert.equal(heatFinish.status, 403);
+
+  const resultStart = await page(actor(["RESULT_TAKER"]), "/staff/start-line");
+  const resultFinish = await page(actor(["RESULT_TAKER"]), "/staff/finish-line");
+  assert.equal(resultStart.status, 403);
+  assert.equal(resultFinish.status, 200);
+  const finishBody = await resultFinish.text();
+  assert.match(finishBody, /Record one official result/);
+  assert.match(finishBody, /Tag URL or duck number/);
+  assert.doesNotMatch(finishBody, /participant email|participant phone/i);
+
+  assert.equal((await page(actor(["RACE_DIRECTOR"]), "/staff/start-line")).status, 200);
+  assert.equal((await page(actor(["RACE_DIRECTOR"]), "/staff/finish-line")).status, 200);
+  assert.equal((await page(actor([], true), "/staff/start-line")).status, 200);
+  assert.equal((await page(actor([], true), "/staff/finish-line")).status, 200);
 });
 
 test("protects newly composed staff operation routes", async () => {
@@ -103,7 +147,8 @@ test("renders working registration UI while protection remains fail-closed", asy
   assert.match(registrationBody, /Register participant/);
   assert.match(registrationBody, /data-protection-ready="false"/);
   assert.match(registrationBody, /src="\/assets\/register\.js"/);
-  assert.match(registrationBody, /You can disable these later/);
+  assert.doesNotMatch(registrationBody, /email updates/i);
+  assert.match(registrationBody, /data-public-name-policy/);
   assert.match(registrationBody, /visible only to logged-in authorized race staff/);
   assert.match(registrationBody, /permanently deletes the complete race/);
   assert.match(await confirmation.text(), /DUCK8234/);
@@ -226,18 +271,43 @@ test("renders a valid private registration status path", async () => {
   const privateEnv = {
     ...env,
     DB: {
-      prepare: () => ({
+      prepare: (sql) => ({
         bind() { return this; },
         async first() {
+          if (sql.includes("FROM registrations r")) {
+            return {
+              first_name: "Daisy",
+              last_name: "Duck",
+              status: "ACTIVE",
+              lookup_code: "ABCD2345",
+              submitted_at: "2026-07-26T00:00:00.000Z",
+              event_name: "Summer Duck Race",
+              event_date: "2026-08-30",
+              race_entry_id: "entry_test",
+              duck_keep_preference: "UNDECIDED",
+            };
+          }
+          if (sql.includes("FROM heats")) {
+            return { round: "ROUND_ONE", heat_number: 5, status: "RUNNING" };
+          }
           return {
-            first_name: "Daisy",
-            last_name: "Duck",
-            status: "SUBMITTED",
-            lookup_code: "ABCD2345",
-            submitted_at: "2026-07-26T00:00:00.000Z",
+            event_id: "event_test",
+            event_slug: "summer-duck-race",
             event_name: "Summer Duck Race",
             event_date: "2026-08-30",
-            duck_keep_preference: "UNDECIDED",
+            event_status: "ROUND_ONE",
+            public_name_policy: "FIRST_NAME_LAST_INITIAL",
+            first_name: "Daisy",
+            last_name: "Duck",
+            registration_status: "ACTIVE",
+            race_entry_id: "entry_test",
+            visible_number: 42,
+            round_one_heat_number: 7,
+            round_one_heat_status: "PLANNED",
+            round_one_place: null,
+            final_heat_number: null,
+            final_heat_status: null,
+            final_place: null,
           };
         },
       }),
@@ -252,6 +322,11 @@ test("renders a valid private registration status path", async () => {
   assert.equal(response.status, 200);
   assert.match(body, /Daisy/);
   assert.match(body, /ABCD2345/);
+  assert.match(body, /Duck #42/);
+  assert.match(body, /Round one · Heat 7/);
+  assert.match(body, /Round one · Heat 5/);
+  assert.match(body, /Not raced/);
+  assert.doesNotMatch(body, /daisy@example\.com|555-0100/);
   assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
 });
 
@@ -295,12 +370,43 @@ test("renders protected staff pairing preview with code and name lookup", async 
   assert.match(staffHomeBody, /Administrator/);
   assert.match(staffHomeBody, /\/assets\/staff-home\.js/);
 
-  const regularStaffHome = renderStaffHome("Regular Staff", false);
+  const startLine = await worker.fetch(
+    new Request("https://quickducks.com/mock/staff/start-line"),
+    env,
+  );
+  const finishLine = await worker.fetch(
+    new Request("https://quickducks.com/mock/staff/finish-line"),
+    env,
+  );
+  assert.match(await startLine.text(), /data-start-line/);
+  assert.match(await finishLine.text(), /data-finish-line/);
+
+  const regularStaffHome = renderStaffHome("Regular Staff", false, ["RETURN_STEWARD"]);
   assert.doesNotMatch(regularStaffHome, /data-staff-access-form/);
   assert.doesNotMatch(regularStaffHome, /Administrators have deletion authority/);
   assert.doesNotMatch(regularStaffHome, /id="support"/);
   assert.doesNotMatch(regularStaffHome, /data-final-purge-form/);
   assert.match(regularStaffHome, /data-return-batch-item-form/);
+  assert.match(regularStaffHome, /<a href="#returns">Returns<\/a>/);
+  assert.doesNotMatch(regularStaffHome, /<a href="#participants">Participants<\/a>/);
+  assert.match(regularStaffHome, /id="participants"[^>]* hidden/);
+  assert.match(regularStaffHome, /id="returns"/);
+
+  const announcerHome = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
+  assert.match(announcerHome, /<a href="#heats">Heats<\/a>/);
+  assert.match(announcerHome, /id="inventory"[^>]* hidden/);
+  assert.match(announcerHome, /data-roles="ANNOUNCER"/);
+
+  const heatRunnerHome = renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"]);
+  assert.match(heatRunnerHome, /href="\/staff\/start-line"/);
+  assert.doesNotMatch(heatRunnerHome, /href="\/staff\/finish-line"/);
+  const resultTakerHome = renderStaffHome("Result Taker", false, ["RESULT_TAKER"]);
+  assert.match(resultTakerHome, /href="\/staff\/finish-line"/);
+  assert.doesNotMatch(resultTakerHome, /href="\/staff\/start-line"/);
+
+  const noRoleHome = renderStaffHome("No Role", false, []);
+  assert.match(noRoleHome, /No operational roles assigned/);
+  assert.doesNotMatch(noRoleHome, /src="\/assets\/staff-home\.js"/);
 });
 
 test("keeps the database health check", async () => {

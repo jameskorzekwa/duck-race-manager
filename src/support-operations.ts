@@ -1,4 +1,5 @@
 import type { StaffActor } from "./auth.ts";
+import { requireAnyRole } from "./authorization.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -1385,6 +1386,8 @@ export const handleSupportOperations = async (
     /^\/api\/v1\/staff\/support\/events\/([A-Za-z0-9_-]{1,128})\/return-batches\/([A-Za-z0-9_-]{1,128})\/items$/,
   );
   if (returnItemMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RETURN_STEWARD", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return addReturnBatchItem(request, env, actor, returnItemMatch[1], returnItemMatch[2]);
   }
 
@@ -1392,6 +1395,8 @@ export const handleSupportOperations = async (
     /^\/api\/v1\/staff\/support\/events\/([A-Za-z0-9_-]{1,128})\/return-batches\/([A-Za-z0-9_-]{1,128})\/undo-last$/,
   );
   if (undoReturnMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RETURN_STEWARD", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return undoLastReturnBatchItem(request, env, actor, undoReturnMatch[1], undoReturnMatch[2]);
   }
 
@@ -1399,6 +1404,8 @@ export const handleSupportOperations = async (
     /^\/api\/v1\/staff\/support\/events\/([A-Za-z0-9_-]{1,128})\/return-batches\/([A-Za-z0-9_-]{1,128})\/finalize$/,
   );
   if (finalizeReturnMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RETURN_STEWARD", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return finalizeReturnBatch(request, env, actor, finalizeReturnMatch[1], finalizeReturnMatch[2]);
   }
 
@@ -1406,6 +1413,8 @@ export const handleSupportOperations = async (
     /^\/api\/v1\/staff\/support\/events\/([A-Za-z0-9_-]{1,128})\/return-batches$/,
   );
   if (returnBatchMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RETURN_STEWARD", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
     return createReturnBatch(request, env, actor, returnBatchMatch[1]);
   }
 
