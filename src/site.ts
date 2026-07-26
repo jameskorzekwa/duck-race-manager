@@ -1,0 +1,218 @@
+const escapeHtml = (value: string): string =>
+  value.replace(/[&<>'"]/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "'": "&#39;",
+    '"': "&quot;",
+  })[character] ?? character);
+
+const duck = (className = "duck-mark"): string => `
+<svg class="${className}" viewBox="0 0 96 76" role="img" aria-label="Rubber duck">
+  <path d="M8 61c12 5 22 5 34 0 12-5 22-5 34 0 6 3 11 3 16 1" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+  <ellipse cx="42" cy="47" rx="31" ry="20" fill="#ffd43b" stroke="#112b3c" stroke-width="3"/>
+  <circle cx="61" cy="28" r="20" fill="#ffd43b" stroke="#112b3c" stroke-width="3"/>
+  <circle cx="68" cy="23" r="3" fill="#112b3c"/>
+  <path d="M78 29h14l-10 8H75z" fill="#ff7132" stroke="#112b3c" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M25 45c8-8 19-7 24 2-7 8-17 11-24 5" fill="#efad20" stroke="#112b3c" stroke-width="3" stroke-linecap="round"/>
+</svg>`;
+
+export const faviconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#fff7d6"/>
+  <ellipse cx="27" cy="41" rx="21" ry="14" fill="#ffd43b" stroke="#112b3c" stroke-width="3"/>
+  <circle cx="40" cy="25" r="14" fill="#ffd43b" stroke="#112b3c" stroke-width="3"/>
+  <circle cx="45" cy="21" r="2.5" fill="#112b3c"/>
+  <path d="M51 26h12l-9 7h-7z" fill="#ff7132" stroke="#112b3c" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M15 40c6-6 14-5 18 2-5 6-12 8-18 4" fill="#efad20" stroke="#112b3c" stroke-width="2.5"/>
+</svg>`;
+
+const styles = `
+:root { color-scheme: light; --ink:#112b3c; --cream:#fff7d6; --paper:#fffdf3; --yellow:#ffd43b; --orange:#ff7132; --water:#3294b0; --water-dark:#146780; --muted:#607078; font-family:ui-rounded,"Avenir Next Rounded","Arial Rounded MT Bold",system-ui,sans-serif; }
+* { box-sizing:border-box; }
+html { scroll-behavior:smooth; }
+body { margin:0; min-width:320px; min-height:100vh; background:var(--cream); color:var(--ink); }
+a { color:inherit; }
+.shell { width:min(70rem,calc(100% - 2rem)); margin:0 auto; }
+.site-head { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:1rem 0; }
+.brand { display:inline-flex; align-items:center; gap:.55rem; color:var(--ink); text-decoration:none; font-size:1.12rem; font-weight:950; letter-spacing:-.03em; }
+.brand svg { width:3rem; height:2.35rem; color:var(--water-dark); }
+.nav { display:flex; gap:.35rem; }
+.nav a { padding:.7rem .9rem; border:2px solid transparent; border-radius:999px; font-weight:850; text-decoration:none; }
+.nav a:hover,.nav a:focus-visible { border-color:var(--ink); outline:none; }
+.hero { position:relative; overflow:hidden; display:grid; align-items:center; min-height:34rem; padding:clamp(2rem,6vw,5rem); border:3px solid var(--ink); border-radius:2rem; background:var(--paper); box-shadow:9px 9px 0 var(--ink); }
+.hero::after { content:""; position:absolute; right:-10%; bottom:-5rem; left:-10%; height:12rem; border-radius:50% 50% 0 0; background:var(--water); transform:rotate(-2deg); }
+.hero-copy { position:relative; z-index:1; max-width:42rem; }
+.eyebrow { display:inline-flex; margin:0 0 1rem; padding:.48rem .78rem; border:2px solid var(--ink); border-radius:999px; background:var(--yellow); font-size:.8rem; font-weight:950; letter-spacing:.09em; text-transform:uppercase; }
+h1,h2,h3,p { margin-top:0; }
+h1 { max-width:10ch; margin-bottom:1.15rem; font-size:clamp(3.2rem,12vw,7.8rem); line-height:.82; letter-spacing:-.075em; }
+h2 { font-size:clamp(2rem,6vw,3.7rem); line-height:.95; letter-spacing:-.055em; }
+h3 { font-size:1.3rem; letter-spacing:-.03em; }
+.lede { max-width:38rem; margin-bottom:1.5rem; color:#314a57; font-size:clamp(1.05rem,2.5vw,1.35rem); line-height:1.55; }
+.actions { display:flex; flex-wrap:wrap; gap:.8rem; }
+.button { display:inline-flex; min-height:3.25rem; align-items:center; justify-content:center; padding:.85rem 1.15rem; border:3px solid var(--ink); border-radius:.8rem; background:var(--yellow); box-shadow:4px 4px 0 var(--ink); color:var(--ink); font:inherit; font-weight:950; text-decoration:none; cursor:pointer; }
+.button:hover,.button:focus-visible { outline:none; box-shadow:2px 2px 0 var(--ink); transform:translate(2px,2px); }
+.button.secondary { background:var(--paper); }
+.hero-duck { position:absolute; z-index:2; right:clamp(1rem,5vw,4rem); bottom:2.5rem; width:clamp(12rem,37vw,25rem); color:#fff; filter:drop-shadow(5px 7px 0 rgba(17,43,60,.22)); pointer-events:none; transform:rotate(-4deg); }
+.ticker { display:flex; flex-wrap:wrap; justify-content:center; gap:.2rem .7rem; padding:1.35rem 0; color:var(--water-dark); font-size:.8rem; font-weight:950; letter-spacing:.1em; text-transform:uppercase; }
+.ticker span::after { content:"•"; margin-left:.7rem; color:var(--orange); }
+.ticker span:last-child::after { content:""; margin:0; }
+.cards { display:grid; gap:1rem; margin:2rem 0 4rem; }
+.card { padding:1.4rem; border:3px solid var(--ink); border-radius:1.2rem; background:var(--paper); }
+.card strong { display:block; margin-bottom:.35rem; color:var(--water-dark); font-size:.76rem; letter-spacing:.09em; text-transform:uppercase; }
+.card-link { display:inline-block; margin-top:.7rem; font-weight:900; }
+.page-panel { max-width:49rem; margin:2rem auto 5rem; padding:clamp(1.2rem,5vw,3rem); border:3px solid var(--ink); border-radius:1.5rem; background:var(--paper); box-shadow:8px 8px 0 var(--ink); }
+.page-panel > .duck-mark { float:right; width:8rem; color:var(--water-dark); }
+.page-title { max-width:12ch; font-size:clamp(2.7rem,10vw,5.4rem); }
+.muted { color:var(--muted); line-height:1.55; }
+.notice { margin:1.2rem 0; padding:1rem; border-left:.5rem solid var(--orange); background:#fff0df; line-height:1.5; }
+form { display:grid; gap:1.15rem; clear:both; }
+.field-grid { display:grid; gap:1rem; }
+label,legend { font-weight:900; }
+label span,legend span { display:block; margin-top:.25rem; color:var(--muted); font-size:.86rem; font-weight:650; line-height:1.4; }
+input,select { width:100%; min-height:3.2rem; margin-top:.45rem; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; }
+input:focus,select:focus { outline:4px solid #83d8ec; outline-offset:1px; }
+fieldset { margin:0; padding:1rem; border:2px solid var(--ink); border-radius:.8rem; }
+.check { display:grid; grid-template-columns:1.4rem 1fr; gap:.7rem; align-items:start; font-weight:750; }
+.check input { width:1.25rem; min-height:1.25rem; margin:.15rem 0 0; }
+.turnstile-mock { display:grid; min-height:4.4rem; place-items:center; padding:.8rem; border:2px dashed #8da0a6; border-radius:.7rem; background:#f4f7f7; color:var(--muted); font-size:.82rem; font-weight:800; text-align:center; }
+.code { display:inline-block; margin:.5rem 0; padding:.65rem .85rem; border:2px dashed var(--ink); border-radius:.6rem; background:var(--cream); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:clamp(1.4rem,7vw,2.4rem); font-weight:950; letter-spacing:.12em; }
+.facts { display:grid; gap:.8rem; margin:1.5rem 0; }
+.fact { padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
+.fact dt { color:var(--muted); font-size:.75rem; font-weight:950; letter-spacing:.08em; text-transform:uppercase; }
+.fact dd { margin:.25rem 0 0; font-size:1.08rem; font-weight:850; }
+.privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
+.privacy strong { flex:none; }
+.site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
+@media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:39rem; padding:1.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .hero-duck { right:50%; bottom:1.2rem; width:14rem; transform:translateX(50%) rotate(-4deg); } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } }
+@media (prefers-reduced-motion:no-preference) { .hero-duck { animation:bob 3.3s ease-in-out infinite; } @keyframes bob { 50% { transform:translateY(-8px) rotate(2deg); } } }
+`;
+
+interface PageOptions {
+  title: string;
+  description: string;
+  content: string;
+  robots?: string;
+}
+
+const page = ({ title, description, content, robots = "index,follow" }: PageOptions): string => `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffd43b">
+    <meta name="description" content="${escapeHtml(description)}">
+    <meta name="robots" content="${robots}">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="manifest" href="/site.webmanifest">
+    <title>${escapeHtml(title)} · QuickDucks</title>
+    <style>${styles}</style>
+  </head>
+  <body>
+    <header class="shell site-head">
+      <a class="brand" href="/">${duck("brand-duck")}<span>QuickDucks</span></a>
+      <nav class="nav" aria-label="Primary"><a href="/">Home</a><a href="/register">Register</a></nav>
+    </header>
+    <main class="shell">${content}</main>
+    <footer class="shell site-foot">Built for quick check-ins, clear heats, and happy ducks.</footer>
+  </body>
+</html>`;
+
+export const renderHome = (): string => page({
+  title: "Race-day registration and results",
+  description: "Register for the next QuickDucks race, check your heat, and follow race-day results.",
+  content: `
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">Race-day, simplified</p>
+        <h1>Find your duck. Follow the race.</h1>
+        <p class="lede">A fast, friendly home for community duck races. Register, keep your private code, and follow your duck from check-in to finish.</p>
+        <div class="actions"><a class="button" href="/register">Preview registration</a><a class="button secondary" href="#how-it-works">How it works</a></div>
+      </div>
+      ${duck("hero-duck")}
+    </section>
+    <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
+    <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
+      <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">No participant account is required. Keep your private status link and short lookup code.</p><a class="card-link" href="/register">Preview the form →</a></article>
+      <article class="card"><strong>At check-in</strong><h3>Your duck carries its identity</h3><p class="muted">Each permanent NFC and QR tag opens a safe, read-only page for that physical duck.</p><a class="card-link" href="/t/mock">Preview a duck scan →</a></article>
+      <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">Heat assignments, finalist progress, and results stay connected from check-in to finish.</p><a class="card-link" href="/r/mock">Preview status →</a></article>
+    </section>`,
+});
+
+export const renderRegistration = (): string => page({
+  title: "Register for the Summer Duck Race",
+  description: "QuickDucks registration form mockup.",
+  robots: "noindex,nofollow",
+  content: `
+    <section class="page-panel">
+      ${duck()}
+      <p class="eyebrow">Registration preview</p>
+      <h1 class="page-title">Summer Duck Race</h1>
+      <p class="lede">Sunday, August 30 · Registration takes about one minute.</p>
+      <div class="privacy"><strong>Private by design.</strong><span>Your contact information never appears on the public NFC page.</span></div>
+      <form method="get" action="/r/mock">
+        <div class="field-grid">
+          <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"></label>
+          <label>Last name<input name="last_name" autocomplete="family-name" maxlength="80" required placeholder="Rivera"></label>
+        </div>
+        <div class="field-grid">
+          <label>Email (optional)<input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>Used only for operational race updates.</span></label>
+          <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="32" placeholder="(555) 010-2040"></label>
+        </div>
+        <label class="check"><input name="email_notifications_enabled" type="checkbox" checked><span>Send me duck assignment, heat, and result updates. I can disable these later.</span></label>
+        <fieldset><legend>After the race <span>This is only your current plan. Staff will record what physically happens to the duck.</span></legend><select name="duck_keep_preference"><option>I am not sure yet</option><option>I plan to keep my duck</option><option>I plan to return my duck</option></select></fieldset>
+        <div class="turnstile-mock">Cloudflare anti-bot check appears here in the working registration flow.</div>
+        <button class="button" type="submit">Preview confirmation</button>
+      </form>
+    </section>`,
+});
+
+export const renderStatus = (): string => page({
+  title: "Registration status",
+  description: "Private QuickDucks registration status mockup.",
+  robots: "noindex,nofollow",
+  content: `
+    <section class="page-panel">
+      ${duck()}
+      <p class="eyebrow">Private status preview</p>
+      <h1 class="page-title">You’re in the queue, Jamie.</h1>
+      <p class="lede">Keep this page private. It becomes the racer’s status link for the Summer Duck Race.</p>
+      <div class="notice"><strong>Staff lookup code</strong><br><span class="code">DUCK-824</span><br><span class="muted">Save this code or bookmark this page.</span></div>
+      <dl class="facts"><div class="fact"><dt>Status</dt><dd>Submitted — waiting for duck assignment</dd></div><div class="fact"><dt>Race date</dt><dd>Sunday, August 30</dd></div><div class="fact"><dt>Return plan</dt><dd>Not sure about keeping or returning yet</dd></div></dl>
+      <p class="muted">A duck and heat are not assigned until the status changes. Contact details never appear on public duck pages.</p>
+      <a class="button secondary" href="/">Back to home</a>
+    </section>`,
+});
+
+export const renderDuck = (): string => page({
+  title: "Duck #128",
+  description: "Public QuickDucks NFC duck-page mockup.",
+  robots: "noindex,nofollow",
+  content: `
+    <section class="page-panel">
+      ${duck()}
+      <p class="eyebrow">Permanent duck ID</p>
+      <h1 class="page-title">Duck #128</h1>
+      <p class="lede">This tag belongs to a real QuickDucks race duck.</p>
+      <div class="notice"><strong>Tag verified.</strong> Participant, heat, assignment, and location details are intentionally kept private here.</div>
+      <div class="privacy"><strong>Safe to scan.</strong><span>This page is read-only. Scanning a duck never changes its registration or race status.</span></div>
+      <br><a class="button secondary" href="/">Visit QuickDucks</a>
+    </section>`,
+});
+
+export const renderNotFound = (): string => page({
+  title: "Not found",
+  description: "The requested QuickDucks page was not found.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel">${duck()}<p class="eyebrow">Wrong part of the pond</p><h1 class="page-title">Nothing is swimming here.</h1><p class="lede">Check the link or return to the QuickDucks home page.</p><a class="button" href="/">Go home</a></section>`,
+});
+
+export const manifestJson = JSON.stringify({
+  name: "QuickDucks",
+  short_name: "QuickDucks",
+  start_url: "/",
+  display: "standalone",
+  background_color: "#fff7d6",
+  theme_color: "#ffd43b",
+  icons: [{ src: "/favicon.svg", sizes: "any", type: "image/svg+xml" }],
+});
