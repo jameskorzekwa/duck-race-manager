@@ -1,11 +1,19 @@
-import { handleApi } from "./api.ts";
+import {
+  findDuckRaceStatus,
+  findRegistrationStatus,
+  handleApi,
+  searchPublicStatuses,
+} from "./api.ts";
+import { readBrowserRegistrations } from "./browser-registrations.ts";
 import {
   faviconSvg,
   manifestJson,
   renderDuck,
   renderHome,
   renderNotFound,
+  renderPublicStatusSearch,
   renderRegistration,
+  renderStaffPairing,
   renderStatus,
 } from "./site.ts";
 import type { Env } from "./types.ts";
@@ -100,10 +108,40 @@ export default {
 
     if (url.pathname.startsWith("/api/v1/")) return handleApi(request, env);
 
-    if (url.pathname === "/" && request.method === "GET") return html(renderHome());
+    if (url.pathname === "/" && request.method === "GET") {
+      return html(renderHome(readBrowserRegistrations(request.headers.get("cookie"))));
+    }
     if (url.pathname === "/register" && request.method === "GET") return html(renderRegistration(), 200, true);
     if (url.pathname === "/r/mock" && request.method === "GET") return html(renderStatus(), 200, true);
     if (url.pathname === "/t/mock" && request.method === "GET") return html(renderDuck(), 200, true);
+    if (url.pathname === "/t/mock-unpaired" && request.method === "GET") {
+      return new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } });
+    }
+    if (url.pathname === "/mock/staff/ducks/128/pair" && request.method === "GET") {
+      return html(renderStaffPairing(), 200, true);
+    }
+
+    if (url.pathname === "/status" && request.method === "GET") {
+      const query = url.searchParams.get("q")?.trim() ?? "";
+      const statuses = await searchPublicStatuses(query, env);
+      return html(renderPublicStatusSearch(query, statuses), 200, true);
+    }
+
+    const privateStatusMatch = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);
+    if (privateStatusMatch !== null && request.method === "GET") {
+      const registration = await findRegistrationStatus(privateStatusMatch[1], env);
+      return registration === null
+        ? html(renderNotFound(), 404, true)
+        : html(renderStatus(registration), 200, true);
+    }
+
+    const duckTagMatch = url.pathname.match(/^\/t\/([A-Za-z0-9_-]+)$/);
+    if (duckTagMatch !== null && request.method === "GET") {
+      const status = await findDuckRaceStatus(duckTagMatch[1], env);
+      return status === null
+        ? new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } })
+        : html(renderDuck(status), 200, true);
+    }
 
     return html(renderNotFound(), 404, true);
   },

@@ -39,3 +39,19 @@ export interface DuckRecord {
   visible_number: number;
   tag_status: string;
 }
+
+export interface PublicRaceStatusRecord {
+  first_name: string;
+  last_name: string;
+  registration_status: string;
+  event_name: string;
+  event_status: string;
+  visible_number: number | null;
+  round_type: string | null;
+  heat_number: number | null;
+  heat_status: string | null;
+  current_heat_number: number | null;
+  current_heat_round: string | null;
+  result_position: number | null;
+  advanced: number | null;
+}

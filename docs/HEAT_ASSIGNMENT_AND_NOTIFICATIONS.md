@@ -354,8 +354,11 @@ mutating scan operation is also taken to the read-only inspection page.
 Inspection never changes assignment, heat, location, or result state. All
 corrective actions require separate role-checked commands and confirmation.
 
-Public users who scan the same tag see only the generic public duck page and no
-participant, operational, or location information.
+An anonymous scan of an unpaired duck redirects to the home page. An anonymous
+scan of a paired duck opens its public race-status page. That page may show the
+participant name, duck number, assigned heat, currently running heat, and
+published outcome, but never contact information, lookup codes, private tokens,
+physical location, synchronization state, or audit history.
 
 ### Inspection Summary
 

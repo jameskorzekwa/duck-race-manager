@@ -85,15 +85,35 @@ response in analytics, application logs, public links, or search indexes.
 The short lookup code is for staff search only and must never authorize this
 endpoint.
 
+Each successful response also appends the participant name, lookup code, and
+private status path to the secure, HttpOnly
+`__Host-quickducks-registrations` browser cookie. The bounded cookie supports
+multiple registrations from one phone and lets the server render the device's
+registration list on the home page. Email and phone are not unique.
+
+## Public Status Search
+
+```http
+GET /api/v1/status/search?q={participantName}
+```
+
+Public name search may return participant display name, visible duck number,
+assigned/current heat, registration status, and published race outcome. It
+must never return contact details, lookup codes, private status paths, internal
+IDs, inventory state, or audit data. Authenticated staff use a separate
+role-checked search that may return the lookup code for pairing assistance.
+
 ## Public Duck Lookup
 
 ```http
 GET /api/v1/ducks/{permanentTagToken}
 ```
 
-The response intentionally exposes only the visible duck number and tag
-status. It does not expose participants, registrations, assignments, heats,
-inventory state, or location.
+An unpaired duck has no anonymous status payload and redirects home at the page
+route. A paired duck's public status payload may expose participant name, duck
+number, heat, current race progress, and published result. It never exposes
+contact details, lookup codes, private tokens, inventory state, location,
+synchronization state, or audit history.
 
 ## Runtime Configuration
 

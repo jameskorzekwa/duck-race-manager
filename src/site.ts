@@ -1,3 +1,6 @@
+import type { BrowserRegistration } from "./browser-registrations.ts";
+import type { PublicRaceStatusRecord, RegistrationStatusRecord } from "./types.ts";
+
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;",
@@ -57,6 +60,15 @@ h3 { font-size:1.3rem; letter-spacing:-.03em; }
 .ticker { display:flex; flex-wrap:wrap; justify-content:center; gap:.2rem .7rem; padding:1.35rem 0; color:var(--water-dark); font-size:.8rem; font-weight:950; letter-spacing:.1em; text-transform:uppercase; }
 .ticker span::after { content:"•"; margin-left:.7rem; color:var(--orange); }
 .ticker span:last-child::after { content:""; margin:0; }
+.home-tools { display:grid; gap:1rem; margin:1rem 0 2rem; }
+.tool-panel { padding:1.4rem; border:3px solid var(--ink); border-radius:1.2rem; background:var(--paper); }
+.tool-panel h2 { margin-bottom:.7rem; font-size:clamp(1.7rem,5vw,2.5rem); }
+.registration-list { display:grid; gap:.7rem; margin:1rem 0; padding:0; list-style:none; }
+.registration-item { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.7rem; padding:.85rem; border:2px solid #b8c6c9; border-radius:.8rem; }
+.registration-item a { font-weight:900; }
+.mini-code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85rem; font-weight:900; letter-spacing:.08em; }
+.status-search { display:grid; grid-template-columns:1fr auto; gap:.7rem; align-items:end; }
+.status-search label { min-width:0; }
 .cards { display:grid; gap:1rem; margin:2rem 0 4rem; }
 .card { padding:1.4rem; border:3px solid var(--ink); border-radius:1.2rem; background:var(--paper); }
 .card strong { display:block; margin-bottom:.35rem; color:var(--water-dark); font-size:.76rem; letter-spacing:.09em; text-transform:uppercase; }
@@ -83,8 +95,8 @@ input:focus { outline:4px solid #83d8ec; outline-offset:1px; }
 .privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
 .privacy strong { flex:none; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
-@media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero::after { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } }
+@media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } .home-tools.has-registrations { grid-template-columns:1.15fr .85fr; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero::after { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .status-search { grid-template-columns:1fr; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } }
 @media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-glide 3.1s ease-in-out infinite; } .hero::after { animation:water-swell 4.2s ease-in-out infinite; } .hero::before { animation:current 2.8s linear infinite; } @keyframes duck-glide { 0%,100% { transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); } 50% { transform:translateX(calc(var(--duck-center) + 6px)) translateY(-9px) rotate(1deg); } } @keyframes water-swell { 0%,100% { transform:translateY(0) rotate(-2deg); } 50% { transform:translateY(4px) rotate(-1deg); } } @keyframes current { to { background-position:-10rem 50%; } } }
 `;
 
@@ -118,7 +130,7 @@ const page = ({ title, description, content, robots = "index,follow" }: PageOpti
   </body>
 </html>`;
 
-export const renderHome = (): string => page({
+export const renderHome = (registrations: BrowserRegistration[] = []): string => page({
   title: "Race-day registration and results",
   description: "Register for the next QuickDucks race, check your heat, and follow race-day results.",
   content: `
@@ -132,9 +144,13 @@ export const renderHome = (): string => page({
       ${duck("hero-duck")}
     </section>
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
+    <section class="home-tools ${registrations.length > 0 ? "has-registrations" : ""}" aria-label="Registration and race status">
+      ${registrations.length === 0 ? "" : `<div class="tool-panel"><p class="eyebrow">Saved on this device</p><h2>Your registrations</h2><p class="muted">These registrations stay available on this browser after refreshes.</p><ul class="registration-list">${registrations.map((registration) => `<li class="registration-item"><span><strong>${escapeHtml(registration.name)}</strong><br><span class="mini-code">${escapeHtml(registration.lookupCode)}</span></span><a href="${escapeHtml(registration.statusPath)}">View status →</a></li>`).join("")}</ul><a class="button secondary" href="/register">Register another participant</a></div>`}
+      <div class="tool-panel"><p class="eyebrow">Public race status</p><h2>Find a participant</h2><p class="muted">Search by participant name to see public duck, heat, and race progress. Contact information and staff codes are never shown.</p><form class="status-search" method="get" action="/status"><label>Participant name<input name="q" minlength="2" maxlength="161" required placeholder="Jamie Rivera"></label><button class="button" type="submit">Search status</button></form></div>
+    </section>
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p><a class="card-link" href="/register">Preview the form →</a></article>
-      <article class="card"><strong>At check-in</strong><h3>Your duck carries its identity</h3><p class="muted">Tap your duck’s permanent NFC or QR tag to open its safe, read-only page.</p><a class="card-link" href="/t/mock">Preview a duck scan →</a></article>
+      <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/mock/staff/ducks/128/pair">Preview staff pairing →</a></article>
       <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p><a class="card-link" href="/r/mock">Preview status →</a></article>
     </section>`,
 });
@@ -150,6 +166,7 @@ export const renderRegistration = (): string => page({
       <h1 class="page-title">Summer Duck Race</h1>
       <p class="lede">Sunday, August 30 · Registration takes about one minute.</p>
       <div class="privacy"><strong>Private by design.</strong><span>Your contact information never appears on the public NFC page.</span></div>
+      <div class="notice"><strong>Registering more than one participant?</strong> Finish this form once for each person. You can use the same phone, email, or browser, and QuickDucks will keep their codes together on this device.</div>
       <form method="get" action="/r/mock">
         <div class="field-grid">
           <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"></label>
@@ -166,7 +183,14 @@ export const renderRegistration = (): string => page({
     </section>`,
 });
 
-export const renderStatus = (): string => page({
+export const renderStatus = (registration?: RegistrationStatusRecord): string => {
+  const firstName = registration?.first_name ?? "Jamie";
+  const lookupCode = registration?.lookup_code ?? "DUCK-824";
+  const eventName = registration?.event_name ?? "Summer Duck Race";
+  const registrationStatus = registration?.status === "ACTIVE"
+    ? "Active — duck assigned"
+    : "Submitted — waiting for duck assignment";
+  return page({
   title: "Registration status",
   description: "Private QuickDucks registration status mockup.",
   robots: "noindex,nofollow",
@@ -174,29 +198,85 @@ export const renderStatus = (): string => page({
     <section class="page-panel">
       ${duck()}
       <p class="eyebrow">Private status preview</p>
-      <h1 class="page-title">You’re in the queue, Jamie.</h1>
-      <p class="lede">Keep this page private. This is your status link for the Summer Duck Race.</p>
-      <div class="notice"><strong>Staff lookup code</strong><br><span class="code">DUCK-824</span><br><span class="muted">Save this code or bookmark this page.</span></div>
-      <dl class="facts"><div class="fact"><dt>Status</dt><dd>Submitted — waiting for duck assignment</dd></div><div class="fact"><dt>Race date</dt><dd>Sunday, August 30</dd></div></dl>
+      <h1 class="page-title">You’re in the queue, ${escapeHtml(firstName)}.</h1>
+      <p class="lede">Keep this page private. This is your status link for ${escapeHtml(eventName)}.</p>
+      <div class="notice"><strong>Staff lookup code</strong><br><span class="code">${escapeHtml(lookupCode)}</span><br><span class="muted">Save this code or bookmark this page.</span></div>
+      <dl class="facts"><div class="fact"><dt>Status</dt><dd>${registrationStatus}</dd></div><div class="fact"><dt>Race date</dt><dd>Sunday, August 30</dd></div></dl>
       <p class="muted">You’ll see your duck and heat here after staff assigns them. Your contact details never appear on public duck pages.</p>
-      <a class="button secondary" href="/">Back to home</a>
+      <div class="actions"><a class="button" href="/register">Register another participant</a><a class="button secondary" href="/">Back to home</a></div>
     </section>`,
-});
+  });
+};
 
-export const renderDuck = (): string => page({
-  title: "Duck #128",
+const mockRaceStatus: PublicRaceStatusRecord = {
+  first_name: "Jamie",
+  last_name: "Rivera",
+  registration_status: "ACTIVE",
+  event_name: "Summer Duck Race",
+  event_status: "ROUND_ONE",
+  visible_number: 128,
+  round_type: "ROUND_ONE",
+  heat_number: 7,
+  heat_status: "PLANNED",
+  current_heat_number: 5,
+  current_heat_round: "ROUND_ONE",
+  result_position: null,
+  advanced: 0,
+};
+
+const roundLabel = (round: string | null): string => round === "FINAL" ? "Final" : "Round one";
+
+const publicStatusFacts = (status: PublicRaceStatusRecord, includeParticipant = true): string => {
+  const assignment = status.visible_number === null
+    ? "Waiting for duck assignment"
+    : `Duck #${status.visible_number}`;
+  const heat = status.heat_number === null
+    ? "Heat not assigned yet"
+    : `${roundLabel(status.round_type)} · Heat ${status.heat_number}`;
+  const running = status.current_heat_number === null
+    ? "Racing has not started"
+    : `${roundLabel(status.current_heat_round)} · Heat ${status.current_heat_number}`;
+  const outcome = status.result_position !== null
+    ? `Finished in position ${status.result_position}`
+    : status.advanced === 1
+      ? "Advanced to the final"
+      : status.heat_status === "COMPLETED"
+        ? "Heat completed"
+        : "Waiting to race";
+  return `<dl class="facts">${includeParticipant ? `<div class="fact"><dt>Participant</dt><dd>${escapeHtml(status.first_name)} ${escapeHtml(status.last_name)}</dd></div>` : ""}<div class="fact"><dt>Duck</dt><dd>${assignment}</dd></div><div class="fact"><dt>Assigned heat</dt><dd>${heat}</dd></div><div class="fact"><dt>Currently running</dt><dd>${running}</dd></div><div class="fact"><dt>Race status</dt><dd>${outcome}</dd></div></dl>`;
+};
+
+export const renderDuck = (status: PublicRaceStatusRecord = mockRaceStatus): string => page({
+  title: status.visible_number === null ? "Race status" : `Duck #${status.visible_number}`,
   description: "Public QuickDucks NFC duck-page mockup.",
   robots: "noindex,nofollow",
   content: `
     <section class="page-panel">
       ${duck()}
-      <p class="eyebrow">Permanent duck ID</p>
-      <h1 class="page-title">Duck #128</h1>
-      <p class="lede">This tag belongs to a real QuickDucks race duck.</p>
-      <div class="notice"><strong>Tag verified.</strong> Your participant, heat, assignment, and location details stay private here.</div>
-      <div class="privacy"><strong>Safe to scan.</strong><span>You can scan this read-only page without changing registration or race status.</span></div>
+      <p class="eyebrow">Public race status</p>
+      <h1 class="page-title">${status.visible_number === null ? "Waiting for a duck" : `Duck #${status.visible_number}`}</h1>
+      <p class="lede">Follow this duck through ${escapeHtml(status.event_name)}.</p>
+      ${publicStatusFacts(status)}
+      <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, or private links.</span></div>
       <br><a class="button secondary" href="/">Visit QuickDucks</a>
     </section>`,
+});
+
+export const renderPublicStatusSearch = (
+  query: string,
+  statuses: PublicRaceStatusRecord[],
+): string => page({
+  title: "Find race status",
+  description: "Search public QuickDucks race status by participant name.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel"><p class="eyebrow">Public race status</p><h1 class="page-title">Find a participant</h1><p class="lede">Search by name. Results show only public duck, heat, and race progress.</p><form class="status-search" method="get" action="/status"><label>Participant name<input name="q" minlength="2" maxlength="161" required value="${escapeHtml(query)}" placeholder="Jamie Rivera"></label><button class="button" type="submit">Search status</button></form>${query.length < 2 ? "" : statuses.length === 0 ? '<div class="notice">No matching participant was found. Check the spelling or ask race staff for help.</div>' : `<div class="registration-list">${statuses.map((status) => `<article class="card"><h3>${escapeHtml(status.first_name)} ${escapeHtml(status.last_name)}</h3>${publicStatusFacts(status, false)}</article>`).join("")}</div>`}</section>`,
+});
+
+export const renderStaffPairing = (): string => page({
+  title: "Pair Duck #128",
+  description: "Protected staff duck-pairing mockup.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel"><p class="eyebrow">Protected staff preview</p><h1 class="page-title">Pair Duck #128</h1><p class="lede">This duck is available. Find the participant before confirming the assignment.</p><div class="privacy"><strong>Staff authentication required.</strong><span>The working version will verify the staff session and event role before showing codes or accepting a pairing command.</span></div><div class="facts"><div class="fact"><dt>Duck</dt><dd>#128 · Available</dd></div><div class="fact"><dt>Event</dt><dd>Summer Duck Race</dd></div></div><form><label>Participant duck code<input name="lookup_code" autocomplete="off" maxlength="16" placeholder="ABCD2345"></label><button class="button" type="button">Find participant by code</button></form><hr style="margin:2rem 0;border:0;border-top:2px solid #b8c6c9"><form><label>Forgotten code? Search participant name<input name="participant_name" autocomplete="off" maxlength="161" placeholder="Jamie Rivera"></label><button class="button secondary" type="button">Search by name</button></form><div class="notice"><strong>Final confirmation required.</strong> Pairing will show participant and duck together before an authenticated command changes race data.</div></section>`,
 });
 
 export const renderNotFound = (): string => page({
