@@ -4,7 +4,7 @@ import {
   handleApi,
 } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
-import { registrationScript, staffDuckScript } from "./client-scripts.ts";
+import { registrationScript, staffDuckScript, staffHomeScript } from "./client-scripts.ts";
 import {
   faviconSvg,
   homeScript,
@@ -72,8 +72,10 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const appOrigin = new URL(env.APP_ORIGIN);
+    const localHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
+    const localPreview = appOrigin.protocol === "http:" && localHosts.has(appOrigin.hostname);
 
-    if (url.origin !== appOrigin.origin) {
+    if (!localPreview && url.origin !== appOrigin.origin) {
       const destination = new URL(`${url.pathname}${url.search}`, appOrigin);
 
       return new Response(null, {
@@ -116,8 +118,11 @@ export default {
       });
     }
 
-    if (url.pathname === "/assets/register.js" || url.pathname === "/assets/staff-duck.js") {
-      return new Response(url.pathname === "/assets/register.js" ? registrationScript : staffDuckScript, {
+    if (["/assets/register.js", "/assets/staff-duck.js", "/assets/staff-home.js"].includes(url.pathname)) {
+      const script = url.pathname === "/assets/register.js"
+        ? registrationScript
+        : url.pathname === "/assets/staff-home.js" ? staffHomeScript : staffDuckScript;
+      return new Response(script, {
         headers: {
           ...securityHeaders,
           "cache-control": "public, max-age=3600",
@@ -167,6 +172,9 @@ export default {
     if (url.pathname === "/mock/staff/ducks/128/working" && request.method === "GET") {
       return html(renderStaffDuck("a".repeat(32), "Staff Preview"), 200, true);
     }
+    if (url.pathname === "/mock/staff/home" && request.method === "GET") {
+      return html(renderStaffHome("Administrator Preview", true), 200, true);
+    }
 
     if (url.pathname === "/staff/login/start" && request.method === "GET") {
       return withSecurityHeaders(await startStaffLogin(request, env));
@@ -196,7 +204,7 @@ export default {
       const actor = await authenticateStaff(request, env);
       return actor === null
         ? html(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo"))), 200, true)
-        : html(renderStaffHome(actor.displayName ?? actor.email), 200, true);
+        : html(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin), 200, true);
     }
 
     const staffDuckMatch = url.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]+)$/);

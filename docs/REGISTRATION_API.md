@@ -149,6 +149,34 @@ cookie created only after Cognito authorization-code, state, and PKCE checks.
 Cookie-authenticated mutation requests require the exact application origin.
 Explicit Bearer access tokens remain supported for trusted API clients.
 
+## Return Review and Purge Readiness
+
+```http
+GET  /api/v1/staff/events/return-review
+POST /api/v1/staff/ducks/{tagToken}/dispositions
+POST /api/v1/staff/events/{eventId}/ducks/{visibleNumber}/dispositions
+POST /api/v1/staff/events/{eventId}/purge-ready
+POST /api/v1/staff/events/{eventId}/purge-ready/cancel
+```
+
+After racing reaches `COMPLETED`, authenticated staff scan each physical duck
+and record `RETURNED`, `QUARANTINED`, `DAMAGED`, `RETIRED`, `KEPT`, `MISSING`,
+or `UNACCOUNTED_FOR`. The idempotent command atomically records or explicitly
+corrects the event disposition, closes the active assignment, releases the
+event reservation, updates inventory, writes an audit event, and moves the
+event into `RETURN_PROCESSING`.
+The event-scoped visible-number route supports located ducks without a readable
+tag and ducks that must be marked missing or unaccounted for because they cannot
+be physically scanned.
+
+The staff return-review panel reports counts and unresolved gates. A system
+administrator must acknowledge both the completed physical review and
+permanent deletion before marking an event `ARCHIVED`. The transition is
+blocked by unresolved dispositions, unreleased reservations, active
+assignments, running heats, or heats awaiting results. `ARCHIVED` is read-only;
+an administrator can reopen `RETURN_PROCESSING` only with a recorded correction
+reason.
+
 ## Complete Race Purge
 
 ```http

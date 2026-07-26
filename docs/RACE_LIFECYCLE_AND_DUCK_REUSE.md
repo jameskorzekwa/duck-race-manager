@@ -252,6 +252,18 @@ purged with all other race data. Browser collection rows are also deleted.
 | `cancelEventPurgeReady` | Reopen return processing for an explicit correction |
 | `purgeEvent` | Permanently delete the complete event and all dependent data |
 
+Implemented staff routes:
+
+- `POST /api/v1/staff/ducks/{tagToken}/dispositions` records or corrects one
+  physical disposition and materializes its inventory state.
+- `POST /api/v1/staff/events/{eventId}/ducks/{visibleNumber}/dispositions`
+  supports located, missing, and unaccounted ducks that cannot be tag-scanned.
+- `GET /api/v1/staff/events/return-review` summarizes automated return gates.
+- `POST /api/v1/staff/events/{eventId}/purge-ready` performs the administrator
+  review acknowledgement and transitions the event to `ARCHIVED`.
+- `POST /api/v1/staff/events/{eventId}/purge-ready/cancel` records a correction
+  reason and reopens `RETURN_PROCESSING`.
+
 ## Acceptance Tests
 
 - Purge is blocked until physical return processing and exception review are
