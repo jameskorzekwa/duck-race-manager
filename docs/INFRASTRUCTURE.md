@@ -33,9 +33,18 @@ AWS_SECRET_ACCESS_KEY
 TURNSTILE_SECRET_KEY
 ```
 
-The public Turnstile site key is a non-secret Worker variable added when the
-registration UI is configured. The registration API fails closed until the
-encrypted Turnstile secret exists.
+The public Turnstile site key is the non-secret Worker variable
+`TURNSTILE_SITE_KEY`. The registration page remains visibly disabled unless
+that variable exists, and the registration API independently fails closed until
+the encrypted `TURNSTILE_SECRET_KEY` exists.
+
+Staff sign-in uses Cognito managed login with the OAuth authorization-code flow,
+PKCE `S256`, and a random state value. The Worker exchanges the callback code
+server-side, verifies the access token and matching `staff_profiles` row, and
+stores only the short-lived access token in the host-only
+`__Host-quickducks_staff` cookie. The cookie is `Secure`, `HttpOnly`, and
+`SameSite=Lax`; no refresh token is retained, so staff sign in again after the
+one-hour Cognito access token expires.
 
 Automatic Workers invocation logs are disabled in Wrangler because Cloudflare
 fetch-event logs include request URLs. QuickDucks private status credentials are

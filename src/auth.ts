@@ -8,7 +8,10 @@ export interface StaffActor {
   email: string;
   displayName: string | null;
   isSystemAdmin: boolean;
+  authentication: "bearer" | "cookie";
 }
+
+export const staffSessionCookieName = "__Host-quickducks_staff";
 
 interface VerifiedToken {
   sub: string;
@@ -17,6 +20,16 @@ interface VerifiedToken {
 type TokenVerifier = (token: string, env: Env) => Promise<VerifiedToken>;
 
 const verifiers = new Map<string, ReturnType<typeof CognitoJwtVerifier.create>>();
+
+const readCookie = (request: Request, name: string): string | null => {
+  const header = request.headers.get("cookie");
+  if (header === null) return null;
+  for (const item of header.split(";")) {
+    const [key, ...value] = item.trim().split("=");
+    if (key === name) return value.join("=");
+  }
+  return null;
+};
 
 const verifyCognitoAccessToken: TokenVerifier = async (token, env) => {
   const key = `${env.COGNITO_USER_POOL_ID}:${env.COGNITO_USER_POOL_CLIENT_ID}`;
@@ -41,10 +54,13 @@ export const authenticateStaff = async (
 ): Promise<StaffActor | null> => {
   const authorization = request.headers.get("authorization");
   const match = authorization?.match(/^Bearer ([A-Za-z0-9._~-]+)$/);
-  if (match === undefined || match === null) return null;
+  const cookieToken = readCookie(request, staffSessionCookieName);
+  const token = match?.[1] ?? cookieToken;
+  if (token === undefined || token === null || !/^[A-Za-z0-9._~-]+$/.test(token)) return null;
+  const authentication = match === undefined || match === null ? "cookie" : "bearer";
 
   try {
-    const payload = await verifyToken(match[1], env);
+    const payload = await verifyToken(token, env);
     const profile = await env.DB.prepare(
       `SELECT id, cognito_sub, email, display_name, is_system_admin
          FROM staff_profiles
@@ -64,6 +80,7 @@ export const authenticateStaff = async (
       email: profile.email,
       displayName: profile.display_name,
       isSystemAdmin: profile.is_system_admin === 1,
+      authentication,
     };
   } catch {
     return null;

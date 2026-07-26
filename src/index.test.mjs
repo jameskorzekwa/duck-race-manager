@@ -6,6 +6,9 @@ import worker from "./index.ts";
 const env = {
   APP_ORIGIN: "https://quickducks.com",
   AWS_REGION: "us-east-1",
+  COGNITO_USER_POOL_ID: "us-east-1_example",
+  COGNITO_USER_POOL_CLIENT_ID: "client-example",
+  COGNITO_DOMAIN: "https://quickducks-staff.example.com",
   DB: {
     prepare: () => ({
       async first() {
@@ -32,7 +35,7 @@ test("redirects alternate hosts to the canonical origin", async () => {
   assert.equal(response.headers.get("location"), "https://quickducks.com/");
 });
 
-test("renders the responsive landing-page mockup", async () => {
+test("renders the responsive landing page", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/"), env);
   const body = await response.text();
 
@@ -57,6 +60,16 @@ test("serves the home-page status client", async () => {
   assert.match(body, /\/api\/v1\/race-status\/search/);
 });
 
+test("serves registration and staff pairing browser clients", async () => {
+  const registration = await worker.fetch(new Request("https://quickducks.com/assets/register.js"), env);
+  const staff = await worker.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env);
+
+  assert.equal(registration.status, 200);
+  assert.match(await registration.text(), /\/api\/v1\/registrations/);
+  assert.equal(staff.status, 200);
+  assert.match(await staff.text(), /\/api\/v1\/staff\/ducks/);
+});
+
 test("serves the rubber-duck favicon", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/favicon.svg"), env);
   const body = await response.text();
@@ -66,17 +79,66 @@ test("serves the rubber-duck favicon", async () => {
   assert.match(body, /#ffd43b/);
 });
 
-test("renders the clickable registration and status mockups", async () => {
+test("renders working registration UI while protection remains fail-closed", async () => {
   const registration = await worker.fetch(new Request("https://quickducks.com/register"), env);
   const confirmation = await worker.fetch(new Request("https://quickducks.com/r/mock"), env);
   const registrationBody = await registration.text();
 
-  assert.match(registrationBody, /Preview confirmation/);
+  assert.match(registrationBody, /Register participant/);
+  assert.match(registrationBody, /data-protection-ready="false"/);
+  assert.match(registrationBody, /src="\/assets\/register\.js"/);
   assert.match(registrationBody, /You can disable these later/);
   assert.match(registrationBody, /visible only to logged-in authorized race staff/);
   assert.match(registrationBody, /permanently deletes the complete race/);
   assert.match(await confirmation.text(), /DUCK8234/);
   assert.equal(confirmation.headers.get("x-robots-tag"), "noindex, nofollow");
+});
+
+test("renders the Turnstile widget only when its public key is configured", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/register"), {
+    ...env,
+    TURNSTILE_SITE_KEY: "site-key-test",
+    TURNSTILE_SECRET_KEY: "secret-key-test",
+  });
+  const body = await response.text();
+
+  assert.match(body, /data-sitekey="site-key-test"/);
+  assert.match(body, /challenges\.cloudflare\.com\/turnstile/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /frame-src https:\/\/challenges\.cloudflare\.com/);
+});
+
+test("renders staff sign-in and protects staff duck pages", async () => {
+  const staff = await worker.fetch(new Request("https://quickducks.com/staff?returnTo=%2Ft%2Ftoken"), env);
+  const protectedDuck = await worker.fetch(
+    new Request(`https://quickducks.com/staff/ducks/${"a".repeat(32)}`),
+    env,
+  );
+  const staffBody = await staff.text();
+
+  assert.equal(staff.status, 200);
+  assert.match(staffBody, /Continue to secure sign in/);
+  assert.match(staffBody, /returnTo=%2Ft%2Ftoken/);
+  assert.equal(protectedDuck.status, 303);
+  assert.match(protectedDuck.headers.get("location") ?? "", /^\/staff\?returnTo=/);
+});
+
+test("starts hosted Cognito sign-in and renders safe callback failures", async () => {
+  const start = await worker.fetch(
+    new Request("https://quickducks.com/staff/login/start?returnTo=%2Fstaff"),
+    env,
+  );
+  const callback = await worker.fetch(
+    new Request("https://quickducks.com/auth/callback?error=access_denied"),
+    env,
+  );
+
+  assert.equal(start.status, 302);
+  assert.match(start.headers.get("location") ?? "", /^https:\/\/quickducks-staff\.example\.com\/oauth2\/authorize/);
+  assert.match(start.headers.get("set-cookie") ?? "", /__Host-quickducks_oauth=/);
+  assert.equal(start.headers.get("strict-transport-security"), "max-age=31536000");
+  assert.equal(callback.status, 400);
+  assert.match(await callback.text(), /sign-in request expired/i);
+  assert.match(callback.headers.get("set-cookie") ?? "", /__Host-quickducks_oauth=;/);
 });
 
 test("redirects an anonymous unpaired duck scan home", async () => {
@@ -188,6 +250,14 @@ test("renders protected staff pairing preview with code and name lookup", async 
   assert.match(body, /Participant duck code/);
   assert.match(body, /Search participant name/);
   assert.match(body, /Staff authentication required/);
+
+  const working = await worker.fetch(
+    new Request("https://quickducks.com/mock/staff/ducks/128/working"),
+    env,
+  );
+  const workingBody = await working.text();
+  assert.match(workingBody, /data-staff-duck/);
+  assert.match(workingBody, /\/assets\/staff-duck\.js/);
 });
 
 test("keeps the database health check", async () => {

@@ -56,6 +56,7 @@ h3 { font-size:1.3rem; letter-spacing:-.03em; }
 .button { display:inline-flex; min-height:3.25rem; align-items:center; justify-content:center; padding:.85rem 1.15rem; border:3px solid var(--ink); border-radius:.8rem; background:var(--yellow); box-shadow:4px 4px 0 var(--ink); color:var(--ink); font:inherit; font-weight:950; text-decoration:none; cursor:pointer; }
 .button:hover,.button:focus-visible { outline:none; box-shadow:2px 2px 0 var(--ink); transform:translate(2px,2px); }
 .button.secondary { background:var(--paper); }
+.button:disabled { opacity:.55; box-shadow:none; cursor:not-allowed; transform:none; }
 .hero-duck { --duck-center:0%; position:absolute; z-index:2; right:clamp(1rem,5vw,4rem); bottom:2.5rem; width:clamp(12rem,37vw,25rem); color:#fff; filter:drop-shadow(5px 7px 0 rgba(17,43,60,.22)); pointer-events:none; transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); }
 .ticker { display:flex; flex-wrap:wrap; justify-content:center; gap:.2rem .7rem; padding:1.35rem 0; color:var(--water-dark); font-size:.8rem; font-weight:950; letter-spacing:.1em; text-transform:uppercase; }
 .ticker span::after { content:"•"; margin-left:.7rem; color:var(--orange); }
@@ -82,11 +83,22 @@ form { display:grid; gap:1.15rem; clear:both; }
 .field-grid { display:grid; gap:1rem; }
 label,legend { font-weight:900; }
 label span,legend span { display:block; margin-top:.25rem; color:var(--muted); font-size:.86rem; font-weight:650; line-height:1.4; }
-input { width:100%; min-height:3.2rem; margin-top:.45rem; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; }
-input:focus { outline:4px solid #83d8ec; outline-offset:1px; }
+.label-text { display:inline; margin:0; color:var(--ink); font-size:inherit; font-weight:900; }
+input,select { width:100%; min-height:3.2rem; margin-top:.45rem; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; }
+input:focus,select:focus { outline:4px solid #83d8ec; outline-offset:1px; }
+fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
 .check { display:grid; grid-template-columns:1.4rem 1fr; gap:.7rem; align-items:start; font-weight:750; }
 .check input { width:1.25rem; min-height:1.25rem; margin:.15rem 0 0; }
 .turnstile-mock { display:grid; min-height:4.4rem; place-items:center; padding:.8rem; border:2px dashed #8da0a6; border-radius:.7rem; background:#f4f7f7; color:var(--muted); font-size:.82rem; font-weight:800; text-align:center; }
+.error-text { color:#9f261c; font-weight:850; }
+.field-error { min-height:1.2em; color:#9f261c; font-size:.8rem; font-weight:800; }
+.staff-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.8rem; margin-bottom:1.2rem; padding:.8rem 1rem; border:2px solid var(--ink); border-radius:.8rem; background:#e4f4f8; }
+.staff-bar p { margin:0; }
+.result-list { display:grid; gap:.6rem; margin:.8rem 0; }
+.result-button { width:100%; padding:.8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; font-weight:850; text-align:left; cursor:pointer; }
+.result-button:hover,.result-button:focus-visible { outline:4px solid #83d8ec; outline-offset:1px; }
+.result-button:disabled { opacity:.55; cursor:not-allowed; }
+.pairing-review { margin:1rem 0; padding:1rem; border:2px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; }
 .code { display:inline-block; margin:.5rem 0; padding:.65rem .85rem; border:2px dashed var(--ink); border-radius:.6rem; background:var(--cream); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:clamp(1.4rem,7vw,2.4rem); font-weight:950; letter-spacing:.12em; }
 .facts { display:grid; gap:.8rem; margin:1.5rem 0; }
 .fact { padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
@@ -123,7 +135,7 @@ const page = ({ title, description, content, robots = "index,follow" }: PageOpti
   <body>
     <header class="shell site-head">
       <a class="brand" href="/">${duck("brand-duck")}<span>QuickDucks</span></a>
-      <nav class="nav" aria-label="Primary"><a href="/">Home</a><a href="/register">Register</a></nav>
+      <nav class="nav" aria-label="Primary"><a href="/">Home</a><a href="/register">Register</a><a href="/staff">Staff</a></nav>
     </header>
     <main class="shell">${content}</main>
     <footer class="shell site-foot">Built for quick check-ins, clear heats, and happy ducks.</footer>
@@ -139,14 +151,14 @@ export const renderHome = (): string => page({
         <p class="eyebrow">Race-day, simplified</p>
         <h1>Find your duck. Follow the race.</h1>
         <p class="lede">A fast, friendly home for community duck races. Register, keep your private code, and follow your duck from check-in to finish.</p>
-        <div class="actions"><a class="button" href="/register">Preview registration</a><a class="button secondary" href="#how-it-works">How it works</a></div>
+        <div class="actions"><a class="button" href="/register">Register</a><a class="button secondary" href="#how-it-works">How it works</a></div>
       </div>
       ${duck("hero-duck")}
     </section>
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
-      <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p><a class="card-link" href="/register">Preview the form →</a></article>
-      <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/mock/staff/ducks/128/pair">Preview staff pairing →</a></article>
+      <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p><a class="card-link" href="/register">Open registration →</a></article>
+      <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/staff">Open staff tools →</a></article>
       <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p><a class="card-link" href="/r/mock">Preview status →</a></article>
     </section>
     <section class="status-section" data-my-ducks hidden>
@@ -171,31 +183,36 @@ export const renderHome = (): string => page({
     <script src="/assets/home.js" defer></script>`,
 });
 
-export const renderRegistration = (): string => page({
-  title: "Register for the Summer Duck Race",
-  description: "QuickDucks registration form mockup.",
+export const renderRegistration = (turnstileSiteKey?: string): string => page({
+  title: "Register for the duck race",
+  description: "Register a participant for the current QuickDucks race.",
   robots: "noindex,nofollow",
   content: `
     <section class="page-panel">
       ${duck()}
-      <p class="eyebrow">Registration preview</p>
-      <h1 class="page-title">Summer Duck Race</h1>
-      <p class="lede">Sunday, August 30 · Registration takes about one minute.</p>
+      <p class="eyebrow">Participant registration</p>
+      <h1 class="page-title" data-event-name>Loading race details…</h1>
+      <p class="lede" data-event-date>Registration takes about one minute.</p>
       <div class="privacy"><strong>Private by design.</strong><span>Your email and phone number are visible only to logged-in authorized race staff. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
       <div class="notice"><strong>Registering more than one participant?</strong> Finish this form once for each person. You can use the same phone, email, or browser, and QuickDucks will keep their codes together on this device.</div>
-      <form method="get" action="/r/mock">
+      <form method="post" action="/api/v1/registrations" data-registration-form data-protection-ready="${turnstileSiteKey === undefined ? "false" : "true"}">
         <div class="field-grid">
-          <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"></label>
-          <label>Last name<input name="last_name" autocomplete="family-name" maxlength="80" required placeholder="Rivera"></label>
+          <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"><span class="field-error" data-field-error="first_name"></span></label>
+          <label>Last name<input name="last_name" autocomplete="family-name" maxlength="80" required placeholder="Rivera"><span class="field-error" data-field-error="last_name"></span></label>
         </div>
         <div class="field-grid">
-          <label>Email (optional)<input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>We’ll use this only for operational race updates.</span></label>
-          <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="32" placeholder="(555) 010-2040"></label>
+          <label><span class="label-text" data-email-label>Email (optional)</span><input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>Used only for operational race updates.</span><span class="field-error" data-field-error="email"></span></label>
+          <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="32" placeholder="(555) 010-2040"><span class="field-error" data-field-error="phone"></span></label>
         </div>
         <label class="check"><input name="email_notifications_enabled" type="checkbox" checked><span>Get duck assignment, heat, and result updates by email. You can disable these later.</span></label>
-        <div class="turnstile-mock">Cloudflare anti-bot check appears here in the working registration flow.</div>
-        <button class="button" type="submit">Preview confirmation</button>
+        <label>After the race<select name="duck_keep_preference"><option value="UNDECIDED">I’m not sure yet</option><option value="RETURN">I plan to return the duck</option><option value="KEEP">I plan to keep the duck</option></select><span>This preference helps staff plan. Physical return processing remains authoritative.</span></label>
+        ${turnstileSiteKey === undefined
+          ? '<div class="turnstile-mock">Registration protection is still being configured.</div>'
+          : `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`}
+        <p class="muted" data-form-message aria-live="polite">Loading registration availability…</p>
+        <button class="button" type="submit" disabled>Register participant</button>
       </form>
+      <script src="/assets/register.js" defer></script>
     </section>`,
 });
 
@@ -203,21 +220,35 @@ export const renderStatus = (registration?: RegistrationStatusRecord): string =>
   const firstName = registration?.first_name ?? "Jamie";
   const lookupCode = registration?.lookup_code ?? "DUCK8234";
   const eventName = registration?.event_name ?? "Summer Duck Race";
-  const registrationStatus = registration?.status === "ACTIVE"
-    ? "Active — duck assigned"
-    : "Submitted — waiting for duck assignment";
+  const registrationStatus = ({
+    ACTIVE: "Active — duck assigned",
+    WITHDRAWN: "Withdrawn",
+    DISQUALIFIED: "Disqualified",
+    SUBMITTED: "Submitted — waiting for duck assignment",
+  } as Record<string, string>)[registration?.status ?? "SUBMITTED"] ?? "Status unavailable";
+  const heading = registration?.status === "ACTIVE"
+    ? `Your duck is assigned, ${firstName}.`
+    : registration?.status === "WITHDRAWN"
+      ? `Registration withdrawn, ${firstName}.`
+      : registration?.status === "DISQUALIFIED"
+        ? `Race status updated, ${firstName}.`
+        : `You’re in the queue, ${firstName}.`;
+  const raceDate = registration?.event_date
+    ? new Intl.DateTimeFormat("en-US", { dateStyle: "full", timeZone: "UTC" })
+      .format(new Date(`${registration.event_date}T12:00:00Z`))
+    : "To be announced";
   return page({
   title: "Registration status",
-  description: "Private QuickDucks registration status mockup.",
+  description: "Private QuickDucks participant registration status.",
   robots: "noindex,nofollow",
   content: `
     <section class="page-panel">
       ${duck()}
-      <p class="eyebrow">Private status preview</p>
-      <h1 class="page-title">You’re in the queue, ${escapeHtml(firstName)}.</h1>
+      <p class="eyebrow">Private registration status</p>
+      <h1 class="page-title">${escapeHtml(heading)}</h1>
       <p class="lede">Keep this page private. This is your status link for ${escapeHtml(eventName)}.</p>
       <div class="notice"><strong>Staff lookup code</strong><br><span class="code">${escapeHtml(lookupCode)}</span><br><span class="muted">Save this code or bookmark this page.</span></div>
-      <dl class="facts"><div class="fact"><dt>Status</dt><dd>${registrationStatus}</dd></div><div class="fact"><dt>Race date</dt><dd>Sunday, August 30</dd></div></dl>
+      <dl class="facts"><div class="fact"><dt>Status</dt><dd>${registrationStatus}</dd></div><div class="fact"><dt>Race date</dt><dd>${escapeHtml(raceDate)}</dd></div></dl>
       <p class="muted">You’ll see your duck and heat here after staff assigns them. Email and phone stay staff-only, and the complete race dataset is deleted after return processing.</p>
       <div class="actions"><a class="button" href="/register">Register another participant</a><a class="button secondary" href="/">Back to home</a></div>
     </section>`,
@@ -262,7 +293,7 @@ const publicStatusFacts = (status: PublicRaceStatus): string => {
 
 export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string => page({
   title: status.duck === null ? "Race status" : `Duck #${status.duck.visibleNumber}`,
-  description: "Public QuickDucks NFC duck-page mockup.",
+  description: "Public QuickDucks NFC duck race status.",
   robots: "noindex,nofollow",
   content: `
     <section class="page-panel">
@@ -276,11 +307,75 @@ export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string =>
     </section>`,
 });
 
+export const renderStaffLogin = (returnTo = "/staff"): string => page({
+  title: "Staff sign in",
+  description: "Sign in to protected QuickDucks race operations.",
+  robots: "noindex,nofollow",
+  content: `
+    <section class="page-panel">
+      ${duck()}
+      <p class="eyebrow">Protected race operations</p>
+      <h1 class="page-title">Staff sign in</h1>
+      <p class="lede">Use your invited QuickDucks staff email. Cognito will send a one-time sign-in code.</p>
+      <div class="privacy"><strong>Authorized staff only.</strong><span>Participant email and phone are available only after Cognito verifies your account and QuickDucks finds a matching staff profile.</span></div>
+      <br><a class="button" href="${escapeHtml(`/staff/login/start?returnTo=${encodeURIComponent(returnTo)}`)}">Continue to secure sign in</a>
+      <a class="button secondary" href="/">Back to public site</a>
+    </section>`,
+});
+
+export const renderStaffHome = (displayName: string): string => page({
+  title: "Staff tools",
+  description: "Protected QuickDucks staff race operations.",
+  robots: "noindex,nofollow",
+  content: `
+    <section class="page-panel">
+      <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p><a href="/staff/logout">Sign out</a></div>
+      ${duck()}
+      <p class="eyebrow">Staff tools</p>
+      <h1 class="page-title">Scan the selected duck first.</h1>
+      <p class="lede">Open the duck’s NFC or QR tag. QuickDucks will take you to pairing when it is available, or inspection when it is already assigned.</p>
+      <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
+      <a class="button secondary" href="/mock/staff/ducks/128/pair">Preview pairing layout</a>
+    </section>`,
+});
+
+export const renderStaffDuck = (token: string, displayName: string): string => page({
+  title: "Staff duck scan",
+  description: "Protected QuickDucks duck pairing and inspection.",
+  robots: "noindex,nofollow",
+  content: `
+    <section class="page-panel" data-staff-duck data-token="${escapeHtml(token)}">
+      <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Staff scan</p><span><a href="/staff">Staff home</a> · <a href="/staff/logout">Sign out</a></span></div>
+      <p class="eyebrow">Protected duck record</p>
+      <h1 class="page-title" data-staff-title>Checking this duck…</h1>
+      <p class="lede" data-staff-message aria-live="polite">Verifying tag, inventory, and assignment state.</p>
+      <dl class="facts" data-duck-summary></dl>
+      <section data-pairing-work hidden>
+        <div class="privacy"><strong>Current event</strong><span data-pairing-event></span></div>
+        <form method="post" action="/staff" data-registration-search>
+          <label>Participant code or name<input name="query" autocomplete="off" minlength="2" maxlength="80" required placeholder="ABCD2345 or Jamie Rivera"></label>
+          <button class="button secondary" type="submit">Find participant</button>
+        </form>
+        <div class="result-list" data-registration-results></div>
+        <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
+        <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
+      </section>
+      <script src="/assets/staff-duck.js" defer></script>
+    </section>`,
+});
+
+export const renderStaffAuthError = (message: string): string => page({
+  title: "Staff sign-in problem",
+  description: "QuickDucks staff authentication could not be completed.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel">${duck()}<p class="eyebrow">Sign-in problem</p><h1 class="page-title">We couldn’t finish signing you in.</h1><div class="notice">${escapeHtml(message)}</div><a class="button" href="/staff">Try staff sign in again</a><a class="button secondary" href="/">Back to public site</a></section>`,
+});
+
 export const renderStaffPairing = (): string => page({
   title: "Pair Duck #128",
   description: "Protected staff duck-pairing mockup.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel"><p class="eyebrow">Protected staff preview</p><h1 class="page-title">Pair Duck #128</h1><p class="lede">This duck is available. Find the participant before confirming the assignment.</p><div class="privacy"><strong>Staff authentication required.</strong><span>The working version will verify the staff session and event role before showing codes or accepting a pairing command.</span></div><div class="facts"><div class="fact"><dt>Duck</dt><dd>#128 · Available</dd></div><div class="fact"><dt>Event</dt><dd>Summer Duck Race</dd></div></div><form><label>Participant duck code<input name="lookup_code" autocomplete="off" maxlength="16" placeholder="ABCD2345"></label><button class="button" type="button">Find participant by code</button></form><hr style="margin:2rem 0;border:0;border-top:2px solid #b8c6c9"><form><label>Forgotten code? Search participant name<input name="participant_name" autocomplete="off" maxlength="161" placeholder="Jamie Rivera"></label><button class="button secondary" type="button">Search by name</button></form><div class="notice"><strong>Final confirmation required.</strong> Pairing will show participant and duck together before an authenticated command changes race data.</div></section>`,
+  content: `<section class="page-panel"><p class="eyebrow">Protected staff preview</p><h1 class="page-title">Pair Duck #128</h1><p class="lede">This duck is available. Find the participant before confirming the assignment.</p><div class="privacy"><strong>Staff authentication required.</strong><span>Live scans verify the Cognito session and matching staff profile before showing codes or accepting a pairing command.</span></div><div class="facts"><div class="fact"><dt>Duck</dt><dd>#128 · Available</dd></div><div class="fact"><dt>Event</dt><dd>Summer Duck Race</dd></div></div><form><label>Participant duck code<input name="lookup_code" autocomplete="off" maxlength="16" placeholder="ABCD2345"></label><button class="button" type="button">Find participant by code</button></form><hr style="margin:2rem 0;border:0;border-top:2px solid #b8c6c9"><form><label>Forgotten code? Search participant name<input name="participant_name" autocomplete="off" maxlength="161" placeholder="Jamie Rivera"></label><button class="button secondary" type="button">Search by name</button></form><div class="notice"><strong>Final confirmation required.</strong> Pairing shows participant and duck together before an authenticated command changes race data.</div></section>`,
 });
 
 export const renderNotFound = (): string => page({
