@@ -100,8 +100,9 @@ request code must never run in a privileged context.
 Create a GitHub environment named exactly `production`. Configure:
 
 - One or more required reviewers who understand the CloudFormation and D1
-  changes in the release.
-- **Prevent self-review**.
+  changes in the release. This solo-maintainer repository currently requires
+  James's approval and allows self-review; enable **Prevent self-review** after
+  adding another eligible reviewer so releases do not deadlock.
 - No administrator bypass, where the repository plan supports it.
 - A deployment tag rule allowing only `v*` tags. The workflow performs an
   additional semantic-version check.
