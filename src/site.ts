@@ -104,7 +104,7 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .result-button:disabled { opacity:.55; cursor:not-allowed; }
 .pairing-review { margin:1rem 0; padding:1rem; border:2px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; }
 .staff-access-list { display:grid; gap:.75rem; margin-top:1rem; }
-.staff-access-card { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.5rem 1rem; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
+.staff-access-card { display:flex; flex-wrap:wrap; justify-content:space-between; gap:1rem; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
 .staff-access-card p { margin:0; }
 .role-tag { align-self:flex-start; padding:.3rem .55rem; border:2px solid var(--ink); border-radius:999px; background:var(--cream); font-size:.75rem; font-weight:950; letter-spacing:.06em; text-transform:uppercase; }
 .code { display:inline-block; margin:.5rem 0; padding:.65rem .85rem; border:2px dashed var(--ink); border-radius:.6rem; background:var(--cream); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:clamp(1.4rem,7vw,2.4rem); font-weight:950; letter-spacing:.12em; }
@@ -114,25 +114,30 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .fact dd { margin:.25rem 0 0; font-size:1.08rem; font-weight:850; }
 .privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
 .privacy strong { flex:none; }
+.page-panel > .privacy + .actions { margin-top:1rem; }
 .operations-panel { max-width:70rem; padding:clamp(1rem,3vw,2.2rem); }
-.operations-title { max-width:none; margin-bottom:.6rem; font-size:clamp(2.5rem,8vw,5rem); }
+.operations-title { max-width:none; margin-bottom:.6rem; font-size:clamp(2.5rem,8vw,5rem); line-height:.92; }
 .console-nav { position:sticky; z-index:5; top:.5rem; display:flex; gap:.45rem; margin:1.3rem 0; padding:.65rem; overflow-x:auto; border:2px solid var(--ink); border-radius:.9rem; background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
 .console-nav a { flex:none; padding:.55rem .7rem; border-radius:.55rem; font-size:.85rem; font-weight:900; text-decoration:none; }
 .console-nav a:hover,.console-nav a:focus-visible { background:var(--yellow); outline:2px solid var(--ink); }
 .console-section { scroll-margin-top:6rem; margin:1.4rem 0; padding:clamp(1rem,3vw,1.5rem); border:3px solid var(--ink); border-radius:1rem; background:#fffdf8; }
-.console-section > h2 { margin-bottom:.45rem; font-size:clamp(1.8rem,5vw,2.7rem); }
+.console-section > * + * { margin-top:1rem; }
+.console-section > h2 { margin-bottom:0; font-size:clamp(1.8rem,5vw,2.7rem); }
 .console-grid { display:grid; gap:1rem; }
 .console-grid.wide { grid-template-columns:minmax(0,1fr); }
 .operation-card { min-width:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
+.operation-card > * + * { margin-top:.85rem; }
+.operation-card > label { display:block; }
 .operation-card > :last-child { margin-bottom:0; }
-.operation-card h3 { margin-bottom:.45rem; }
+.operation-card h3 { margin-bottom:0; }
 .operation-card form + form { margin-top:1rem; }
 .section-tools { display:flex; flex-wrap:wrap; gap:.65rem; align-items:end; margin:1rem 0; }
 .section-tools > label { flex:1 1 15rem; }
 .section-tools .button { flex:0 0 auto; }
 .data-list { display:grid; gap:.7rem; margin-top:1rem; }
 .data-card { padding:.9rem; border:2px solid #b8c6c9; border-radius:.75rem; background:#fff; }
-.data-card p { margin-bottom:.35rem; overflow-wrap:anywhere; }
+.data-card > * + * { margin-top:.55rem; }
+.data-card p { margin-bottom:0; overflow-wrap:anywhere; }
 .data-card .actions { margin-top:.65rem; }
 .status-chip { display:inline-block; margin:0 .35rem .35rem 0; padding:.25rem .5rem; border:2px solid var(--ink); border-radius:999px; background:var(--cream); font-size:.72rem; font-weight:950; letter-spacing:.04em; text-transform:uppercase; }
 .status-chip.blocked { background:#ffd8d2; }
@@ -150,7 +155,7 @@ details.operation-card[open] > summary { margin-bottom:1rem; }
 .private-result { overflow-wrap:anywhere; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero::after { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .search-form { grid-template-columns:1fr; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero::after { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .search-form { grid-template-columns:1fr; } .staff-access-card .actions { width:100%; } }
 @media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-glide 3.1s ease-in-out infinite; } .hero::after { animation:water-swell 4.2s ease-in-out infinite; } .hero::before { animation:current 2.8s linear infinite; } @keyframes duck-glide { 0%,100% { transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); } 50% { transform:translateX(calc(var(--duck-center) + 6px)) translateY(-9px) rotate(1deg); } } @keyframes water-swell { 0%,100% { transform:translateY(0) rotate(-2deg); } 50% { transform:translateY(4px) rotate(-1deg); } } @keyframes current { to { background-position:-10rem 50%; } } }
 `;
 
@@ -345,7 +350,7 @@ export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string =>
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
       ${publicStatusFacts(status)}
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, or private links.</span></div>
-      <br><a class="button secondary" href="/">Visit QuickDucks</a>
+      <div class="actions"><a class="button secondary" href="/">Visit QuickDucks</a></div>
     </section>`,
 });
 
@@ -360,8 +365,10 @@ export const renderStaffLogin = (returnTo = "/staff"): string => page({
       <h1 class="page-title">Staff sign in</h1>
       <p class="lede">Use your invited QuickDucks staff email. Cognito will send a one-time sign-in code.</p>
       <div class="privacy"><strong>Authorized staff only.</strong><span>Participant email and phone are available only after Cognito verifies your account and QuickDucks finds a matching staff profile.</span></div>
-      <br><a class="button" href="${escapeHtml(`/staff/login/start?returnTo=${encodeURIComponent(returnTo)}`)}">Continue to secure sign in</a>
-      <a class="button secondary" href="/">Back to public site</a>
+      <div class="actions">
+        <a class="button" href="${escapeHtml(`/staff/login/start?returnTo=${encodeURIComponent(returnTo)}`)}">Continue to secure sign in</a>
+        <a class="button secondary" href="/">Back to public site</a>
+      </div>
     </section>`,
 });
 
@@ -568,7 +575,7 @@ export const renderStaffAuthError = (message: string): string => page({
   title: "Staff sign-in problem",
   description: "QuickDucks staff authentication could not be completed.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel">${duck()}<p class="eyebrow">Sign-in problem</p><h1 class="page-title">We couldn’t finish signing you in.</h1><div class="notice">${escapeHtml(message)}</div><a class="button" href="/staff">Try staff sign in again</a><a class="button secondary" href="/">Back to public site</a></section>`,
+  content: `<section class="page-panel">${duck()}<p class="eyebrow">Sign-in problem</p><h1 class="page-title">We couldn’t finish signing you in.</h1><div class="notice">${escapeHtml(message)}</div><div class="actions"><a class="button" href="/staff">Try staff sign in again</a><a class="button secondary" href="/">Back to public site</a></div></section>`,
 });
 
 export const renderStaffPairing = (): string => page({
