@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import { handleEventOperations } from "./event-operations.ts";
 import { handleHeatOperations } from "./heat-operations.ts";
 
 const migrationNames = [
@@ -11,6 +12,7 @@ const migrationNames = [
   "0003_assignment_and_heat_status.sql",
   "0004_pairing_status_and_purge.sql",
   "0005_staff_access_management.sql",
+  "0008_event_operations.sql",
   "0009_heat_result_operations.sql",
 ];
 
@@ -42,7 +44,10 @@ const d1 = (database) => ({
   async batch(statements) {
     database.exec("BEGIN IMMEDIATE");
     try {
-      const results = statements.map((statement) => database.prepare(statement.sql).run(...statement.args));
+      const results = statements.map((statement) => {
+        const result = database.prepare(statement.sql).run(...statement.args);
+        return { success: true, meta: { changes: Number(result.changes) } };
+      });
       database.exec("COMMIT");
       return results;
     } catch (error) {
@@ -56,10 +61,6 @@ const createDatabase = () => {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
   for (const name of migrationNames) {
-    // Migration 0008 is produced on the parallel event-operations branch.
-    if (name === "0009_heat_result_operations.sql") {
-      database.exec("ALTER TABLE race_commands ADD COLUMN request_fingerprint TEXT");
-    }
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
   }
   return database;
@@ -115,7 +116,7 @@ const seedRace = (database) => {
     VALUES (?, 'event', ?, ?, ?, '2026-07-26T10:00:00Z', 'staff', ?)
   `);
 
-  const firstNames = ["Daisy", "Donald", "Della", "Dewey", "Huey", "Louie"];
+  const firstNames = ["Daisy", "Donald", "Della", "Dewey"];
   for (let index = 1; index <= firstNames.length; index += 1) {
     const registrationId = `registration-${index}`;
     const entryId = `entry-${index}`;
@@ -151,6 +152,7 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   seedRace(database);
   const env = { DB: d1(database) };
   const handle = (request) => handleHeatOperations(request, env, actor);
+  const handleEvent = (request) => handleEventOperations(request, env, actor);
 
   assert.equal(
     await handle(new Request("https://quickducks.com/api/v1/staff/events/event/not-heat-operations")),
@@ -165,7 +167,7 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   assert.equal(preview.status, 200);
   const previewBody = await preview.json();
   assert.equal(previewBody.balanced, true);
-  assert.deepEqual(previewBody.heats.map((heat) => heat.size), [2, 2, 2]);
+  assert.deepEqual(previewBody.heats.map((heat) => heat.size), [2, 2]);
 
   const planCommand = commandId();
   const commitBody = { commandId: planCommand, fingerprint: previewBody.fingerprint };
@@ -187,8 +189,14 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   const listed = await handle(new Request("https://quickducks.com/api/v1/staff/events/event/heats"));
   assert.equal(listed.status, 200);
   const roundHeats = (await listed.json()).heats.filter((heat) => heat.round === "ROUND_ONE");
-  assert.equal(roundHeats.length, 3);
-  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "ROUND_ONE");
+  assert.equal(roundHeats.length, 2);
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "REGISTRATION_CLOSED");
+  const startRoundOne = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/start-round-one",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(startRoundOne.status, 201, JSON.stringify(await startRoundOne.clone().json()));
 
   const firstHeatId = roundHeats[0].id;
   const firstDetail = await handle(new Request(
@@ -242,13 +250,6 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   secondRevision = await transition(secondHeatId, "start", secondRevision, "RUNNING");
   secondRevision = await transition(secondHeatId, "finish", secondRevision, "AWAITING_RESULT");
 
-  const thirdHeatId = roundHeats[2].id;
-  let thirdRevision = await transition(thirdHeatId, "lock", 0, "LOADING");
-  thirdRevision = await transition(thirdHeatId, "ready", thirdRevision, "READY");
-  thirdRevision = await transition(thirdHeatId, "call", thirdRevision, "CALLING");
-  thirdRevision = await transition(thirdHeatId, "start", thirdRevision, "RUNNING");
-  thirdRevision = await transition(thirdHeatId, "finish", thirdRevision, "AWAITING_RESULT");
-
   const announcer = await handle(new Request(
     `https://quickducks.com/api/v1/staff/events/event/heats/${firstHeatId}/announcer-roster`,
   ));
@@ -299,19 +300,25 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   firstRevision = (await correction.json()).heat.revision;
 
   secondRevision = await finalize(secondHeatId, secondRevision, rosters[1][0]);
-  thirdRevision = await finalize(thirdHeatId, thirdRevision, rosters[2][0]);
-  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "FINAL");
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "ROUND_ONE");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heats WHERE event_id = 'event' AND round = 'FINAL'").get().count, 1);
 
   const finalistResponse = await handle(new Request("https://quickducks.com/api/v1/staff/events/event/finalists"));
   const finalistBody = await finalistResponse.json();
   assert.equal(finalistBody.verification.verified, true);
-  assert.equal(finalistBody.finalists.length, 3);
+  assert.equal(finalistBody.finalists.length, 2);
   assert.equal(finalistBody.finalists[0].raceEntryId, rosters[0][1]);
   const verification = await handle(new Request(
     "https://quickducks.com/api/v1/staff/events/event/finalists/verification",
   ));
   assert.equal((await verification.json()).verification.verified, true);
+
+  const startFinal = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/start-final",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(startFinal.status, 201, JSON.stringify(await startFinal.clone().json()));
 
   const finalHeat = database.prepare(
     "SELECT id, revision FROM heats WHERE event_id = 'event' AND round = 'FINAL'",
@@ -339,12 +346,17 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   ));
   assert.equal(finalResult.status, 201);
   finalRevision = (await finalResult.json()).heat.revision;
-  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "COMPLETED");
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "FINAL");
+  const complete = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/complete",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(complete.status, 201, JSON.stringify(await complete.clone().json()));
 
   const correctedPodium = [
     { raceEntryId: finalistIds[1], place: 1 },
     { raceEntryId: finalistIds[0], place: 2 },
-    { raceEntryId: finalistIds[2], place: 3 },
   ];
   const finalCorrection = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${finalHeat.id}/results/correct`,
@@ -360,7 +372,7 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   finalRevision = (await finalCorrection.json()).heat.revision;
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = ? AND status = 'SUPERSEDED'").get(finalHeat.id).count,
-    3,
+    2,
   );
 
   const reopen = await handle(jsonRequest(
@@ -397,7 +409,13 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
     { commandId: commandId(), revision: finalRevision, results: correctedPodium },
   ));
   assert.equal(refinalize.status, 201);
-  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "COMPLETED");
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "FINAL");
+  const recomplete = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/complete",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(recomplete.status, 201, JSON.stringify(await recomplete.clone().json()));
 
   const malicious = await handle(new Request(
     "https://quickducks.com/api/v1/staff/events/'%20OR%201=1--/heats",

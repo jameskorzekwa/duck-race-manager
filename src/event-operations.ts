@@ -616,12 +616,13 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
            AND h.status = 'FINALIZED') AS round_one_finalized_heat_count,
-       (SELECT COUNT(*) FROM heat_entries he
-          JOIN heats h ON h.id = he.heat_id
-          LEFT JOIN heat_results hr
-            ON hr.heat_id = he.heat_id AND hr.race_entry_id = he.race_entry_id
-         WHERE he.event_id = e.id AND he.round = 'ROUND_ONE'
-           AND h.status = 'FINALIZED' AND hr.id IS NULL) AS round_one_missing_result_count,
+        (SELECT COUNT(*) FROM heats h
+          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE' AND h.status = 'FINALIZED'
+            AND NOT EXISTS (
+              SELECT 1 FROM heat_results hr
+               WHERE hr.event_id = e.id AND hr.heat_id = h.id
+                 AND hr.status = 'FINALIZED' AND hr.place = 1
+            )) AS round_one_missing_result_count,
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'FINAL') AS final_heat_count,
        (SELECT COUNT(*) FROM heat_entries he
@@ -635,12 +636,15 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'FINAL'
            AND h.status = 'FINALIZED') AS final_finalized_heat_count,
-       (SELECT COUNT(*) FROM heat_entries he
-          JOIN heats h ON h.id = he.heat_id
-          LEFT JOIN heat_results hr
-            ON hr.heat_id = he.heat_id AND hr.race_entry_id = he.race_entry_id
-         WHERE he.event_id = e.id AND he.round = 'FINAL'
-           AND h.status = 'FINALIZED' AND hr.id IS NULL) AS final_missing_result_count,
+        (SELECT COUNT(*) FROM heats h
+          WHERE h.event_id = e.id AND h.round = 'FINAL' AND h.status = 'FINALIZED'
+            AND (
+              SELECT COUNT(*) FROM heat_results hr
+               WHERE hr.event_id = e.id AND hr.heat_id = h.id AND hr.status = 'FINALIZED'
+            ) != MIN(3, (
+              SELECT COUNT(*) FROM heat_entries he
+               WHERE he.event_id = e.id AND he.heat_id = h.id
+            ))) AS final_missing_result_count,
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id
            AND h.status IN ('CALLING', 'RUNNING', 'AWAITING_RESULT')) AS in_progress_heat_count,
@@ -776,9 +780,13 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
             AND h.status NOT IN ('FINALIZED', 'CANCELLED')
         )
         AND NOT EXISTS (
-          SELECT 1 FROM heat_entries he JOIN heats h ON h.id = he.heat_id
-          LEFT JOIN heat_results hr ON hr.heat_id = he.heat_id AND hr.race_entry_id = he.race_entry_id
-          WHERE he.event_id = e.id AND he.round = 'ROUND_ONE' AND h.status = 'FINALIZED' AND hr.id IS NULL
+          SELECT 1 FROM heats h
+           WHERE h.event_id = e.id AND h.round = 'ROUND_ONE' AND h.status = 'FINALIZED'
+             AND NOT EXISTS (
+               SELECT 1 FROM heat_results hr
+                WHERE hr.event_id = e.id AND hr.heat_id = h.id
+                  AND hr.status = 'FINALIZED' AND hr.place = 1
+             )
         )
         AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.event_id = e.id AND he.round = 'FINAL')
         AND NOT EXISTS (
@@ -807,9 +815,15 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
             AND h.status NOT IN ('FINALIZED', 'CANCELLED')
         )
         AND NOT EXISTS (
-          SELECT 1 FROM heat_entries he JOIN heats h ON h.id = he.heat_id
-          LEFT JOIN heat_results hr ON hr.heat_id = he.heat_id AND hr.race_entry_id = he.race_entry_id
-          WHERE he.event_id = e.id AND he.round = 'FINAL' AND h.status = 'FINALIZED' AND hr.id IS NULL
+          SELECT 1 FROM heats h
+           WHERE h.event_id = e.id AND h.round = 'FINAL' AND h.status = 'FINALIZED'
+             AND (
+               SELECT COUNT(*) FROM heat_results hr
+                WHERE hr.event_id = e.id AND hr.heat_id = h.id AND hr.status = 'FINALIZED'
+             ) != MIN(3, (
+               SELECT COUNT(*) FROM heat_entries he
+                WHERE he.event_id = e.id AND he.heat_id = h.id
+             ))
         )`,
     updateSql: `UPDATE events SET status = 'COMPLETED', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'FINAL'
@@ -862,14 +876,14 @@ const readinessFor = (
     case "start-final":
       if (stats.round_one_finalized_heat_count === 0) blockers.push("At least one round-one heat must be finalized.");
       if (stats.round_one_unfinished_heat_count > 0) blockers.push("Every round-one heat must be finalized or cancelled.");
-      if (stats.round_one_missing_result_count > 0) blockers.push("Every finalized round-one entry needs a result.");
+      if (stats.round_one_missing_result_count > 0) blockers.push("Every finalized round-one heat needs a winning result.");
       if (stats.final_heat_count === 0 || stats.final_entry_count === 0) blockers.push("Create the final and promote finalists first.");
       if (stats.final_unready_heat_count > 0) blockers.push("Final heats must not have started.");
       break;
     case "complete":
       if (stats.final_finalized_heat_count === 0) blockers.push("At least one final heat must be finalized.");
       if (stats.final_unfinished_heat_count > 0) blockers.push("Every final heat must be finalized or cancelled.");
-      if (stats.final_missing_result_count > 0) blockers.push("Every finalized final entry needs a result.");
+      if (stats.final_missing_result_count > 0) blockers.push("Every finalized final heat needs a complete podium result.");
       break;
     case "start-return-processing":
       if (stats.in_progress_heat_count > 0) blockers.push("No heat may be active or awaiting a result.");

@@ -74,6 +74,18 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.match(await staffHome.text(), /\/api\/v1\/staff\/events\/return-review/);
 });
 
+test("protects newly composed staff operation routes", async () => {
+  const response = await worker.fetch(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks"),
+    env,
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
+  assert.equal(response.headers.get("www-authenticate"), "Bearer");
+  assert.deepEqual(await response.json(), { error: "Staff authentication required." });
+});
+
 test("serves the rubber-duck favicon", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/favicon.svg"), env);
   const body = await response.text();
@@ -272,6 +284,13 @@ test("renders protected staff pairing preview with code and name lookup", async 
   assert.match(staffHomeBody, /data-return-review/);
   assert.match(staffHomeBody, /data-system-admin="true"/);
   assert.match(staffHomeBody, /data-staff-access-form/);
+  assert.match(staffHomeBody, /id="events"/);
+  assert.match(staffHomeBody, /id="participants"/);
+  assert.match(staffHomeBody, /id="inventory"/);
+  assert.match(staffHomeBody, /id="heats"/);
+  assert.match(staffHomeBody, /id="returns"/);
+  assert.match(staffHomeBody, /id="support"/);
+  assert.match(staffHomeBody, /data-final-purge-form/);
   assert.match(staffHomeBody, /Regular staff/);
   assert.match(staffHomeBody, /Administrator/);
   assert.match(staffHomeBody, /\/assets\/staff-home\.js/);
@@ -279,6 +298,9 @@ test("renders protected staff pairing preview with code and name lookup", async 
   const regularStaffHome = renderStaffHome("Regular Staff", false);
   assert.doesNotMatch(regularStaffHome, /data-staff-access-form/);
   assert.doesNotMatch(regularStaffHome, /Administrators have deletion authority/);
+  assert.doesNotMatch(regularStaffHome, /id="support"/);
+  assert.doesNotMatch(regularStaffHome, /data-final-purge-form/);
+  assert.match(regularStaffHome, /data-return-batch-item-form/);
 });
 
 test("keeps the database health check", async () => {

@@ -446,9 +446,6 @@ const commitRoundOnePlan = async (
   }
   statements.push(
     env.DB.prepare(
-      "UPDATE events SET status = 'ROUND_ONE', updated_at = ? WHERE id = ? AND status = 'REGISTRATION_CLOSED'",
-    ).bind(now, eventId),
-    env.DB.prepare(
       `INSERT INTO audit_events
         (id, event_id, command_id, action, subject_type, subject_id,
          actor_type, occurred_at, details_json)
@@ -782,13 +779,14 @@ const validateResultSet = (
   results: ResultInput[],
   roster: ResultRosterRow[],
 ): Response | null => {
+  const finalPlaceCount = Math.min(3, roster.length);
   const validPlaces = round === "ROUND_ONE"
     ? results.length === 1 && results[0]?.place === 1
-    : results.length === 3 && results.every((result, index) => result.place === index + 1);
+    : results.length === finalPlaceCount && results.every((result, index) => result.place === index + 1);
   if (!validPlaces) {
     return json({ error: round === "ROUND_ONE"
       ? "A round-one result must contain exactly one first-place winner."
-      : "A final result must contain exactly podium places 1, 2, and 3." }, 422);
+      : `A final result must contain exactly places 1 through ${finalPlaceCount}.` }, 422);
   }
   const rosterIds = new Set(roster.map((entry) => entry.race_entry_id));
   if (results.some((result) => !rosterIds.has(result.raceEntryId))) {
@@ -914,20 +912,6 @@ const finalizeResults = async (
             source_command_id = ?, updated_at = ?
       WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT' AND revision = ?`,
   ).bind(now, commandId, now, heatId, eventId, revision));
-  if (context.round === "ROUND_ONE") {
-    statements.push(env.DB.prepare(
-      `UPDATE events SET status = 'FINAL', updated_at = ?
-        WHERE id = ? AND status = 'ROUND_ONE'
-          AND NOT EXISTS (
-            SELECT 1 FROM heats h
-             WHERE h.event_id = ? AND h.round = 'ROUND_ONE' AND h.status != 'FINALIZED'
-          )`,
-    ).bind(now, eventId, eventId));
-  } else {
-    statements.push(env.DB.prepare(
-      "UPDATE events SET status = 'COMPLETED', updated_at = ? WHERE id = ? AND status = 'FINAL'",
-    ).bind(now, eventId));
-  }
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id,

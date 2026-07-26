@@ -604,15 +604,16 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
   const duckId = crypto.randomUUID();
   const tagId = crypto.randomUUID();
   const eventDuckId = crypto.randomUUID();
+  const inventoryStatus = inventoryStatusForCondition(condition as PhysicalCondition, "RESERVED_FOR_EVENT");
   const details = { request: requestDetails, tag_id: tagId, event_duck_id: eventDuckId };
   const execution = await execute(env, [
     commandInsert(env, commandId, eventId, "REGISTER_RACE_DUCK", duckId, now, preRaceStatuses),
     env.DB.prepare(
       `INSERT INTO ducks
-        (id, visible_number, inventory_status, inventory_status_changed_at,
-         physical_condition, storage_location, notes, created_at, updated_at)
-       VALUES (?, ?, 'RESERVED_FOR_EVENT', ?, ?, ?, ?, ?, ?)`,
-    ).bind(duckId, visibleNumber, now, condition, location, notes, now, now),
+         (id, visible_number, inventory_status, inventory_status_changed_at,
+          physical_condition, storage_location, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(duckId, visibleNumber, inventoryStatus, now, condition, location, notes, now, now),
     env.DB.prepare(
       `INSERT INTO duck_tags
         (id, duck_id, token, status, written_at, verified_at, activated_at, created_at, updated_at)
@@ -642,7 +643,7 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
   return intakeResponse({
     duck_id: duckId,
     visible_number: visibleNumber,
-    inventory_status: "RESERVED_FOR_EVENT",
+    inventory_status: inventoryStatus,
     revision: 0,
     physical_condition: condition as PhysicalCondition,
     storage_location: location,
