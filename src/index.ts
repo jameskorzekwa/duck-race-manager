@@ -2,16 +2,14 @@ import {
   findDuckRaceStatus,
   findRegistrationStatus,
   handleApi,
-  searchPublicStatuses,
 } from "./api.ts";
-import { readBrowserRegistrations } from "./browser-registrations.ts";
 import {
   faviconSvg,
+  homeScript,
   manifestJson,
   renderDuck,
   renderHome,
   renderNotFound,
-  renderPublicStatusSearch,
   renderRegistration,
   renderStaffPairing,
   renderStatus,
@@ -41,7 +39,7 @@ const html = (body: string, status = 200, noindex = false): Response =>
     headers: {
       ...securityHeaders,
       "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; style-src 'unsafe-inline'; upgrade-insecure-requests",
+      "content-security-policy": "default-src 'none'; base-uri 'none'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'unsafe-inline'; upgrade-insecure-requests",
       "content-type": "text/html; charset=utf-8",
       ...(noindex ? { "x-robots-tag": "noindex, nofollow" } : {}),
     },
@@ -52,7 +50,7 @@ export default {
     const url = new URL(request.url);
     const appOrigin = new URL(env.APP_ORIGIN);
 
-    if (url.protocol !== "https:" || url.host !== appOrigin.host) {
+    if (url.origin !== appOrigin.origin) {
       const destination = new URL(`${url.pathname}${url.search}`, appOrigin);
 
       return new Response(null, {
@@ -85,6 +83,16 @@ export default {
       });
     }
 
+    if (url.pathname === "/assets/home.js") {
+      return new Response(homeScript, {
+        headers: {
+          ...securityHeaders,
+          "cache-control": "public, max-age=3600",
+          "content-type": "text/javascript; charset=utf-8",
+        },
+      });
+    }
+
     if (url.pathname === "/robots.txt") {
       return new Response("User-agent: *\nAllow: /\nDisallow: /r/\nDisallow: /api/\n", {
         headers: {
@@ -109,7 +117,7 @@ export default {
     if (url.pathname.startsWith("/api/v1/")) return handleApi(request, env);
 
     if (url.pathname === "/" && request.method === "GET") {
-      return html(renderHome(readBrowserRegistrations(request.headers.get("cookie"))));
+      return html(renderHome());
     }
     if (url.pathname === "/register" && request.method === "GET") return html(renderRegistration(), 200, true);
     if (url.pathname === "/r/mock" && request.method === "GET") return html(renderStatus(), 200, true);
@@ -119,12 +127,6 @@ export default {
     }
     if (url.pathname === "/mock/staff/ducks/128/pair" && request.method === "GET") {
       return html(renderStaffPairing(), 200, true);
-    }
-
-    if (url.pathname === "/status" && request.method === "GET") {
-      const query = url.searchParams.get("q")?.trim() ?? "";
-      const statuses = await searchPublicStatuses(query, env);
-      return html(renderPublicStatusSearch(query, statuses), 200, true);
     }
 
     const privateStatusMatch = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);

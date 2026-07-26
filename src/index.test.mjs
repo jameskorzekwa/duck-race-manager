@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker from "./index.ts";
-import { registrationCookie } from "./browser-registrations.ts";
 
 const env = {
   APP_ORIGIN: "https://quickducks.com",
@@ -40,35 +39,22 @@ test("renders the responsive landing-page mockup", async () => {
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
   assert.match(body, /Find your duck\. Follow the race\./);
+  assert.match(body, /My ducks/);
+  assert.match(body, /Find race status by name/);
+  assert.match(body, /src="\/assets\/home\.js"/);
   assert.match(body, /href="\/favicon\.svg"/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
+  assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self'/);
 });
 
-test("shows multiple participant registrations from one browser cookie", async () => {
-  const firstStatusPath = `/r/${"a".repeat(43)}`;
-  const secondStatusPath = `/r/${"b".repeat(43)}`;
-  const firstCookie = registrationCookie(null, {
-    name: "Daisy Duck",
-    lookupCode: "ABCD2345",
-    statusPath: firstStatusPath,
-  });
-  const cookie = registrationCookie(firstCookie, {
-    name: "Donald Duck",
-    lookupCode: "WXYZ6789",
-    statusPath: secondStatusPath,
-  });
-  const response = await worker.fetch(new Request("https://quickducks.com/", {
-    headers: { cookie },
-  }), env);
+test("serves the home-page status client", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/assets/home.js"), env);
   const body = await response.text();
 
-  assert.match(body, /Your registrations/);
-  assert.match(body, /Daisy Duck/);
-  assert.match(body, /Donald Duck/);
-  assert.match(body, /ABCD2345/);
-  assert.match(body, /WXYZ6789/);
-  assert.match(body, new RegExp(firstStatusPath));
-  assert.match(body, new RegExp(secondStatusPath));
-  assert.match(body, /Register another participant/);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
+  assert.match(body, /\/api\/v1\/registrations\/mine/);
+  assert.match(body, /\/api\/v1\/race-status\/search/);
 });
 
 test("serves the rubber-duck favicon", async () => {
@@ -87,8 +73,9 @@ test("renders the clickable registration and status mockups", async () => {
 
   assert.match(registrationBody, /Preview confirmation/);
   assert.match(registrationBody, /You can disable these later/);
-  assert.doesNotMatch(registrationBody, /After the race/);
-  assert.match(await confirmation.text(), /DUCK-824/);
+  assert.match(registrationBody, /visible only to logged-in authorized race staff/);
+  assert.match(registrationBody, /permanently deletes the complete race/);
+  assert.match(await confirmation.text(), /DUCK8234/);
   assert.equal(confirmation.headers.get("x-robots-tag"), "noindex, nofollow");
 });
 
@@ -115,23 +102,30 @@ test("renders paired duck heat and race status without contact data", async () =
   const pairedEnv = {
     ...env,
     DB: {
-      prepare: () => ({
+      prepare: (sql) => ({
         bind() { return this; },
         async first() {
+          if (sql.includes("FROM heats")) {
+            return { round: "ROUND_ONE", heat_number: 5, status: "RUNNING" };
+          }
           return {
+            event_id: "event_test",
+            event_slug: "summer-duck-race",
+            event_name: "Summer Duck Race",
+            event_date: "2026-08-30",
+            event_status: "ROUND_ONE",
+            public_name_policy: "FIRST_NAME_LAST_INITIAL",
             first_name: "Daisy",
             last_name: "Duck",
             registration_status: "ACTIVE",
-            event_name: "Summer Duck Race",
-            event_status: "ROUND_ONE",
+            race_entry_id: "entry_test",
             visible_number: 42,
-            round_type: "ROUND_ONE",
-            heat_number: 7,
-            heat_status: "PLANNED",
-            current_heat_number: 5,
-            current_heat_round: "ROUND_ONE",
-            result_position: null,
-            advanced: 0,
+            round_one_heat_number: 7,
+            round_one_heat_status: "PLANNED",
+            round_one_place: null,
+            final_heat_number: null,
+            final_heat_status: null,
+            final_place: null,
           };
         },
       }),
@@ -144,13 +138,13 @@ test("renders paired duck heat and race status without contact data", async () =
   const body = await response.text();
 
   assert.equal(response.status, 200);
-  assert.match(body, /Daisy Duck/);
+  assert.match(body, /Daisy D\./);
   assert.match(body, /Heat 7/);
   assert.match(body, /Heat 5/);
   assert.doesNotMatch(body, /Email|Phone|lookup code/i);
 });
 
-test("opens a persisted private status path from the home-page cookie", async () => {
+test("renders a valid private registration status path", async () => {
   const privateEnv = {
     ...env,
     DB: {
@@ -160,8 +154,6 @@ test("opens a persisted private status path from the home-page cookie", async ()
           return {
             first_name: "Daisy",
             last_name: "Duck",
-            email: "daisy@example.com",
-            phone: null,
             status: "SUBMITTED",
             lookup_code: "ABCD2345",
             submitted_at: "2026-07-26T00:00:00.000Z",

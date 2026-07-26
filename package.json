@@ -15,5 +15,8 @@
     "@cloudflare/workers-types": "latest",
     "typescript": "latest",
     "wrangler": "latest"
+  },
+  "dependencies": {
+    "aws-jwt-verify": "^5.2.1"
   }
 }

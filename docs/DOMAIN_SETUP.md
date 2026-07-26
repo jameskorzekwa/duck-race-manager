@@ -150,16 +150,15 @@ Amazon Cognito authentication protects staff pages and staff APIs:
 /api/staff/*
 ```
 
-Cognito establishes staff identity. The Worker still verifies its server-side
-session and checks the user's active staff profile and event role in D1 for
-every protected read or mutation. Access to a staff path does not automatically
-grant administrator, provisioning, or race-official rights.
+Cognito establishes staff identity. The Worker verifies each access token and
+requires a matching staff profile for every protected read or mutation. The
+profile's administrator flag separately protects complete-race purge.
 
 The public `/t/<token>` GET route never mutates race data. A logged-in staff
 page submits a separate authenticated POST command after resolving a scanned
 tag. Anonymous unpaired tags redirect to `/`; anonymous paired tags open public
-race status. Authenticated staff opening an unpaired tag are routed to the
-protected pairing page.
+race status. The staff application uses the protected duck endpoint to choose
+pairing or inspection after verifying the Cognito access token.
 
 ## GitHub Configuration
 

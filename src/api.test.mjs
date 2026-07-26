@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { handleApi } from "./api.ts";
-import { readBrowserRegistrations, registrationCookie } from "./browser-registrations.ts";
 import { hashToken, randomToken } from "./registration.ts";
 
 const openEvent = {
@@ -17,23 +16,7 @@ const openEvent = {
   email_required: 0,
 };
 
-const publicStatus = {
-  first_name: "Daisy",
-  last_name: "Duck",
-  registration_status: "ACTIVE",
-  event_name: "Test Duck Race",
-  event_status: "ROUND_ONE",
-  visible_number: 42,
-  round_type: "ROUND_ONE",
-  heat_number: 7,
-  heat_status: "PLANNED",
-  current_heat_number: 5,
-  current_heat_round: "ROUND_ONE",
-  result_position: null,
-  advanced: 0,
-};
-
-const makeDb = (first) => {
+const makeDb = (first, all = () => ({ results: [] })) => {
   const statements = [];
   const batches = [];
 
@@ -52,8 +35,10 @@ const makeDb = (first) => {
           return first(sql, this.args);
         },
         async all() {
-          const value = first(sql, this.args);
-          return { results: Array.isArray(value) ? value : [] };
+          return all(sql, this.args);
+        },
+        async run() {
+          return { success: true };
         },
       };
       statements.push(statement);
@@ -69,6 +54,11 @@ const makeDb = (first) => {
 const makeEnv = (db, extras = {}) => ({
   APP_ORIGIN: "https://quickducks.com",
   DB: db,
+  PUBLIC_SEARCH_RATE_LIMITER: {
+    async limit() {
+      return { success: true };
+    },
+  },
   ...extras,
 });
 
@@ -95,8 +85,29 @@ test("returns the current event without private configuration", async () => {
   assert.doesNotMatch(db.statements[0].sql, /DRAFT/);
 });
 
-test("returns paired duck race status without private data", async () => {
-  const db = makeDb(() => publicStatus);
+test("returns only safe public data for an NFC duck token", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM heats")) return null;
+    return {
+      event_id: "event_test",
+      event_slug: "test-race",
+      event_name: "Test Duck Race",
+      event_date: "2026-08-30",
+      event_status: "ROUND_ONE",
+      public_name_policy: "FIRST_NAME_LAST_INITIAL",
+      first_name: "Daisy",
+      last_name: "Duck",
+      registration_status: "ACTIVE",
+      race_entry_id: "entry_test",
+      visible_number: 42,
+      round_one_heat_number: 8,
+      round_one_heat_status: "PLANNED",
+      round_one_place: null,
+      final_heat_number: null,
+      final_heat_status: null,
+      final_place: null,
+    };
+  });
   const token = "a".repeat(32);
   const response = await handleApi(
     new Request(`https://quickducks.com/api/v1/ducks/${token}`),
@@ -104,47 +115,207 @@ test("returns paired duck race status without private data", async () => {
   );
   const body = await response.json();
 
-  assert.deepEqual(body, {
-    displayName: "Daisy Duck",
-    registrationStatus: "ACTIVE",
-    eventName: "Test Duck Race",
-    eventStatus: "ROUND_ONE",
-    duckNumber: 42,
-    assignedHeat: { round: "ROUND_ONE", number: 7, status: "PLANNED" },
-    currentHeat: { round: "ROUND_ONE", number: 5 },
-    result: null,
-  });
-  assert.equal("email" in body, false);
-  assert.equal("lookupCode" in body, false);
-  assert.equal("privateStatusPath" in body, false);
-  assert.match(db.statements[0].sql, /JOIN duck_assignments/);
+  assert.equal(body.destination, "RACE_STATUS");
+  assert.equal(body.raceStatus.duck.visibleNumber, 42);
+  assert.equal(body.raceStatus.participantDisplayName, "Daisy D.");
+  assert.equal(body.raceStatus.assignedHeat.roundOne.number, 8);
+  assert.equal("email" in body.raceStatus, false);
+  assert.equal("phone" in body.raceStatus, false);
+  assert.equal("lookupCode" in body.raceStatus, false);
 });
 
-test("does not expose an unpaired duck through the public API", async () => {
+test("does not disclose whether an anonymous unassigned tag exists", async () => {
   const db = makeDb(() => null);
   const response = await handleApi(
-    new Request(`https://quickducks.com/api/v1/ducks/${"a".repeat(32)}`),
+    new Request(`https://quickducks.com/api/v1/ducks/${"b".repeat(32)}`),
     makeEnv(db),
   );
 
-  assert.equal(response.status, 404);
-  assert.deepEqual(await response.json(), { error: "Not found." });
+  assert.deepEqual(await response.json(), { destination: "HOME" });
 });
 
-test("searches public status by name without returning private fields", async () => {
-  const db = makeDb(() => [publicStatus]);
+test("public name search returns race status without contact details", async () => {
+  const statusRow = {
+    event_id: "event_test",
+    event_slug: "test-race",
+    event_name: "Test Duck Race",
+    event_date: "2026-08-30",
+    event_status: "ROUND_ONE",
+    public_name_policy: "FIRST_NAME_LAST_INITIAL",
+    first_name: "Daisy",
+    last_name: "Duck",
+    registration_status: "ACTIVE",
+    race_entry_id: "entry_test",
+    visible_number: 42,
+    round_one_heat_number: 8,
+    round_one_heat_status: "RUNNING",
+    round_one_place: null,
+    final_heat_number: null,
+    final_heat_status: null,
+    final_place: null,
+  };
+  const db = makeDb(
+    (sql) => sql.includes("FROM heats") ? null : statusRow,
+    () => ({ results: [{ race_entry_id: "entry_test" }] }),
+  );
   const response = await handleApi(
-    new Request("https://quickducks.com/api/v1/status/search?q=Daisy%20Duck"),
+    new Request("https://quickducks.com/api/v1/race-status/search?eventId=event_test&name=Daisy"),
     makeEnv(db),
   );
   const body = await response.json();
 
-  assert.equal(response.status, 200);
-  assert.equal(body.results[0].displayName, "Daisy Duck");
-  assert.equal(body.results[0].duckNumber, 42);
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].participantDisplayName, "Daisy D.");
+  assert.equal(body.results[0].outcome, "RUNNING");
   assert.equal("email" in body.results[0], false);
-  assert.equal("lookupCode" in body.results[0], false);
-  assert.match(db.statements[0].sql, /LIMIT 25/);
+  assert.equal("phone" in body.results[0], false);
+  assert.doesNotMatch(db.statements[0].sql, /email|phone|lookup_code/i);
+  assert.doesNotMatch(db.statements[0].sql, /LIKE/i);
+  assert.deepEqual(db.statements[0].args, ["event_test", "Daisy", "Daisy", "Daisy"]);
+});
+
+test("rate limits anonymous name search", async () => {
+  const db = makeDb(() => null);
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/race-status/search?eventId=event_test&name=Daisy"),
+    makeEnv(db, {
+      PUBLIC_SEARCH_RATE_LIMITER: {
+        async limit() {
+          return { success: false };
+        },
+      },
+    }),
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(db.statements.length, 0);
+});
+
+test("name search recovers an unpaired submission without inventory data", async () => {
+  const db = makeDb(
+    (sql) => sql.includes("FROM heats") ? null : {
+      event_id: "event_test",
+      event_slug: "test-race",
+      event_name: "Test Duck Race",
+      event_date: "2026-08-30",
+      event_status: "REGISTRATION_OPEN",
+      public_name_policy: "FIRST_NAME_LAST_INITIAL",
+      first_name: "Daisy",
+      last_name: "Duck",
+      registration_status: "SUBMITTED",
+      race_entry_id: "entry_unpaired",
+      visible_number: null,
+      round_one_heat_number: null,
+      round_one_heat_status: null,
+      round_one_place: null,
+      final_heat_number: null,
+      final_heat_status: null,
+      final_place: null,
+    },
+    () => ({ results: [{ race_entry_id: "entry_unpaired" }] }),
+  );
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/race-status/search?eventId=event_test&name=Daisy"),
+    makeEnv(db),
+  );
+  const body = await response.json();
+
+  assert.equal(body.results[0].outcome, "AWAITING_DUCK_PAIRING");
+  assert.equal(body.results[0].duck, null);
+  assert.equal("email" in body.results[0], false);
+  assert.equal("phone" in body.results[0], false);
+});
+
+test("one browser collection returns multiple independent registrations", async () => {
+  const cookieToken = "C".repeat(43);
+  const db = makeDb(
+    (sql, args) => {
+      if (sql.includes("browser_registration_collections")) {
+        return { id: "collection_test", expires_at: "2099-01-01T00:00:00.000Z" };
+      }
+      if (sql.includes("FROM heats")) return null;
+      if (sql.includes("FROM race_entries")) {
+        const raceEntryId = args[0];
+        return {
+          event_id: "event_test",
+          event_slug: "test-race",
+          event_name: "Test Duck Race",
+          event_date: "2026-08-30",
+          event_status: "REGISTRATION_OPEN",
+          public_name_policy: "FIRST_NAME_LAST_INITIAL",
+          first_name: raceEntryId === "entry_one" ? "Daisy" : "Donald",
+          last_name: "Duck",
+          registration_status: "ACTIVE",
+          race_entry_id: raceEntryId,
+          visible_number: raceEntryId === "entry_one" ? 42 : 43,
+          round_one_heat_number: null,
+          round_one_heat_status: null,
+          round_one_place: null,
+          final_heat_number: null,
+          final_heat_status: null,
+          final_place: null,
+        };
+      }
+      return null;
+    },
+    (sql) => sql.includes("browser_collection_registrations") ? {
+      results: [
+        {
+          registration_id: "registration_one",
+          race_entry_id: "entry_one",
+          first_name: "Daisy",
+          last_name: "Duck",
+          lookup_code: "DAISY123",
+          status: "ACTIVE",
+        },
+        {
+          registration_id: "registration_two",
+          race_entry_id: "entry_two",
+          first_name: "Donald",
+          last_name: "Duck",
+          lookup_code: "DONALD45",
+          status: "ACTIVE",
+        },
+      ],
+    } : { results: [] },
+  );
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/registrations/mine", {
+      headers: { cookie: `__Host-quickducks_browser=${cookieToken}` },
+    }),
+    makeEnv(db),
+  );
+  const body = await response.json();
+
+  assert.equal(body.registrations.length, 2);
+  assert.deepEqual(body.registrations.map((item) => item.lookupCode), ["DAISY123", "DONALD45"]);
+  assert.equal("email" in body.registrations[0], false);
+  assert.equal("phone" in body.registrations[0], false);
+  assert.match(db.statements[1].sql, /SET last_seen_at = \?, expires_at = \?/);
+  assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
+});
+
+test("private registration status still keeps email and phone staff-only", async () => {
+  const db = makeDb(() => ({
+    first_name: "Daisy",
+    last_name: "Duck",
+    status: "SUBMITTED",
+    lookup_code: "DAISY123",
+    submitted_at: "2026-07-26T00:00:00.000Z",
+    event_name: "Test Duck Race",
+    event_date: "2026-08-30",
+    duck_keep_preference: "UNDECIDED",
+  }));
+  const response = await handleApi(
+    new Request(`https://quickducks.com/api/v1/registrations/${randomToken()}`),
+    makeEnv(db),
+  );
+  const body = await response.json();
+
+  assert.equal(body.firstName, "Daisy");
+  assert.equal("email" in body, false);
+  assert.equal("phone" in body, false);
+  assert.doesNotMatch(db.statements[0].sql, /email|phone/i);
 });
 
 test("rejects cross-origin registration before touching the database", async () => {
@@ -159,6 +330,22 @@ test("rejects cross-origin registration before touching the database", async () 
   );
 
   assert.equal(response.status, 403);
+  assert.equal(db.statements.length, 0);
+});
+
+test("rejects a non-object registration body without throwing", async () => {
+  const db = makeDb(() => null);
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/registrations", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://quickducks.com" },
+      body: "null",
+    }),
+    makeEnv(db),
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "Request body must be a JSON object." });
   assert.equal(db.statements.length, 0);
 });
 
@@ -205,19 +392,12 @@ test("creates registration, race-entry, command, and audit records atomically", 
     hostname: "quickducks.com",
   }));
   const privateToken = randomToken();
-  const existingRegistration = {
-    name: "Donald Duck",
-    lookupCode: "WXYZ6789",
-    statusPath: `/r/${"b".repeat(43)}`,
-  };
-  const existingCookie = registrationCookie(null, existingRegistration);
   const response = await handleApi(
     new Request("https://quickducks.com/api/v1/registrations", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         origin: "https://quickducks.com",
-        cookie: existingCookie,
       },
       body: JSON.stringify({
         eventId: openEvent.id,
@@ -240,20 +420,16 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.equal(body.privateStatusPath, `/r/${privateToken}`);
   assert.equal(body.replayed, false);
   assert.match(body.lookupCode, /^[A-HJ-NP-Z2-9]{8}$/);
-  assert.deepEqual(readBrowserRegistrations(response.headers.get("set-cookie")), [
-    existingRegistration,
-    {
-      name: "Daisy Duck",
-      lookupCode: body.lookupCode,
-      statusPath: `/r/${privateToken}`,
-    },
-  ]);
   assert.equal(db.batches.length, 1);
-  assert.equal(db.batches[0].length, 4);
+  assert.equal(db.batches[0].length, 6);
   assert.match(db.batches[0][0].sql, /INSERT INTO race_commands/);
   assert.match(db.batches[0][1].sql, /INSERT INTO registrations/);
   assert.match(db.batches[0][2].sql, /INSERT INTO race_entries/);
   assert.match(db.batches[0][3].sql, /INSERT INTO audit_events/);
+  assert.match(db.batches[0][4].sql, /INSERT INTO browser_registration_collections/);
+  assert.match(db.batches[0][5].sql, /INSERT OR IGNORE INTO browser_collection_registrations/);
+  assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
+  assert.match(response.headers.get("set-cookie") ?? "", /HttpOnly/);
 });
 
 test("rejects a Turnstile result for a different hostname", async (context) => {
@@ -317,11 +493,7 @@ test("replays a completed command without reusing a Turnstile token", async () =
   assert.equal(response.status, 200);
   assert.equal(body.registrationId, "registration_existing");
   assert.equal(body.replayed, true);
-  assert.deepEqual(readBrowserRegistrations(response.headers.get("set-cookie")), [{
-    name: "Daisy Duck",
-    lookupCode: "DCKS2345",
-    statusPath: `/r/${privateToken}`,
-  }]);
-  assert.equal(db.batches.length, 0);
-  assert.equal(db.statements.length, 1);
+  assert.equal(db.batches.length, 1);
+  assert.equal(db.batches[0].length, 2);
+  assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
 });

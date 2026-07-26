@@ -8,6 +8,7 @@
 | Source | `jameskorzekwa/duck-race-manager` |
 | Web/API | Cloudflare Worker `quickducks` |
 | Database | Cloudflare D1 `quickducks-prod` |
+| Public name-search protection | Workers Rate Limiting binding `PUBLIC_SEARCH_RATE_LIMITER` |
 | Email queue | Cloudflare Queue `quickducks-email` |
 | Dead-letter queue | Cloudflare Queue `quickducks-email-dlq` |
 | Staff identity | Amazon Cognito user pool `quickducks-staff` in `us-east-1` |
@@ -35,6 +36,12 @@ TURNSTILE_SECRET_KEY
 The public Turnstile site key is a non-secret Worker variable added when the
 registration UI is configured. The registration API fails closed until the
 encrypted Turnstile secret exists.
+
+Automatic Workers invocation logs are disabled in Wrangler because Cloudflare
+fetch-event logs include request URLs. QuickDucks private status credentials are
+URL path segments and must not be persisted in observability data. Application
+logging must likewise exclude request bodies, names, contact details, private
+tokens, lookup codes, and tag tokens.
 
 ## AWS Deployment
 

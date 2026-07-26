@@ -78,30 +78,13 @@ GET /api/v1/registrations/{privateToken}
 ```
 
 The high-entropy token is the authorization credential. The response includes
-participant contact information, registration status, staff lookup code,
-event details, and keep/return preference. Never place this endpoint or its
-response in analytics, application logs, public links, or search indexes.
+participant name, registration status, staff lookup code, event details, and
+keep/return preference. Email and phone remain staff-only and are not returned,
+even with the private token. Never place this endpoint or its response in
+analytics, application logs, public links, or search indexes.
 
 The short lookup code is for staff search only and must never authorize this
 endpoint.
-
-Each successful response also appends the participant name, lookup code, and
-private status path to the secure, HttpOnly
-`__Host-quickducks-registrations` browser cookie. The bounded cookie supports
-multiple registrations from one phone and lets the server render the device's
-registration list on the home page. Email and phone are not unique.
-
-## Public Status Search
-
-```http
-GET /api/v1/status/search?q={participantName}
-```
-
-Public name search may return participant display name, visible duck number,
-assigned/current heat, registration status, and published race outcome. It
-must never return contact details, lookup codes, private status paths, internal
-IDs, inventory state, or audit data. Authenticated staff use a separate
-role-checked search that may return the lookup code for pairing assistance.
 
 ## Public Duck Lookup
 
@@ -109,13 +92,81 @@ role-checked search that may return the lookup code for pairing assistance.
 GET /api/v1/ducks/{permanentTagToken}
 ```
 
-An unpaired duck has no anonymous status payload and redirects home at the page
-route. A paired duck's public status payload may expose participant name, duck
-number, heat, current race progress, and published result. It never exposes
-contact details, lookup codes, private tokens, inventory state, location,
-synchronization state, or audit history.
+An unassigned, retired, unknown, or purged token returns the same `HOME`
+destination and no inventory metadata. An actively assigned token returns a
+`RACE_STATUS` destination with privacy-filtered event, visible duck, assigned
+heat, currently running heat, and finalized progression/result fields. It never
+returns contact information, lookup codes, private links, staff history,
+synchronization details, or physical location.
+
+## Browser Registration Collection
+
+```http
+GET /api/v1/registrations/mine
+```
+
+Registration responses issue one opaque `__Host-` prefixed, `HttpOnly`,
+`Secure`, `SameSite=Lax` browser-collection cookie. The cookie resolves
+server-side to every independent registration created from that browser,
+allowing one phone to retain many participant names, lookup codes, and race
+statuses across refreshes. Successful reads renew its server-side expiry. The
+cookie contains no participant data or private status tokens.
+
+## Public Name Search
+
+```http
+GET /api/v1/race-status/search?eventId={eventId}&name={name}
+```
+
+Anonymous search accepts exact first names, last names, or full names only.
+Submitted entries may return
+`AWAITING_DUCK_PAIRING`; assigned entries return public race status. Results
+obey the event public-name policy. Email, phone, lookup code, private link,
+staff data, inventory state, and location are never returned.
+The production Worker rate-limits name search to 20 requests per minute per
+event and client network key.
+
+Authenticated staff use a separate event-scoped code/name search and may see
+the full name, email, and phone required for registration operations.
+
+## Staff Scan and Pairing
+
+```http
+GET  /api/v1/staff/ducks/{tagToken}
+GET  /api/v1/staff/registrations/search?eventId={eventId}&q={codeOrName}
+POST /api/v1/staff/ducks/{tagToken}/assignments
+```
+
+Staff endpoints require a verified Cognito access token whose subject maps to
+a matching `staff_profiles` row. Staff search may return full participant name,
+email, phone, lookup code, registration state, and assigned duck. The pairing
+command is idempotent and atomically creates the event reservation, versioned
+duck assignment, registration transition, inventory transition, audit, and
+immediate-mode heat entry when applicable.
+
+## Complete Race Purge
+
+```http
+POST /api/v1/staff/events/{eventId}/purge
+```
+
+Purge requires a system administrator, purge-ready event state, no other event
+dataset, a physical disposition for every event duck, and an exact typed
+confirmation. It transactionally deletes browser links, heats, results,
+assignments, registrations, commands, audits, event, duck tags, ducks, and
+browser collections. The next race re-registers physical ducks from scratch.
+
+## Post-Race Purge
+
+After return processing, the complete race dataset is deleted, including
+events, participants, browser collections, ducks, tags, assignments, heats,
+results, messages, commands, and audits. Staff accounts, schema, and
+infrastructure remain. Every physical duck used in a later race must be scanned
+and registered again.
 
 ## Runtime Configuration
 
 Production requires encrypted Worker secret `TURNSTILE_SECRET_KEY`. The future
 UI also needs the corresponding public `TURNSTILE_SITE_KEY` binding.
+Automatic Workers invocation logs stay disabled because fetch-event logs include
+request URLs, and private status credentials are carried in URL paths.
