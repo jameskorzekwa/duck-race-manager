@@ -67,6 +67,7 @@ test("serves registration and staff pairing browser clients", async () => {
   const live = await worker.fetch(new Request("https://quickducks.com/assets/live.js"), env);
   const startLine = await worker.fetch(new Request("https://quickducks.com/assets/start-line.js"), env);
   const finishLine = await worker.fetch(new Request("https://quickducks.com/assets/finish-line.js"), env);
+  const inventoryIntake = await worker.fetch(new Request("https://quickducks.com/assets/inventory-intake.js"), env);
 
   assert.equal(registration.status, 200);
   assert.equal(registration.headers.get("cache-control"), "public, max-age=3600");
@@ -82,6 +83,44 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(startLine.headers.get("cache-control"), "no-store");
   assert.match(await finishLine.text(), /NDEFReader/);
   assert.equal(finishLine.headers.get("cache-control"), "no-store");
+  assert.match(await inventoryIntake.text(), /intakeCreateProvisioningMachine/);
+  assert.equal(inventoryIntake.headers.get("cache-control"), "no-store");
+});
+
+test("gates the inventory intake station and renders its canonical noindex markup", async () => {
+  const actor = (roles, isSystemAdmin = false) => ({
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Inventory Staff",
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  const page = (currentActor) => createWorker(async () => currentActor).fetch(
+    new Request("https://quickducks.com/staff/inventory-intake"), env,
+  );
+
+  const anonymous = await page(null);
+  assert.equal(anonymous.status, 303);
+  assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Finventory-intake");
+
+  const denied = await page(actor(["REGISTRATION"]));
+  assert.equal(denied.status, 403);
+  assert.equal(denied.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.match(await denied.text(), /permission to use the inventory intake station/);
+
+  for (const currentActor of [actor(["DUCK_MANAGER"]), actor(["RACE_DIRECTOR"]), actor([], true)]) {
+    const allowed = await page(currentActor);
+    const body = await allowed.text();
+    assert.equal(allowed.status, 200);
+    assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.match(body, /data-inventory-intake/);
+    assert.match(body, /data-app-origin="https:\/\/quickducks\.com"/);
+    assert.match(body, /Reserved for race/);
+    assert.match(body, /Added this session/);
+    assert.match(body, /Start NFC provisioning/);
+    assert.match(body, /Android Chrome over HTTPS only/);
+    assert.match(body, /data-intake-takeover hidden/);
+    assert.match(body, /Take over pending sticker/);
+    assert.doesNotMatch(body, /name="visibleNumber"|name="tagUrl"|name="condition"|name="physicallyPresent"/);
+    assert.match(body, /src="\/assets\/inventory-intake\.js"/);
+  }
 });
 
 test("gates focused station pages by operational role", async () => {
@@ -128,6 +167,158 @@ test("protects newly composed staff operation routes", async () => {
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
   assert.equal(response.headers.get("www-authenticate"), "Bearer");
   assert.deepEqual(await response.json(), { error: "Staff authentication required." });
+});
+
+test("requires same-origin protection for cookie-authenticated provisioning", async () => {
+  const cookieActor = {
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Inventory Staff",
+    isSystemAdmin: false, roles: ["DUCK_MANAGER"], authentication: "cookie",
+  };
+  const response = await createWorker(async () => cookieActor).fetch(
+    new Request("https://quickducks.com/api/v1/staff/inventory/provisioning", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      body: JSON.stringify({ commandId: crypto.randomUUID(), eventId: "event_test" }),
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { error: "Same-origin staff request required." });
+
+  const takeover = await createWorker(async () => ({
+    ...cookieActor, roles: ["RACE_DIRECTOR"],
+  })).fetch(
+    new Request("https://quickducks.com/api/v1/staff/inventory/provisioning/takeover", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: "event_test",
+        duckId: "duck_test",
+        provisioningCommandId: crypto.randomUUID(),
+      }),
+    }),
+    env,
+  );
+  assert.equal(takeover.status, 403);
+  assert.deepEqual(await takeover.json(), { error: "Same-origin staff request required." });
+});
+
+const refreshedActor = {
+  id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Refreshed Staff",
+  isSystemAdmin: false, roles: [], authentication: "bearer",
+};
+
+const refreshWorker = (tokenResponse = {
+  access_token: "new.jwt.token",
+  refresh_token: "new.refresh.token",
+  expires_in: 1800,
+}) => createWorker(
+  async (request) => request.headers.get("cookie") === "__Host-quickducks_staff=new.jwt.token"
+    ? refreshedActor
+    : null,
+  async () => Response.json(tokenResponse),
+);
+
+const expiredSessionCookie = "__Host-quickducks_staff=expired.jwt.token; __Host-quickducks_staff_refresh=old.refresh.token";
+
+test("appends rotated session cookies to API responses and keeps the actor cookie-authenticated", async () => {
+  const response = await refreshWorker().fetch(
+    new Request("https://quickducks.com/api/v1/staff/unknown", {
+      method: "POST",
+      headers: { cookie: expiredSessionCookie, origin: env.APP_ORIGIN },
+      body: "request-body-is-not-consumed-by-refresh",
+    }),
+    env,
+  );
+  const cookies = response.headers.get("set-cookie");
+
+  assert.equal(response.status, 404);
+  assert.match(cookies, /__Host-quickducks_staff=new\.jwt\.token/);
+  assert.match(cookies, /__Host-quickducks_staff_refresh=new\.refresh\.token/);
+});
+
+test("appends rotated session cookies to staff page responses", async () => {
+  const response = await refreshWorker().fetch(
+    new Request("https://quickducks.com/staff", { headers: { cookie: expiredSessionCookie } }),
+    env,
+  );
+  const cookies = response.headers.get("set-cookie");
+
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /Refreshed Staff/);
+  assert.match(cookies, /__Host-quickducks_staff=new\.jwt\.token/);
+  assert.match(cookies, /__Host-quickducks_staff_refresh=new\.refresh\.token/);
+});
+
+test("clears both staff cookies when refresh rotation is invalid", async () => {
+  const response = await refreshWorker({ access_token: "new.jwt.token" }).fetch(
+    new Request("https://quickducks.com/api/v1/staff/unknown", {
+      headers: { cookie: expiredSessionCookie },
+    }),
+    env,
+  );
+  const cookies = response.headers.get("set-cookie");
+
+  assert.equal(response.status, 401);
+  assert.match(cookies, /__Host-quickducks_staff=;/);
+  assert.match(cookies, /__Host-quickducks_staff_refresh=;/);
+});
+
+test("preserves the refresh cookie when Cognito refresh is temporarily unavailable", async () => {
+  const response = await createWorker(
+    async () => null,
+    async () => new Response("provider details", { status: 503 }),
+  ).fetch(
+    new Request("https://quickducks.com/api/v1/staff/unknown", {
+      headers: { cookie: expiredSessionCookie },
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get("set-cookie"), null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
+  assert.deepEqual(await response.json(), { error: "Staff authentication required." });
+});
+
+test("does not refresh Bearer API requests", async () => {
+  let refreshCalled = false;
+  const bearerWorker = createWorker(
+    async () => null,
+    async () => {
+      refreshCalled = true;
+      throw new Error("must not refresh");
+    },
+  );
+  const response = await bearerWorker.fetch(
+    new Request("https://quickducks.com/api/v1/staff/unknown", {
+      headers: {
+        authorization: "Bearer expired.jwt.token",
+        cookie: "__Host-quickducks_staff_refresh=old.refresh.token",
+      },
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 401);
+  assert.equal(refreshCalled, false);
+  assert.equal(response.headers.get("set-cookie"), null);
+});
+
+test("Cognito template keeps 15-minute tokens and seven-day refresh rotation", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const template = await readFile(new URL("../infra/aws/quickducks.yaml", import.meta.url), "utf8");
+
+  assert.match(template, /AccessTokenValidity: 15/);
+  assert.match(template, /IdTokenValidity: 15/);
+  assert.match(template, /RefreshTokenValidity: 7/);
+  assert.match(template, /AccessToken: minutes/);
+  assert.match(template, /IdToken: minutes/);
+  assert.match(template, /RefreshToken: days/);
+  assert.match(template, /RefreshTokenRotation:\s+Feature: ENABLED/);
 });
 
 test("serves the rubber-duck favicon", async () => {
@@ -183,6 +374,28 @@ test("renders staff sign-in and protects staff duck pages", async () => {
   assert.match(protectedDuck.headers.get("location") ?? "", /^\/staff\?returnTo=/);
 });
 
+test("routes authenticated tag scans to protected code and contact pairing search", async () => {
+  const token = "a".repeat(32);
+  const authenticated = createWorker(async () => ({
+    id: "staff_test",
+    cognitoSub: "staff-sub",
+    email: "staff@example.com",
+    displayName: "Registration Staff",
+    isSystemAdmin: false,
+    roles: ["REGISTRATION"],
+    authentication: "cookie",
+  }));
+  const scan = await authenticated.fetch(new Request(`https://quickducks.com/t/${token}`), env);
+  const page = await authenticated.fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
+  const body = await page.text();
+
+  assert.equal(scan.status, 303);
+  assert.equal(scan.headers.get("location"), `/staff/ducks/${token}`);
+  assert.equal(page.status, 200);
+  assert.match(body, /Participant code, name, phone, or email/);
+  assert.match(body, /data-registration-search/);
+});
+
 test("starts hosted Cognito sign-in and renders safe callback failures", async () => {
   const start = await worker.fetch(
     new Request("https://quickducks.com/staff/login/start?returnTo=%2Fstaff"),
@@ -200,6 +413,65 @@ test("starts hosted Cognito sign-in and renders safe callback failures", async (
   assert.equal(callback.status, 400);
   assert.match(await callback.text(), /sign-in request expired/i);
   assert.match(callback.headers.get("set-cookie") ?? "", /__Host-quickducks_oauth=;/);
+});
+
+test("rejects cross-site and non-POST logout without side effects", async () => {
+  let revokeCalls = 0;
+  const logoutWorker = createWorker(
+    async () => null,
+    async () => {
+      revokeCalls += 1;
+      return new Response(null, { status: 200 });
+    },
+  );
+  const requests = [
+    new Request("https://quickducks.com/staff/logout", {
+      headers: { cookie: expiredSessionCookie, referer: "https://attacker.example/logout" },
+    }),
+    new Request("https://quickducks.com/staff/logout", {
+      method: "POST",
+      headers: { cookie: expiredSessionCookie, origin: "https://attacker.example" },
+    }),
+    new Request("https://quickducks.com/staff/logout", {
+      method: "POST",
+      headers: { cookie: expiredSessionCookie },
+    }),
+  ];
+
+  for (const [index, request] of requests.entries()) {
+    const response = await logoutWorker.fetch(request, env);
+    assert.equal(response.status, index === 0 ? 405 : 403);
+    assert.equal(response.headers.get("set-cookie"), null);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
+  }
+  assert.equal(revokeCalls, 0);
+});
+
+test("accepts same-origin POST logout and clears cookies despite failed revocation", async () => {
+  let revokeRequest;
+  const response = await createWorker(
+    async () => null,
+    async (url, options) => {
+      revokeRequest = { url: url.toString(), options };
+      return Response.json({ error: "provider details must stay private" }, { status: 500 });
+    },
+  ).fetch(
+    new Request("https://quickducks.com/staff/logout", {
+      method: "POST",
+      headers: { cookie: expiredSessionCookie, origin: env.APP_ORIGIN },
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 303);
+  assert.equal(revokeRequest.url, "https://quickducks-staff.example.com/oauth2/revoke");
+  assert.match(response.headers.get("set-cookie"), /__Host-quickducks_staff=;/);
+  assert.match(response.headers.get("set-cookie"), /__Host-quickducks_staff_refresh=;/);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
+  assert.match(response.headers.get("location"), /^https:\/\/quickducks-staff\.example\.com\/logout/);
+  assert.equal(await response.text(), "");
 });
 
 test("redirects an anonymous unpaired duck scan home", async () => {
@@ -265,6 +537,7 @@ test("renders paired duck heat and race status without contact data", async () =
   assert.match(body, /Heat 7/);
   assert.match(body, /Heat 5/);
   assert.doesNotMatch(body, /Email|Phone|lookup code/i);
+  assert.doesNotMatch(body, /data-registration-search|Confirm duck pairing/);
 });
 
 test("renders a valid private registration status path", async () => {
@@ -330,7 +603,7 @@ test("renders a valid private registration status path", async () => {
   assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
 });
 
-test("renders protected staff pairing preview with code and name lookup", async () => {
+test("renders protected staff pairing preview with code and contact lookup", async () => {
   const response = await worker.fetch(
     new Request("https://quickducks.com/mock/staff/ducks/128/pair"),
     env,
@@ -338,8 +611,8 @@ test("renders protected staff pairing preview with code and name lookup", async 
   const body = await response.text();
 
   assert.equal(response.status, 200);
-  assert.match(body, /Participant duck code/);
-  assert.match(body, /Search participant name/);
+  assert.match(body, /Participant code, name, phone, or email/);
+  assert.match(body, /Find participant/);
   assert.match(body, /Staff authentication required/);
 
   const working = await worker.fetch(
@@ -403,6 +676,11 @@ test("renders protected staff pairing preview with code and name lookup", async 
   const resultTakerHome = renderStaffHome("Result Taker", false, ["RESULT_TAKER"]);
   assert.match(resultTakerHome, /href="\/staff\/finish-line"/);
   assert.doesNotMatch(resultTakerHome, /href="\/staff\/start-line"/);
+
+  const duckManagerHome = renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]);
+  assert.match(duckManagerHome, /href="\/staff\/inventory-intake"/);
+  assert.match(duckManagerHome, /Blank NFC provisioning station/);
+  assert.doesNotMatch(announcerHome, /href="\/staff\/inventory-intake"/);
 
   const noRoleHome = renderStaffHome("No Role", false, []);
   assert.match(noRoleHome, /No operational roles assigned/);

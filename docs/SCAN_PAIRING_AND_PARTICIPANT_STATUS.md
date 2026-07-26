@@ -15,7 +15,7 @@ page.
   active assignment state. After purge, the token is unknown until staff
   register it again for the next race.
 - Staff scan the selected duck first, then identify the participant by their
-  short lookup code or a name search.
+  short lookup code or a protected name, phone, or email search.
 - One browser may register and retain status access for many participants.
 - Anonymous users see race status only after a duck has an active assignment.
 - Public status never exposes email, phone, staff-only history, inventory
@@ -64,7 +64,7 @@ outcome.
 2. A logged-in staff member scans its NFC tag or QR code.
 3. The app verifies the tag, inventory eligibility, and current assignment.
 4. If unassigned, the app opens `Pair Duck <number>`.
-5. Staff enter the participant's short code or search by name.
+5. Staff enter the participant's short code or search by name, phone, or email.
 6. Search results are scoped to the current event and show enough information
    to disambiguate duplicate names, including registration status and current
    duck when one exists.
@@ -195,6 +195,7 @@ GET  /api/v1/staff/ducks/<tag-token>
 GET  /api/v1/staff/registrations/search?eventId=<id>&q=<code-or-name>
 POST /api/v1/staff/ducks/<tag-token>/assignments
 POST /api/v1/staff/events/<event-id>/purge
+POST /staff/logout
 ```
 
 Staff endpoints require a verified Cognito access token and a matching
@@ -203,14 +204,31 @@ lookup code, and scanned tag token. Staff authorization, event state,
 assignment uniqueness, tag state, inventory eligibility, and command
 idempotency are rechecked server-side.
 
-The browser receives the access token only as a host-only HttpOnly staff-session
-cookie after a Cognito authorization-code and PKCE exchange. Staff APIs also
-accept an explicit Bearer token for trusted non-browser clients. Mutations made
-with the browser cookie require the exact QuickDucks origin, preventing a
-cross-site form from submitting a pairing or purge command.
+The browser receives access and refresh tokens only as separate host-only
+HttpOnly staff-session cookies after a Cognito authorization-code and PKCE
+exchange. Access and ID tokens are valid for at most 15 minutes; the browser
+silently rotates both cookies while the refresh token remains within its
+absolute seven-day Cognito validity. Rotation never exposes the refresh token to
+JavaScript, responses, URLs, logs, or D1. Definitive refresh rejection (`400`,
+`401`, or malformed success) clears both cookies. Network, `408`, `429`, and
+`5xx` failures preserve the existing refresh cookie unchanged for a later retry.
+Staff APIs also accept an explicit Bearer token for trusted non-browser clients
+and never refresh those requests. Mutations made with browser cookies require
+the exact QuickDucks origin, preventing a cross-site form from submitting a
+pairing or purge command.
 
-Authenticated staff registration search may return full name, email, and phone
-for event operations. Those columns are never selected by anonymous name search
+Staff logout is a same-origin POST form. It requires an exact `Origin`, with a
+strict same-origin `Referer` fallback only when `Origin` is absent. Accepted
+logout clears both cookies and redirects through Cognito even if best-effort
+refresh-token revocation fails over the network or returns non-2xx. Offline JWT
+verification does not observe Cognito revocation immediately, leaving a copied
+access token with at most 15 minutes of residual validity. Every request reloads
+the live `staff_profiles.is_active` value from D1, so deactivation still fails
+closed immediately; revocation and global sign-out prevent future refresh.
+
+Authenticated staff registration search accepts lookup code, name, phone, or
+email and may return full name, email, and phone for event operations. Those
+columns are never selected by anonymous name search
 or public duck status queries.
 
 ## Data Model
@@ -238,7 +256,7 @@ physical ducks from scratch.
   contact information or staff-only fields.
 - A logged-in staff scan of an eligible unassigned duck opens pairing for that
   exact duck.
-- Staff can locate a participant by exact lookup code or name and disambiguate
+- Staff can locate a participant by exact lookup code, name, phone, or email and disambiguate
   duplicate names.
 - Pairing creates one current assignment and changes the registration to
   `ACTIVE`; concurrent double assignment cannot partially save.

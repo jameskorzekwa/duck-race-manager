@@ -64,6 +64,29 @@ const validVisibleNumber = (value: unknown): value is number =>
 const validTagToken = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9_-]{22,128}$/.test(value);
 
+const canonicalTagToken = (value: unknown, appOrigin: string): string | null => {
+  if (typeof value !== "string") return null;
+  try {
+    const configured = new URL(appOrigin);
+    const parsed = new URL(value);
+    const match = parsed.pathname.match(/^\/t\/([A-Za-z0-9_-]{22,128})$/);
+    return configured.pathname === "/"
+      && configured.search === ""
+      && configured.hash === ""
+      && parsed.origin === configured.origin
+      && parsed.username === ""
+      && parsed.password === ""
+      && parsed.search === ""
+      && parsed.hash === ""
+      && match !== null
+      && value === `${configured.origin}/t/${match[1]}`
+      ? match[1]
+      : null;
+  } catch {
+    return null;
+  }
+};
+
 const hashValue = async (value: string): Promise<string> => {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -659,6 +682,799 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
     tag_id: tagId,
     event_duck_id: eventDuckId,
   }, false);
+};
+
+const provisioningStartCommand = "START_DUCK_PROVISIONING";
+const provisioningConfirmCommand = "CONFIRM_DUCK_PROVISIONING";
+const provisioningTakeoverCommand = "TAKE_OVER_DUCK_PROVISIONING";
+const provisioningTakeoverDelayMs = 10 * 60 * 1000;
+
+interface ProvisioningCommandRow {
+  event_id: string;
+  command_type: string;
+  result_id: string | null;
+  request_fingerprint: string | null;
+}
+
+interface ProvisioningRow {
+  provisioning_command_id: string;
+  event_id: string;
+  duck_id: string;
+  visible_number: number;
+  inventory_status: string;
+  physical_condition: PhysicalCondition;
+  storage_location: string | null;
+  tag_id: string;
+  tag_token: string;
+  tag_status: string;
+  event_duck_id: string | null;
+  owner_audit_id: string;
+  owner_staff_profile_id: string;
+  ownership_occurred_at: string;
+}
+
+const provisioningSelect = `
+  SELECT rc.id AS provisioning_command_id, rc.event_id,
+         d.id AS duck_id, d.visible_number, d.inventory_status,
+         d.physical_condition, d.storage_location,
+         dt.id AS tag_id, dt.token AS tag_token, dt.status AS tag_status,
+         ed.id AS event_duck_id,
+         owner_ae.id AS owner_audit_id,
+         json_extract(owner_ae.details_json, '$.staff_profile_id') AS owner_staff_profile_id,
+         owner_ae.occurred_at AS ownership_occurred_at
+    FROM race_commands rc
+    JOIN audit_events start_ae
+      ON start_ae.command_id = rc.id
+     AND start_ae.action = 'DUCK_PROVISIONING_STARTED'
+     AND start_ae.subject_type = 'DUCK'
+     AND start_ae.subject_id = rc.result_id
+    JOIN ducks d ON d.id = rc.result_id
+    JOIN duck_tags dt
+      ON dt.duck_id = d.id
+     AND dt.id = json_extract(start_ae.details_json, '$.tag_id')
+    JOIN audit_events owner_ae ON owner_ae.id = (
+      SELECT ownership_ae.id
+        FROM audit_events ownership_ae
+       WHERE ownership_ae.event_id = rc.event_id
+         AND ownership_ae.subject_type = 'DUCK'
+         AND ownership_ae.subject_id = d.id
+         AND ownership_ae.action IN ('DUCK_PROVISIONING_STARTED', 'DUCK_PROVISIONING_TAKEN_OVER')
+       ORDER BY ownership_ae.occurred_at DESC, ownership_ae.id DESC
+       LIMIT 1
+    )
+    LEFT JOIN event_ducks ed
+      ON ed.duck_id = d.id AND ed.event_id = rc.event_id AND ed.released_at IS NULL
+   WHERE rc.command_type = '${provisioningStartCommand}'`;
+
+const getProvisioningCommand = (
+  env: Env,
+  commandId: string,
+): Promise<ProvisioningCommandRow | null> => env.DB.prepare(
+  `SELECT event_id, command_type, result_id, request_fingerprint
+     FROM race_commands
+    WHERE id = ?`,
+).bind(commandId).first<ProvisioningCommandRow>();
+
+const getProvisioningByCommand = (
+  env: Env,
+  commandId: string,
+  actorId: string,
+): Promise<ProvisioningRow | null> => env.DB.prepare(
+  `${provisioningSelect}
+      AND rc.id = ?
+      AND json_extract(owner_ae.details_json, '$.staff_profile_id') = ?
+    LIMIT 1`,
+).bind(commandId, actorId).first<ProvisioningRow>();
+
+const getProvisioningTarget = (
+  env: Env,
+  commandId: string,
+  duckId: string,
+): Promise<ProvisioningRow | null> => env.DB.prepare(
+  `${provisioningSelect}
+      AND rc.id = ?
+      AND d.id = ?
+    LIMIT 1`,
+).bind(commandId, duckId).first<ProvisioningRow>();
+
+const getPendingProvisioning = (
+  env: Env,
+  eventId: string,
+  actorId: string,
+): Promise<ProvisioningRow | null> => env.DB.prepare(
+  `${provisioningSelect}
+      AND rc.event_id = ?
+      AND json_extract(owner_ae.details_json, '$.staff_profile_id') = ?
+      AND d.inventory_status = 'NEW'
+      AND d.physical_condition = 'NEEDS_TAG'
+      AND dt.status = 'RESERVED'
+      AND ed.id IS NULL
+    ORDER BY rc.requested_at, rc.id
+    LIMIT 1`,
+).bind(eventId, actorId).first<ProvisioningRow>();
+
+const getTakeoverCandidate = (
+  env: Env,
+  eventId: string,
+  actorId: string,
+  takeoverBefore: string,
+): Promise<ProvisioningRow | null> => env.DB.prepare(
+  `${provisioningSelect}
+      AND rc.event_id = ?
+      AND json_extract(owner_ae.details_json, '$.staff_profile_id') != ?
+      AND owner_ae.occurred_at <= ?
+      AND d.inventory_status = 'NEW'
+      AND d.physical_condition = 'NEEDS_TAG'
+      AND dt.status = 'RESERVED'
+      AND ed.id IS NULL
+    ORDER BY owner_ae.occurred_at, rc.requested_at, rc.id
+    LIMIT 1`,
+).bind(eventId, actorId, takeoverBefore).first<ProvisioningRow>();
+
+const provisioningFingerprint = (
+  commandType: string,
+  actorId: string,
+  eventId: string,
+  details: Record<string, unknown>,
+): Promise<string> => hashValue(JSON.stringify({ commandType, actorId, eventId, ...details }));
+
+const generateTagToken = (): string => {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+};
+
+const provisioningResponse = (
+  env: Env,
+  row: ProvisioningRow,
+  replayed: boolean,
+  status = 200,
+): Response => {
+  const pending = row.inventory_status === "NEW"
+    && row.physical_condition === "NEEDS_TAG"
+    && row.tag_status === "RESERVED"
+    && row.event_duck_id === null;
+  return json({
+    provisioningCommandId: row.provisioning_command_id,
+    duckId: row.duck_id,
+    visibleNumber: row.visible_number,
+    status: pending ? "PENDING_WRITE" : "CONFIRMED",
+    ...(pending ? { tagUrl: new URL(`/t/${row.tag_token}`, env.APP_ORIGIN).toString() } : {}),
+    replayed,
+  }, status);
+};
+
+const isPendingProvisioning = (row: ProvisioningRow): boolean =>
+  row.inventory_status === "NEW"
+  && row.physical_condition === "NEEDS_TAG"
+  && row.tag_status === "RESERVED"
+  && row.event_duck_id === null;
+
+const parseProvisioningLocation = (payload: Record<string, unknown>): string | null | undefined => {
+  if (!Object.hasOwn(payload, "location") || payload.location === null) return null;
+  if (typeof payload.location !== "string") return undefined;
+  const location = payload.location.trim().replace(/\s+/g, " ");
+  if (location.length === 0) return null;
+  return location.length <= 100 ? location : undefined;
+};
+
+const recoverProvisioning = async (
+  url: URL,
+  env: Env,
+  actor: StaffActor,
+): Promise<Response> => {
+  const eventId = url.searchParams.get("eventId");
+  if (eventId === null || !validEventId(eventId)) {
+    return json({ error: "A valid event is required." }, 400);
+  }
+  const pending = await getPendingProvisioning(env, eventId, actor.id);
+  if (pending !== null) {
+    return json({
+      provisioning: {
+        provisioningCommandId: pending.provisioning_command_id,
+        duckId: pending.duck_id,
+        visibleNumber: pending.visible_number,
+        tagUrl: new URL(`/t/${pending.tag_token}`, env.APP_ORIGIN).toString(),
+        status: "PENDING_WRITE",
+      },
+    });
+  }
+  if (!actor.isSystemAdmin && !actor.roles.includes("RACE_DIRECTOR")) {
+    return json({ provisioning: null });
+  }
+  const takeoverBefore = new Date(Date.now() - provisioningTakeoverDelayMs).toISOString();
+  const candidate = await getTakeoverCandidate(env, eventId, actor.id, takeoverBefore);
+  return candidate === null ? json({ provisioning: null }) : json({
+    provisioning: {
+      provisioningCommandId: candidate.provisioning_command_id,
+      duckId: candidate.duck_id,
+      visibleNumber: candidate.visible_number,
+      status: "PENDING_WRITE",
+      takeoverAvailable: true,
+    },
+  });
+};
+
+const takeoverProvisioning = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+): Promise<Response> => {
+  const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
+  if (denied !== null) return denied;
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const eventId = payload?.eventId;
+  const duckId = payload?.duckId;
+  const startCommandId = payload?.provisioningCommandId;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || !validEventId(eventId) || typeof duckId !== "string" || !validEntityId(duckId)
+    || typeof startCommandId !== "string" || !isCommandId(startCommandId)
+  ) {
+    return json({ error: "Command, event, target duck, and provisioning command are required." }, 400);
+  }
+
+  const requestDetails = { duckId, provisioningCommandId: startCommandId };
+  const fingerprint = await provisioningFingerprint(
+    provisioningTakeoverCommand,
+    actor.id,
+    eventId,
+    requestDetails,
+  );
+  const previous = await getProvisioningCommand(env, commandId);
+  if (previous !== null) {
+    if (
+      previous.event_id !== eventId
+      || previous.command_type !== provisioningTakeoverCommand
+      || previous.result_id !== duckId
+      || previous.request_fingerprint !== fingerprint
+    ) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const replay = await getProvisioningByCommand(env, startCommandId, actor.id);
+    return replay === null
+      ? json({ error: "This provisioning takeover no longer belongs to this operator." }, 409)
+      : provisioningResponse(env, replay, true);
+  }
+
+  const provisioning = await getProvisioningTarget(env, startCommandId, duckId);
+  if (provisioning === null || provisioning.event_id !== eventId) {
+    return json({ error: "Pending provisioning was not found for this event." }, 404);
+  }
+  if (!isPendingProvisioning(provisioning)) {
+    return json({ error: "This provisioning is not waiting for NFC confirmation." }, 409);
+  }
+  if (provisioning.owner_staff_profile_id === actor.id) {
+    return json({ error: "This provisioning already belongs to this operator." }, 409);
+  }
+  const takeoverBefore = new Date(Date.now() - provisioningTakeoverDelayMs).toISOString();
+  if (provisioning.ownership_occurred_at > takeoverBefore) {
+    return json({ error: "Provisioning can be taken over only after it has been pending for 10 minutes." }, 409);
+  }
+
+  const now = new Date().toISOString();
+  const auditDetails = JSON.stringify({
+    staff_profile_id: actor.id,
+    prior_staff_profile_id: provisioning.owner_staff_profile_id,
+    new_staff_profile_id: actor.id,
+    provisioning_command_id: startCommandId,
+  });
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
+         SELECT ?, e.id, '${provisioningTakeoverCommand}', d.id, ?, ?, ?
+           FROM events e
+           JOIN race_commands start_rc
+             ON start_rc.id = ? AND start_rc.event_id = e.id
+            AND start_rc.command_type = '${provisioningStartCommand}'
+           JOIN audit_events start_ae
+             ON start_ae.command_id = start_rc.id
+            AND start_ae.action = 'DUCK_PROVISIONING_STARTED'
+            AND start_ae.subject_type = 'DUCK'
+            AND start_ae.subject_id = start_rc.result_id
+           JOIN ducks d ON d.id = start_rc.result_id
+           JOIN duck_tags dt
+             ON dt.duck_id = d.id
+            AND dt.id = json_extract(start_ae.details_json, '$.tag_id')
+           JOIN audit_events owner_ae ON owner_ae.id = ?
+          WHERE e.id = ?
+            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
+            AND d.id = ?
+            AND d.inventory_status = 'NEW'
+            AND d.physical_condition = 'NEEDS_TAG'
+            AND dt.status = 'RESERVED'
+            AND owner_ae.event_id = e.id
+            AND owner_ae.subject_type = 'DUCK'
+            AND owner_ae.subject_id = d.id
+            AND owner_ae.action IN ('DUCK_PROVISIONING_STARTED', 'DUCK_PROVISIONING_TAKEN_OVER')
+            AND json_extract(owner_ae.details_json, '$.staff_profile_id') = ?
+            AND owner_ae.occurred_at <= ?
+            AND owner_ae.id = (
+              SELECT latest_owner.id
+                FROM audit_events latest_owner
+               WHERE latest_owner.event_id = e.id
+                 AND latest_owner.subject_type = 'DUCK'
+                 AND latest_owner.subject_id = d.id
+                 AND latest_owner.action IN ('DUCK_PROVISIONING_STARTED', 'DUCK_PROVISIONING_TAKEN_OVER')
+               ORDER BY latest_owner.occurred_at DESC, latest_owner.id DESC
+               LIMIT 1
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM event_ducks ed WHERE ed.duck_id = d.id AND ed.released_at IS NULL
+            )`,
+      ).bind(
+        commandId,
+        now,
+        now,
+        fingerprint,
+        startCommandId,
+        provisioning.owner_audit_id,
+        eventId,
+        duckId,
+        provisioning.owner_staff_profile_id,
+        takeoverBefore,
+      ),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         SELECT ?, ?, ?, 'DUCK_PROVISIONING_TAKEN_OVER', 'DUCK', ?, 'STAFF', ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM race_commands
+             WHERE id = ? AND event_id = ?
+               AND command_type = '${provisioningTakeoverCommand}' AND result_id = ?
+          )`,
+      ).bind(
+        crypto.randomUUID(),
+        eventId,
+        commandId,
+        duckId,
+        now,
+        auditDetails,
+        commandId,
+        eventId,
+        duckId,
+      ),
+    ]);
+  } catch {
+    const racedCommand = await getProvisioningCommand(env, commandId);
+    if (
+      racedCommand !== null
+      && racedCommand.event_id === eventId
+      && racedCommand.command_type === provisioningTakeoverCommand
+      && racedCommand.result_id === duckId
+      && racedCommand.request_fingerprint === fingerprint
+    ) {
+      const replay = await getProvisioningByCommand(env, startCommandId, actor.id);
+      if (replay !== null) return provisioningResponse(env, replay, true);
+    }
+    return json({ error: "Provisioning takeover conflicted with another operator. Refresh before trying again." }, 409);
+  }
+
+  const committed = await getProvisioningCommand(env, commandId);
+  const recovered = await getProvisioningByCommand(env, startCommandId, actor.id);
+  return committed !== null
+    && committed.event_id === eventId
+    && committed.command_type === provisioningTakeoverCommand
+    && committed.result_id === duckId
+    && committed.request_fingerprint === fingerprint
+    && recovered !== null
+    ? provisioningResponse(env, recovered, false, 201)
+    : json({ error: "Provisioning takeover conflicted with another operator. Refresh before trying again." }, 409);
+};
+
+const startProvisioning = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  if (payload === null) return json({ error: "A valid JSON provisioning request is required." }, 400);
+  const commandId = payload.commandId;
+  const eventId = payload.eventId;
+  const location = parseProvisioningLocation(payload);
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || !validEventId(eventId) || location === undefined
+  ) {
+    return json({ error: "Command, event, and an optional location of at most 100 characters are required." }, 400);
+  }
+
+  const fingerprint = await provisioningFingerprint(
+    provisioningStartCommand,
+    actor.id,
+    eventId,
+    { location },
+  );
+  const previous = await getProvisioningCommand(env, commandId);
+  if (previous !== null) {
+    if (
+      previous.event_id !== eventId
+      || previous.command_type !== provisioningStartCommand
+      || previous.request_fingerprint !== fingerprint
+    ) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const replay = await getProvisioningByCommand(env, commandId, actor.id);
+    return replay === null
+      ? json({ error: "The saved provisioning result is no longer available." }, 409)
+      : provisioningResponse(env, replay, true);
+  }
+
+  const recovered = await getPendingProvisioning(env, eventId, actor.id);
+  if (recovered !== null) return provisioningResponse(env, recovered, true);
+
+  const event = await env.DB.prepare(
+    `SELECT id FROM events
+      WHERE id = ? AND status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')`,
+  ).bind(eventId).first<{ id: string }>();
+  if (event === null) return json({ error: "Duck provisioning is closed for this event." }, 409);
+
+  const now = new Date().toISOString();
+  const duckId = crypto.randomUUID();
+  const tagId = crypto.randomUUID();
+  const token = generateTagToken();
+  const auditDetails = JSON.stringify({ staff_profile_id: actor.id, tag_id: tagId });
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
+         SELECT ?, e.id, '${provisioningStartCommand}', ?, ?, ?, ?
+           FROM events e
+          WHERE e.id = ?
+            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
+            AND COALESCE((SELECT MAX(visible_number) FROM ducks), 0) < 999999999
+            AND NOT EXISTS (
+              SELECT 1
+                FROM race_commands pending_rc
+                JOIN audit_events pending_ae
+                  ON pending_ae.command_id = pending_rc.id
+                 AND pending_ae.action = 'DUCK_PROVISIONING_STARTED'
+                JOIN ducks pending_d ON pending_d.id = pending_rc.result_id
+                JOIN duck_tags pending_dt
+                  ON pending_dt.duck_id = pending_d.id AND pending_dt.status = 'RESERVED'
+               WHERE pending_rc.event_id = e.id
+                  AND pending_rc.command_type = '${provisioningStartCommand}'
+                  AND json_extract((
+                    SELECT current_owner.details_json
+                      FROM audit_events current_owner
+                     WHERE current_owner.event_id = pending_rc.event_id
+                       AND current_owner.subject_type = 'DUCK'
+                       AND current_owner.subject_id = pending_d.id
+                       AND current_owner.action IN ('DUCK_PROVISIONING_STARTED', 'DUCK_PROVISIONING_TAKEN_OVER')
+                     ORDER BY current_owner.occurred_at DESC, current_owner.id DESC
+                     LIMIT 1
+                  ), '$.staff_profile_id') = ?
+                  AND pending_d.inventory_status = 'NEW'
+                  AND pending_d.physical_condition = 'NEEDS_TAG'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM event_ducks pending_ed
+                    WHERE pending_ed.duck_id = pending_d.id AND pending_ed.released_at IS NULL
+                 )
+            )`,
+      ).bind(commandId, duckId, now, now, fingerprint, eventId, actor.id),
+      env.DB.prepare(
+        `INSERT INTO ducks
+          (id, visible_number, inventory_status, inventory_status_changed_at,
+           physical_condition, storage_location, created_at, updated_at)
+         SELECT ?, (SELECT COALESCE(MAX(visible_number), 0) + 1 FROM ducks),
+                'NEW', ?, 'NEEDS_TAG', ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM race_commands
+             WHERE id = ? AND command_type = '${provisioningStartCommand}' AND result_id = ?
+          )`,
+      ).bind(duckId, now, location, now, now, commandId, duckId),
+      env.DB.prepare(
+        `INSERT INTO duck_tags
+          (id, duck_id, token, status, created_at, updated_at)
+         SELECT ?, ?, ?, 'RESERVED', ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM race_commands
+             WHERE id = ? AND command_type = '${provisioningStartCommand}' AND result_id = ?
+          )`,
+      ).bind(tagId, duckId, token, now, now, commandId, duckId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         SELECT ?, ?, ?, 'DUCK_PROVISIONING_STARTED', 'DUCK', ?, 'STAFF', ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM race_commands
+             WHERE id = ? AND command_type = '${provisioningStartCommand}' AND result_id = ?
+          )`,
+      ).bind(crypto.randomUUID(), eventId, commandId, duckId, now, auditDetails, commandId, duckId),
+    ]);
+  } catch {
+    const racedCommand = await getProvisioningCommand(env, commandId);
+    if (
+      racedCommand !== null
+      && racedCommand.event_id === eventId
+      && racedCommand.command_type === provisioningStartCommand
+      && racedCommand.request_fingerprint === fingerprint
+    ) {
+      const replay = await getProvisioningByCommand(env, commandId, actor.id);
+      if (replay !== null) return provisioningResponse(env, replay, true);
+    }
+    const racedPending = await getPendingProvisioning(env, eventId, actor.id);
+    if (racedPending !== null) return provisioningResponse(env, racedPending, true);
+    return json({ error: "Duck provisioning conflicted with another inventory update. Retap the same sticker." }, 409);
+  }
+
+  const created = await getProvisioningByCommand(env, commandId, actor.id);
+  if (created !== null) return provisioningResponse(env, created, false, 201);
+  const concurrent = await getPendingProvisioning(env, eventId, actor.id);
+  return concurrent === null
+    ? json({ error: "Duck provisioning could not reserve a pending tag." }, 409)
+    : provisioningResponse(env, concurrent, true);
+};
+
+interface ProvisioningTagRow {
+  duck_id: string;
+  visible_number: number;
+  tag_status: string;
+  inventory_status: string;
+  event_id: string | null;
+  provisioning_command_id: string | null;
+  provisioning_event_id: string | null;
+  provisioning_owner_id: string | null;
+}
+
+const classifyProvisioningTag = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  const eventId = payload?.eventId;
+  const token = canonicalTagToken(payload?.tagUrl, env.APP_ORIGIN);
+  if (!validEventId(eventId) || token === null) {
+    return json({ error: "A valid event and canonical QuickDucks tag URL are required." }, 400);
+  }
+  const pending = await getPendingProvisioning(env, eventId, actor.id);
+  if (pending !== null && pending.tag_token !== token) {
+    return json({
+      kind: "mismatch",
+      message: "Finish the pending sticker before tapping another QuickDucks tag. Do not overwrite this sticker.",
+    });
+  }
+  const tag = await env.DB.prepare(
+    `SELECT d.id AS duck_id, d.visible_number, d.inventory_status,
+            dt.status AS tag_status, ed.event_id,
+             rc.id AS provisioning_command_id,
+             rc.event_id AS provisioning_event_id,
+             json_extract((
+               SELECT owner_ae.details_json
+                 FROM audit_events owner_ae
+                WHERE owner_ae.event_id = rc.event_id
+                  AND owner_ae.subject_type = 'DUCK'
+                  AND owner_ae.subject_id = d.id
+                  AND owner_ae.action IN ('DUCK_PROVISIONING_STARTED', 'DUCK_PROVISIONING_TAKEN_OVER')
+                ORDER BY owner_ae.occurred_at DESC, owner_ae.id DESC
+                LIMIT 1
+             ), '$.staff_profile_id') AS provisioning_owner_id
+        FROM duck_tags dt
+       JOIN ducks d ON d.id = dt.duck_id
+       LEFT JOIN event_ducks ed
+         ON ed.duck_id = d.id AND ed.released_at IS NULL
+       LEFT JOIN race_commands rc
+         ON rc.result_id = d.id AND rc.command_type = '${provisioningStartCommand}'
+       WHERE dt.token = ?
+      ORDER BY CASE dt.status WHEN 'ACTIVE' THEN 0 WHEN 'RESERVED' THEN 1 ELSE 2 END
+      LIMIT 1`,
+  ).bind(token).first<ProvisioningTagRow>();
+  if (tag === null) {
+    return json({ kind: "mismatch", message: "That QuickDucks URL is unknown. Do not overwrite this sticker." });
+  }
+  if (tag.tag_status === "ACTIVE" && tag.event_id === eventId) {
+    return json({ kind: "already", duck: { id: tag.duck_id, visibleNumber: tag.visible_number } });
+  }
+  if (
+    tag.tag_status === "RESERVED"
+    && tag.inventory_status === "NEW"
+    && tag.provisioning_event_id === eventId
+    && tag.provisioning_owner_id === actor.id
+    && tag.provisioning_command_id !== null
+  ) {
+    return json({ kind: "pending", duckId: tag.duck_id, provisioningCommandId: tag.provisioning_command_id });
+  }
+  return json({ kind: "mismatch", message: "That QuickDucks sticker belongs to different inventory. Do not overwrite it." });
+};
+
+const confirmProvisioning = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const eventId = payload?.eventId;
+  const duckId = payload?.duckId;
+  const startCommandId = payload?.provisioningCommandId;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || !validEventId(eventId) || typeof duckId !== "string" || !validEntityId(duckId)
+    || typeof startCommandId !== "string" || !isCommandId(startCommandId)
+    || payload?.physicalWriteVerified !== true
+  ) {
+    return json({ error: "Command, event, pending provisioning, duck, and successful physical write are required." }, 400);
+  }
+  const requestDetails = { duckId, provisioningCommandId: startCommandId, physicalWriteVerified: true };
+  const fingerprint = await provisioningFingerprint(
+    provisioningConfirmCommand,
+    actor.id,
+    eventId,
+    requestDetails,
+  );
+  const previous = await getProvisioningCommand(env, commandId);
+  if (previous !== null) {
+    if (
+      previous.event_id !== eventId
+      || previous.command_type !== provisioningConfirmCommand
+      || previous.result_id !== duckId
+      || previous.request_fingerprint !== fingerprint
+    ) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const replay = await getIntakeResult(env, duckId, eventId);
+    return replay === null
+      ? json({ error: "The saved provisioning confirmation is no longer available." }, 409)
+      : intakeResponse(replay, true);
+  }
+
+  const provisioning = await getProvisioningByCommand(env, startCommandId, actor.id);
+  if (provisioning === null || provisioning.event_id !== eventId || provisioning.duck_id !== duckId) {
+    return json({ error: "Pending provisioning was not found for this operator and event." }, 404);
+  }
+  if (provisioning.event_duck_id !== null) {
+    const already = await getIntakeResult(env, duckId, eventId);
+    return already === null
+      ? json({ error: "The confirmed provisioning result is unavailable." }, 409)
+      : intakeResponse(already, true);
+  }
+  if (
+    provisioning.inventory_status !== "NEW"
+    || provisioning.physical_condition !== "NEEDS_TAG"
+    || provisioning.tag_status !== "RESERVED"
+    || provisioning.event_duck_id !== null
+  ) {
+    return json({ error: "This provisioning is not waiting for NFC confirmation." }, 409);
+  }
+
+  const event = await env.DB.prepare(
+    `SELECT id FROM events
+      WHERE id = ? AND status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')`,
+  ).bind(eventId).first<{ id: string }>();
+  if (event === null) return json({ error: "Duck provisioning confirmation is closed for this event." }, 409);
+
+  const now = new Date().toISOString();
+  const eventDuckId = crypto.randomUUID();
+  const details = JSON.stringify({ request: requestDetails, tag_id: provisioning.tag_id, event_duck_id: eventDuckId });
+  const auditDetails = JSON.stringify({
+    staff_profile_id: actor.id,
+    provisioning_command_id: startCommandId,
+    tag_id: provisioning.tag_id,
+    event_duck_id: eventDuckId,
+  });
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
+         SELECT ?, e.id, '${provisioningConfirmCommand}', d.id, ?, ?, ?
+           FROM events e
+           JOIN race_commands start_rc
+             ON start_rc.id = ? AND start_rc.event_id = e.id
+            AND start_rc.command_type = '${provisioningStartCommand}'
+           JOIN audit_events start_ae
+              ON start_ae.command_id = start_rc.id
+             AND start_ae.action = 'DUCK_PROVISIONING_STARTED'
+           JOIN ducks d ON d.id = start_rc.result_id
+           JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'RESERVED'
+          WHERE e.id = ?
+            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
+             AND d.id = ?
+             AND d.inventory_status = 'NEW'
+             AND d.physical_condition = 'NEEDS_TAG'
+             AND json_extract((
+               SELECT current_owner.details_json
+                 FROM audit_events current_owner
+                WHERE current_owner.event_id = e.id
+                  AND current_owner.subject_type = 'DUCK'
+                  AND current_owner.subject_id = d.id
+                  AND current_owner.action IN ('DUCK_PROVISIONING_STARTED', 'DUCK_PROVISIONING_TAKEN_OVER')
+                ORDER BY current_owner.occurred_at DESC, current_owner.id DESC
+                LIMIT 1
+             ), '$.staff_profile_id') = ?
+             AND NOT EXISTS (
+              SELECT 1 FROM event_ducks ed WHERE ed.duck_id = d.id AND ed.released_at IS NULL
+            )`,
+      ).bind(commandId, now, now, fingerprint, startCommandId, eventId, duckId, actor.id),
+      env.DB.prepare(
+        `UPDATE ducks
+            SET inventory_status = 'RESERVED_FOR_EVENT', inventory_status_changed_at = ?,
+                physical_condition = 'GOOD', updated_at = ?, revision = revision + 1
+          WHERE id = ? AND inventory_status = 'NEW' AND physical_condition = 'NEEDS_TAG'
+            AND EXISTS (
+              SELECT 1 FROM race_commands
+               WHERE id = ? AND command_type = '${provisioningConfirmCommand}' AND result_id = ?
+            )`,
+      ).bind(now, now, duckId, commandId, duckId),
+      env.DB.prepare(
+        `UPDATE duck_tags
+            SET status = 'ACTIVE', written_at = ?, verified_at = ?, activated_at = ?, updated_at = ?
+          WHERE id = ? AND duck_id = ? AND status = 'RESERVED'
+            AND EXISTS (
+              SELECT 1 FROM race_commands
+               WHERE id = ? AND command_type = '${provisioningConfirmCommand}' AND result_id = ?
+            )`,
+      ).bind(now, now, now, now, provisioning.tag_id, duckId, commandId, duckId),
+      env.DB.prepare(
+        `INSERT INTO event_ducks
+          (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+         SELECT ?, ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM race_commands
+             WHERE id = ? AND command_type = '${provisioningConfirmCommand}' AND result_id = ?
+          )`,
+      ).bind(eventDuckId, eventId, duckId, now, actor.id, commandId, duckId),
+      env.DB.prepare(
+        `INSERT INTO duck_inventory_events
+          (id, event_id, duck_id, action, actor_staff_profile_id,
+           source_command_id, occurred_at, details_json)
+         SELECT ?, ?, ?, 'DUCK_INTAKE', ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM race_commands
+             WHERE id = ? AND command_type = '${provisioningConfirmCommand}' AND result_id = ?
+          )`,
+      ).bind(crypto.randomUUID(), eventId, duckId, actor.id, commandId, now, details, commandId, duckId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         SELECT ?, ?, ?, 'DUCK_PROVISIONED_FOR_EVENT', 'DUCK', ?, 'STAFF', ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM race_commands
+             WHERE id = ? AND command_type = '${provisioningConfirmCommand}' AND result_id = ?
+          )`,
+      ).bind(crypto.randomUUID(), eventId, commandId, duckId, now, auditDetails, commandId, duckId),
+    ]);
+  } catch {
+    const racedCommand = await getProvisioningCommand(env, commandId);
+    if (
+      racedCommand !== null
+      && racedCommand.event_id === eventId
+      && racedCommand.command_type === provisioningConfirmCommand
+      && racedCommand.result_id === duckId
+      && racedCommand.request_fingerprint === fingerprint
+    ) {
+      const replay = await getIntakeResult(env, duckId, eventId);
+      if (replay !== null) return intakeResponse(replay, true);
+    }
+    const concurrentlyConfirmed = await getIntakeResult(env, duckId, eventId);
+    if (concurrentlyConfirmed !== null) return intakeResponse(concurrentlyConfirmed, true);
+    return json({ error: "Provisioning confirmation conflicted with another update. Retap the same sticker." }, 409);
+  }
+
+  const committedCommand = await getProvisioningCommand(env, commandId);
+  const confirmed = await getIntakeResult(env, duckId, eventId);
+  if (
+    confirmed !== null
+    && committedCommand !== null
+    && committedCommand.event_id === eventId
+    && committedCommand.command_type === provisioningConfirmCommand
+    && committedCommand.result_id === duckId
+    && committedCommand.request_fingerprint === fingerprint
+  ) {
+    return intakeResponse(confirmed, false);
+  }
+  return confirmed === null
+    ? json({ error: "Provisioning confirmation did not complete. Retap the same sticker." }, 409)
+    : intakeResponse(confirmed, true);
 };
 
 interface EditableDuckRow {
@@ -1653,6 +2469,30 @@ export const handleDuckOperations = async (
   const denied = requireAnyRole(actor, ["DUCK_MANAGER", "RACE_DIRECTOR"]);
   if (denied !== null) return denied;
   const includePii = canViewParticipantPii(actor);
+
+  if (url.pathname === `${inventoryPath}/provisioning`) {
+    if (request.method === "GET") return recoverProvisioning(url, env, actor);
+    if (request.method === "POST") return startProvisioning(request, env, actor);
+    return json({ error: "Method not allowed." }, 405);
+  }
+
+  if (url.pathname === `${inventoryPath}/provisioning/classify`) {
+    return request.method === "POST"
+      ? classifyProvisioningTag(request, env, actor)
+      : json({ error: "Method not allowed." }, 405);
+  }
+
+  if (url.pathname === `${inventoryPath}/provisioning/takeover`) {
+    return request.method === "POST"
+      ? takeoverProvisioning(request, env, actor)
+      : json({ error: "Method not allowed." }, 405);
+  }
+
+  if (url.pathname === `${inventoryPath}/provisioning/confirm`) {
+    return request.method === "POST"
+      ? confirmProvisioning(request, env, actor)
+      : json({ error: "Method not allowed." }, 405);
+  }
 
   if (url.pathname === `${inventoryPath}/ducks`) {
     if (request.method === "GET") return listDucks(env, includePii);

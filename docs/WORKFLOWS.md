@@ -41,6 +41,7 @@ not authorized.
 | Participant disqualification/reactivation | `RACE_DIRECTOR` | Yes |
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Duck inventory intake/edit, tag, assignment, unassignment, reservation, and inspection | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
 | Event list/detail context | Any operational role | Yes |
 | Event readiness, heat list/detail/announcer-roster, result, and finalist reads | `ANNOUNCER`, `HEAT_RUNNER`, `RESULT_TAKER`, or `RACE_DIRECTOR` | Yes |
 | Lock, ready, call, and start heat | `HEAT_RUNNER` or `RACE_DIRECTOR` | Yes |
@@ -315,12 +316,29 @@ current assignment or suppress the pairing prompt after unassignment.
 During `COMPLETED` or `RETURN_PROCESSING`, the same page offers disposition entry
 or correction.
 
-**Implemented exception for the finish line:** `/staff/finish-line` can read an
-NFC URL through Android Web NFC when `NDEFReader` is available. Its first-class
+**Implemented scan stations:** `/staff/finish-line` can read an NFC URL through
+Android Web NFC when `NDEFReader` is available. Its first-class
 manual field also accepts a pasted canonical tag URL or visible duck number.
 Both paths only select a roster entry; neither submits a result. Camera QR APIs,
-tag writing/provisioning, and a generic scan screen remain deferred. Response
-headers continue to disable browser camera access.
+inventory tag provisioning, and camera scanning remain separate from the finish
+station.
+Response headers continue to disable browser camera access.
+
+`/staff/inventory-intake` is the dedicated Android station that provisions blank
+writable NDEF stickers. A duck manager, race director, or administrator selects
+the race and optional station location and presses Start once. That user gesture
+starts one `NDEFReader.scan()` in current Android Chrome over HTTPS; the top-level
+page must remain visible. Each subsequent physical reading writes and confirms
+one sticker without a per-duck form, printed number, pasted URL, condition,
+presence checkbox, or desktop fallback.
+
+QuickDucks generates the UUID, next globally unique positive internal number,
+and random 32-byte base64url token. The number remains an internal inventory
+identifier; it is not input from or required to be printed on the duck. The
+browser writes exactly `APP_ORIGIN/t/<token>` as one URL record and does not make
+the tag read-only. NFC hardware serial numbers are used only as transient
+in-memory read debouncing; they are never persisted, transmitted, displayed,
+logged, or used as duck identity.
 
 On iPhone, the operating system opens `/t/<tag-token>`. While a running or
 awaiting-result heat is displayed, the finish station keeps a one-minute
@@ -340,14 +358,31 @@ using authorization code, OAuth state, and PKCE. After the callback exchanges
 the code, QuickDucks verifies the Cognito access token and requires a matching
 active staff profile.
 
-The browser session is a `Secure`, `HttpOnly`, `SameSite=Lax`, host-only cookie.
-Its lifetime is capped at one hour by QuickDucks. Staff API clients may instead
-use an explicit Cognito Bearer access token. Sign-out clears the local cookie
-and redirects through Cognito logout.
+The browser session uses separate `Secure`, `HttpOnly`, `SameSite=Lax`, host-only
+access and refresh cookies. Access and ID tokens remain valid for at most 15
+minutes. The browser silently rotates both cookies through Cognito as needed,
+without exposing the refresh token to JavaScript, responses, URLs, logs, or D1.
+Cognito's rotating refresh token has an absolute seven-day provider validity, so
+the browser remains signed in for up to seven days from sign-in and rotation
+does not extend that deadline. A Cognito `400` or `401`, or a malformed
+successful token response, clears both cookies. Network failures, `408`, `429`,
+and `5xx` responses fail closed for that request but preserve the existing
+refresh cookie unchanged so a reload can retry. Staff API clients may instead
+use an explicit Cognito Bearer access token; Bearer requests are never refreshed.
 
 Cookie-authenticated mutations require an exact application `Origin` header.
-If a session expires while using the console, the browser returns to staff
-sign-in. A scan page preserves its path as a safe same-origin return target.
+Sign-out is a same-origin `POST`; it requires the exact application `Origin`, or
+when a browser omits `Origin`, a `Referer` whose parsed origin matches exactly.
+Requests without that provenance do not revoke or clear anything. Accepted
+sign-out requests revoke the refresh token best-effort, clear both local cookies,
+and redirect through Cognito logout even when revocation has a network failure
+or non-2xx response. This deliberately favors reliable local logout. Cognito
+revocation is not observed immediately by offline JWT verification, so a copied
+access token can retain residual validity for at most 15 minutes. Every request
+still performs the live `staff_profiles.is_active = 1` D1 check, so staff
+deactivation fails closed immediately. After the seven-day provider session
+expires, the browser returns to staff sign-in. A scan page preserves its path as
+a safe same-origin return target.
 
 The staff home shows role-aware links to the focused start-line and finish-line
 pages. Hidden links are only a convenience; each page and every API it calls
@@ -355,8 +390,11 @@ repeat authentication, active-profile, role, event-state, heat-state, and
 revision checks.
 
 **Operator step:** sign in and load the console on every intended device before
-race operations. Do not assume the browser remains authorized beyond one hour.
-There is no offline session or cached staff authorization.
+race operations. Do not assume the browser remains authorized beyond seven days.
+There is no offline session or cached staff authorization. Every authenticated
+request loads the active staff profile live; deactivation blocks access.
+Cognito revocation or global sign-out prevents further refresh but does not make
+offline verification of an already issued access token observe revocation.
 
 ## Event Setup and Lifecycle
 
@@ -411,6 +449,7 @@ checks pass:
 - No registration remains `SUBMITTED`.
 - Every active participant has a current duck assignment.
 - Every active participant has a round-one heat entry.
+- No blank-sticker provisioning remains pending physical-write confirmation.
 - At least one round-one heat exists.
 - The round-one heat count does not exceed final capacity.
 - Every round-one heat is still `PLANNED`, `LOADING`, or `READY`.
@@ -419,6 +458,16 @@ checks pass:
 administrative disqualification before starting. A heat cannot lock while its
 roster contains a participant who is not `ACTIVE`; update the still-planned,
 unlocked roster before proceeding.
+
+Registration can close while a sticker is pending, and its owning operator can
+still confirm it during `REGISTRATION_CLOSED`. Round one remains blocked until
+every `START_DUCK_PROVISIONING` record still joined to a `NEW`/`NEEDS_TAG` duck,
+`RESERVED` tag, and no active event reservation has been confirmed. The server
+checks this both in readiness and inside the atomic round-start command so a
+concurrent provisioning transition cannot strand a written sticker. An
+abandoned pending record is not discarded to bypass readiness: a race director
+or administrator must safely take it over and recover or confirm the exact
+sticker first.
 
 ### Start Final and Complete Event
 
@@ -476,26 +525,94 @@ locking and avoid creating a stranded empty heat.
 
 ### Intake
 
-Duck managers, race directors, and administrators can intake a duck during `DRAFT`,
-`REGISTRATION_OPEN`, or `REGISTRATION_CLOSED`. The form requires:
+Duck managers, race directors, and administrators can provision and reserve a
+duck during `DRAFT`, `REGISTRATION_OPEN`, or `REGISTRATION_CLOSED`. The normal
+staff console still exposes the older explicit inventory form for supervised
+administrative work, but it is not a fallback inside the dedicated station.
+`/staff/inventory-intake` has no per-duck number, token, URL, condition, notes,
+or physical-presence inputs. The operator selects the event and may set one
+station-level storage location of at most 100 characters.
 
-- The selected event.
-- A unique visible number.
-- A 22-to-128-character base64url-style tag token.
-- Physical condition: good, needs tag, damaged, or retired.
-- Optional storage location and notes.
-- Affirmative confirmation that the physical duck and tag are present.
+Blank-sticker provisioning uses a durable two-phase protocol:
 
-One atomic command creates the duck, an immediately `ACTIVE` tag mapping, an
-event reservation, inventory history, and audit history. Good ducks become
-`RESERVED_FOR_EVENT`; other conditions project to quarantined, damaged, or
-retired inventory states.
+1. `POST /api/v1/staff/inventory/provisioning` accepts an idempotent command ID,
+   event ID, and optional location. In one write transaction it allocates the
+   UUID, computes the next globally unique positive internal number as
+   `MAX(visible_number) + 1`, generates a cryptographically random 32-byte
+   base64url token, creates a `NEW`/`NEEDS_TAG` duck and `RESERVED` tag, and
+   records a redacted command/audit association with the actor. The raw token is
+   present only in the tag row and authorized no-store response, never command
+   fingerprints or audit details.
+2. The pending record does not create `event_ducks`, does not increment
+   `summary.eventDucks`, has no intake inventory event, and cannot resolve as an
+   active public tag. `GET /api/v1/staff/inventory/provisioning?eventId=...`
+   immediately returns only the current owner's oldest pending record and exact
+   URL for that event. A new start request recovers it instead of allocating
+   another duck. It never automatically returns another operator's URL.
+3. After Web NFC `write()` resolves, an independently idempotent
+   `POST /api/v1/staff/inventory/provisioning/confirm` atomically changes the duck
+   to `GOOD`/`RESERVED_FOR_EVENT`, changes the tag to `ACTIVE` with written,
+   verified, and activated timestamps, creates the event reservation and
+   `DUCK_INTAKE` history, and writes redacted audit history. Event state and
+   pending ownership/state are guarded again inside the transaction. Same-command
+   replay and a concurrent second confirmation return the authoritative existing
+   result without duplicating the reservation or history.
+4. If the owning station is abandoned, the pending record remains protected for
+   at least 10 minutes after its latest start or takeover ownership audit. After
+   that interval, recovery may show a race director or administrator only the
+   pending duck's internal number and an explicit takeover action. A duck manager
+   alone cannot take over it, and no tag URL is disclosed before takeover.
+   Confirming the action atomically records a redacted
+   `DUCK_PROVISIONING_TAKEN_OVER` audit naming the prior and new staff profile
+   IDs. The new owner can then recover the exact URL and confirm; the prior owner
+   immediately loses recovery, classification, and confirmation access. Each
+   takeover starts a new 10-minute ownership-protection interval so concurrent
+   stations cannot steal live work. Start audits remain immutable, and command
+   reuse plus pending/event guards make takeover idempotent and race-safe.
 
-**Operator step:** obtain the token from, or write it to, the physical NFC/QR
-tag before intake and verify that it opens the intended permanent URL. Current
-QuickDucks does not reserve a token, invoke Web NFC, write a tag, or perform a
-separate read-back verification. The intake confirmation is the application's
-only verification evidence.
+**Operator step:** in current Android Chrome on an NFC-capable device, keep the
+top-level HTTPS page visible and online. Select the race, optionally enter the
+station location, and press Start once. Then tap one blank writable NDEF sticker,
+hold it still until the station beeps/vibrates and displays success, remove that
+duck during the short **Remove duck** state, and immediately tap the next one.
+QuickDucks automatically writes exactly one URL record containing the canonical
+`https://quickducks.com/t/<token>` URL. It uses successful `write()` resolution
+as physical-write verification and does not call `makeReadOnly`, preserving the
+controlled tag-replacement workflow.
+
+The browser allows one operation in flight and has no scan queue. It uses an NFC
+hardware serial only as an in-memory same-reading debounce and never as duck
+identity. A failed or interrupted write retains the same pending URL and both
+command IDs; a blank retap retries the same URL and no new duck is allocated. If
+the physical write succeeded but confirmation is uncertain, retapping its exact
+canonical URL retries confirmation without rewriting. Reloading recovers the
+pending record from the server; reading that exact recovered URL treats the
+physical write as complete and proceeds directly to confirmation without another
+`write()` call. The station pre-arms recovery after success but does not allocate
+the next duck until the next physical reading.
+
+If a reading already contains an exact canonical QuickDucks URL, the browser
+classifies it through the protected provisioning endpoint before any write. With
+no pending operation, an active tag reserved for the selected event reports
+**Already provisioned**, refreshes the authoritative count, and does not increment
+**Added this session**. While provisioning is pending, only the current actor's
+exact pending URL can finish it. Every other canonical URL, including another
+active selected-event tag, produces a sticky **finish the pending sticker**
+mismatch without clearing command IDs, allocating a duck, cloning the pending URL,
+or changing either count. Unknown, different-event, or different-actor canonical
+URLs are likewise never adopted or overwritten. Blank tags and unrelated NDEF
+content may be overwritten after the station starts.
+
+The station's session count and DOM-built history contain outcomes only, never
+the raw token or permanent URL. Provisioning is online-only and requires current
+staff authentication, live authorization, same-origin cookie mutation
+protection, and live API access. Unsupported platforms receive Android
+Chrome/HTTPS/top-level/visible-page instructions. There is no pasted URL,
+manual-number, desktop, offline queue, service-worker cache, or background retry
+fallback. Takeover target IDs and internal number are non-sensitive recovery
+metadata; after a successful takeover, the recovered URL remains only in the
+station's in-memory provisioning state and is not placed in DOM, browser history,
+or logs.
 
 ### Inventory Editing and Label Data
 
@@ -531,7 +648,7 @@ The normal pairing workflow is:
 1. The participant selects a physical duck.
 2. Logged-in staff open that duck's NFC/QR URL.
 3. QuickDucks verifies the tag and displays the exact duck.
-4. Staff search the current event by lookup code or name.
+4. Staff search the current event by lookup code, name, phone, or email.
 5. Staff select an unpaired registration and review participant plus duck.
 6. Staff press the one confirmation button.
 7. QuickDucks atomically reserves the duck if needed, creates a current
@@ -1177,14 +1294,16 @@ Use these operating rules with older or non-technical staff:
    a tag cannot be opened. It is not a universal fallback for other workflows.
 9. Keep destructive administrator tasks separate from routine race operation.
    Purge requires return review, two typed confirmations, and a distinct claim.
-10. Do not teach unsupported offline, camera scan, NFC tag-writing/provisioning,
-    random-draw scanning, or email-notification procedures as if they work.
+10. Do not teach unsupported offline, camera scan, random-draw scanning, or
+    email-notification procedures as if they work. NFC writing works only in the
+    protected blank-sticker provisioning station.
 
 The UI still exposes race-entry IDs for inventory assignment and return-batch
 IDs for bulk work. A lead operator should prepare those workflows and supervise
 staff who are not comfortable with technical identifiers. There is no demo
-mode, task-specific help system, sound/vibration feedback, printed quick
-reference, or automated usability-test gate in the current application.
+mode, task-specific help system, printed quick reference, or automated
+usability-test gate in the current application. The provisioning station does
+provide success sound/vibration when the browser and device support them.
 
 ## Live Race Test Coverage
 
@@ -1204,7 +1323,11 @@ heat starts, round-one winners, final podium, empty state, and foreign keys. The
 complete race integration test verifies board state during round one, the
 running final, published podium, and completion; resolves round-one and final
 scans through real station handlers; and confirms mutation refresh signals
-contain only `type` and `version`.
+contain only `type` and `version`. Provisioning tests cover generated tokens and
+numbers, redacted audits, pending invisibility, actor/event recovery, command
+replay, phase gates, atomic confirmation, concurrent confirmation, exact Web NFC
+URL writes, same-tag debounce, write/confirm retry separation, unsafe sinks, and
+the full migrated-SQLite race workflow.
 
 ## Deliberately Deferred or Non-Operational Features
 
@@ -1214,10 +1337,8 @@ The following are not current operator workflows:
   complaint ingestion, and automatic retry processing.
 - Offline PWA shell, cached event data, IndexedDB command outbox, device claims,
   sync status, and offline conflict resolution.
-- Web NFC writing/provisioning, camera QR scanning, and general visible-number
-  fallback outside the finish and return stations.
-- Multi-stage tag reservation/written/verified activation; intake directly
-  creates an active tag after operator confirmation.
+- Camera QR scanning and general visible-number fallback outside the finish and
+  return stations.
 - Event-specific assignments; current roles are organization-wide.
 - Random draw scanning into balanced heat bags, heat claims, and undo-last heat
   loading.
@@ -1254,7 +1375,7 @@ Important reconciliations include:
 | Heat/final capacity compatibility is validated | Operators must verify it; current planning does not enforce final compatibility. |
 | Email assignment/upcoming/result messages are sent | Preference and support schema exist, but creation and delivery are not operational. |
 | Offline cache and outbox permit race-day work | Every authoritative operation is online-only. |
-| Protected Android Web NFC provisions tags | Staff manually enter an already written/verified token during intake. |
+| Protected Android Web NFC provisions tags | Implemented for blank writable NDEF stickers with durable reservation, write, confirmation, and recovery phases. |
 | QR and visible number are universal fallbacks | Opening the URL works; the finish station accepts canonical tag URLs or roster duck numbers, and returns accept numbers, but fallback is not universal. |
 | Private status shows duck, heat, and results | Current private status also includes privacy-filtered race progress and result state. |
 | Public event pages list all heat winners and podium | This is now implemented through the privacy-filtered live race board from registration-open through completed. |

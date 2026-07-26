@@ -7,6 +7,7 @@ import { authenticateStaff } from "./auth.ts";
 import { hasAnyRole } from "./authorization.ts";
 import {
   finishLineScript,
+  inventoryIntakeScript,
   liveScript,
   registrationScript,
   staffDuckScript,
@@ -24,6 +25,7 @@ import {
   renderStaffAuthError,
   renderStaffDuck,
   renderFinishLine,
+  renderInventoryIntake,
   renderStaffHome,
   renderStaffLogin,
   renderStaffPairing,
@@ -31,6 +33,7 @@ import {
   renderStatus,
 } from "./site.ts";
 import {
+  authenticateStaffSession,
   clearFailedOAuthCookie,
   completeStaffLogin,
   finishStaffLoginResponse,
@@ -82,12 +85,22 @@ const safeReturnTo = (value: string | null): string =>
 
 export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
+  tokenFetch: typeof fetch = fetch,
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const appOrigin = new URL(env.APP_ORIGIN);
     const localHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
     const localPreview = appOrigin.protocol === "http:" && localHosts.has(appOrigin.hostname);
+    let sessionAuthentication: Awaited<ReturnType<typeof authenticateStaffSession>> | undefined;
+    const authenticateRequest: typeof authenticateStaff = async (authRequest, authEnv) => {
+      sessionAuthentication ??= await authenticateStaffSession(authRequest, authEnv, authenticate, tokenFetch);
+      return sessionAuthentication.actor;
+    };
+    const withSessionCookies = (response: Response): Response => {
+      for (const cookie of sessionAuthentication?.setCookies ?? []) response.headers.append("set-cookie", cookie);
+      return response;
+    };
 
     if (!localPreview && url.origin !== appOrigin.origin) {
       const destination = new URL(`${url.pathname}${url.search}`, appOrigin);
@@ -132,7 +145,7 @@ export const createWorker = (
       });
     }
 
-    if (["/assets/register.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js"].includes(url.pathname)) {
+    if (["/assets/register.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)) {
       const script = url.pathname === "/assets/register.js"
         ? registrationScript
         : url.pathname === "/assets/staff-home.js"
@@ -141,11 +154,13 @@ export const createWorker = (
             ? liveScript
             : url.pathname === "/assets/start-line.js"
               ? startLineScript
-              : url.pathname === "/assets/finish-line.js" ? finishLineScript : staffDuckScript;
+              : url.pathname === "/assets/finish-line.js"
+                ? finishLineScript
+                : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": ["/assets/staff-duck.js", "/assets/start-line.js", "/assets/finish-line.js"].includes(url.pathname)
+          "cache-control": ["/assets/staff-duck.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)
             ? "no-store"
             : "public, max-age=3600",
           "content-type": "text/javascript; charset=utf-8",
@@ -174,7 +189,9 @@ export const createWorker = (
       });
     }
 
-    if (url.pathname.startsWith("/api/v1/")) return handleApi(request, env, authenticate, ctx);
+    if (url.pathname.startsWith("/api/v1/")) {
+      return withSessionCookies(await handleApi(request, env, authenticateRequest, ctx));
+    }
 
     if (url.pathname === "/" && request.method === "GET") {
       return html(renderHome());
@@ -209,7 +226,7 @@ export const createWorker = (
     }
 
     if (url.pathname === "/auth/callback" && request.method === "GET") {
-      const completion = await completeStaffLogin(request, env);
+      const completion = await completeStaffLogin(request, env, authenticate, tokenFetch);
       if (completion.ok) return withSecurityHeaders(finishStaffLoginResponse(completion));
       return new Response(renderStaffAuthError(completion.error), {
         status: completion.status,
@@ -224,47 +241,60 @@ export const createWorker = (
       });
     }
 
-    if (url.pathname === "/staff/logout" && request.method === "GET") {
-      return withSecurityHeaders(staffLogoutResponse(env));
+    if (url.pathname === "/staff/logout") {
+      return withSecurityHeaders(await staffLogoutResponse(request, env, tokenFetch));
     }
 
     if (url.pathname === "/staff" && request.method === "GET") {
-      const actor = await authenticate(request, env);
-      return actor === null
+      const actor = await authenticateRequest(request, env);
+      return withSessionCookies(actor === null
         ? html(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo"))), 200, true)
-        : html(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles), 200, true);
+        : html(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles), 200, true));
+    }
+
+    if (url.pathname === "/staff/inventory-intake" && request.method === "GET") {
+      const actor = await authenticateRequest(request, env);
+      if (actor === null) {
+        const login = new URL("/staff", env.APP_ORIGIN);
+        login.searchParams.set("returnTo", url.pathname);
+        return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
+      }
+      if (!hasAnyRole(actor, ["DUCK_MANAGER", "RACE_DIRECTOR"])) {
+        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use the inventory intake station."), 403, true));
+      }
+      return withSessionCookies(html(renderInventoryIntake(actor.displayName ?? actor.email, appOrigin.origin), 200, true));
     }
 
     if ((url.pathname === "/staff/start-line" || url.pathname === "/staff/finish-line") && request.method === "GET") {
-      const actor = await authenticate(request, env);
+      const actor = await authenticateRequest(request, env);
       if (actor === null) {
         const login = new URL("/staff", env.APP_ORIGIN);
         login.searchParams.set("returnTo", `${url.pathname}${url.search}`);
-        return new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } });
+        return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
       }
       const startLine = url.pathname === "/staff/start-line";
       const allowed = startLine
         ? hasAnyRole(actor, ["HEAT_RUNNER", "RACE_DIRECTOR"])
         : hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
       if (!allowed) {
-        return html(renderStaffAuthError(`This account does not have permission to use the ${startLine ? "start-line" : "finish-line"} station.`), 403, true);
+        return withSessionCookies(html(renderStaffAuthError(`This account does not have permission to use the ${startLine ? "start-line" : "finish-line"} station.`), 403, true));
       }
       const displayName = actor.displayName ?? actor.email;
-      return html(startLine ? renderStartLine(displayName) : renderFinishLine(displayName), 200, true);
+      return withSessionCookies(html(startLine ? renderStartLine(displayName) : renderFinishLine(displayName), 200, true));
     }
 
     const staffDuckMatch = url.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
     if (staffDuckMatch !== null && request.method === "GET") {
-      const actor = await authenticate(request, env);
+      const actor = await authenticateRequest(request, env);
       if (actor === null) {
         const login = new URL("/staff", env.APP_ORIGIN);
         login.searchParams.set("returnTo", url.pathname);
-        return new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } });
+        return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
       }
       if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"])) {
-        return html(renderStaffAuthError("This account does not have permission to inspect staff duck records."), 403, true);
+        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to inspect staff duck records."), 403, true));
       }
-      return html(renderStaffDuck(staffDuckMatch[1], actor.displayName ?? actor.email), 200, true);
+      return withSessionCookies(html(renderStaffDuck(staffDuckMatch[1], actor.displayName ?? actor.email), 200, true));
     }
 
     const privateStatusMatch = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);
@@ -277,17 +307,17 @@ export const createWorker = (
 
     const duckTagMatch = url.pathname.match(/^\/t\/([A-Za-z0-9_-]+)$/);
     if (duckTagMatch !== null && request.method === "GET") {
-      const actor = await authenticate(request, env);
+      const actor = await authenticateRequest(request, env);
       if (actor !== null) {
-        return new Response(null, {
+        return withSessionCookies(new Response(null, {
           status: 303,
           headers: { ...securityHeaders, location: `/staff/ducks/${duckTagMatch[1]}` },
-        });
+        }));
       }
       const status = await findDuckRaceStatus(duckTagMatch[1], env);
-      return status === null
+      return withSessionCookies(status === null
         ? new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } })
-        : html(renderDuck(status), 200, true);
+        : html(renderDuck(status), 200, true));
     }
 
     return html(renderNotFound(), 404, true);

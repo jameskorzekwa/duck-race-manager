@@ -1206,6 +1206,579 @@ if (finishRoot) {
 }
 `;
 
+export const inventoryIntakeHelpersScript = String.raw`
+const intakePreRaceStatuses = new Set(["DRAFT", "REGISTRATION_OPEN", "REGISTRATION_CLOSED"]);
+
+const intakeParseCanonicalTagUrl = (value, appOrigin) => {
+  if (typeof value !== "string") return null;
+  try {
+    const configured = new URL(appOrigin);
+    const parsed = new URL(value);
+    const match = parsed.pathname.match(/^\/t\/([A-Za-z0-9_-]{22,128})$/);
+    if (
+      configured.pathname !== "/" || configured.search || configured.hash
+      || parsed.origin !== configured.origin || parsed.username || parsed.password
+      || parsed.search || parsed.hash || match === null
+      || value !== configured.origin + "/t/" + match[1]
+    ) return null;
+    return value;
+  } catch {
+    return null;
+  }
+};
+
+const intakeCanonicalUrlFromMessage = (message, appOrigin, decode) => {
+  if (!message || !message.records) return null;
+  for (const record of message.records) {
+    if (record.recordType !== "url" && record.recordType !== "text") continue;
+    try {
+      const canonical = intakeParseCanonicalTagUrl(decode(record), appOrigin);
+      if (canonical) return canonical;
+    } catch {}
+  }
+  return null;
+};
+
+const intakeSafeTakeoverCandidate = (record) => {
+  if (
+    !record || record.takeoverAvailable !== true || typeof record.tagUrl === "string"
+    || typeof record.duckId !== "string" || typeof record.provisioningCommandId !== "string"
+    || !Number.isSafeInteger(record.visibleNumber) || record.visibleNumber <= 0
+  ) return null;
+  return {
+    duckId: record.duckId,
+    provisioningCommandId: record.provisioningCommandId,
+    visibleNumber: record.visibleNumber,
+  };
+};
+
+const intakeCreateProvisioningMachine = ({
+  eventId, location, recover, start, classify, write, confirm, refresh,
+  accepted, message, state, feedback,
+  commandId = () => crypto.randomUUID(),
+  scheduleReady = (callback) => setTimeout(callback, 900),
+}) => {
+  let pending = null;
+  let inFlight = false;
+  let removing = false;
+  let lastSerial = null;
+  let nextStartCommandId = commandId();
+
+  const adopt = (record) => {
+    if (!record || typeof record.tagUrl !== "string") return null;
+    if (
+      pending
+      && pending.duckId === record.duckId
+      && pending.provisioningCommandId === record.provisioningCommandId
+    ) return pending;
+    pending = {
+      duckId: record.duckId,
+      provisioningCommandId: record.provisioningCommandId,
+      confirmCommandId: commandId(),
+      tagUrl: record.tagUrl,
+      writeResolved: false,
+    };
+    return pending;
+  };
+
+  const recoverPending = async () => {
+    const selectedEventId = eventId();
+    if (!selectedEventId) return null;
+    const record = await recover(selectedEventId);
+    if (record) adopt(record);
+    return pending;
+  };
+
+  const beginRemove = () => {
+    removing = true;
+    state("remove");
+    message("Success. Remove this duck before presenting the next sticker.", false);
+    scheduleReady(() => {
+      removing = false;
+      state("ready");
+      message("Ready. Tap the next blank writable sticker.", false);
+    });
+  };
+
+  const refreshAfterOutcome = async () => {
+    try {
+      await refresh();
+    } catch {
+      message("The sticker is provisioned, but the authoritative race count could not refresh. Stay online and refresh before continuing.", true);
+    }
+  };
+
+  const reading = async ({ serialNumber, canonicalUrl }) => {
+    const transientSerial = typeof serialNumber === "string" && serialNumber ? serialNumber : null;
+    if (inFlight || removing) return { accepted: false, reason: "busy" };
+    if (transientSerial !== null && transientSerial === lastSerial) {
+      return { accepted: false, reason: "repeated" };
+    }
+    lastSerial = transientSerial;
+    inFlight = true;
+    try {
+      const selectedEventId = eventId();
+      if (!selectedEventId) {
+        state("error");
+        message("Select a race before starting NFC provisioning.", true);
+        return { accepted: false, reason: "event" };
+      }
+
+      let classification = null;
+      if (canonicalUrl) {
+        if (pending && canonicalUrl !== pending.tagUrl) {
+          state("error");
+          message("Finish the pending sticker before tapping another QuickDucks tag. Do not overwrite this sticker.", true);
+          return { accepted: false, reason: "mismatch" };
+        }
+        state("checking");
+        message("Checking the QuickDucks URL already on this sticker.", false);
+        try {
+          classification = await classify({ eventId: selectedEventId, tagUrl: canonicalUrl });
+        } catch {
+          lastSerial = null;
+          state("error");
+          message("The existing sticker could not be classified online. Retap the same sticker; nothing was written.", true);
+          return { accepted: false, reason: "classify-uncertain" };
+        }
+        if (classification.kind === "already") {
+          pending = null;
+          nextStartCommandId = commandId();
+          accepted({ outcome: "already" });
+          await refreshAfterOutcome();
+          feedback("already");
+          beginRemove();
+          return { accepted: true, outcome: "already" };
+        }
+        if (classification.kind !== "pending") {
+          state("error");
+          message(classification.message || "That QuickDucks sticker does not belong to this provisioning station. Do not overwrite it.", true);
+          return { accepted: false, reason: "mismatch" };
+        }
+        if (!pending) {
+          try {
+            await recoverPending();
+          } catch {
+            lastSerial = null;
+            state("error");
+            message("The pending sticker could not be recovered online. Retap it after connectivity returns.", true);
+            return { accepted: false, reason: "recover-uncertain" };
+          }
+        }
+        if (
+          !pending
+          || pending.duckId !== classification.duckId
+          || pending.provisioningCommandId !== classification.provisioningCommandId
+          || pending.tagUrl !== canonicalUrl
+        ) {
+          state("error");
+          message("That pending QuickDucks sticker belongs to different inventory. Do not overwrite it.", true);
+          return { accepted: false, reason: "mismatch" };
+        }
+        pending.writeResolved = true;
+      }
+
+      if (!pending) {
+        state("reserving");
+        message("Reserving a permanent QuickDucks URL for this blank sticker.", false);
+        try {
+          const created = await start({
+            commandId: nextStartCommandId,
+            eventId: selectedEventId,
+            location: location() || null,
+          });
+          if (created.status === "CONFIRMED") {
+            nextStartCommandId = commandId();
+            accepted({ outcome: "already" });
+            await refreshAfterOutcome();
+            feedback("already");
+            beginRemove();
+            return { accepted: true, outcome: "already" };
+          }
+          if (!adopt(created)) throw new Error("invalid-pending");
+        } catch {
+          lastSerial = null;
+          state("error");
+          message("A permanent URL could not be reserved online. Retap this same blank sticker; nothing was written.", true);
+          return { accepted: false, reason: "start-uncertain" };
+        }
+      }
+
+      if (pending.writeResolved) {
+        if (canonicalUrl !== pending.tagUrl) {
+          state("error");
+          message("Confirmation is still pending. Retap the same sticker that was just written; no new duck was allocated.", true);
+          return { accepted: false, reason: "wrong-confirmation-tag" };
+        }
+      } else {
+        state("writing");
+        message("Hold the sticker still while QuickDucks writes its permanent URL.", false);
+        try {
+          await write(pending.tagUrl);
+          pending.writeResolved = true;
+        } catch {
+          lastSerial = null;
+          state("error");
+          message("The NFC write did not finish. Retap this same sticker; QuickDucks will retry the same reserved URL.", true);
+          return { accepted: false, reason: "write-failed" };
+        }
+      }
+
+      state("confirming");
+      message("The sticker was written. Confirming its race reservation online.", false);
+      let result;
+      try {
+        result = await confirm({
+          commandId: pending.confirmCommandId,
+          eventId: selectedEventId,
+          duckId: pending.duckId,
+          provisioningCommandId: pending.provisioningCommandId,
+          physicalWriteVerified: true,
+        });
+      } catch (error) {
+        lastSerial = null;
+        state("error");
+        message(error && Number.isInteger(error.status)
+          ? "The written sticker could not be confirmed for this race. Keep it separate and retap it after resolving the event state."
+          : "The sticker was written, but confirmation is uncertain. Retap this same sticker; QuickDucks will retry confirmation without rewriting it.", true);
+        return { accepted: false, reason: "confirm-uncertain" };
+      }
+
+      pending = null;
+      nextStartCommandId = commandId();
+      accepted({ outcome: result.replayed ? "already" : "added" });
+      await refreshAfterOutcome();
+      feedback(result.replayed ? "already" : "added");
+      beginRemove();
+      void recoverPending().catch(() => {});
+      return { accepted: true, outcome: result.replayed ? "already" : "added" };
+    } finally {
+      inFlight = false;
+    }
+  };
+
+  return {
+    reading,
+    recover: recoverPending,
+    adoptTakeover: adopt,
+    resetForEvent() {
+      if (inFlight) return false;
+      pending = null;
+      removing = false;
+      lastSerial = null;
+      nextStartCommandId = commandId();
+      return true;
+    },
+    hasPending() { return pending !== null; },
+    isBusy() { return inFlight || removing; },
+  };
+};
+
+const intakeCreateNfcStation = ({ createReader, decode, appOrigin, onReading, onReadingError, onStartError, onActive }) => {
+  let active = false;
+  let reader = null;
+  let handleReading = null;
+  const start = async () => {
+    if (active) return false;
+    const candidate = createReader();
+    handleReading = (event) => void onReading({
+      serialNumber: event.serialNumber,
+      canonicalUrl: intakeCanonicalUrlFromMessage(event.message, appOrigin, decode),
+    });
+    reader = candidate;
+    reader.addEventListener("reading", handleReading);
+    reader.addEventListener("readingerror", onReadingError);
+    try {
+      await reader.scan();
+      active = true;
+      onActive();
+      return true;
+    } catch (error) {
+      reader.removeEventListener("reading", handleReading);
+      reader.removeEventListener("readingerror", onReadingError);
+      reader = null;
+      onStartError(error);
+      return false;
+    }
+  };
+  return {
+    start,
+    async write(tagUrl) {
+      if (!active || reader === null) throw new Error("nfc-not-active");
+      await reader.write({ records: [{ recordType: "url", data: tagUrl }] });
+    },
+    isActive() { return active; },
+  };
+};
+`;
+
+export const inventoryIntakeScript = inventoryIntakeHelpersScript + String.raw`
+const intakeRoot = document.querySelector("[data-inventory-intake]");
+const intakeEventSelect = document.querySelector("[data-intake-event]");
+const intakeLocation = document.querySelector("[data-intake-location]");
+const intakeNfcButton = document.querySelector("[data-start-intake-nfc]");
+const intakeState = document.querySelector("[data-intake-state]");
+const intakeMessage = document.querySelector("[data-intake-message]");
+const intakeReservedCount = document.querySelector("[data-reserved-count]");
+const intakeSessionCount = document.querySelector("[data-session-count]");
+const intakeHistory = document.querySelector("[data-intake-history]");
+const intakeTakeoverPanel = document.querySelector("[data-intake-takeover]");
+const intakeTakeoverMessage = document.querySelector("[data-intake-takeover-message]");
+const intakeTakeoverButton = document.querySelector("[data-takeover-provisioning]");
+const intakeAppOrigin = intakeRoot.dataset.appOrigin;
+let intakeAddedCount = 0;
+let intakeSelectedEvent = null;
+let intakeStarted = false;
+let intakeAudio = null;
+let intakeTakeoverCandidate = null;
+
+const intakeApi = async (url, options) => {
+  const response = await fetch(url, { ...options, cache: "no-store" });
+  if (response.status === 401) {
+    location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
+    throw new Error("signed-out");
+  }
+  let body = null;
+  try { body = await response.json(); } catch {}
+  if (!response.ok) {
+    const error = new Error(body && body.error ? body.error : "The station request failed.");
+    error.status = response.status;
+    throw error;
+  }
+  return body;
+};
+
+const intakeSetMessage = (value, isError = false) => {
+  intakeMessage.textContent = value;
+  intakeMessage.classList.toggle("error-text", isError);
+};
+
+const intakeSetState = (value) => {
+  const labels = {
+    checking: "Checking sticker",
+    confirming: "Confirming",
+    error: "Needs attention",
+    ready: "Ready",
+    remove: "Remove duck",
+    reserving: "Reserving URL",
+    writing: "Writing sticker",
+  };
+  intakeState.textContent = labels[value] || "Not started";
+};
+
+const intakePost = (path, body) => intakeApi(path, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+const intakeOfferTakeover = (record) => {
+  intakeTakeoverCandidate = intakeSafeTakeoverCandidate(record);
+  intakeTakeoverPanel.hidden = intakeTakeoverCandidate === null;
+  intakeTakeoverMessage.textContent = intakeTakeoverCandidate === null
+    ? ""
+    : "Pending Duck #" + intakeTakeoverCandidate.visibleNumber + " has had no ownership activity for at least 10 minutes.";
+};
+
+const intakeRefreshStation = async () => {
+  const eventId = intakeEventSelect.value;
+  if (!eventId) {
+    intakeSelectedEvent = null;
+    intakeReservedCount.textContent = "0";
+    return;
+  }
+  const detail = await intakeApi("/api/v1/staff/events/" + encodeURIComponent(eventId));
+  intakeSelectedEvent = detail.event;
+  intakeReservedCount.textContent = String(detail.summary.eventDucks);
+  if (!intakePreRaceStatuses.has(detail.event.status)) {
+    intakeSetState("error");
+    intakeSetMessage("NFC provisioning is closed for the selected event.", true);
+  }
+};
+
+const intakeAddHistory = ({ outcome }) => {
+  if (intakeHistory.children.length === 1 && intakeHistory.firstElementChild.textContent.startsWith("No ducks")) {
+    intakeHistory.replaceChildren();
+  }
+  const item = document.createElement("li");
+  item.textContent = outcome === "added" ? "Sticker provisioned and reserved" : "Already provisioned; count unchanged";
+  intakeHistory.prepend(item);
+  while (intakeHistory.children.length > 12) intakeHistory.lastElementChild.remove();
+  if (outcome === "added") {
+    intakeAddedCount += 1;
+    intakeSessionCount.textContent = String(intakeAddedCount);
+  }
+};
+
+const intakeFeedback = () => {
+  if (typeof navigator.vibrate === "function") navigator.vibrate(120);
+  if (!intakeAudio) return;
+  try {
+    const oscillator = intakeAudio.createOscillator();
+    const gain = intakeAudio.createGain();
+    oscillator.frequency.value = 880;
+    gain.gain.value = 0.05;
+    oscillator.connect(gain);
+    gain.connect(intakeAudio.destination);
+    oscillator.start();
+    oscillator.stop(intakeAudio.currentTime + 0.12);
+  } catch {}
+};
+
+let intakeNfcStation = null;
+const intakeMachine = intakeCreateProvisioningMachine({
+  eventId: () => intakeEventSelect.value,
+  location: () => intakeLocation.value.trim(),
+  recover: async (eventId) => {
+    const body = await intakeApi("/api/v1/staff/inventory/provisioning?eventId=" + encodeURIComponent(eventId));
+    intakeOfferTakeover(body.provisioning);
+    return body.provisioning;
+  },
+  start: (body) => {
+    intakeOfferTakeover(null);
+    return intakePost("/api/v1/staff/inventory/provisioning", body);
+  },
+  classify: (body) => intakePost("/api/v1/staff/inventory/provisioning/classify", body),
+  write: (tagUrl) => intakeNfcStation.write(tagUrl),
+  confirm: (body) => intakePost("/api/v1/staff/inventory/provisioning/confirm", body),
+  refresh: intakeRefreshStation,
+  accepted: intakeAddHistory,
+  message: intakeSetMessage,
+  state: intakeSetState,
+  feedback: intakeFeedback,
+});
+
+intakeTakeoverButton.addEventListener("click", async () => {
+  const candidate = intakeTakeoverCandidate;
+  if (candidate === null || intakeMachine.isBusy() || intakeMachine.hasPending()) return;
+  if (!window.confirm(
+    "Take over pending Duck #" + candidate.visibleNumber
+    + "? Continue only if the previous provisioning station has been abandoned."
+  )) return;
+  intakeTakeoverButton.disabled = true;
+  intakeSetMessage("Taking ownership of the abandoned pending sticker.", false);
+  try {
+    const recovered = await intakePost("/api/v1/staff/inventory/provisioning/takeover", {
+      commandId: crypto.randomUUID(),
+      eventId: intakeEventSelect.value,
+      duckId: candidate.duckId,
+      provisioningCommandId: candidate.provisioningCommandId,
+    });
+    if (!intakeMachine.adoptTakeover(recovered)) throw new Error("invalid-takeover");
+    intakeOfferTakeover(null);
+    intakeSetMessage(intakeStarted
+      ? "Takeover complete. Retap that exact pending sticker to finish confirmation."
+      : "Takeover complete. Press Start, then retap that exact pending sticker.", false);
+  } catch {
+    intakeSetState("error");
+    intakeSetMessage("The pending sticker could not be taken over. Refresh its status before trying again.", true);
+  } finally {
+    intakeTakeoverButton.disabled = false;
+  }
+});
+
+intakeNfcStation = intakeCreateNfcStation({
+  createReader: () => new NDEFReader(),
+  decode: (record) => new TextDecoder(record.encoding || "utf-8").decode(record.data),
+  appOrigin: intakeAppOrigin,
+  onReading: (reading) => intakeMachine.reading(reading),
+  onReadingError: () => intakeSetMessage("The NFC sticker could not be read. Remove it, then retap the same sticker.", true),
+  onStartError: () => {
+    intakeSetState("error");
+    intakeSetMessage("NFC scanning could not start. Use current Android Chrome over HTTPS, allow NFC, and keep this top-level page visible.", true);
+  },
+  onActive: () => {
+    intakeSetState("ready");
+    intakeSetMessage(intakeMachine.hasPending()
+      ? "A pending sticker was recovered. Retap that same sticker to finish it before using another."
+      : "Ready. Tap the first blank writable sticker.", false);
+  },
+});
+
+const intakeRecoverSelected = async () => {
+  intakeMachine.resetForEvent();
+  await intakeRefreshStation();
+  if (!intakeEventSelect.value) return;
+  const pending = await intakeMachine.recover();
+  intakeSetMessage(pending
+    ? "A pending sticker is waiting. Press Start, then retap that same sticker."
+    : "Press Start once, then tap one blank writable sticker per duck.", false);
+};
+
+const intakeLoadEvents = async () => {
+  const body = await intakeApi("/api/v1/staff/events");
+  const available = body.events.filter((event) => intakePreRaceStatuses.has(event.status));
+  intakeEventSelect.replaceChildren();
+  if (available.length !== 1) {
+    const prompt = document.createElement("option");
+    prompt.value = "";
+    prompt.textContent = available.length ? "Select an event" : "No events accepting provisioning";
+    intakeEventSelect.append(prompt);
+  }
+  for (const event of available) {
+    const option = document.createElement("option");
+    option.value = event.id;
+    option.textContent = event.name + " · " + event.status.replaceAll("_", " ").toLowerCase();
+    intakeEventSelect.append(option);
+  }
+  intakeEventSelect.disabled = available.length === 0;
+  if (available.length === 1) intakeEventSelect.value = available[0].id;
+  await intakeRecoverSelected();
+};
+
+intakeEventSelect.addEventListener("change", async () => {
+  if (intakeStarted) return;
+  try {
+    await intakeRecoverSelected();
+  } catch {
+    intakeSetMessage("The selected event could not be refreshed. Stay online and try again.", true);
+  }
+});
+
+let intakeTopLevel = false;
+try { intakeTopLevel = window.top === window.self; } catch {}
+const intakeSupported = "NDEFReader" in globalThis && isSecureContext && intakeTopLevel;
+if (!intakeSupported) {
+  intakeNfcButton.disabled = true;
+  intakeSetState("error");
+  intakeSetMessage("This station requires current Android Chrome, an NFC-capable device, HTTPS, a top-level tab, and a visible page. There is no manual fallback.", true);
+}
+
+intakeNfcButton.addEventListener("click", async () => {
+  if (!intakeSupported || intakeStarted) return;
+  if (
+    !intakeSelectedEvent
+    || intakeSelectedEvent.id !== intakeEventSelect.value
+    || !intakePreRaceStatuses.has(intakeSelectedEvent.status)
+  ) {
+    intakeSetState("error");
+    intakeSetMessage("Select an available draft or registration-stage event before starting.", true);
+    return;
+  }
+  if (document.hidden) {
+    intakeSetState("error");
+    intakeSetMessage("Keep this page visible before starting NFC provisioning.", true);
+    return;
+  }
+  const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (AudioContextClass) {
+    try {
+      intakeAudio = new AudioContextClass();
+      void intakeAudio.resume();
+    } catch {}
+  }
+  const started = await intakeNfcStation.start();
+  if (!started) return;
+  intakeStarted = true;
+  intakeEventSelect.disabled = true;
+  intakeLocation.disabled = true;
+  intakeNfcButton.disabled = true;
+  intakeNfcButton.textContent = "NFC provisioning active";
+});
+
+intakeLoadEvents().catch(() => intakeSetMessage("The station could not load events. Stay online, then refresh this page.", true));
+`;
+
 export const staffHomeScript = String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
@@ -2683,9 +3256,14 @@ document.querySelector("[data-registration-search]").addEventListener("submit", 
       const assignment = registration.assignedDuckNumber === null
         ? "unpaired"
         : "already paired with Duck #" + registration.assignedDuckNumber;
-      const button = text("button", registration.firstName + " " + registration.lastName + " · " + registration.lookupCode + " · " + assignment, "result-button");
+      const contact = [registration.email, registration.phone].filter(Boolean).join(" · ") || "No email or phone provided";
+      const button = text("button", "", "result-button");
       button.type = "button";
       button.disabled = registration.assignedDuckNumber !== null;
+      button.append(
+        text("strong", registration.firstName + " " + registration.lastName + " · " + registration.lookupCode),
+        text("span", contact + " · " + assignment, "muted"),
+      );
       button.addEventListener("click", () => renderSelection(registration));
       results.append(button);
     }

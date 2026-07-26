@@ -435,7 +435,7 @@ test("a failed D1 grant removes a newly created Cognito identity", async () => {
   assert.deepEqual(deleted, ["cleanup-user"]);
 });
 
-test("staff name search may return contact details", async () => {
+test("staff pairing search accepts code, name, email, or phone and returns protected contact details", async () => {
   const db = makeDb(
     () => null,
     () => ({
@@ -453,7 +453,7 @@ test("staff name search may return contact details", async () => {
     }),
   );
   const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q=Daisy"),
+    new Request("https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q=daisy%40example.com"),
     makeEnv(db),
     actor,
   );
@@ -462,6 +462,9 @@ test("staff name search may return contact details", async () => {
   assert.equal(body.registrations[0].email, "daisy@example.com");
   assert.equal(body.registrations[0].phone, "555-0100");
   assert.match(db.statements[0].sql, /r\.email, r\.phone/);
+  assert.match(db.statements[0].sql, /COALESCE\(r\.email, ''\) LIKE/);
+  assert.match(db.statements[0].sql, /COALESCE\(r\.phone, ''\) LIKE/);
+  assert.equal(db.statements[0].args.filter((value) => value === "%daisy@example.com%").length, 5);
 });
 
 test("staff inspection does not offer pairing for an ineligible duck", async () => {

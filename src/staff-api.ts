@@ -545,17 +545,19 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
        LEFT JOIN ducks d ON d.id = da.duck_id
       WHERE r.event_id = ?
         AND (
-          r.lookup_code = ? COLLATE NOCASE
-          OR r.first_name LIKE ? ESCAPE '\\' COLLATE NOCASE
-          OR r.last_name LIKE ? ESCAPE '\\' COLLATE NOCASE
-          OR (r.first_name || ' ' || r.last_name) LIKE ? ESCAPE '\\' COLLATE NOCASE
-        )
+           r.lookup_code = ? COLLATE NOCASE
+           OR r.first_name LIKE ? ESCAPE '\\' COLLATE NOCASE
+           OR r.last_name LIKE ? ESCAPE '\\' COLLATE NOCASE
+           OR (r.first_name || ' ' || r.last_name) LIKE ? ESCAPE '\\' COLLATE NOCASE
+           OR COALESCE(r.email, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+           OR COALESCE(r.phone, '') LIKE ? ESCAPE '\\' COLLATE NOCASE
+         )
       ORDER BY CASE WHEN r.lookup_code = ? COLLATE NOCASE THEN 0 ELSE 1 END,
                r.last_name COLLATE NOCASE,
                r.first_name COLLATE NOCASE,
                r.submitted_at
       LIMIT 20`,
-  ).bind(eventId, exactCode, like, like, like, exactCode).all<{
+  ).bind(eventId, exactCode, like, like, like, like, like, exactCode).all<{
     registration_id: string;
     race_entry_id: string;
     first_name: string;
