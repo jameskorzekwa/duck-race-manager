@@ -112,6 +112,23 @@ label span,legend span { display:block; margin-top:.25rem; color:var(--muted); f
 input,select,textarea { width:100%; min-width:0; max-width:100%; min-height:3.2rem; margin-top:.45rem; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; }
 textarea { min-height:6rem; resize:vertical; }
 input:focus,select:focus,textarea:focus { outline:4px solid #83d8ec; outline-offset:1px; }
+.app-select { position:relative; display:block; min-width:0; max-width:100%; margin-top:.45rem; }
+select.app-select-native { position:absolute; width:1px; height:1px; min-height:0; margin:0; padding:0; border:0; clip-path:inset(50%); opacity:0; overflow:hidden; pointer-events:none; }
+.app-select-trigger { display:flex; width:100%; min-width:0; max-width:100%; min-height:3.2rem; align-items:center; justify-content:space-between; gap:.6rem; margin:0; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; font-weight:750; text-align:left; cursor:pointer; }
+.app-select-trigger:focus-visible { outline:4px solid #83d8ec; outline-offset:1px; }
+.app-select-trigger[aria-expanded="true"] { background:var(--cream); }
+.app-select-trigger:disabled { opacity:.55; cursor:not-allowed; }
+.app-select-value { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.app-select-arrow { flex:none; width:.8rem; height:.5rem; background:var(--ink); clip-path:polygon(0 0,100% 0,50% 100%); }
+.app-select-trigger[aria-expanded="true"] .app-select-arrow { transform:rotate(180deg); }
+.app-select-panel { position:absolute; z-index:60; top:calc(100% + .35rem); right:0; left:0; max-height:16rem; padding:.35rem; overflow:auto; overscroll-behavior:contain; border:3px solid var(--ink); border-radius:.8rem; background:var(--paper); box-shadow:4px 4px 0 var(--ink); }
+.app-select-option { display:flex; min-height:2.75rem; align-items:center; padding:.55rem .65rem; border-radius:.5rem; font-weight:750; overflow-wrap:anywhere; cursor:pointer; }
+.app-select-option[aria-selected="true"] { background:var(--yellow); font-weight:900; }
+.app-select-option.is-highlighted { outline:3px solid var(--water-dark); outline-offset:-3px; }
+.app-select-option:hover { background:var(--cream); }
+.app-select-option[aria-selected="true"]:hover { background:var(--yellow); }
+.app-select-option[aria-disabled="true"] { color:var(--muted); cursor:not-allowed; }
+.staff-role-controls > .app-select { flex:1 1 100%; margin-top:0; }
 fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
 .check { display:grid; grid-template-columns:1.4rem minmax(0,1fr); gap:.7rem; align-items:start; font-weight:750; }
 .check input { width:1.25rem; min-height:1.25rem; margin:.15rem 0 0; }
@@ -720,6 +737,7 @@ export const renderStaffHome = (
         <form class="operation-card" data-staff-access-form><div class="field-grid"><label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required></label><label>Display name<input name="displayName" autocomplete="off" maxlength="100" required></label></div><label>Account type<select name="role" required><option value="STAFF">Regular staff</option><option value="ADMIN">System administrator</option></select></label><fieldset class="role-set" data-create-role-set><legend>Operational roles</legend>${roleCheckboxes}</fieldset><button class="button" type="submit">Add staff access</button></form>
         <p class="message-line muted" data-staff-access-message aria-live="polite">Loading authorized staff…</p><div class="staff-access-list" data-staff-access-list></div>
       </section>` : ""}
+      <script src="/assets/app-select.js" defer></script>
       ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
     </section>`,
   });
@@ -811,6 +829,7 @@ export const renderInventoryIntake = (
       <h2>Session history</h2><p class="muted">Only provisioning outcomes appear here. Permanent URLs and tokens are never displayed or stored by the browser.</p>
       <ul class="station-history" data-intake-history><li>No ducks added in this page session.</li></ul>
     </div>
+    <script src="/assets/app-select.js" defer></script>
     <script src="/assets/inventory-intake.js" defer></script>
   </section>`,
 });
@@ -872,6 +891,7 @@ export const renderStaffDuck = (
         </form>
         <p class="muted" data-disposition-message aria-live="polite"></p>
       </section>
+      <script src="/assets/app-select.js" defer></script>
       <script src="/assets/staff-duck.js" defer></script>
     </section>`,
 });

@@ -4506,3 +4506,367 @@ staffDuckSubscription = globalThis.quickDucksLive.subscribe({
 });
 }
 `;
+
+// Progressive enhancement that replaces visible native selects with an
+// app-styled combobox trigger and listbox panel. The native select stays in
+// the DOM as the form-associated programmatic source of truth: console code
+// keeps reading and writing .value / .selectedIndex, rebuilding options with
+// replaceChildren/new Option, toggling .disabled, and listening for "change".
+export const appSelectHelpersScript = String.raw`
+let appSelectInstanceCount = 0;
+
+const appSelectPrototypeAccessor = (target, name) => {
+  let prototype = Object.getPrototypeOf(target);
+  while (prototype !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    if (descriptor && (descriptor.get || descriptor.set)) return descriptor;
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  return null;
+};
+
+const appSelectInterceptProperty = (select, name, onSet) => {
+  const inherited = appSelectPrototypeAccessor(select, name);
+  if (inherited !== null) {
+    Object.defineProperty(select, name, {
+      configurable: true,
+      get() { return inherited.get.call(select); },
+      set(value) { inherited.set.call(select, value); onSet(); },
+    });
+    return;
+  }
+  let stored = select[name];
+  Object.defineProperty(select, name, {
+    configurable: true,
+    get() { return stored; },
+    set(value) { stored = value; onSet(); },
+  });
+};
+
+const appSelectOptionList = (select) => Array.from(select.options || []);
+
+const appSelectOptionText = (option) => String(option.textContent ?? option.label ?? "").trim();
+
+const appSelectFieldLabelText = (select) => {
+  const explicit = typeof select.getAttribute === "function" ? select.getAttribute("aria-label") : null;
+  if (explicit) return explicit;
+  const label = typeof select.closest === "function" ? select.closest("label") : null;
+  if (!label) return "";
+  const parts = [];
+  for (const node of Array.from(label.childNodes || [])) {
+    if (node === select || (typeof node.contains === "function" && node.contains(select))) break;
+    parts.push(String(node.textContent || ""));
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+};
+
+const createAppSelect = (select, context = {}) => {
+  const doc = context.documentObject || document;
+  const nativeValue = appSelectPrototypeAccessor(select, "value");
+  const nativeSelectedIndex = appSelectPrototypeAccessor(select, "selectedIndex");
+  const readValue = () => nativeValue && nativeValue.get ? nativeValue.get.call(select) : select.value;
+  const writeSelectedIndex = (index) => {
+    if (nativeSelectedIndex && nativeSelectedIndex.set) nativeSelectedIndex.set.call(select, index);
+    else select.selectedIndex = index;
+  };
+
+  const baseId = "app-select-" + (appSelectInstanceCount += 1);
+  const wrapper = doc.createElement("div");
+  wrapper.className = "app-select";
+  const trigger = doc.createElement("button");
+  trigger.type = "button";
+  trigger.className = "app-select-trigger";
+  trigger.setAttribute("role", "combobox");
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
+  const valueText = doc.createElement("span");
+  valueText.className = "app-select-value";
+  const arrow = doc.createElement("span");
+  arrow.className = "app-select-arrow";
+  arrow.setAttribute("aria-hidden", "true");
+  trigger.append(valueText, arrow);
+  const panel = doc.createElement("div");
+  panel.className = "app-select-panel";
+  panel.id = baseId + "-listbox";
+  panel.setAttribute("role", "listbox");
+  panel.hidden = true;
+  trigger.setAttribute("aria-controls", panel.id);
+
+  const fieldLabel = appSelectFieldLabelText(select);
+  if (fieldLabel) trigger.setAttribute("aria-label", fieldLabel);
+  if (typeof select.getAttribute === "function") {
+    const labelledBy = select.getAttribute("aria-labelledby");
+    if (labelledBy) trigger.setAttribute("aria-labelledby", labelledBy);
+    const describedBy = select.getAttribute("aria-describedby");
+    if (describedBy) trigger.setAttribute("aria-describedby", describedBy);
+  }
+
+  const parent = select.parentNode || null;
+  if (parent && typeof parent.insertBefore === "function") parent.insertBefore(wrapper, select);
+  wrapper.append(select, trigger, panel);
+  if (select.classList) select.classList.add("app-select-native");
+  if (typeof select.setAttribute === "function") {
+    select.setAttribute("tabindex", "-1");
+    select.setAttribute("aria-hidden", "true");
+  }
+
+  let openState = false;
+  let panelOptions = [];
+  let highlighted = -1;
+  let typeAheadBuffer = "";
+  let typeAheadAt = 0;
+
+  const selectedNativeIndex = () => {
+    const options = appSelectOptionList(select);
+    const index = typeof select.selectedIndex === "number" ? select.selectedIndex : -1;
+    if (index >= 0 && index < options.length) return index;
+    return options.findIndex((option) => option.selected === true);
+  };
+
+  const syncTrigger = () => {
+    const options = appSelectOptionList(select);
+    const current = selectedNativeIndex();
+    valueText.textContent = current >= 0 && options[current] ? appSelectOptionText(options[current]) : "";
+    trigger.disabled = select.disabled === true;
+    if (trigger.disabled && openState) close(false);
+  };
+
+  const applyHighlight = (index) => {
+    highlighted = index;
+    let activeElement = null;
+    for (const entry of panelOptions) {
+      const active = entry.index === index;
+      if (entry.element.classList) entry.element.classList[active ? "add" : "remove"]("is-highlighted");
+      if (active) activeElement = entry.element;
+    }
+    if (activeElement === null) trigger.removeAttribute("aria-activedescendant");
+    else {
+      trigger.setAttribute("aria-activedescendant", activeElement.id);
+      if (typeof activeElement.scrollIntoView === "function") activeElement.scrollIntoView({ block: "nearest" });
+    }
+  };
+
+  const rebuildPanel = () => {
+    panel.replaceChildren();
+    panelOptions = [];
+    const current = selectedNativeIndex();
+    appSelectOptionList(select).forEach((option, index) => {
+      const item = doc.createElement("div");
+      item.id = baseId + "-option-" + index;
+      item.className = "app-select-option";
+      item.setAttribute("role", "option");
+      item.textContent = appSelectOptionText(option);
+      const disabled = option.disabled === true;
+      if (disabled) item.setAttribute("aria-disabled", "true");
+      item.setAttribute("aria-selected", index === current ? "true" : "false");
+      if (index === current && item.classList) item.classList.add("is-selected");
+      item.addEventListener("pointerdown", (event) => {
+        if (event && typeof event.preventDefault === "function") event.preventDefault();
+      });
+      item.addEventListener("click", () => {
+        if (disabled) return;
+        commit(index);
+        close(true);
+      });
+      panel.append(item);
+      panelOptions.push({ element: item, index, disabled, text: appSelectOptionText(option) });
+    });
+  };
+
+  const enabledEntries = () => panelOptions.filter((entry) => !entry.disabled);
+
+  const highlightSelectedOrFirst = () => {
+    const current = selectedNativeIndex();
+    const options = appSelectOptionList(select);
+    if (current >= 0 && options[current] && options[current].disabled !== true) {
+      applyHighlight(current);
+      return;
+    }
+    const first = enabledEntries()[0];
+    applyHighlight(first ? first.index : -1);
+  };
+
+  const open = () => {
+    if (openState || select.disabled === true) return;
+    rebuildPanel();
+    openState = true;
+    panel.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    highlightSelectedOrFirst();
+  };
+
+  const close = (returnFocus) => {
+    if (!openState) return;
+    openState = false;
+    panel.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.removeAttribute("aria-activedescendant");
+    typeAheadBuffer = "";
+    if (returnFocus && typeof trigger.focus === "function") trigger.focus();
+  };
+
+  const commit = (index) => {
+    const options = appSelectOptionList(select);
+    const option = options[index];
+    if (!option || option.disabled === true) return;
+    const before = readValue();
+    writeSelectedIndex(index);
+    syncTrigger();
+    if (readValue() !== before) select.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  const moveHighlight = (delta) => {
+    const entries = enabledEntries();
+    if (entries.length === 0) return;
+    const position = entries.findIndex((entry) => entry.index === highlighted);
+    const next = position === -1
+      ? (delta > 0 ? 0 : entries.length - 1)
+      : Math.min(entries.length - 1, Math.max(0, position + delta));
+    applyHighlight(entries[next].index);
+  };
+
+  const typeAhead = (character, now) => {
+    const time = typeof now === "number" ? now : Date.now();
+    if (time - typeAheadAt > 700) typeAheadBuffer = "";
+    typeAheadAt = time;
+    typeAheadBuffer += character.toLowerCase();
+    const entries = enabledEntries();
+    if (entries.length === 0) return;
+    const repeated = typeAheadBuffer.length > 1
+      && typeAheadBuffer.split("").every((letter) => letter === typeAheadBuffer[0]);
+    const needle = repeated ? typeAheadBuffer[0] : typeAheadBuffer;
+    const position = entries.findIndex((entry) => entry.index === highlighted);
+    const start = repeated || typeAheadBuffer.length === 1 ? position + 1 : Math.max(position, 0);
+    for (let step = 0; step < entries.length; step += 1) {
+      const entry = entries[(start + step + entries.length) % entries.length];
+      if (entry.text.toLowerCase().startsWith(needle)) {
+        applyHighlight(entry.index);
+        return;
+      }
+    }
+  };
+
+  const handleTriggerKeydown = (event) => {
+    const key = event.key;
+    const printable = typeof key === "string" && key.length === 1 && key !== " "
+      && !event.ctrlKey && !event.metaKey && !event.altKey;
+    if (!openState) {
+      if (key === "ArrowDown" || key === "ArrowUp" || key === "Enter" || key === " ") {
+        if (typeof event.preventDefault === "function") event.preventDefault();
+        open();
+      } else if (printable) {
+        open();
+        typeAhead(key);
+      }
+      return;
+    }
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      moveHighlight(key === "ArrowDown" ? 1 : -1);
+    } else if (key === "Home" || key === "End") {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      const entries = enabledEntries();
+      const entry = key === "Home" ? entries[0] : entries[entries.length - 1];
+      if (entry) applyHighlight(entry.index);
+    } else if (key === "Enter" || key === " ") {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      if (highlighted >= 0) commit(highlighted);
+      close(true);
+    } else if (key === "Escape") {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      close(true);
+    } else if (key === "Tab") {
+      close(false);
+    } else if (printable) {
+      typeAhead(key);
+    }
+  };
+
+  const handleDocumentPointerDown = (event) => {
+    if (!openState) return;
+    const target = event ? event.target : null;
+    if (target && typeof wrapper.contains === "function" && wrapper.contains(target)) return;
+    close(false);
+  };
+
+  const refresh = () => {
+    syncTrigger();
+    if (openState) {
+      rebuildPanel();
+      highlightSelectedOrFirst();
+    }
+  };
+
+  trigger.addEventListener("keydown", handleTriggerKeydown);
+  trigger.addEventListener("click", () => {
+    if (openState) close(true);
+    else open();
+  });
+  select.addEventListener("change", () => syncTrigger());
+  select.addEventListener("focus", () => {
+    if (typeof trigger.focus === "function") trigger.focus();
+  });
+  if (select.form && typeof select.form.addEventListener === "function") {
+    select.form.addEventListener("reset", () => {
+      if (typeof queueMicrotask === "function") queueMicrotask(refresh);
+      else refresh();
+    });
+  }
+  if (doc !== null && typeof doc.addEventListener === "function") {
+    doc.addEventListener("pointerdown", handleDocumentPointerDown, true);
+  }
+
+  appSelectInterceptProperty(select, "value", refresh);
+  appSelectInterceptProperty(select, "selectedIndex", refresh);
+  let observer = null;
+  if (typeof MutationObserver === "function") {
+    observer = new MutationObserver(refresh);
+    observer.observe(select, { attributes: true, childList: true, subtree: true });
+  }
+  syncTrigger();
+
+  return {
+    select,
+    wrapper,
+    trigger,
+    panel,
+    refresh,
+    open,
+    close: (returnFocus = true) => close(returnFocus),
+    isOpen: () => openState,
+    handleTriggerKeydown,
+    handleDocumentPointerDown,
+    typeAhead,
+    highlightedIndex: () => highlighted,
+    optionElements: () => panelOptions.map((entry) => entry.element),
+    disconnect: () => { if (observer !== null) observer.disconnect(); },
+  };
+};
+`;
+
+export const appSelectScript = appSelectHelpersScript + String.raw`
+const appSelectEligible = (element) => element instanceof HTMLSelectElement
+  && element.dataset.appSelectEnhanced !== "true"
+  && !element.multiple
+  && !(element.size > 1);
+
+const appSelectEnhance = (element) => {
+  if (!appSelectEligible(element)) return;
+  element.dataset.appSelectEnhanced = "true";
+  createAppSelect(element, { documentObject: document });
+};
+
+for (const element of document.querySelectorAll("select")) appSelectEnhance(element);
+
+const appSelectAdditions = new MutationObserver((records) => {
+  for (const record of records) {
+    for (const node of record.addedNodes) {
+      if (node instanceof HTMLSelectElement) appSelectEnhance(node);
+      else if (node && typeof node.querySelectorAll === "function") {
+        for (const element of node.querySelectorAll("select")) appSelectEnhance(element);
+      }
+    }
+  }
+});
+appSelectAdditions.observe(document.body, { childList: true, subtree: true });
+`;
