@@ -19,15 +19,16 @@ import {
   staffHomeScript,
   startLineScript,
 } from "./client-scripts.ts";
+import { getPublicPhase, type PublicPhase } from "./public-phase.ts";
 import {
   faviconSvg,
-  homeScript,
   manifestJson,
   renderDuck,
   renderHome,
   renderNotFound,
   renderPublicDuck,
   renderPublicDuckNotFound,
+  renderRace,
   renderRegistration,
   renderStaffAuthError,
   renderStaffDuck,
@@ -41,6 +42,7 @@ import {
   renderStaffPairing,
   renderStartLine,
   renderStatus,
+  searchScript,
 } from "./site.ts";
 import {
   authenticateStaffSession,
@@ -109,6 +111,11 @@ export const createWorker = (
     const localPreview = appOrigin.protocol === "http:" && localHosts.has(appOrigin.hostname);
     const staffHtml = (body: string, status = 200): Response =>
       html(body, status, true, new URL(env.COGNITO_DOMAIN).origin);
+    // One lightweight current-event query per HTML request. Every page renders
+    // its navigation, and the public pages their whole body, from this phase, so
+    // the first paint is already correct.
+    let phaseResolution: Promise<PublicPhase> | undefined;
+    const publicPhase = (): Promise<PublicPhase> => (phaseResolution ??= getPublicPhase(env));
     let sessionAuthentication: Awaited<ReturnType<typeof authenticateStaffSession>> | undefined;
     const authenticateRequest: typeof authenticateStaff = async (authRequest, authEnv) => {
       sessionAuthentication ??= await authenticateStaffSession(authRequest, authEnv, authenticate, tokenFetch);
@@ -152,8 +159,8 @@ export const createWorker = (
       });
     }
 
-    if (url.pathname === "/assets/home.js") {
-      return new Response(homeScript, {
+    if (url.pathname === "/assets/search.js") {
+      return new Response(searchScript, {
         headers: {
           ...securityHeaders,
           "cache-control": "public, max-age=3600",
@@ -219,17 +226,30 @@ export const createWorker = (
     }
 
     if (url.pathname === "/" && request.method === "GET") {
-      return html(renderHome());
+      return html(renderHome(await publicPhase()));
     }
     if (url.pathname === "/register" && request.method === "GET") {
       const siteKey = env.TURNSTILE_SITE_KEY?.trim();
-      return html(renderRegistration(siteKey && env.TURNSTILE_SECRET_KEY ? siteKey : undefined), 200, true);
+      return html(
+        renderRegistration(siteKey && env.TURNSTILE_SECRET_KEY ? siteKey : undefined, await publicPhase()),
+        200,
+        true,
+      );
+    }
+    // Race Status. Public for the five post-DRAFT statuses and the shared
+    // preparing message before that.
+    if (url.pathname === "/race" && request.method === "GET") {
+      return html(renderRace(await publicPhase()), 200, true);
     }
     if (url.pathname === "/my-ducks" && request.method === "GET") {
-      return html(renderMyDucks(), 200, true);
+      return html(renderMyDucks(await publicPhase()), 200, true);
     }
-    if (url.pathname === "/r/mock" && request.method === "GET") return html(renderStatus(), 200, true);
-    if (url.pathname === "/t/mock" && request.method === "GET") return html(renderDuck(), 200, true);
+    if (url.pathname === "/r/mock" && request.method === "GET") {
+      return html(renderStatus(undefined, await publicPhase()), 200, true);
+    }
+    if (url.pathname === "/t/mock" && request.method === "GET") {
+      return html(renderDuck(undefined, await publicPhase()), 200, true);
+    }
     if (url.pathname === "/t/mock-unpaired" && request.method === "GET") {
       return new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } });
     }
@@ -375,17 +395,20 @@ export const createWorker = (
     const duckNumberMatch = url.pathname.match(/^\/duck\/([0-9]{1,9})$/);
     if (duckNumberMatch !== null && request.method === "GET") {
       const status = await findDuckNumberRaceStatus(duckNumberMatch[1], env);
+      const phase = await publicPhase();
       return status === null
-        ? html(renderPublicDuckNotFound(duckNumberMatch[1]), 404, true)
-        : html(renderPublicDuck(status), 200, true);
+        ? html(renderPublicDuckNotFound(duckNumberMatch[1], phase), 404, true)
+        : html(renderPublicDuck(status, phase), 200, true);
     }
 
     const privateStatusMatch = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);
     if (privateStatusMatch !== null && request.method === "GET") {
       const registration = await findRegistrationStatus(privateStatusMatch[1], env);
+      // The not-found page is phase-free, so an unknown token costs one lookup
+      // and nothing more.
       return registration === null
         ? html(renderNotFound(), 404, true)
-        : html(renderStatus(registration), 200, true);
+        : html(renderStatus(registration, await publicPhase()), 200, true);
     }
 
     const duckTagMatch = url.pathname.match(/^\/t\/([A-Za-z0-9_-]+)$/);
@@ -400,9 +423,12 @@ export const createWorker = (
       const status = await findDuckRaceStatus(duckTagMatch[1], env);
       return withSessionCookies(status === null
         ? new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } })
-        : html(renderDuck(status), 200, true));
+        : html(renderDuck(status, await publicPhase()), 200, true));
     }
 
+    // Catch-all. Every unmatched path lands here, including bot and scanner
+    // traffic, so it deliberately runs no phase query and renders the minimal
+    // Home-and-Staff navigation instead.
     return html(renderNotFound(), 404, true);
   },
 });

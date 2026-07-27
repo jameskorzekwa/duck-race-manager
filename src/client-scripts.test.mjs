@@ -27,7 +27,7 @@ import {
   startLineScript,
 } from "./client-scripts.ts";
 import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
-import { homeScript } from "./site.ts";
+import { searchScript } from "./site.ts";
 
 const eventSlugHelpers = () => new Function(
   `${eventSlugHelpersScript}; return { eventSlugFromName };`,
@@ -45,20 +45,43 @@ test("staff client generates and live-previews server-compatible event slugs", (
 });
 
 test("the public pages' classic scripts share one global scope without collisions", () => {
-  // The home page serves live-ui.js, live.js, home.js, and participant.js as
-  // classic scripts, so every top-level declaration lands in one scope.
+  // The home page serves live-ui.js, live.js, and participant.js as classic
+  // scripts, so every top-level declaration lands in one scope.
   assert.doesNotThrow(
-    () => new Function([liveUiScript, liveScript, homeScript, participantScript].join("\n")),
+    () => new Function([liveUiScript, liveScript, participantScript].join("\n")),
     "home page scripts must not redeclare each other's globals",
   );
+  // My Ducks additionally serves the name-search client.
   assert.doesNotThrow(
-    () => new Function([liveUiScript, participantScript].join("\n")),
+    () => new Function([liveUiScript, searchScript, participantScript].join("\n")),
     "My Ducks page scripts must not redeclare each other's globals",
   );
+  // /race serves the full board client.
+  assert.doesNotThrow(
+    () => new Function([liveUiScript, liveScript].join("\n")),
+    "race page scripts must not redeclare each other's globals",
+  );
+  // The phase-driven navigation runtime rides in live-ui.js, which every page
+  // loads, so it must coexist with every other page client too.
+  const pageClients = {
+    register: registrationScript,
+    "staff home": staffHomeScript,
+    "staff access": staffAccessScript,
+    "staff duck": staffDuckScript,
+    "start line": startLineScript,
+    "finish line": finishLineScript,
+    "inventory intake": inventoryIntakeScript,
+  };
+  for (const [name, script] of Object.entries(pageClients)) {
+    assert.doesNotThrow(
+      () => new Function([liveUiScript, script, participantScript].join("\n")),
+      `${name} scripts must not redeclare the shared navigation globals`,
+    );
+  }
 });
 
 test("browser clients are valid JavaScript and target protected APIs", () => {
-  assert.doesNotThrow(() => new Function(homeScript));
+  assert.doesNotThrow(() => new Function(searchScript));
   assert.doesNotThrow(() => new Function(registrationScript));
   assert.doesNotThrow(() => new Function(participantScript));
   assert.doesNotThrow(() => new Function(staffDuckScript));
@@ -85,7 +108,7 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(participantScript, /card\.focus/);
   assert.match(participantScript, /card\.scrollIntoView/);
   assert.doesNotMatch(participantScript, /duckKeepPreference|duck_keep_preference/);
-  for (const script of [homeScript, registrationScript, participantScript]) {
+  for (const script of [searchScript, registrationScript, participantScript]) {
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   }
   assert.match(staffDuckScript, /\/api\/v1\/staff\/ducks/);
@@ -1068,7 +1091,7 @@ test("canonical existing URLs are classified before any write or allocation", as
 
 test("live clients build safe DOM and retain reconnect plus polling fallback", () => {
   for (const script of [
-    homeScript,
+    searchScript,
     registrationScript,
     participantScript,
     liveScript,
@@ -1133,7 +1156,7 @@ const liveScripts = [
   inventoryIntakeScript,
   staffHomeScript,
   staffDuckScript,
-  homeScript,
+  searchScript,
   registrationScript,
 ];
 
@@ -1292,19 +1315,20 @@ const homeHarness = (route) => {
     return route(String(url), options);
   };
   const subscriptions = [];
+  const cleaned = [];
   const live = {
-    markClean() {},
+    markClean(root) { cleaned.push(root); },
     subscribe(subscriber) { subscriptions.push(subscriber); },
   };
 
-  new Function("document", "fetch", "FormData", "globalThis", homeScript)(
+  new Function("document", "fetch", "FormData", "globalThis", searchScript)(
     document,
     fetchStub,
     QuickFormData,
     { quickDucksLive: live },
   );
 
-  return { document, form, message, navigation, requests, results, subscriptions };
+  return { cleaned, document, form, message, navigation, requests, results, subscriptions };
 };
 
 const currentEventResponse = () => Response.json({ event: { id: "event-1" } });
@@ -1359,6 +1383,10 @@ test("a search result offers one add action that confirms and reveals the My Duc
   assert.equal(confirmed.children[0].textContent, "In My Ducks");
   assert.equal(confirmed.children[0].className, "success-tag");
   assert.equal(harness.navigation.hidden, false, "the My Ducks nav must be revealed");
+  assert.equal(harness.navigation.dataset.hasRegistrations, "true");
+  // The search shares the My Ducks page, so a successful follow asks the hub to
+  // rerun every authoritative refetch instead of rendering the new entry itself.
+  assert.equal(harness.cleaned.at(-1), harness.form);
   assert.equal(followStatus, 200);
 });
 
@@ -2429,7 +2457,7 @@ test("the shared duck-link helper is declared once across the public classic scr
   assert.doesNotMatch(liveScript, /const duckDetailLink =/);
   assert.doesNotMatch(participantScript, /const duckDetailLink =/);
   assert.doesNotThrow(
-    () => new Function([liveUiScript, liveScript, homeScript, participantScript].join("\n")),
+    () => new Function([liveUiScript, liveScript, searchScript, participantScript].join("\n")),
     "duck-link helpers must not redeclare an existing public global",
   );
   for (const script of [duckDetailHelpersScript, liveScript, participantScript]) {

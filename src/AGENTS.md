@@ -27,6 +27,7 @@ scan-first pairing.
 | Concern | Files |
 | --- | --- |
 | Worker/pages/assets | `index.ts`, `site.ts`, `client-scripts.ts` |
+| Public site phase | `public-phase.ts` |
 | Public registration/status | `api.ts`, `registration.ts`, `browser-collection.ts`, `race-status.ts` |
 | Public live board/signaling | `race-board.ts`, `live-updates.ts` |
 | Cognito/session/access | `auth.ts`, `staff-session.ts`, `staff-access.ts` |
@@ -66,6 +67,24 @@ scan-first pairing.
 
 - `site.ts` owns shared CSS and server markup; `client-scripts.ts` exports raw
   browser JavaScript strings served by `index.ts`.
+- The public site is phase-driven. `public-phase.ts` owns the single mapping from
+  the current event's lifecycle status to `PREPARING`, `REGISTRATION`,
+  `LOCKED_IN`, `RACING`, or `RESULTS`. `index.ts` resolves it once per HTML
+  request and passes it into the renderers; `live-ui.js` re-renders the nav from
+  `GET /api/v1/events/current` on live event signals. Never re-derive that
+  mapping in a page, a browser client, or a test fixture.
+- Preparing wording belongs to the page, not to the phase. `/register` owns the
+  approved come-back-and-register sentence and `/race` owns its own race-status
+  sentence; never render one page's message on the other.
+- The live hub in `live-ui.js` starts its socket and pollers lazily on the first
+  subscriber, and `RaceUpdates` admits a bounded number of connections. Every
+  subscriber must therefore be registered conditionally. The navigation
+  subscriber ships in `live-ui.js`, which every page loads, so it is gated on the
+  server-rendered `data-live-nav` marker that only public content pages set.
+  Staff sign-in, not-found, unsupported-device, and staff error pages carry no
+  marker and no other live surface, so they hold no connection.
+- The catch-all not-found response resolves no phase and runs no query, so
+  unmatched paths cannot amplify database reads.
 - Escape every dynamic server value with `escapeHtml`.
 - Browser scripts create nodes with safe DOM APIs. Do not introduce
   `innerHTML`, `outerHTML`, or `insertAdjacentHTML` for API data.

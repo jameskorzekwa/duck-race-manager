@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { participantScript } from "./client-scripts.ts";
 import {
-  homeScript,
   renderDuck,
   renderFinishLine,
   renderHome,
@@ -12,6 +11,7 @@ import {
   renderMyDucks,
   renderPublicDuck,
   renderPublicDuckNotFound,
+  renderRace,
   renderRegistration,
   renderStaffAccess,
   renderStaffDuck,
@@ -20,13 +20,19 @@ import {
   renderStaffPairing,
   renderStartLine,
   renderStatus,
+  searchScript,
 } from "./site.ts";
 
 const renderedPages = [
+  renderHome("REGISTRATION"),
   renderHome(),
-  renderMyDucks(),
+  renderMyDucks("REGISTRATION"),
+  renderRegistration(undefined, "REGISTRATION"),
+  renderRegistration("test-site-key", "REGISTRATION"),
   renderRegistration(),
-  renderRegistration("test-site-key"),
+  renderRegistration(undefined, "RACING"),
+  renderRace("RACING"),
+  renderRace(),
   renderStatus(),
   renderDuck(),
   renderPublicDuck(),
@@ -84,13 +90,17 @@ test("disabled controls never react to presses and motion stays gated and tiny",
 });
 
 test("newer My Ducks, inventory panel, and app dialog surfaces stay contained", () => {
-  const myDucks = renderMyDucks();
+  const myDucks = renderMyDucks("REGISTRATION");
   const staffHome = renderStaffHome("Administrator", true, []);
 
   assert.match(myDucks, /class="participant-track" id="awaiting-participants" data-participant-track/);
   assert.match(style, /\.participant-track \{[^}]*overflow-x:auto;[^}]*scroll-snap-type:x mandatory;/);
   assert.match(style, /\.participant-card \{ flex:0 0 min\(30rem,calc\(100% - 3rem\)\); min-width:0;/);
   assert.match(style, /\.page-panel\.my-ducks-panel \{ max-width:70rem; \}/);
+  // The phase message pages set a whole sentence as the page title, so it gets
+  // a readable size instead of the 12ch display treatment.
+  assert.match(style, /\.page-title\.message-title \{ max-width:26ch; font-size:clamp\(1\.9rem,5vw,3\.2rem\);/);
+  assert.match(style, /\.my-ducks-flow \{ display:flex; flex-direction:column; \}/);
   assert.match(staffHome, /class="operation-card inventory-detail-panel"[^>]*data-inventory-detail hidden/);
   assert.match(style, /\.inventory-detail-panel \{ min-width:0;/);
   assert.match(style, /\.inventory-card-grid \{ grid-template-columns:repeat\(auto-fit,minmax\(min\(100%,14rem\),1fr\)\);/);
@@ -115,6 +125,8 @@ test("every rendered form class remains covered by the shared form constraints",
   // Down from 36: the Returns section's four forms (numbered disposition,
   // purge-ready, cancel purge-ready, return-batch item), the two purge forms
   // in Support, and the staff duck page's disposition form are all gone.
+  // The name-search form moved from the home page to My Ducks, and the
+  // registration form now renders only in the Registration phase.
   assert.equal(openingForms, 29);
   assert.equal(closingForms, openingForms);
   // "danger-zone" left the form vocabulary with the two purge forms; it now
@@ -153,7 +165,7 @@ test("stations keep their actionable message lines after freshness removal", () 
 });
 
 test("the live board exposes a stage chip on every page that renders it", () => {
-  const boardPages = [renderHome(), renderStatus(), renderDuck()];
+  const boardPages = [renderRace("RACING"), renderStatus(), renderDuck()];
 
   for (const markup of boardPages) {
     assert.match(markup, /<p class="status-chip live-board-stage" data-live-board-stage aria-live="polite">Loading race stage…<\/p>/);
@@ -163,11 +175,14 @@ test("the live board exposes a stage chip on every page that renders it", () => 
     assert.match(markup, /data-live-board-content/);
   }
   assert.match(style, /\.live-board-stage \{[^}]*background:var\(--yellow\)/);
-  assert.equal(renderMyDucks().includes("data-live-board-stage"), false);
+  assert.equal(renderMyDucks("RACING").includes("data-live-board-stage"), false);
+  // The full board left the home page; only the compact summary remains there.
+  assert.equal(renderHome("RACING").includes("data-live-board-stage"), false);
+  assert.equal(renderHome("RACING").includes("data-live-board-content"), false);
 });
 
 test("the how-it-works cards describe the race without linking anywhere", () => {
-  const home = renderHome();
+  const home = renderHome("REGISTRATION");
   const explainers = home.match(/<section id="how-it-works"[\s\S]*?<\/section>/)?.[0];
 
   assert.ok(explainers);
@@ -187,7 +202,7 @@ test("the how-it-works cards describe the race without linking anywhere", () => 
 });
 
 test("My Ducks ships no per-section empty state and stays gated until data loads", () => {
-  const myDucks = renderMyDucks();
+  const myDucks = renderMyDucks("REGISTRATION");
 
   for (const kind of ["awaiting", "paired"]) {
     assert.match(
@@ -205,21 +220,21 @@ test("My Ducks ships no per-section empty state and stays gated until data loads
 });
 
 test("search results style an add-to-My-Ducks action with the shared button conventions", () => {
-  assert.match(homeScript, /"\/api\/v1\/registrations\/mine\/follow"/);
-  assert.match(homeScript, /createText\("button", "Add to My Ducks", "button small"\)/);
-  assert.match(homeScript, /button\.type = "button"/);
-  assert.match(homeScript, /createText\("span", "In My Ducks", "success-tag"\)/);
+  assert.match(searchScript, /"\/api\/v1\/registrations\/mine\/follow"/);
+  assert.match(searchScript, /createText\("button", "Add to My Ducks", "button small"\)/);
+  assert.match(searchScript, /button\.type = "button"/);
+  assert.match(searchScript, /createText\("span", "In My Ducks", "success-tag"\)/);
   assert.match(style, /\.button\.small \{/);
   assert.match(style, /\.success-tag \{/);
   assert.match(style, /\.duck-card > \.actions \{ margin-top:\.75rem; \}/);
   // The public search carries no staff code and no private token, so no result
   // card can read or render either one.
-  assert.doesNotMatch(homeScript, /lookupCode|Staff lookup code|privateStatusPath|privateToken/i);
-  assert.doesNotMatch(homeScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  assert.doesNotMatch(searchScript, /lookupCode|Staff lookup code|privateStatusPath|privateToken/i);
+  assert.doesNotMatch(searchScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
 });
 
 test("registration uses the responsive Turnstile widget contract", () => {
-  const registration = renderRegistration("test-site-key");
+  const registration = renderRegistration("test-site-key", "REGISTRATION");
 
   assert.match(registration, /class="cf-turnstile"[^>]*data-size="flexible"/);
   assert.match(style, /\.cf-turnstile,\.turnstile-mock \{ width:100%; min-width:0; max-width:100%; \}/);
@@ -315,7 +330,17 @@ test("the duck not-found view is friendly, terminal, and reveals nothing extra",
   assert.match(markup, /<meta name="robots" content="noindex,nofollow">/);
   assert.match(panel, /Duck #4096 isn’t racing\./);
   assert.match(panel, /No duck with this number is paired with a participant in the current race\./);
-  assert.match(panel, /<a class="button" href="\/">Back to the race board<\/a>/);
+  // The board moved to /race, so the recovery action follows it. Before a race
+  // exists there is no board, so the same action falls back to the home page.
+  assert.match(panel, /<a class="button" href="\/">Back to QuickDucks<\/a>/);
+  assert.match(
+    renderPublicDuckNotFound("4096", "RACING"),
+    /<a class="button" href="\/race">Back to the race board<\/a>/,
+  );
+  assert.match(
+    renderPublicDuck(duckStatus(), "RACING"),
+    /<a class="button secondary" href="\/race">Back to the race board<\/a>/,
+  );
   // No live surface, no board, and no wording that separates the possible causes.
   assert.doesNotMatch(markup, /data-live-personal|data-live-board|assets\/live\.js/);
   assert.doesNotMatch(panel, /inventory|available|reserved|unpaired|unknown|does not exist/i);
