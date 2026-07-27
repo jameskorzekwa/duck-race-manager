@@ -48,6 +48,7 @@ not authorized.
 | Lock, ready, call, and start heat | `HEAT_RUNNER` or `RACE_DIRECTOR` | Yes |
 | Finish heat and finalize required result/podium | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/start-line` | `HEAT_RUNNER` or `RACE_DIRECTOR` | Yes |
+| Open `/staff/announcer` (read-only) | `ANNOUNCER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/finish-line` and resolve a roster duck by tag URL/number | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
 | Create/configure/delete draft; reopen registration | None | Yes |
@@ -687,7 +688,8 @@ revision checks.
 Every staff page also renders one persistent staff navigation listing only the
 pages the signed-in actor may open: **Console** (`/staff`, any staff member),
 **Access** (`/staff/access`, system administrator), **Start line**
-(`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), **Finish line**
+(`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), **Announcer**
+(`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Finish line**
 (`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`), and **Inventory**
 (`/staff/inventory-intake`, `DUCK_MANAGER` or `RACE_DIRECTOR`). A system
 administrator sees every link. The current page is marked `aria-current="page"`.
@@ -1258,6 +1260,32 @@ Starting requires a plain-language confirmation that reads back round, heat
 number, and racer count. The station has no finish, result, correction, reopen,
 or roster-edit control. Large high-contrast controls are at least 48 pixels
 tall.
+
+### Focused Announcer Station
+
+`/staff/announcer` is a reading script for someone holding a microphone. It is
+strictly read-only: it issues only GET requests and has no lifecycle transition,
+result entry, or roster control anywhere on the page.
+
+It shows the heat that is up now, chosen by the same priority as the start-line
+station, with a plain sentence saying what to do (read the racers, call the
+race, or hold for the official result). Its roster comes from
+`GET /api/v1/staff/events/:eventId/heats/:heatId/announcer-roster`, which
+projects exactly slot number, full participant name, and visible duck number.
+Announcers say the whole name, so this projection is deliberately the full
+registered name rather than the public name policy used on the race board; it
+carries no contact data, lookup code, or inventory detail.
+
+Every heat that already has a published result appears under **Recorded
+winners** with its round, heat number, winner's full name, and duck number, so
+the announcer can call the winner out as soon as the finish-line staffer records
+it. The final additionally renders the full official podium. A settled heat's
+detail is read once per heat revision, so a live signal never refetches the
+whole race, and a race-director correction is picked up immediately.
+
+The page subscribes to the shared live hub on the `event`, `participants`,
+`ducks`, and `heats` domains and refetches the authoritative APIs on a signal,
+so the announcer never has to refresh.
 
 ### Focused Finish-Line Station
 
