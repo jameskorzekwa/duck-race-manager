@@ -1,12 +1,15 @@
 import {
+  findDuckNumberFollowState,
   findDuckNumberRaceStatus,
   findDuckRaceStatus,
   findRegistrationStatus,
+  findTagFollowState,
   handleApi,
 } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
-import { hasAnyRole } from "./authorization.ts";
+import { hasAnyRole, type OperationalRole } from "./authorization.ts";
 import {
+  announcerScript,
   appSelectScript,
   finishLineScript,
   inventoryIntakeScript,
@@ -32,6 +35,7 @@ import {
   renderRegistration,
   renderStaffAuthError,
   renderStaffDuck,
+  renderAnnouncer,
   renderFinishLine,
   renderInventoryIntake,
   renderInventoryIntakeUnsupported,
@@ -106,6 +110,38 @@ const safeReturnTo = (value: string | null): string =>
 const hasAndroidUserAgent = (request: Request): boolean =>
   /\bAndroid\b/i.test(request.headers.get("user-agent") ?? "");
 
+// Focused race-day station pages. Each is one path, one role set, one renderer,
+// so a new station cannot drift from the shared 303/403/noindex treatment. A Map
+// is used rather than an object literal because the key is the request path.
+// Announcer sits between the two stations it reports on, matching the staff nav.
+interface StationPage {
+  roles: readonly OperationalRole[];
+  name: string;
+  render: (
+    displayName: string,
+    isSystemAdmin: boolean,
+    roles: readonly OperationalRole[],
+  ) => string;
+}
+
+const stationPages = new Map<string, StationPage>([
+  ["/staff/start-line", {
+    roles: ["HEAT_RUNNER", "RACE_DIRECTOR"],
+    name: "start-line",
+    render: (displayName, isSystemAdmin, roles) => renderStartLine(displayName, true, isSystemAdmin, roles),
+  }],
+  ["/staff/announcer", {
+    roles: ["ANNOUNCER", "RACE_DIRECTOR"],
+    name: "announcer",
+    render: (displayName, isSystemAdmin, roles) => renderAnnouncer(displayName, true, isSystemAdmin, roles),
+  }],
+  ["/staff/finish-line", {
+    roles: ["RESULT_TAKER", "RACE_DIRECTOR"],
+    name: "finish-line",
+    render: (displayName, isSystemAdmin, roles) => renderFinishLine(displayName, true, isSystemAdmin, roles),
+  }],
+]);
+
 export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
@@ -177,7 +213,7 @@ export const createWorker = (
       });
     }
 
-    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)) {
+    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/live.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)) {
       const script = url.pathname === "/assets/live-ui.js"
         ? liveUiScript
         : url.pathname === "/assets/register.js"
@@ -192,15 +228,17 @@ export const createWorker = (
                   ? liveScript
                   : url.pathname === "/assets/start-line.js"
                     ? startLineScript
-                    : url.pathname === "/assets/finish-line.js"
-                      ? finishLineScript
-                      : url.pathname === "/assets/app-select.js"
-                        ? appSelectScript
-                        : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
+                    : url.pathname === "/assets/announcer.js"
+                      ? announcerScript
+                      : url.pathname === "/assets/finish-line.js"
+                        ? finishLineScript
+                        : url.pathname === "/assets/app-select.js"
+                          ? appSelectScript
+                          : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)
+          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)
             ? "no-store"
             : "public, max-age=3600",
           "content-type": "text/javascript; charset=utf-8",
@@ -272,6 +310,9 @@ export const createWorker = (
     }
     if (url.pathname === "/mock/staff/start-line" && request.method === "GET") {
       return staffHtml(renderStartLine("Start-line Preview", false));
+    }
+    if (url.pathname === "/mock/staff/announcer" && request.method === "GET") {
+      return staffHtml(renderAnnouncer("Announcer Preview", false));
     }
     if (url.pathname === "/mock/staff/finish-line" && request.method === "GET") {
       return staffHtml(renderFinishLine("Finish-line Preview", false));
@@ -352,27 +393,25 @@ export const createWorker = (
       return withSessionCookies(response);
     }
 
-    if ((url.pathname === "/staff/start-line" || url.pathname === "/staff/finish-line") && request.method === "GET") {
+    const station = stationPages.get(url.pathname);
+    if (station !== undefined && request.method === "GET") {
       const actor = await authenticateRequest(request, env);
       if (actor === null) {
         const login = new URL("/staff", env.APP_ORIGIN);
         login.searchParams.set("returnTo", `${url.pathname}${url.search}`);
         return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
       }
-      const startLine = url.pathname === "/staff/start-line";
-      const allowed = startLine
-        ? hasAnyRole(actor, ["HEAT_RUNNER", "RACE_DIRECTOR"])
-        : hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
-      if (!allowed) {
+      if (!hasAnyRole(actor, station.roles)) {
         return withSessionCookies(html(renderStaffAuthError(
-          `This account does not have permission to use the ${startLine ? "start-line" : "finish-line"} station.`,
+          `This account does not have permission to use the ${station.name} station.`,
           actor,
         ), 403, true));
       }
-      const displayName = actor.displayName ?? actor.email;
-      return withSessionCookies(staffHtml(startLine
-        ? renderStartLine(displayName, true, actor.isSystemAdmin, actor.roles)
-        : renderFinishLine(displayName, true, actor.isSystemAdmin, actor.roles)));
+      return withSessionCookies(staffHtml(station.render(
+        actor.displayName ?? actor.email,
+        actor.isSystemAdmin,
+        actor.roles,
+      )));
     }
 
     const staffDuckMatch = url.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
@@ -404,9 +443,16 @@ export const createWorker = (
     if (duckNumberMatch !== null && request.method === "GET") {
       const status = await findDuckNumberRaceStatus(duckNumberMatch[1], env);
       const phase = await publicPhase();
+      // The follow control is resolved from the same anonymous request, so a
+      // page painted for a browser that already follows this participant never
+      // offers to add them twice.
       return status === null
         ? html(renderPublicDuckNotFound(duckNumberMatch[1], phase), 404, true)
-        : html(renderPublicDuck(status, phase), 200, true);
+        : html(renderPublicDuck(
+          status,
+          phase,
+          await findDuckNumberFollowState(request, env, duckNumberMatch[1]),
+        ), 200, true);
     }
 
     const privateStatusMatch = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);
@@ -429,9 +475,19 @@ export const createWorker = (
         }));
       }
       const status = await findDuckRaceStatus(duckTagMatch[1], env);
-      return withSessionCookies(status === null
-        ? new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } })
-        : html(renderDuck(status, await publicPhase()), 200, true));
+      if (status === null) {
+        return withSessionCookies(new Response(null, {
+          status: 303,
+          headers: { ...securityHeaders, location: "/" },
+        }));
+      }
+      // Tag GETs stay read-only: this resolves the follow control from the
+      // browser collection cookie without refreshing it or issuing one.
+      return withSessionCookies(html(renderDuck(
+        status,
+        await publicPhase(),
+        await findTagFollowState(request, env, duckTagMatch[1]),
+      ), 200, true));
     }
 
     // Catch-all. Every unmatched path lands here, including bot and scanner

@@ -55,7 +55,7 @@ delivery phases, and acceptance criteria.
 - Host the PWA, API, and database on Cloudflare's free developer platform.
 - Push privacy-safe finite-domain invalidations through one hibernatable Durable
   Object while keeping D1-backed APIs authoritative on every device.
-- Support immediate fixed-size or post-registration balanced heat assignment.
+- Fill fixed-size heats (at least three ducks) as participants are paired.
 - Send upcoming-heat email notifications to participants who provide email.
 - Provide a read-only duck inspection workflow for misplaced ducks.
 - Preserve a participant's heat and race status when replacing a lost duck.

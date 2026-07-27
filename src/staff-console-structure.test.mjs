@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { liveUiScript, staffAccessScript, staffHomeScript } from "./client-scripts.ts";
 import {
+  renderAnnouncer,
   renderFinishLine,
   renderInventoryIntake,
   renderStaffAccess,
@@ -44,6 +45,36 @@ const eventScopedToggle = () => {
 };
 
 const scopedElement = (roleAllowed) => ({ hidden: true, dataset: roleAllowed === undefined ? {} : { roleAllowed } });
+
+// Three race-control surfaces were removed outright. The balanced planner is a
+// retired assignment model, and the lock-roster and announcer-roster buttons
+// are respectively obsolete (rounds lock themselves) and a visible no-op.
+test("the heats console drops the balanced planner, lock-roster, and announcer-roster controls", () => {
+  const consoles = [
+    ["administrator", renderStaffHome("Administrator", true, [])],
+    ["race director", renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])],
+    ["announcer", renderStaffHome("Announcer", false, ["ANNOUNCER"])],
+    ["heat runner", renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"])],
+  ];
+  for (const [label, markup] of consoles) {
+    const heats = markup.match(/<section class="console-section" id="heats"[^]*?<\/section>/)?.[0];
+    assert.ok(heats, `${label} renders the heats section`);
+    assert.doesNotMatch(heats, /Balanced round-one plan|data-plan-preview|data-plan-commit|data-plan-result/, label);
+    assert.doesNotMatch(heats, /Lock roster|Load announcer roster/, label);
+    // The surviving race-control surfaces are untouched.
+    assert.match(heats, /data-heat-list/, label);
+    assert.match(heats, /data-finalist-list/, label);
+  }
+
+  // The draft configuration form no longer offers a heat assignment mode.
+  const adminMarkup = renderStaffHome("Administrator", true, []);
+  assert.doesNotMatch(adminMarkup, /heatAssignmentMode|POST_CLOSE_BALANCED|Balanced plan after close/);
+
+  // The start-line station lost its lock action and says so.
+  const startLine = renderStartLine("Heat Runner", true, false, ["HEAT_RUNNER"]);
+  assert.doesNotMatch(startLine, /Lock roster|lock, ready, call/);
+  assert.match(startLine, /This station can only ready, call, or start a heat\./);
+});
 
 test("every event-scoped console section ships hidden so no section flashes before an event loads", () => {
   const consoles = [
@@ -194,16 +225,17 @@ test("the console drives gating from the event load and the no-events branch", (
 
 test("the staff nav lists only the pages the actor may open", () => {
   const cases = [
-    [renderStaffHome("Administrator", true, []), ["/staff", "/staff/access", "/staff/start-line", "/staff/finish-line", "/staff/inventory-intake"]],
-    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), ["/staff", "/staff/start-line", "/staff/finish-line", "/staff/inventory-intake"]],
+    [renderStaffHome("Administrator", true, []), ["/staff", "/staff/access", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory-intake"]],
+    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), ["/staff", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory-intake"]],
     [renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"]), ["/staff", "/staff/start-line"]],
     [renderStaffHome("Result Taker", false, ["RESULT_TAKER"]), ["/staff", "/staff/finish-line"]],
     [renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]), ["/staff", "/staff/inventory-intake"]],
-    [renderStaffHome("Announcer", false, ["ANNOUNCER"]), ["/staff"]],
+    [renderStaffHome("Announcer", false, ["ANNOUNCER"]), ["/staff", "/staff/announcer"]],
     [renderStaffHome("Registration Staff", false, ["REGISTRATION"]), ["/staff"]],
     [renderStaffHome("No Role", false, []), ["/staff"]],
     [renderStaffHome("Mixed Staff", false, ["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff", "/staff/finish-line", "/staff/inventory-intake"]],
-    [renderStaffAccess("Administrator"), ["/staff", "/staff/access", "/staff/start-line", "/staff/finish-line", "/staff/inventory-intake"]],
+    [renderStaffHome("Mixed Race Staff", false, ["ANNOUNCER", "HEAT_RUNNER"]), ["/staff", "/staff/start-line", "/staff/announcer"]],
+    [renderStaffAccess("Administrator"), ["/staff", "/staff/access", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory-intake"]],
   ];
 
   for (const [markup, expected] of cases) {
@@ -217,6 +249,40 @@ test("the staff nav lists only the pages the actor may open", () => {
   for (const role of ["RACE_DIRECTOR", "REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
     assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /\/staff\/access/, role);
   }
+
+  // Announcer is a race-day station gated exactly like the two it reports on:
+  // its own role, the race director, and an administrator implicitly.
+  for (const role of ["REGISTRATION", "DUCK_MANAGER", "HEAT_RUNNER", "RESULT_TAKER"]) {
+    assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /\/staff\/announcer/, role);
+  }
+});
+
+// The announcer works between the start line and the finish line, so the link
+// sits between them. Position is asserted as an adjacency, not an index, so the
+// requirement survives any later station being added or removed.
+test("the announcer link sits immediately to the right of Start line", () => {
+  const navs = [
+    ["administrator", staffNav(renderStaffHome("Administrator", true, []))],
+    ["race director", staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]))],
+    ["announcer and heat runner", staffNav(renderStaffHome("Mixed", false, ["ANNOUNCER", "HEAT_RUNNER"]))],
+  ];
+
+  for (const [label, nav] of navs) {
+    const hrefs = navHrefs(nav);
+    assert.equal(
+      hrefs.indexOf("/staff/announcer"),
+      hrefs.indexOf("/staff/start-line") + 1,
+      `announcer must follow start line for ${label}`,
+    );
+    assert.match(nav, /<a href="\/staff\/start-line"[^>]*>Start line<\/a><a href="\/staff\/announcer"[^>]*>Announcer<\/a>/, label);
+  }
+
+  // An announcer without the start-line role still gets the link, and it stays
+  // ahead of the finish line.
+  const announcerOnly = navHrefs(staffNav(renderStaffHome("Announcer", false, ["ANNOUNCER"])));
+  assert.deepEqual(announcerOnly, ["/staff", "/staff/announcer"]);
+  const director = navHrefs(staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])));
+  assert.ok(director.indexOf("/staff/announcer") < director.indexOf("/staff/finish-line"));
 });
 
 test("the staff nav is on every operational staff page and marks the current one", () => {
@@ -224,6 +290,7 @@ test("the staff nav is on every operational staff page and marks the current one
     [renderStaffHome("Administrator", true, []), "/staff"],
     [renderStaffAccess("Administrator"), "/staff/access"],
     [renderStartLine("Heat Runner", true, false, ["HEAT_RUNNER"]), "/staff/start-line"],
+    [renderAnnouncer("Announcer", true, false, ["ANNOUNCER"]), "/staff/announcer"],
     [renderFinishLine("Result Taker", true, false, ["RESULT_TAKER"]), "/staff/finish-line"],
     [renderInventoryIntake("Duck Manager", "https://quickducks.com", false, ["DUCK_MANAGER"]), "/staff/inventory-intake"],
   ];

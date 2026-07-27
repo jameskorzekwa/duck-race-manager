@@ -204,7 +204,7 @@ test("the how-it-works cards describe the race without linking anywhere", () => 
 test("My Ducks ships no per-section empty state and stays gated until data loads", () => {
   const myDucks = renderMyDucks("REGISTRATION");
 
-  for (const kind of ["awaiting", "paired"]) {
+  for (const kind of ["awaiting", "paired", "followed"]) {
     assert.match(
       myDucks,
       new RegExp(`<section class="participant-section" data-participant-section="${kind}" aria-labelledby="[a-z-]+" hidden>`),
@@ -217,6 +217,24 @@ test("My Ducks ships no per-section empty state and stays gated until data loads
   assert.match(myDucks, /<h2 id="paired-participants-title">My Ducks<\/h2>/);
   assert.match(myDucks, /data-carousel-controls hidden/);
   assert.match(myDucks, /data-participant-track tabindex="0" aria-label="Awaiting participant registrations" hidden/);
+});
+
+test("My Ducks separates participants registered here from ducks that are only followed", () => {
+  const myDucks = renderMyDucks("REGISTRATION");
+
+  // The followed set is its own section with its own carousel, and it says
+  // plainly that those entries carry no staff code and no duck name.
+  assert.match(myDucks, /<h2 id="followed-participants-title">Ducks I’m Following<\/h2>/);
+  assert.match(myDucks, /data-participant-track tabindex="0" aria-label="Followed participants" hidden/);
+  assert.match(myDucks, /someone else’s registration, so they show public race status only — no staff lookup code and no duck name/);
+  // The owned sections say the opposite, so the distinction is on the page and
+  // not only in the card contents.
+  assert.match(myDucks, /Participants you registered on this device, waiting for staff to pair a physical duck\. Their staff lookup code stays on this device\./);
+  assert.match(myDucks, /Participants you registered on this device, already paired with their race duck\. Give the duck a name/);
+  assert.match(myDucks, /Participants you registered on this device keep their full details and staff lookup code\./);
+  // The followed section still follows the shared hidden-until-data rule.
+  const followed = myDucks.slice(myDucks.indexOf('data-participant-section="followed"'));
+  assert.match(followed.slice(0, followed.indexOf("</section>")), /data-carousel-controls hidden/);
 });
 
 test("search results style an add-to-My-Ducks action with the shared button conventions", () => {
@@ -322,6 +340,39 @@ test("the public duck detail view escapes server values and shows no private mat
   assert.match(markup, /never contact information, staff codes, private links, or the duck’s tag/);
 });
 
+test("both public duck views paint the follow control from the resolved follow state", () => {
+  const followId = "11111111-1111-4111-8111-111111111111";
+  for (const [label, render] of [["tag scan", renderDuck], ["duck number", renderPublicDuck]]) {
+    // No follow state means the participant cannot be followed at all, so no
+    // control is painted and no dead button can appear.
+    const none = render(duckStatus(), "RACING", null);
+    assert.doesNotMatch(none, /data-duck-follow data-follow-id/, label);
+    assert.doesNotMatch(none, /data-follow-button|data-follow-added/, label);
+
+    const offered = render(duckStatus(), "RACING", { followId, inMyDucks: false });
+    assert.match(
+      offered,
+      new RegExp(`<div class="actions" data-duck-follow data-follow-id="${followId}"><button class="button" type="button" data-follow-button>Follow this duck</button></div>`),
+      label,
+    );
+    assert.match(offered, /<p class="message-line muted" data-follow-message role="status" hidden><\/p>/, label);
+
+    const already = render(duckStatus(), "RACING", { followId, inMyDucks: true });
+    assert.match(already, /<span class="success-tag" data-follow-added>In My Ducks<\/span>/, label);
+    assert.match(already, /<a class="button secondary small" href="\/my-ducks">Open My Ducks<\/a>/, label);
+    assert.doesNotMatch(already, /data-follow-button/, label);
+
+    // The identifier is a server value like any other and is escaped.
+    assert.match(
+      render(duckStatus(), "RACING", { followId: '"><script>alert(1)</script>', inMyDucks: false }),
+      /data-follow-id="&quot;&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt;"/,
+      label,
+    );
+    // The control adds no participant data of its own.
+    assert.doesNotMatch(offered, /lookup code|duckName|privateStatusPath/i, label);
+  }
+});
+
 test("the duck not-found view is friendly, terminal, and reveals nothing extra", () => {
   const markup = renderPublicDuckNotFound("4096");
   const panel = markup.match(/<section class="page-panel">[\s\S]*?<\/section>/)?.[0];
@@ -352,5 +403,8 @@ test("the duck number link style is shared by the board and My Ducks", () => {
   assert.ok(style);
   assert.match(style, /\.duck-number-link \{[^}]*text-decoration:underline;/);
   assert.match(style, /\.duck-number-link:focus-visible \{ outline:4px solid #83d8ec; outline-offset:2px; \}/);
-  assert.match(participantScript, /duckDetailLink\(document, status\.duck \? status\.duck\.visibleNumber : null\)/);
+  // My Ducks passes the owner's chosen duck name as the link label. The
+  // destination stays the shared public duck path either way.
+  assert.match(participantScript, /duckDetailLink\(document, status\.duck \? status\.duck\.visibleNumber : null, duckName\)/);
+  assert.match(style, /\.duck-number-note \{[^}]*color:var\(--muted\);/);
 });

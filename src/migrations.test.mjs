@@ -18,6 +18,7 @@ const migrationNames = [
   "0012_staff_role_assignments.sql",
   "0013_followed_collection_entries.sql",
   "0014_simplified_lifecycle_schema.sql",
+  "0015_participant_duck_names.sql",
 ];
 
 const lifecycleStatuses = [
@@ -209,6 +210,63 @@ test("0013 keeps existing collection links registration-sourced and constrains n
   // The purge path still clears every collection link regardless of source.
   database.exec("DELETE FROM browser_collection_registrations");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM browser_collection_registrations").get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0015 adds an optional bounded duck name that older writes keep working without", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0015_participant_duck_names.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event', 'test-race', 'Test Race', 'America/Denver', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash, submitted_at, status_changed_at)
+    VALUES ('registration-1', 'event', 'Daisy', 'Duck', 'ACTIVE', 'DAASY234', 'hash-1',
+            '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-1', 'event', 'registration-1');
+  `);
+
+  applyMigrations(database, ["0015_participant_duck_names.sql"]);
+
+  // Existing race entries are unnamed, and the previously deployed Worker's
+  // insert shape still works because the column is nullable with no default.
+  assert.equal(database.prepare("SELECT duck_name FROM race_entries WHERE id = 'entry-1'").get().duck_name, null);
+  database.exec(`
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash, submitted_at, status_changed_at)
+    VALUES ('registration-2', 'event', 'Donald', 'Mallard', 'SUBMITTED', 'DNNALD23', 'hash-2',
+            '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-2', 'event', 'registration-2');
+  `);
+  assert.equal(database.prepare("SELECT duck_name FROM race_entries WHERE id = 'entry-2'").get().duck_name, null);
+
+  // The CHECK is the authoritative bound on what may be stored.
+  database.prepare("UPDATE race_entries SET duck_name = ? WHERE id = 'entry-1'").run("Sir Quacks-a-Lot");
+  database.prepare("UPDATE race_entries SET duck_name = ? WHERE id = 'entry-2'").run("d".repeat(40));
+  for (const value of ["", "  ", " Bubbles", "Bubbles ", "e".repeat(41)]) {
+    assert.throws(
+      () => database.prepare("UPDATE race_entries SET duck_name = ? WHERE id = 'entry-1'").run(value),
+      /CHECK constraint failed/,
+      JSON.stringify(value),
+    );
+  }
+  assert.equal(
+    database.prepare("SELECT duck_name FROM race_entries WHERE id = 'entry-1'").get().duck_name,
+    "Sir Quacks-a-Lot",
+  );
+
+  // Two entries may carry the same name: it is a personal label, not an
+  // identifier, and nothing keys off it.
+  database.prepare("UPDATE race_entries SET duck_name = 'Bubbles' WHERE id = 'entry-1'").run();
+  database.prepare("UPDATE race_entries SET duck_name = 'Bubbles' WHERE id = 'entry-2'").run();
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM race_entries WHERE duck_name = 'Bubbles'").get().count,
+    2,
+  );
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

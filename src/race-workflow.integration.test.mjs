@@ -101,6 +101,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0012_staff_role_assignments.sql",
     "0013_followed_collection_entries.sql",
     "0014_simplified_lifecycle_schema.sql",
+    "0015_participant_duck_names.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -213,7 +214,29 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(created.event.heatAssignmentMode, "IMMEDIATE_FIXED");
   assert.equal(created.event.roundOneHeatCapacity, 4);
 
-  // The legacy balanced mode remains available through draft configuration.
+  // The retired balanced mode is refused outright; assigning heats while
+  // pairing is the only model.
+  const retiredMode = await api(`/api/v1/staff/events/${eventId}/configuration`, {
+    method: "PATCH",
+    token: adminToken,
+    body: {
+      commandId: crypto.randomUUID(),
+      revision: 0,
+      heatAssignmentMode: "POST_CLOSE_BALANCED",
+    },
+  });
+  assert.equal(retiredMode.status, 400);
+  assert.match((await retiredMode.json()).error, /no other heat assignment mode/i);
+
+  // A heat needs at least three ducks, so a smaller capacity is refused too.
+  const tinyHeats = await api(`/api/v1/staff/events/${eventId}/configuration`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { commandId: crypto.randomUUID(), revision: 0, roundOneHeatCapacity: 2 },
+  });
+  assert.equal(tinyHeats.status, 400);
+  assert.match((await tinyHeats.json()).error, /roundOneHeatCapacity must be an integer between 3 and 10000/);
+
   const configured = await jsonBody(await api(`/api/v1/staff/events/${eventId}/configuration`, {
     method: "PATCH",
     token: adminToken,
@@ -222,14 +245,15 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       revision: 0,
       timezone: "America/Denver",
       emailRequired: true,
-      heatAssignmentMode: "POST_CLOSE_BALANCED",
-      roundOneHeatCapacity: 2,
+      heatAssignmentMode: "IMMEDIATE_FIXED",
+      roundOneHeatCapacity: 3,
       finalHeatCapacity: 3,
       publicNamePolicy: "FIRST_NAME_LAST_INITIAL",
     },
   }), 200, "configure event");
   assert.equal(configured.event.revision, 1);
-  assert.equal(configured.event.roundOneHeatCapacity, 2);
+  assert.equal(configured.event.heatAssignmentMode, "IMMEDIATE_FIXED");
+  assert.equal(configured.event.roundOneHeatCapacity, 3);
 
   const opened = await jsonBody(await post(`/api/v1/staff/events/${eventId}/open-registration`, {
     commandId: crypto.randomUUID(),
@@ -244,6 +268,8 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.deepEqual(openBoard.event.roundOneHeats, []);
   assert.equal(/id|email|phone|token|lookup/i.test(JSON.stringify(openBoard)), false);
 
+  // Nine racers at three per heat fill exactly three round-one heats, which is
+  // the smallest layout that still produces a complete three-place final.
   const participantInputs = [
     ["Daisy", "Duck"],
     ["Donald", "Mallard"],
@@ -251,6 +277,9 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     ["Dewey", "Bird"],
     ["Huey", "Bird"],
     ["Louie", "Bird"],
+    ["Scrooge", "McDuck"],
+    ["Webby", "Vanderquack"],
+    ["Gyro", "Gearloose"],
   ];
   const participants = [];
   let browserCookie;
@@ -348,7 +377,9 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       eventId,
       lookupCode: participant.lookupCode,
     }), 201, `pair duck ${participant.visibleNumber}`);
-    assert.equal(pairing.heatAssignmentPending, true);
+    // Pairing places the duck straight into the next open heat spot.
+    assert.equal(pairing.heatAssignmentPending, false);
+    assert.ok(pairing.heat.number >= 1);
     assert.equal(pairing.duck.visibleNumber, participant.visibleNumber);
   }
 
@@ -395,16 +426,21 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(closedRegistration.status, 409);
   assert.equal(turnstileChecks, participants.length);
 
-  const preview = await jsonBody(await post(
-    `/api/v1/staff/events/${eventId}/heats/round-one/plan-preview`,
-    {},
-  ), 200, "preview round one");
-  assert.equal(preview.balanced, true);
-  assert.deepEqual(preview.heats.map((heat) => heat.size), [2, 2, 2]);
-  await jsonBody(await post(`/api/v1/staff/events/${eventId}/heats/round-one/plan-commit`, {
-    commandId: crypto.randomUUID(),
-    fingerprint: preview.fingerprint,
-  }), 201, "commit round one");
+  // The retired balanced planner is unrouted, and closing registration left
+  // three full heats that need no rebalancing.
+  for (const path of ["plan-preview", "plan-commit"]) {
+    const retiredPlan = await post(`/api/v1/staff/events/${eventId}/heats/round-one/${path}`, {
+      commandId: crypto.randomUUID(),
+    });
+    assert.equal(retiredPlan.status, 404, `retired ${path}`);
+  }
+  assert.deepEqual(
+    database.prepare(
+      `SELECT (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) AS size
+         FROM heats h WHERE h.round = 'ROUND_ONE' ORDER BY h.heat_number`,
+    ).all().map((row) => row.size),
+    [3, 3, 3],
+  );
 
   const readiness = await jsonBody(await api(`/api/v1/staff/events/${eventId}/readiness`, {
     token: staffToken,
@@ -438,12 +474,16 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     heat.revision = body.heat.revision;
     heat.status = body.heat.status;
   };
+  // Starting the round already locked every roster, so there is no operator
+  // lock step and each heat begins at LOADING.
   for (const heat of roundOneHeats) {
     const detail = await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats/${heat.id}`, {
       token: staffToken,
     }), 200, `round-one heat ${heat.number}`);
     heat.roster = detail.roster;
-    await transition(heat, "lock");
+    assert.equal(detail.heat.status, "LOADING", `heat ${heat.number} locks when the round starts`);
+    assert.equal(detail.heat.rosterLocked, true);
+    heat.revision = detail.heat.revision;
     await transition(heat, "ready");
     await transition(heat, "call");
   }
@@ -523,7 +563,10 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   }), 200, "list final");
   const finalHeat = finalList.heats.find((heat) => heat.round === "FINAL");
   assert.ok(finalHeat);
-  for (const operation of ["lock", "ready", "call", "start", "finish"]) {
+  // The final locks when the final round starts, for the same reason.
+  assert.equal(finalHeat.status, "LOADING");
+  assert.equal(finalHeat.rosterLocked, true);
+  for (const operation of ["ready", "call", "start", "finish"]) {
     await transition(finalHeat, operation);
   }
   const podium = [];
