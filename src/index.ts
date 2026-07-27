@@ -22,6 +22,7 @@ import {
   staffHomeScript,
   startLineScript,
 } from "./client-scripts.ts";
+import { isLocalPreviewOrigin } from "./local-preview.ts";
 import { publicPhaseForRender, type PublicPhase } from "./public-phase.ts";
 import {
   faviconSvg,
@@ -149,8 +150,7 @@ export const createWorker = (
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const appOrigin = new URL(env.APP_ORIGIN);
-    const localHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
-    const localPreview = appOrigin.protocol === "http:" && localHosts.has(appOrigin.hostname);
+    const localPreview = isLocalPreviewOrigin(env.APP_ORIGIN);
     const staffHtml = (body: string, status = 200): Response =>
       html(body, status, true, new URL(env.COGNITO_DOMAIN).origin);
     // One lightweight current-event query per HTML request. Every page renders
@@ -276,8 +276,18 @@ export const createWorker = (
     }
     if (url.pathname === "/register" && request.method === "GET") {
       const siteKey = env.TURNSTILE_SITE_KEY?.trim();
+      const configuredSiteKey = siteKey && env.TURNSTILE_SECRET_KEY ? siteKey : undefined;
+      // A local preview has no Turnstile keys and no route to Cloudflare's
+      // siteverify endpoint, which would otherwise leave the public form
+      // permanently unsubmittable. The unprotected form is offered only when
+      // `createRegistration` will also waive verification, so the page and the
+      // API cannot disagree about whether protection is in force.
       return html(
-        renderRegistration(siteKey && env.TURNSTILE_SECRET_KEY ? siteKey : undefined, await publicPhase()),
+        renderRegistration(
+          configuredSiteKey,
+          await publicPhase(),
+          configuredSiteKey === undefined && localPreview,
+        ),
         200,
         true,
       );

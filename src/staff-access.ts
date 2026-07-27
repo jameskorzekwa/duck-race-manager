@@ -9,6 +9,7 @@ import {
   UsernameExistsException,
 } from "@aws-sdk/client-cognito-identity-provider";
 
+import { isLocalPreviewOrigin } from "./local-preview.ts";
 import type { Env } from "./types.ts";
 
 export interface ProvisionedStaffIdentity {
@@ -41,10 +42,22 @@ const attribute = (
   name: string,
 ): string | null => attributes?.find((item) => item.Name === name)?.Value ?? null;
 
+// A local preview has no AWS credentials and no route to Cognito, so the identity
+// side of staff management is satisfied locally while every D1 write, guard, and
+// audit row still runs for real. The subject is namespaced so a local identity can
+// never collide with a Cognito subject. `isLocalPreviewOrigin` is false for every
+// https origin, so a deployed Worker always talks to the real user pool.
+const localStaffIdentity = (email: string): ProvisionedStaffIdentity => ({
+  cognitoSub: `local-preview-${email}`,
+  username: email,
+  created: true,
+});
+
 export const createCognitoStaffProvisioner = (
   clientForEnv: typeof client = client,
 ): StaffIdentityProvisioner => ({
   async create(email, displayName, env) {
+    if (isLocalPreviewOrigin(env.APP_ORIGIN)) return localStaffIdentity(email);
     const cognito = clientForEnv(env);
     try {
       const result = await cognito.send(new AdminCreateUserCommand({
@@ -86,6 +99,7 @@ export const createCognitoStaffProvisioner = (
   },
 
   async delete(username, env) {
+    if (isLocalPreviewOrigin(env.APP_ORIGIN)) return;
     await clientForEnv(env).send(new AdminDeleteUserCommand({
       UserPoolId: env.COGNITO_USER_POOL_ID,
       Username: username,
@@ -99,6 +113,7 @@ export const createCognitoStaffLifecycle = (
   clientForEnv: typeof client = client,
 ): StaffIdentityLifecycle => ({
   async disable(username, env) {
+    if (isLocalPreviewOrigin(env.APP_ORIGIN)) return;
     await clientForEnv(env).send(new AdminDisableUserCommand({
       UserPoolId: env.COGNITO_USER_POOL_ID,
       Username: username,
@@ -106,6 +121,7 @@ export const createCognitoStaffLifecycle = (
   },
 
   async enable(username, env) {
+    if (isLocalPreviewOrigin(env.APP_ORIGIN)) return;
     await clientForEnv(env).send(new AdminEnableUserCommand({
       UserPoolId: env.COGNITO_USER_POOL_ID,
       Username: username,
@@ -113,6 +129,7 @@ export const createCognitoStaffLifecycle = (
   },
 
   async globalSignOut(username, env) {
+    if (isLocalPreviewOrigin(env.APP_ORIGIN)) return;
     await clientForEnv(env).send(new AdminUserGlobalSignOutCommand({
       UserPoolId: env.COGNITO_USER_POOL_ID,
       Username: username,

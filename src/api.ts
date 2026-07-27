@@ -32,6 +32,7 @@ import {
 import { handleDuckOperations } from "./duck-operations.ts";
 import { handleEventOperations } from "./event-operations.ts";
 import { handleHeatOperations } from "./heat-operations.ts";
+import { isLocalPreviewOrigin } from "./local-preview.ts";
 import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
@@ -352,16 +353,22 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
     return json({ error: "Registration validation failed.", fields: validation.errors }, 422);
   }
 
-  if (env.TURNSTILE_SECRET_KEY === undefined) {
+  // A local preview has no Turnstile secret and no route to Cloudflare, so
+  // remote verification is waived there and only there. The check stays
+  // fail-closed everywhere else: an unconfigured deployment still refuses
+  // registrations rather than accepting unverified ones. `isLocalPreviewOrigin`
+  // is false for every https origin, so production cannot reach this branch.
+  const turnstileSecret = env.TURNSTILE_SECRET_KEY;
+  if (turnstileSecret === undefined && !isLocalPreviewOrigin(env.APP_ORIGIN)) {
     return json({ error: "Registration protection is not configured." }, 503);
   }
   if (typeof payload.turnstileToken !== "string" || payload.turnstileToken.length === 0) {
     return json({ error: "Anti-bot verification is required." }, 422);
   }
-  if (!await verifyTurnstile(
+  if (turnstileSecret !== undefined && !await verifyTurnstile(
     request,
     payload.turnstileToken,
-    env.TURNSTILE_SECRET_KEY,
+    turnstileSecret,
     expectedOrigin.hostname,
     payload.commandId,
   )) {

@@ -1,3 +1,4 @@
+import { isLocalPreviewOrigin } from "./local-preview.ts";
 import type { Env } from "./types.ts";
 
 const objectName = "race-updates";
@@ -130,9 +131,7 @@ export const handleLiveConnection = (request: Request, env: Env): Promise<Respon
   } catch {
     return denied("Live updates are temporarily unavailable.", 503);
   }
-  const configuredOrigin = new URL(expectedOrigin);
-  const localPreview = configuredOrigin.protocol === "http:"
-    && new Set(["localhost", "127.0.0.1", "[::1]"]).has(configuredOrigin.hostname);
+  const localPreview = isLocalPreviewOrigin(expectedOrigin);
   const receivedOrigin = request.headers.get("origin");
   if (receivedOrigin !== expectedOrigin && !(localPreview && receivedOrigin === "http://quickducks.com")) {
     return denied("The live connection origin is not allowed.", 403);

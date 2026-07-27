@@ -1,0 +1,77 @@
+// Local development only. `npm run dev:local` uses this config; deployment never
+// does. It differs from wrangler.jsonc in exactly four ways, and each difference
+// is what makes the site runnable with no network access:
+//
+//   1. `main` is src/local-dev.ts, which supplies an offline stand-in for the
+//      Cognito hosted UI and token endpoints.
+//   2. `APP_ORIGIN` is an http loopback origin, which is the single switch every
+//      local-preview affordance in the Worker keys off.
+//   3. `COGNITO_DOMAIN` points back at the local Worker so the OAuth redirects
+//      resolve locally. It must stay a valid absolute URL: staff pages parse it
+//      to build their CSP form-action.
+//   4. The name and routes are local, so this config cannot take over the
+//      production Worker even if someone deploys it by mistake.
+//
+// The D1, Durable Object, queue, and rate-limiter bindings are deliberately
+// identical to production. Wrangler simulates all four locally, and dropping the
+// rate limiter would make the public search and My Ducks routes throw.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "quickducks-local",
+  "main": "src/local-dev.ts",
+  "compatibility_date": "2026-07-25",
+  "workers_dev": false,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "invocation_logs": false
+    }
+  },
+  "vars": {
+    "APP_ORIGIN": "http://localhost:8787",
+    "AWS_REGION": "us-east-1",
+    "COGNITO_USER_POOL_ID": "us-east-1_local0000",
+    "COGNITO_USER_POOL_CLIENT_ID": "localdevclientid",
+    "COGNITO_DOMAIN": "http://localhost:8787"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "quickducks-prod",
+      "database_id": "3c12a95d-3505-4b80-bd69-b91f61fe5b93",
+      "migrations_dir": "db/migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "RACE_UPDATES",
+        "class_name": "RaceUpdates"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RaceUpdates"]
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "EMAIL_QUEUE",
+        "queue": "quickducks-email"
+      }
+    ]
+  },
+  "ratelimits": [
+    {
+      "name": "PUBLIC_SEARCH_RATE_LIMITER",
+      "namespace_id": "2001",
+      "simple": {
+        "limit": 20,
+        "period": 60
+      }
+    }
+  ]
+}
