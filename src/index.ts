@@ -73,13 +73,19 @@ const json = (value: unknown, status = 200): Response =>
     },
   });
 
+// Cloudflare injects its Web Analytics beacon into HTML responses at the edge,
+// after this Worker returns. The script is served from one origin and reports
+// to another, so both are allowed explicitly rather than widening the policy.
+const analyticsScriptOrigin = "https://static.cloudflareinsights.com";
+const analyticsReportOrigin = "https://cloudflareinsights.com";
+
 const html = (body: string, status = 200, noindex = false, formActionOrigin?: string): Response =>
   new Response(body, {
     status,
     headers: {
       ...securityHeaders,
       "cache-control": "no-store",
-      "content-security-policy": `default-src 'none'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'${formActionOrigin === undefined ? "" : ` ${formActionOrigin}`}; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self' data:; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'unsafe-inline'; upgrade-insecure-requests`,
+      "content-security-policy": `default-src 'none'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com ${analyticsReportOrigin}; form-action 'self'${formActionOrigin === undefined ? "" : ` ${formActionOrigin}`}; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self' data:; object-src 'none'; script-src 'self' https://challenges.cloudflare.com ${analyticsScriptOrigin}; style-src 'unsafe-inline'; upgrade-insecure-requests`,
       "content-type": "text/html; charset=utf-8",
       ...(formActionOrigin === undefined ? {} : { "referrer-policy": "same-origin" }),
       ...(noindex ? { "x-robots-tag": "noindex, nofollow" } : {}),

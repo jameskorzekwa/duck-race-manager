@@ -83,6 +83,35 @@ test("renders the responsive landing page", async () => {
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
 });
 
+test("HTML pages allow exactly the Cloudflare analytics beacon origins", async () => {
+  // Cloudflare injects the beacon at the edge after this Worker responds, so the
+  // policy must admit the script origin and the origin it reports to. Each is a
+  // single exact origin: no wildcards, no scheme-only sources, no inline scripts.
+  const pages = ["https://quickducks.com/", "https://quickducks.com/race", "https://quickducks.com/my-ducks"];
+  for (const url of pages) {
+    const policy = (await worker.fetch(new Request(url), env)).headers.get("content-security-policy") ?? "";
+    const scriptSrc = policy.match(/script-src ([^;]+)/)?.[1] ?? "";
+    const connectSrc = policy.match(/connect-src ([^;]+)/)?.[1] ?? "";
+
+    assert.equal(
+      scriptSrc.trim(),
+      "'self' https://challenges.cloudflare.com https://static.cloudflareinsights.com",
+      `script-src drifted on ${url}`,
+    );
+    assert.equal(
+      connectSrc.trim(),
+      "'self' https://challenges.cloudflare.com https://cloudflareinsights.com",
+      `connect-src drifted on ${url}`,
+    );
+    assert.doesNotMatch(policy, /'unsafe-inline'[^;]*;\s*(?:[^;]*\s)?script-src|script-src[^;]*'unsafe-inline'/);
+    assert.doesNotMatch(policy, /script-src[^;]*\*/);
+    assert.doesNotMatch(policy, /connect-src[^;]*\*/);
+    assert.match(policy, /default-src 'none'/);
+    assert.match(policy, /object-src 'none'/);
+    assert.match(policy, /frame-ancestors 'none'/);
+  }
+});
+
 test("serves the name-search client that ships with My Ducks", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/assets/search.js"), env);
   const legacy = await worker.fetch(new Request("https://quickducks.com/assets/home.js"), env);
