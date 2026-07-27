@@ -24,7 +24,9 @@ test("shared staff styles keep card and status rhythm without empty whitespace",
   assert.match(css, /\.data-list:empty \{ display:none; \}/);
   assert.match(css, /form\.operation-card > \* \+ \* \{ margin-top:0; \}/);
   assert.match(css, /\.data-card h3 \{ margin-bottom:0; overflow-wrap:anywhere; \}/);
-  assert.match(css, /\.freshness \{[^}]*max-width:100%[^}]*overflow-wrap:anywhere/);
+  // The freshness pill is gone; the live board stage chip replaces its rhythm.
+  assert.doesNotMatch(css, /\.freshness\b/);
+  assert.match(css, /\.live-board-stage \{[^}]*max-width:100%[^}]*overflow-wrap:anywhere/);
 });
 
 test("NFC station renders scoped control, state, history, and logout spacing", () => {

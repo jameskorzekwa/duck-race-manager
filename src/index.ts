@@ -1,4 +1,5 @@
 import {
+  findDuckNumberRaceStatus,
   findDuckRaceStatus,
   findRegistrationStatus,
   handleApi,
@@ -24,6 +25,8 @@ import {
   renderDuck,
   renderHome,
   renderNotFound,
+  renderPublicDuck,
+  renderPublicDuckNotFound,
   renderRegistration,
   renderStaffAuthError,
   renderStaffDuck,
@@ -338,6 +341,17 @@ export const createWorker = (
         actor.isSystemAdmin,
         actor.roles,
       )));
+    }
+
+    // Public duck detail by the number printed on the duck and shown on the
+    // board. It carries no token, so it stays anonymous and noindex like the
+    // other public duck pages.
+    const duckNumberMatch = url.pathname.match(/^\/duck\/([0-9]{1,9})$/);
+    if (duckNumberMatch !== null && request.method === "GET") {
+      const status = await findDuckNumberRaceStatus(duckNumberMatch[1], env);
+      return status === null
+        ? html(renderPublicDuckNotFound(duckNumberMatch[1]), 404, true)
+        : html(renderPublicDuck(status), 200, true);
     }
 
     const privateStatusMatch = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);

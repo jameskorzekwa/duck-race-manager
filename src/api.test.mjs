@@ -221,9 +221,15 @@ test("public name search returns race status without contact details", async () 
   assert.equal(body.results[0].outcome, "RUNNING");
   assert.equal("email" in body.results[0], false);
   assert.equal("phone" in body.results[0], false);
+  assert.equal("lookupCode" in body.results[0], false);
+  assert.equal("privateStatusPath" in body.results[0], false);
   assert.doesNotMatch(db.statements[0].sql, /email|phone|lookup_code/i);
   assert.doesNotMatch(db.statements[0].sql, /LIKE/i);
-  assert.deepEqual(db.statements[0].args, ["event_test", "Daisy", "Daisy", "Daisy"]);
+  // An anonymous search binds an unmatchable collection id, so every result is
+  // reported as not yet collected without touching the cookie.
+  assert.deepEqual(db.statements[0].args, ["", "event_test", "Daisy", "Daisy", "Daisy"]);
+  assert.equal(body.results[0].inMyDucks, false);
+  assert.equal(body.results[0].followId, "entry_test");
 });
 
 test("rate limits anonymous name search", async () => {
@@ -354,6 +360,274 @@ test("one browser collection returns multiple independent registrations", async 
   assert.match(db.statements[2].sql, /FROM duck_assignments da/);
   assert.doesNotMatch(db.statements[2].sql, /email|phone|private_token/i);
   assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
+});
+
+test("a followed collection entry is projected without a lookup code or unmasked name", async () => {
+  const cookieToken = "C".repeat(43);
+  const db = makeDb(
+    (sql, args) => {
+      if (sql.includes("browser_registration_collections")) {
+        return { id: "collection_test", expires_at: "2099-01-01T00:00:00.000Z" };
+      }
+      if (sql.includes("FROM heats")) return null;
+      if (sql.includes("FROM race_entries")) {
+        return {
+          event_id: "event_test",
+          event_slug: "test-race",
+          event_name: "Test Duck Race",
+          event_date: "2026-08-30",
+          event_status: "REGISTRATION_OPEN",
+          public_name_policy: "FIRST_NAME_LAST_INITIAL",
+          first_name: args[0] === "entry_owned" ? "Daisy" : "Donald",
+          last_name: args[0] === "entry_owned" ? "Duck" : "Mallard",
+          registration_status: "SUBMITTED",
+          race_entry_id: args[0],
+          visible_number: null,
+          round_one_heat_number: null,
+          round_one_heat_status: null,
+          round_one_place: null,
+          final_heat_number: null,
+          final_heat_status: null,
+          final_place: null,
+        };
+      }
+      return null;
+    },
+    (sql) => sql.includes("browser_collection_registrations") ? {
+      results: [
+        {
+          registration_id: "registration_owned",
+          race_entry_id: "entry_owned",
+          first_name: "Daisy",
+          last_name: "Duck",
+          lookup_code: "DAISY123",
+          status: "SUBMITTED",
+          added_via: "REGISTRATION",
+          public_name_policy: "FIRST_NAME_LAST_INITIAL",
+          is_paired: 0,
+        },
+        {
+          registration_id: "registration_followed",
+          race_entry_id: "entry_followed",
+          first_name: "Donald",
+          last_name: "Mallard",
+          lookup_code: "DONALD45",
+          status: "SUBMITTED",
+          added_via: "FOLLOWED",
+          public_name_policy: "FIRST_NAME_LAST_INITIAL",
+          is_paired: 0,
+        },
+      ],
+    } : { results: [] },
+  );
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/registrations/mine", {
+      headers: { cookie: `__Host-quickducks_browser=${cookieToken}` },
+    }),
+    makeEnv(db),
+  );
+  const body = await response.json();
+
+  const [owned, followed] = body.registrations;
+  assert.equal(owned.followed, false);
+  assert.equal(owned.lookupCode, "DAISY123");
+  assert.equal(owned.displayName, "Daisy Duck");
+  assert.equal(followed.followed, true);
+  assert.equal(followed.lookupCode, null);
+  assert.equal(followed.firstName, null);
+  assert.equal(followed.lastName, null);
+  // Following must never widen the name past the public search projection.
+  assert.equal(followed.displayName, "Donald M.");
+  assert.equal(JSON.stringify(body).includes("DONALD45"), false);
+  assert.equal(JSON.stringify(body).includes("Mallard"), false);
+  assert.match(db.statements[2].sql, /bcr\.added_via, e\.public_name_policy/);
+  assert.doesNotMatch(db.statements[2].sql, /email|phone|private_token/i);
+});
+
+test("name search marks results already saved in this browser's collection", async () => {
+  const cookieToken = "C".repeat(43);
+  const db = makeDb(
+    (sql) => {
+      if (sql.includes("FROM browser_registration_collections")) {
+        return { id: "collection_test", expires_at: "2099-01-01T00:00:00.000Z" };
+      }
+      if (sql.includes("FROM heats")) return null;
+      return {
+        event_id: "event_test",
+        event_slug: "test-race",
+        event_name: "Test Duck Race",
+        event_date: "2026-08-30",
+        event_status: "REGISTRATION_OPEN",
+        public_name_policy: "FIRST_NAME_LAST_INITIAL",
+        first_name: "Daisy",
+        last_name: "Duck",
+        registration_status: "SUBMITTED",
+        race_entry_id: "entry_test",
+        visible_number: null,
+        round_one_heat_number: null,
+        round_one_heat_status: null,
+        round_one_place: null,
+        final_heat_number: null,
+        final_heat_status: null,
+        final_place: null,
+      };
+    },
+    () => ({ results: [{ race_entry_id: "entry_test", in_collection: 1 }] }),
+  );
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/race-status/search?eventId=event_test&name=Daisy", {
+      headers: { cookie: `__Host-quickducks_browser=${cookieToken}` },
+    }),
+    makeEnv(db),
+  );
+  const body = await response.json();
+
+  assert.equal(body.results[0].inMyDucks, true);
+  assert.equal(body.results[0].followId, "entry_test");
+  assert.equal("lookupCode" in body.results[0], false);
+  // Search stays read-only: it never refreshes or reissues the collection cookie.
+  assert.equal(response.headers.get("set-cookie"), null);
+  assert.equal(db.statements[1].args[0], "collection_test");
+  assert.equal(db.statements.some((statement) => /UPDATE browser_registration_collections/.test(statement.sql)), false);
+});
+
+const followRequest = (body, headers = {}) => new Request(
+  "https://quickducks.com/api/v1/registrations/mine/follow",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://quickducks.com", ...headers },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  },
+);
+
+test("follow validates transport and identifier shape before touching the database", async () => {
+  const followId = "11111111-1111-4111-8111-111111111111";
+  const rejected = [
+    [415, followRequest({ followId }, { "content-type": "text/plain" })],
+    [403, followRequest({ followId }, { origin: "https://evil.example" })],
+    [413, followRequest({ followId }, { "content-length": "9999" })],
+    [400, followRequest("not-json")],
+    [400, followRequest([followId])],
+    [400, followRequest({ followId: "registration-one" })],
+    [400, followRequest({ followId: 42 })],
+    [400, followRequest({})],
+  ];
+
+  for (const [status, request] of rejected) {
+    const db = makeDb(() => assert.fail("invalid follow requests must not query D1"));
+    const response = await handleApi(request, makeEnv(db));
+    assert.equal(response.status, status, await response.text());
+    assert.equal(db.statements.length, 0);
+    assert.equal(db.batches.length, 0);
+  }
+
+  // A request without any Origin header is rejected too, because the browser
+  // collection cookie is the only credential this mutation has.
+  const anonymousDb = makeDb(() => assert.fail("origin-less follow must not query D1"));
+  const anonymous = await handleApi(
+    new Request("https://quickducks.com/api/v1/registrations/mine/follow", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ followId }),
+    }),
+    makeEnv(anonymousDb),
+  );
+  assert.equal(anonymous.status, 403);
+  assert.equal(anonymousDb.statements.length, 0);
+});
+
+test("follow rate limits before reading the event or race entry", async () => {
+  const db = makeDb(() => assert.fail("rate-limited follow must not query D1"));
+  const response = await handleApi(
+    followRequest({ followId: "11111111-1111-4111-8111-111111111111" }),
+    makeEnv(db, {
+      PUBLIC_SEARCH_RATE_LIMITER: {
+        async limit({ key }) {
+          assert.match(key, /^follow:/);
+          return { success: false };
+        },
+      },
+    }),
+  );
+
+  assert.equal(response.status, 429);
+  assert.equal(db.statements.length, 0);
+});
+
+test("follow adds a searchable public entry as a FOLLOWED collection link", async () => {
+  const followId = "11111111-1111-4111-8111-111111111111";
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM events")) return openEvent;
+    if (sql.includes("FROM race_entries re")) return { registration_id: "registration_followed" };
+    return null;
+  });
+  const response = await handleApi(followRequest({ followId }), makeEnv(db));
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body, { followed: true, alreadyInCollection: false });
+  assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
+  assert.match(response.headers.get("set-cookie") ?? "", /HttpOnly/);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+
+  const lookup = db.statements.find((statement) => statement.sql.includes("FROM race_entries re"));
+  // The identifier is only accepted when it still resolves to a publicly
+  // searchable entry of the current public event.
+  assert.match(lookup.sql, /r\.status IN \('SUBMITTED', 'ACTIVE'\)/);
+  assert.match(lookup.sql, /e\.status IN \('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED'\)/);
+  assert.deepEqual(lookup.args, [followId, openEvent.id]);
+  assert.doesNotMatch(lookup.sql, /lookup_code|private_token|email|phone/i);
+
+  assert.equal(db.batches.length, 1);
+  assert.equal(db.batches[0].length, 2);
+  assert.match(db.batches[0][0].sql, /INSERT INTO browser_registration_collections/);
+  assert.match(db.batches[0][1].sql, /INSERT OR IGNORE INTO browser_collection_registrations/);
+  assert.match(db.batches[0][1].sql, /VALUES \(\?, \?, \?, 'FOLLOWED'\)/);
+  assert.equal(db.batches[0][1].args[1], "registration_followed");
+});
+
+test("follow rejects an identifier that is not publicly searchable", async () => {
+  const noEvent = makeDb(() => null);
+  const missingEvent = await handleApi(
+    followRequest({ followId: "11111111-1111-4111-8111-111111111111" }),
+    makeEnv(noEvent),
+  );
+  assert.equal(missingEvent.status, 404);
+  assert.equal(noEvent.batches.length, 0);
+
+  const noEntry = makeDb((sql) => sql.includes("FROM events") ? openEvent : null);
+  const missingEntry = await handleApi(
+    followRequest({ followId: "11111111-1111-4111-8111-111111111111" }),
+    makeEnv(noEntry),
+  );
+  assert.equal(missingEntry.status, 404);
+  assert.equal(noEntry.batches.length, 0);
+  assert.equal((await missingEntry.json()).error, "That participant cannot be added.");
+});
+
+test("follow is idempotent for an entry already in the collection", async () => {
+  const cookieToken = "C".repeat(43);
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM browser_registration_collections")) {
+      return { id: "collection_test", expires_at: "2099-01-01T00:00:00.000Z" };
+    }
+    if (sql.includes("FROM events")) return openEvent;
+    if (sql.includes("FROM race_entries re")) return { registration_id: "registration_followed" };
+    if (sql.includes("SELECT 1 AS present")) return { present: 1 };
+    return null;
+  });
+  const response = await handleApi(
+    followRequest(
+      { followId: "11111111-1111-4111-8111-111111111111" },
+      { cookie: `__Host-quickducks_browser=${cookieToken}` },
+    ),
+    makeEnv(db),
+  );
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { followed: true, alreadyInCollection: true });
+  assert.match(db.batches[0][0].sql, /UPDATE browser_registration_collections/);
+  assert.match(db.batches[0][1].sql, /INSERT OR IGNORE INTO browser_collection_registrations/);
 });
 
 test("browser collection presence probe refreshes the cookie without selecting private records", async () => {
@@ -586,7 +860,11 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.match(db.batches[0][3].sql, /INSERT INTO audit_events/);
   assert.equal(db.batches[0][3].args.at(-1), JSON.stringify({ created_via: "PUBLIC" }));
   assert.match(db.batches[0][4].sql, /INSERT INTO browser_registration_collections/);
-  assert.match(db.batches[0][5].sql, /INSERT OR IGNORE INTO browser_collection_registrations/);
+  // Registering in this browser always claims the link as REGISTRATION, so an
+  // earlier followed link can never keep hiding this browser's own lookup code.
+  assert.match(db.batches[0][5].sql, /INSERT INTO browser_collection_registrations/);
+  assert.match(db.batches[0][5].sql, /VALUES \(\?, \?, \?, 'REGISTRATION'\)/);
+  assert.match(db.batches[0][5].sql, /DO UPDATE SET added_via = 'REGISTRATION'/);
   assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
   assert.match(response.headers.get("set-cookie") ?? "", /HttpOnly/);
   assert.ok(publicationTask);
@@ -659,4 +937,197 @@ test("replays a completed command without reusing a Turnstile token", async () =
   assert.equal(db.batches.length, 1);
   assert.equal(db.batches[0].length, 2);
   assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
+});
+
+const publicEventRow = {
+  id: "event_test",
+  name: "Test Duck Race",
+  event_date: "2026-08-30",
+  status: "ROUND_ONE",
+  public_name_policy: "FIRST_NAME_LAST_INITIAL",
+};
+
+// The row deliberately carries private columns the projection never selects, so
+// the assertions prove the response is a projection rather than a row dump.
+const duckNumberRow = {
+  event_id: "event_test",
+  event_slug: "test-race",
+  event_name: "Test Duck Race",
+  event_date: "2026-08-30",
+  event_status: "ROUND_ONE",
+  public_name_policy: "FIRST_NAME_LAST_INITIAL",
+  first_name: "Daisy",
+  last_name: "Duck",
+  registration_status: "ACTIVE",
+  race_entry_id: "entry_test",
+  visible_number: 128,
+  round_one_heat_number: 7,
+  round_one_heat_status: "FINALIZED",
+  round_one_place: 1,
+  final_heat_number: null,
+  final_heat_status: null,
+  final_place: null,
+  email: "daisy@example.com",
+  phone: "555-0100",
+  lookup_code: "DUCK8234",
+  private_token_hash: "hash-value",
+  tag_token: "tag-token-value",
+  inventory_location: "Shed B",
+  staff_notes: "Ask about the cracked bill.",
+};
+
+const duckNumberDb = ({ event = publicEventRow, row = duckNumberRow, heat = null } = {}) => makeDb((sql) => {
+  if (sql.includes("FROM race_entries")) return row;
+  if (sql.includes("FROM heats")) return heat;
+  if (sql.includes("FROM events")) return event;
+  return null;
+});
+
+const collectStrings = (value, keys = [], values = []) => {
+  if (typeof value === "string") values.push(value);
+  else if (Array.isArray(value)) for (const item of value) collectStrings(item, keys, values);
+  else if (value !== null && typeof value === "object") {
+    for (const [key, item] of Object.entries(value)) {
+      keys.push(key);
+      collectStrings(item, keys, values);
+    }
+  }
+  return { keys, values };
+};
+
+test("resolves a public duck number to the shared public projection only", async () => {
+  const db = duckNumberDb({ heat: { round: "ROUND_ONE", heat_number: 5, status: "RUNNING" } });
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/ducks/number/128"),
+    makeEnv(db),
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body, {
+    raceStatus: {
+      event: {
+        id: "event_test",
+        slug: "test-race",
+        name: "Test Duck Race",
+        eventDate: "2026-08-30",
+        status: "ROUND_ONE",
+      },
+      participantDisplayName: "Daisy D.",
+      duck: { visibleNumber: 128 },
+      assignedHeat: {
+        roundOne: { number: 7, status: "FINALIZED" },
+        final: null,
+      },
+      currentHeat: { round: "ROUND_ONE", number: 5, status: "RUNNING" },
+      outcome: "ROUND_ONE_WINNER",
+    },
+  });
+  assert.equal(response.headers.get("cache-control"), "no-store");
+});
+
+test("the public duck number projection exposes no contact, code, token, or staff data", async () => {
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/ducks/number/128"),
+    makeEnv(duckNumberDb()),
+  );
+  const serialized = await response.text();
+  const { keys, values } = collectStrings(JSON.parse(serialized));
+
+  for (const forbidden of [
+    "email", "phone", "lookupCode", "lookup_code", "privateToken", "privateTokenHash",
+    "private_token_hash", "token", "tagToken", "tag_token", "privateStatusPath",
+    "inventoryLocation", "inventory_location", "notes", "staffNotes", "staff_notes",
+    "auditEvents", "firstName", "lastName", "registrationId", "followId",
+  ]) {
+    assert.equal(keys.includes(forbidden), false, `key ${forbidden} must not be projected`);
+  }
+  for (const forbidden of [
+    "daisy@example.com", "555-0100", "DUCK8234", "hash-value",
+    "tag-token-value", "Shed B", "Ask about the cracked bill.",
+  ]) {
+    assert.equal(values.includes(forbidden), false, `value ${forbidden} must not be projected`);
+    assert.equal(serialized.includes(forbidden), false, `${forbidden} must not appear in the response body`);
+  }
+  // The policy display name is the only participant identity that ships.
+  assert.equal(values.includes("Daisy D."), true);
+  assert.equal(serialized.includes("Duck"), true);
+  assert.equal(/"last_?[Nn]ame"/.test(serialized), false);
+});
+
+test("the public duck number lookup is bound and scoped to the current public event", async () => {
+  const db = duckNumberDb();
+  await handleApi(new Request("https://quickducks.com/api/v1/ducks/number/128"), makeEnv(db));
+
+  const eventStatement = db.statements.find((statement) => statement.sql.includes("FROM events"));
+  const statusStatement = db.statements.find((statement) => statement.sql.includes("FROM race_entries"));
+
+  // The event selection is the same one the public board renders.
+  assert.match(eventStatement.sql, /status IN \('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED'\)/);
+  assert.doesNotMatch(eventStatement.sql, /DRAFT|RETURN_PROCESSING|ARCHIVED/);
+
+  // Every external value is bound, and the row is pinned to that event.
+  assert.deepEqual(statusStatement.args, ["event_test", 128]);
+  assert.match(statusStatement.sql, /WHERE re\.event_id = \?/);
+  assert.match(statusStatement.sql, /AND d\.visible_number = \?/);
+  assert.match(statusStatement.sql, /e\.status IN \('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED'\)/);
+  assert.equal(statusStatement.sql.includes("128"), false);
+  // The projection is the shared one: no private column is ever selected.
+  assert.doesNotMatch(statusStatement.sql, /r\.email|r\.phone|lookup_code|private_token_hash|dt\.token/);
+});
+
+test("unknown, unpaired, and out-of-event duck numbers are indistinguishable 404s", async () => {
+  const cases = [
+    ["unpaired or unknown number", duckNumberDb({ row: null })],
+    ["no current public event", duckNumberDb({ event: null })],
+  ];
+
+  for (const [label, db] of cases) {
+    const response = await handleApi(
+      new Request("https://quickducks.com/api/v1/ducks/number/9999"),
+      makeEnv(db),
+    );
+    assert.equal(response.status, 404, label);
+    assert.deepEqual(await response.json(), { error: "Not found." }, label);
+  }
+});
+
+test("non-canonical duck numbers never reach the database", async () => {
+  for (const value of ["0", "012", "1234567890", "00"]) {
+    const db = duckNumberDb();
+    const response = await handleApi(
+      new Request(`https://quickducks.com/api/v1/ducks/number/${value}`),
+      makeEnv(db),
+    );
+
+    assert.equal(response.status, 404, value);
+    assert.equal(db.statements.length, 0, `${value} must not query D1`);
+  }
+});
+
+test("the duck number endpoint never intercepts the tag scan route", async () => {
+  const token = "b".repeat(32);
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM heats")) return null;
+    if (sql.includes("duck_tags")) return { ...duckNumberRow, visible_number: 77 };
+    return null;
+  });
+  const response = await handleApi(
+    new Request(`https://quickducks.com/api/v1/ducks/${token}`),
+    makeEnv(db),
+  );
+  const body = await response.json();
+
+  // The tag route keeps its own shape, its own token predicate, and its own
+  // anonymous "HOME" fallback.
+  assert.equal(body.destination, "RACE_STATUS");
+  assert.equal(body.raceStatus.duck.visibleNumber, 77);
+  assert.match(db.statements[0].sql, /JOIN duck_tags dt ON dt\.duck_id = d\.id/);
+  assert.deepEqual(db.statements[0].args, [token]);
+
+  const short = await handleApi(
+    new Request("https://quickducks.com/api/v1/ducks/128"),
+    makeEnv(makeDb(() => null)),
+  );
+  assert.deepEqual(await short.json(), { destination: "HOME" });
 });

@@ -64,7 +64,10 @@ export const publicDisplayName = (
   return `${firstName} ${lastName.slice(0, 1).toUpperCase()}.`;
 };
 
-const currentEvent = (env: Env): Promise<BoardEventRow | null> => env.DB.prepare(
+// The one event the public board renders. Every other public view that resolves
+// a board-visible identifier reuses this selection so a duck number always
+// resolves inside the same race the board is showing.
+export const getCurrentPublicEvent = (env: Env): Promise<BoardEventRow | null> => env.DB.prepare(
   `SELECT id, name, event_date, status, public_name_policy
      FROM events
     WHERE status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
@@ -89,7 +92,7 @@ const currentHeat = (heats: PublicRaceBoardHeat[]): PublicRaceBoardHeat | undefi
 };
 
 export const getPublicRaceBoard = async (env: Env): Promise<PublicRaceBoard> => {
-  const event = await currentEvent(env);
+  const event = await getCurrentPublicEvent(env);
   if (event === null) return { event: null };
 
   const rows = await env.DB.prepare(

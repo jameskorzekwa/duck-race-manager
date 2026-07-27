@@ -16,6 +16,7 @@ const migrationNames = [
   "0010_staff_lifecycle.sql",
   "0011_support_operations.sql",
   "0012_staff_role_assignments.sql",
+  "0013_followed_collection_entries.sql",
 ];
 
 const applyMigrations = (database, names = migrationNames) => {
@@ -118,6 +119,67 @@ test("staff access commands retain administrator and target relationships", () =
 
   assert.throws(() => database.exec("DELETE FROM staff_profiles WHERE id = 'admin'"), /FOREIGN KEY constraint failed/);
   assert.throws(() => database.exec("DELETE FROM staff_profiles WHERE id = 'staff'"), /FOREIGN KEY constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0013 keeps existing collection links registration-sourced and constrains new sources", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationNames.filter((name) => name !== "0013_followed_collection_entries.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event', 'test-race', 'Test Race', 'America/Denver', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash, submitted_at, status_changed_at)
+    VALUES ('registration-1', 'event', 'Daisy', 'Duck', 'SUBMITTED', 'DAASY234', 'hash-1',
+            '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z');
+    INSERT INTO browser_registration_collections (id, token_hash, created_at, last_seen_at, expires_at)
+    VALUES ('collection-1', 'cookie-hash-1', '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z', '2027-07-25T00:00:00Z');
+    INSERT INTO browser_collection_registrations (collection_id, registration_id, added_at)
+    VALUES ('collection-1', 'registration-1', '2026-07-25T00:00:00Z');
+  `);
+
+  applyMigrations(database, ["0013_followed_collection_entries.sql"]);
+
+  // Links created before the migration keep today's shipped projection.
+  assert.deepEqual(
+    database.prepare("SELECT collection_id, added_via FROM browser_collection_registrations").all()
+      .map((row) => ({ ...row })),
+    [{ collection_id: "collection-1", added_via: "REGISTRATION" }],
+  );
+
+  // The previously deployed Worker writes only the original three columns, so
+  // the migration must remain compatible with that insert shape.
+  database.exec(`
+    INSERT INTO browser_registration_collections (id, token_hash, created_at, last_seen_at, expires_at)
+    VALUES ('collection-2', 'cookie-hash-2', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', '2027-07-26T00:00:00Z');
+    INSERT OR IGNORE INTO browser_collection_registrations (collection_id, registration_id, added_at)
+    VALUES ('collection-2', 'registration-1', '2026-07-26T00:00:00Z');
+  `);
+  assert.equal(database.prepare(
+    "SELECT added_via FROM browser_collection_registrations WHERE collection_id = 'collection-2'",
+  ).get().added_via, "REGISTRATION");
+
+  database.exec(`
+    INSERT INTO browser_registration_collections (id, token_hash, created_at, last_seen_at, expires_at)
+    VALUES ('collection-3', 'cookie-hash-3', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', '2027-07-26T00:00:00Z');
+    INSERT INTO browser_collection_registrations (collection_id, registration_id, added_at, added_via)
+    VALUES ('collection-3', 'registration-1', '2026-07-26T00:00:00Z', 'FOLLOWED');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO browser_registration_collections (id, token_hash, created_at, last_seen_at, expires_at)
+    VALUES ('collection-4', 'cookie-hash-4', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', '2027-07-26T00:00:00Z');
+    INSERT INTO browser_collection_registrations (collection_id, registration_id, added_at, added_via)
+    VALUES ('collection-4', 'registration-1', '2026-07-26T00:00:00Z', 'STAFF');
+  `), /CHECK constraint failed/);
+  assert.throws(() => database.exec(`
+    UPDATE browser_collection_registrations SET added_via = NULL WHERE collection_id = 'collection-3'
+  `), /NOT NULL constraint failed/);
+
+  // The purge path still clears every collection link regardless of source.
+  database.exec("DELETE FROM browser_collection_registrations");
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM browser_collection_registrations").get().count, 0);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

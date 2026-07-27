@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   confirmationDialogScript,
+  duckDetailHelpersScript,
   eventSlugHelpersScript,
   finishLineScript,
   finishHandoffHelpersScript,
@@ -11,6 +12,7 @@ import {
   finishSelectionValidationScript,
   inventoryIntakeHelpersScript,
   inventoryIntakeScript,
+  liveBoardStageScript,
   liveScript,
   liveRuntimeHelpersScript,
   liveUiScript,
@@ -23,6 +25,7 @@ import {
   staffHomeScript,
   startLineScript,
 } from "./client-scripts.ts";
+import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
 import { homeScript } from "./site.ts";
 
 const eventSlugHelpers = () => new Function(
@@ -38,6 +41,19 @@ test("staff client generates and live-previews server-compatible event slugs", (
   assert.match(staffHomeScript, /elements\.name\.addEventListener\("input"/);
   assert.match(staffHomeScript, /updateEventSlugPreview\(eventConfigForm, eventConfigSlugPreview, currentEvent\)/);
   assert.doesNotMatch(staffHomeScript, /slug:\s*String\(values\.get\("slug"\)\)/);
+});
+
+test("the public pages' classic scripts share one global scope without collisions", () => {
+  // The home page serves live-ui.js, live.js, home.js, and participant.js as
+  // classic scripts, so every top-level declaration lands in one scope.
+  assert.doesNotThrow(
+    () => new Function([liveUiScript, liveScript, homeScript, participantScript].join("\n")),
+    "home page scripts must not redeclare each other's globals",
+  );
+  assert.doesNotThrow(
+    () => new Function([liveUiScript, participantScript].join("\n")),
+    "My Ducks page scripts must not redeclare each other's globals",
+  );
 });
 
 test("browser clients are valid JavaScript and target protected APIs", () => {
@@ -107,6 +123,7 @@ class FakeElement {
     this.listeners = new Map();
     this.attributes = new Map();
     this.className = "";
+    this.dataset = {};
     this.hidden = false;
     this.id = "";
     this.isConnected = false;
@@ -152,6 +169,13 @@ class FakeElement {
       child.setConnected(this.isConnected);
       this.children.push(child);
     }
+  }
+
+  replaceChildren(...children) {
+    for (const child of this.children) child.parentNode = null;
+    this.children = [];
+    this.textContent = "";
+    this.append(...children);
   }
 
   setConnected(value) {
@@ -1065,8 +1089,6 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
   assert.match(liveScript, /\/api\/v1\/race-board/);
   assert.doesNotMatch(liveScript, /\/api\/v1\/registrations\/mine/);
   assert.match(participantScript, /\/api\/v1\/registrations\/mine/);
-  assert.match(liveScript, /Updates are delayed/);
-  assert.match(liveUiScript, /personal details are delayed/);
   assert.match(liveScript, /replaceChildren/);
   assert.match(liveScript, /textContent/);
   assert.match(participantScript, /ArrowLeft/);
@@ -1080,6 +1102,576 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
   assert.match(finishLineScript, /That duck is not in the selected heat/);
   assert.match(finishLineScript, /finishSelected\.length !== finishRequiredPlaces/);
   assert.match(finishLineScript, /\/results\/finalize/);
+});
+
+const freshnessStrings = [
+  /Updated just now/,
+  /Updates are arriving live/,
+  /Checking for fresh updates/,
+  /Reconnecting; this (?:page|station) is still checking for updates/,
+  /Updates are delayed/,
+  /Saved registrations are temporarily unavailable/,
+  /personal details are delayed/,
+  /public race board is current/,
+];
+
+const liveScripts = [
+  liveUiScript,
+  liveRuntimeHelpersScript,
+  liveScript,
+  participantScript,
+  startLineScript,
+  finishLineScript,
+  inventoryIntakeScript,
+  staffHomeScript,
+  staffDuckScript,
+  homeScript,
+  registrationScript,
+];
+
+test("no browser client renders ambient freshness or connection-status chatter", () => {
+  for (const script of liveScripts) {
+    for (const pattern of freshnessStrings) assert.doesNotMatch(script, pattern);
+    assert.doesNotMatch(script, /data-(?:live|station|my-ducks)-freshness/);
+    assert.doesNotMatch(script, /liveSuccessfulFreshness|[Ff]reshness/);
+  }
+  // The shared hub no longer fans a connection status out to subscribers.
+  assert.doesNotMatch(liveUiScript, /setStatus|subscriber\.status/);
+  for (const script of [liveScript, participantScript, startLineScript, finishLineScript]) {
+    assert.doesNotMatch(script, /status:\s*\(status\)/);
+  }
+});
+
+test("hard failures stay visible through error-only lines and station message lines", () => {
+  // Stations keep their own actionable operational message line.
+  assert.match(startLineScript, /data-station-message/);
+  assert.match(startLineScript, /if \(error\.message !== "signed-out"\) startMessage\.textContent = error\.message;/);
+  assert.match(finishLineScript, /data-station-message/);
+  assert.match(finishLineScript, /if \(error\.message !== "signed-out"\) finishMessage\.textContent = error\.message;/);
+  assert.match(inventoryIntakeScript, /data-intake-message/);
+
+  // The public board and My Ducks have no other message surface, so each keeps a
+  // minimal error-only line that is cleared on the next successful refresh.
+  assert.match(liveScript, /data-live-board-error/);
+  assert.match(liveScript, /liveShowBoardError\("The race board could not be loaded\./);
+  assert.match(liveScript, /liveShowBoardError\(null\)/);
+  assert.match(liveScript, /liveBoardError\.hidden = message === null/);
+  assert.match(participantScript, /data-my-ducks-error/);
+  assert.match(participantScript, /participantShowError\("Saved registrations could not be loaded\./);
+  assert.match(participantScript, /participantShowError\(null\)/);
+  assert.match(participantScript, /participantError\.hidden = message === null/);
+});
+
+// A very small attribute-selector DOM good enough to run the two public
+// participant clients end to end without a browser.
+const quickMatches = (node, selector) => {
+  const attribute = selector.match(/^\[data-([a-z0-9-]+)(?:="([^"]*)")?\]$/);
+  if (attribute === null) return false;
+  const key = attribute[1].replace(/-([a-z0-9])/g, (_, character) => character.toUpperCase());
+  const value = node.dataset[key];
+  if (value === undefined) return false;
+  return attribute[2] === undefined || value === attribute[2];
+};
+
+class QuickNode {
+  constructor(tagName) {
+    this.tagName = tagName.toUpperCase();
+    this.attributes = new Map();
+    this.children = [];
+    this.className = "";
+    this.clientWidth = 0;
+    this.dataset = {};
+    this.disabled = false;
+    this.focusCalls = 0;
+    this.hidden = false;
+    this.listeners = new Map();
+    this.scrollCalls = 0;
+    this.scrollLeft = 0;
+    this.scrollWidth = 0;
+    this.tabIndex = 0;
+    this.textContent = "";
+    this.type = "";
+  }
+
+  append(...nodes) {
+    this.children.push(...nodes);
+  }
+
+  replaceChildren(...nodes) {
+    this.children = [...nodes];
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  addEventListener(name, listener) {
+    if (!this.listeners.has(name)) this.listeners.set(name, new Set());
+    this.listeners.get(name).add(listener);
+  }
+
+  removeEventListener(name, listener) {
+    this.listeners.get(name)?.delete(listener);
+  }
+
+  dispatch(name, init = {}) {
+    const event = { ...init, type: name, target: this, preventDefault() {} };
+    return Promise.all([...(this.listeners.get(name) ?? [])].map((listener) => listener(event)));
+  }
+
+  focus() {
+    this.focusCalls += 1;
+  }
+
+  scrollIntoView() {
+    this.scrollCalls += 1;
+  }
+
+  descendants() {
+    return this.children.flatMap((child) => [child, ...child.descendants()]);
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] ?? null;
+  }
+
+  querySelectorAll(selector) {
+    return this.descendants().filter((node) => quickMatches(node, selector));
+  }
+
+  text() {
+    return [this.textContent, ...this.children.map((child) => child.text())].join(" ").trim();
+  }
+}
+
+class QuickDocument extends QuickNode {
+  createElement(tagName) {
+    return new QuickNode(tagName);
+  }
+}
+
+class QuickFormData {
+  constructor(form) {
+    this.form = form;
+  }
+
+  get(name) {
+    return this.form.values[name] ?? null;
+  }
+}
+
+const homeHarness = (route) => {
+  const document = new QuickDocument("#document");
+  const navigation = document.createElement("a");
+  navigation.dataset.myDucksNav = "";
+  navigation.hidden = true;
+  const form = document.createElement("form");
+  form.dataset.statusSearch = "";
+  form.values = { name: "Daisy" };
+  const message = document.createElement("p");
+  message.dataset.searchMessage = "";
+  const results = document.createElement("div");
+  results.dataset.searchResults = "";
+  document.append(navigation, form, message, results);
+
+  const requests = [];
+  const fetchStub = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    return route(String(url), options);
+  };
+  const subscriptions = [];
+  const live = {
+    markClean() {},
+    subscribe(subscriber) { subscriptions.push(subscriber); },
+  };
+
+  new Function("document", "fetch", "FormData", "globalThis", homeScript)(
+    document,
+    fetchStub,
+    QuickFormData,
+    { quickDucksLive: live },
+  );
+
+  return { document, form, message, navigation, requests, results, subscriptions };
+};
+
+const currentEventResponse = () => Response.json({ event: { id: "event-1" } });
+const searchResult = (overrides = {}) => ({
+  event: { id: "event-1", slug: "race", name: "Race", eventDate: null, status: "REGISTRATION_OPEN" },
+  participantDisplayName: "Daisy D.",
+  duck: null,
+  assignedHeat: { roundOne: null, final: null },
+  currentHeat: null,
+  outcome: "AWAITING_DUCK_PAIRING",
+  followId: "11111111-1111-4111-8111-111111111111",
+  inMyDucks: false,
+  ...overrides,
+});
+const cardAction = (results) => results.children[0].children.find((child) => child.className === "actions");
+
+test("a search result offers one add action that confirms and reveals the My Ducks nav", async () => {
+  let followStatus = 200;
+  const harness = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    if (url.startsWith("/api/v1/race-status/search")) return Response.json({ results: [searchResult()] });
+    return Response.json({ followed: true, alreadyInCollection: false }, { status: followStatus });
+  });
+
+  await harness.form.dispatch("submit");
+  const card = harness.results.children[0];
+  assert.equal(card.className, "duck-card");
+  assert.equal(card.children[0].textContent, "Daisy D.");
+  // The public search has no lookup code, so no card line can claim one.
+  assert.doesNotMatch(card.text(), /lookup/i);
+
+  const actions = cardAction(harness.results);
+  const button = actions.children[0];
+  assert.equal(button.tagName, "BUTTON");
+  assert.equal(button.type, "button");
+  assert.equal(button.className, "button small");
+  assert.equal(button.textContent, "Add to My Ducks");
+  assert.equal(harness.navigation.hidden, true);
+
+  await button.dispatch("click");
+  const follow = harness.requests.at(-1);
+  assert.equal(follow.url, "/api/v1/registrations/mine/follow");
+  assert.equal(follow.options.method, "POST");
+  assert.equal(follow.options.headers["content-type"], "application/json");
+  assert.deepEqual(JSON.parse(follow.options.body), {
+    followId: "11111111-1111-4111-8111-111111111111",
+  });
+
+  const confirmed = cardAction(harness.results);
+  assert.equal(confirmed.children.length, 1);
+  assert.equal(confirmed.children[0].tagName, "SPAN");
+  assert.equal(confirmed.children[0].textContent, "In My Ducks");
+  assert.equal(confirmed.children[0].className, "success-tag");
+  assert.equal(harness.navigation.hidden, false, "the My Ducks nav must be revealed");
+  assert.equal(followStatus, 200);
+});
+
+test("a result already in the collection renders the added state with no add action", async () => {
+  const harness = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    return Response.json({ results: [searchResult({ inMyDucks: true })] });
+  });
+
+  await harness.form.dispatch("submit");
+  const actions = cardAction(harness.results);
+  assert.equal(actions.children.length, 1);
+  assert.equal(actions.children[0].textContent, "In My Ducks");
+  assert.equal(actions.children.some((child) => child.tagName === "BUTTON"), false);
+  assert.equal(harness.requests.filter((item) => item.url.includes("/follow")).length, 0);
+});
+
+test("a failed add restores the action and reports the failure on that result", async () => {
+  const harness = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    if (url.startsWith("/api/v1/race-status/search")) return Response.json({ results: [searchResult()] });
+    return Response.json({ error: "Too many requests." }, { status: 429 });
+  });
+
+  await harness.form.dispatch("submit");
+  const card = harness.results.children[0];
+  const button = cardAction(harness.results).children[0];
+  await button.dispatch("click");
+
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Add to My Ducks");
+  const feedback = card.children.at(-1);
+  assert.equal(feedback.hidden, false);
+  assert.match(feedback.textContent, /could not be added to My Ducks/);
+  assert.equal(harness.navigation.hidden, true);
+});
+
+test("a search result without a follow identifier renders no add action", async () => {
+  const harness = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    return Response.json({ results: [searchResult({ followId: undefined })] });
+  });
+
+  await harness.form.dispatch("submit");
+  assert.equal(cardAction(harness.results), undefined);
+  assert.equal(harness.results.children[0].children.length, 2);
+});
+
+const participantSection = (document, kind) => {
+  const section = document.createElement("section");
+  section.dataset.participantSection = kind;
+  section.hidden = true;
+  const controls = document.createElement("div");
+  controls.dataset.carouselControls = "";
+  controls.hidden = true;
+  const previous = document.createElement("button");
+  previous.dataset.carouselPrevious = "";
+  const next = document.createElement("button");
+  next.dataset.carouselNext = "";
+  controls.append(previous, next);
+  const track = document.createElement("div");
+  track.dataset.participantTrack = "";
+  track.hidden = true;
+  section.append(controls, track);
+  return { controls, section, track };
+};
+
+const myDucksHarness = (route, search = "") => {
+  const document = new QuickDocument("#document");
+  const navigation = document.createElement("a");
+  navigation.dataset.myDucksNav = "";
+  navigation.hidden = true;
+  const page = document.createElement("section");
+  page.dataset.myDucksPage = "";
+  const error = document.createElement("p");
+  error.dataset.myDucksError = "";
+  error.hidden = true;
+  const success = document.createElement("div");
+  success.dataset.registrationSuccess = "";
+  success.hidden = true;
+  const empty = document.createElement("p");
+  empty.dataset.myDucksEmpty = "";
+  empty.hidden = true;
+  const awaiting = participantSection(document, "awaiting");
+  const paired = participantSection(document, "paired");
+  page.append(error, success, empty, awaiting.section, paired.section);
+  document.append(navigation, page);
+
+  const requests = [];
+  const fetchStub = async (url) => {
+    requests.push(String(url));
+    return route(String(url));
+  };
+  const subscriptions = [];
+
+  new Function(
+    "document", "location", "window", "globalThis", "requestAnimationFrame", "history", "fetch",
+    participantScript,
+  )(
+    document,
+    { search, pathname: "/my-ducks", hash: "", origin: "https://quickducks.com" },
+    { addEventListener() {} },
+    { quickDucksLive: { subscribe(subscriber) { subscriptions.push(subscriber); } } },
+    (callback) => callback(),
+    { replaceState() {}, state: null },
+    fetchStub,
+  );
+
+  return { awaiting, document, empty, error, navigation, paired, requests, subscriptions, success };
+};
+
+const collected = (registrationId, paired, overrides = {}) => ({
+  registrationId,
+  firstName: "Daisy",
+  lastName: "Duck",
+  displayName: "Daisy Duck",
+  lookupCode: "DAISY123",
+  followed: false,
+  registrationStatus: "SUBMITTED",
+  paired,
+  raceStatus: null,
+  ...overrides,
+});
+
+const renderMyDucks = async (registrations) => {
+  const harness = myDucksHarness(() => Response.json({ registrations }));
+  assert.equal(harness.subscriptions.length, 1);
+  await harness.subscriptions[0].refresh();
+  return harness;
+};
+
+test("an empty participant group hides its whole section instead of an empty state", async () => {
+  const awaitingOnly = await renderMyDucks([collected("11111111-1111-4111-8111-111111111111", false)]);
+  assert.equal(awaitingOnly.awaiting.section.hidden, false);
+  assert.equal(awaitingOnly.awaiting.controls.hidden, false);
+  assert.equal(awaitingOnly.paired.section.hidden, true, "an empty paired group hides its section");
+  assert.equal(awaitingOnly.empty.hidden, true);
+  assert.equal(awaitingOnly.navigation.hidden, false);
+  assert.equal(awaitingOnly.error.hidden, true);
+
+  const pairedOnly = await renderMyDucks([collected("22222222-2222-4222-8222-222222222222", true)]);
+  assert.equal(pairedOnly.awaiting.section.hidden, true, "an empty awaiting group hides its section");
+  assert.equal(pairedOnly.paired.section.hidden, false);
+  assert.equal(pairedOnly.empty.hidden, true);
+
+  const both = await renderMyDucks([
+    collected("11111111-1111-4111-8111-111111111111", false),
+    collected("22222222-2222-4222-8222-222222222222", true),
+  ]);
+  assert.equal(both.awaiting.section.hidden, false);
+  assert.equal(both.paired.section.hidden, false);
+  assert.equal(both.empty.hidden, true);
+});
+
+test("an entirely empty collection keeps one guidance message instead of a blank page", async () => {
+  const harness = await renderMyDucks([]);
+
+  assert.equal(harness.awaiting.section.hidden, true);
+  assert.equal(harness.paired.section.hidden, true);
+  assert.equal(harness.empty.hidden, false, "the page must never render nothing at all");
+  assert.equal(harness.navigation.hidden, true);
+});
+
+test("My Ducks sections stay hidden until the first successful collection response", async () => {
+  const harness = myDucksHarness(() => Response.json({ error: "unavailable" }, { status: 503 }));
+  await harness.subscriptions[0].refresh();
+
+  assert.equal(harness.awaiting.section.hidden, true);
+  assert.equal(harness.paired.section.hidden, true);
+  assert.equal(harness.empty.hidden, true, "a failed first load must not claim an empty collection");
+  assert.equal(harness.error.hidden, false);
+  assert.match(harness.error.textContent, /Saved registrations could not be loaded/);
+});
+
+test("a live regroup moves a newly paired participant between the two sections", async () => {
+  let paired = false;
+  const harness = myDucksHarness(() => Response.json({
+    registrations: [collected("11111111-1111-4111-8111-111111111111", paired)],
+  }));
+
+  await harness.subscriptions[0].refresh();
+  assert.equal(harness.awaiting.track.children.length, 1);
+  assert.equal(harness.paired.section.hidden, true);
+
+  paired = true;
+  await harness.subscriptions[0].refresh();
+  assert.equal(harness.awaiting.section.hidden, true);
+  assert.equal(harness.awaiting.track.children.length, 0);
+  assert.equal(harness.paired.section.hidden, false);
+  assert.equal(harness.paired.track.children.length, 1);
+  assert.equal(harness.empty.hidden, true);
+});
+
+test("a followed card shows the policy display name and never a lookup code", async () => {
+  const harness = await renderMyDucks([
+    collected("11111111-1111-4111-8111-111111111111", false),
+    collected("22222222-2222-4222-8222-222222222222", false, {
+      firstName: null,
+      lastName: null,
+      displayName: "Donald M.",
+      lookupCode: null,
+      followed: true,
+    }),
+  ]);
+
+  const [owned, followed] = harness.awaiting.track.children;
+  assert.match(owned.text(), /Daisy Duck/);
+  assert.match(owned.text(), /Staff lookup code: DAISY123/);
+  assert.match(followed.text(), /Donald M\./);
+  assert.doesNotMatch(followed.text(), /Staff lookup code/);
+  assert.doesNotMatch(followed.text(), /null/);
+  assert.equal(followed.children[0].className, "success-tag");
+  assert.equal(followed.children[0].textContent, "Following");
+});
+
+test("the just-registered highlight survives the section-visibility change", async () => {
+  const registrationId = "11111111-1111-4111-8111-111111111111";
+  const harness = myDucksHarness(
+    () => Response.json({ registrations: [collected(registrationId, false)] }),
+    `?registered=${registrationId}`,
+  );
+
+  await harness.subscriptions[0].refresh();
+
+  assert.equal(harness.awaiting.section.hidden, false);
+  assert.equal(harness.success.hidden, false);
+  assert.match(harness.success.text(), /Registration saved\./);
+  assert.match(harness.success.text(), /Daisy Duck is highlighted below\./);
+  const card = harness.awaiting.track.children[0];
+  assert.equal(card.className, "duck-card participant-card is-current");
+  assert.equal(card.getAttribute("aria-current"), "true");
+  assert.equal(card.focusCalls, 1);
+  assert.equal(card.scrollCalls, 1);
+});
+
+const liveBoardStageHelpers = () => new Function(
+  `${liveBoardStageScript}; return { liveEventStage, liveStageSummary };`,
+)();
+
+test("the live board names the stage for every event lifecycle status", () => {
+  const { liveEventStage } = liveBoardStageHelpers();
+
+  assert.deepEqual(
+    Object.fromEntries(
+      [
+        "DRAFT",
+        "REGISTRATION_OPEN",
+        "REGISTRATION_CLOSED",
+        "ROUND_ONE",
+        "FINAL",
+        "COMPLETED",
+        "RETURN_PROCESSING",
+        "ARCHIVED",
+      ].map((status) => [status, liveEventStage(status).label]),
+    ),
+    {
+      DRAFT: "Race being prepared",
+      REGISTRATION_OPEN: "Participant registration open",
+      REGISTRATION_CLOSED: "Registration closed",
+      ROUND_ONE: "Round one under way",
+      FINAL: "Final under way",
+      COMPLETED: "Results official",
+      RETURN_PROCESSING: "Race complete",
+      ARCHIVED: "Race complete",
+    },
+  );
+
+  // Unknown and prototype-shaped values fall back instead of leaking enum text.
+  for (const status of ["", "SOMETHING_NEW", "constructor", "toString", undefined, null]) {
+    assert.deepEqual(
+      liveEventStage(status),
+      { label: "Race stage updating", summary: "The race stage is being confirmed." },
+      String(status),
+    );
+  }
+});
+
+test("the live board summary leads with the stage and keeps running-heat detail", () => {
+  const { liveStageSummary } = liveBoardStageHelpers();
+
+  assert.equal(
+    liveStageSummary("REGISTRATION_OPEN", null, false),
+    "Registration is open. Sign up to put a duck in this race. Heats have not been posted yet.",
+  );
+  assert.equal(
+    liveStageSummary("REGISTRATION_CLOSED", null, true),
+    "Registration is closed while staff finalize the heats. The latest official heats and results are below.",
+  );
+  assert.equal(
+    liveStageSummary("ROUND_ONE", "Round one · Heat 5 · Racing now", true),
+    "Round one is under way. Running now: Round one · Heat 5 · Racing now.",
+  );
+  assert.equal(
+    liveStageSummary("ROUND_ONE", null, true),
+    "Round one is under way. The latest official heats and results are below.",
+  );
+  assert.equal(
+    liveStageSummary("FINAL", "Final · Heat 1 · Racing now", true),
+    "The final is under way. Running now: Final · Heat 1 · Racing now.",
+  );
+  assert.equal(
+    liveStageSummary("COMPLETED", null, true),
+    "Every heat is finished and the results are final. The latest official heats and results are below.",
+  );
+  assert.match(liveStageSummary("RETURN_PROCESSING", null, true), /^The race is complete and staff are collecting the ducks\./);
+  assert.match(liveStageSummary("ARCHIVED", null, false), /^The race is complete\./);
+  assert.match(liveStageSummary("DRAFT", null, false), /^Race staff are still preparing this race\./);
+});
+
+test("the live board renders the stage chip from the public board status only", () => {
+  assert.match(liveScript, /liveBoardStageChip = document\.querySelector\("\[data-live-board-stage\]"\)/);
+  assert.match(liveScript, /liveBoardStageChip\.textContent = liveEventStage\(event\.status\)\.label/);
+  assert.match(liveScript, /liveBoardStageChip\.textContent = "No race scheduled"/);
+  assert.match(liveScript, /liveBoardTitle\.textContent = event\.name/);
+  assert.match(liveScript, /liveBoardSummary\.textContent = liveStageSummary\(/);
+  // The stage never depends on anything beyond the public projection.
+  assert.doesNotMatch(liveScript, /event\.(?:email|phone|lookupCode|privateToken|staff)/);
+  // Heat and podium rendering stays intact underneath the stage.
+  assert.match(liveScript, /liveRound\("Round one", event\.roundOneHeats, event\.currentHeat\)/);
+  assert.match(liveScript, /liveRound\("Final", event\.finalHeats, event\.currentHeat\)/);
+  assert.match(liveScript, /liveText\("h3", "Official podium"\)/);
 });
 
 test("station state helpers prioritize unpublished results and stable render keys", () => {
@@ -1102,18 +1694,13 @@ test("station state helpers prioritize unpublished results and stable render key
 
 test("live runtime helpers coalesce refreshes and switch fake poll timers", async () => {
   const helpers = new Function(
-    `${liveRuntimeHelpersScript}; return { livePollDelay, liveReconnectDelay, liveSuccessfulFreshness, liveParseRefreshSignal, liveSignalMatches, liveCreateRefreshQueue, liveCreatePollScheduler, liveCreateHub };`,
+    `${liveRuntimeHelpersScript}; return { livePollDelay, liveReconnectDelay, liveParseRefreshSignal, liveSignalMatches, liveCreateRefreshQueue, liveCreatePollScheduler, liveCreateHub };`,
   )();
   assert.equal(helpers.livePollDelay(false), 5000);
   assert.equal(helpers.livePollDelay(true), 30000);
   assert.equal(helpers.liveReconnectDelay(0, 0), 800);
   assert.equal(helpers.liveReconnectDelay(0, 1), 1200);
   assert.equal(helpers.liveReconnectDelay(8, 1), 15000);
-  assert.equal(helpers.liveSuccessfulFreshness([{ status: "fulfilled" }]), "Updated just now.");
-  assert.match(
-    helpers.liveSuccessfulFreshness([{ status: "fulfilled" }, { status: "rejected" }]),
-    /public race board is current, but personal details are delayed/i,
-  );
 
   let release;
   let refreshes = 0;
@@ -1585,4 +2172,259 @@ test("staff duck scan hands complete iPhone context back without submitting", ()
   });
   assert.equal(values.has("quickducks.finishStation"), false);
   assert.doesNotMatch(destination, /submit|result/i);
+});
+
+const nodeText = (node) => node.textContent + node.children.map(nodeText).join("");
+
+const duckLinkHelpers = () => {
+  const document = new FakeDocument(false);
+  const helpers = new Function(
+    "document",
+    `${duckDetailHelpersScript}; return { duckDetailPath, duckDetailLink, duckHeatStatusLabel, duckOfficialResult };`,
+  )(document);
+  return { ...helpers, document };
+};
+
+// The board and My Ducks both render duck numbers, so the same builder decides
+// when a number becomes a link and what that link points at.
+test("the duck detail link builder emits a plain navigation only for a real duck number", () => {
+  const { duckDetailPath, duckDetailLink, document } = duckLinkHelpers();
+
+  assert.equal(duckDetailPath(128), "/duck/128");
+
+  const link = duckDetailLink(document, 128);
+  assert.equal(link.tagName, "A");
+  assert.equal(link.href, "/duck/128");
+  assert.equal(link.textContent, "Duck #128");
+  assert.equal(link.className, "duck-number-link");
+  // A plain navigation carries no click handler and no scripted behaviour.
+  assert.equal(link.listeners.size, 0);
+  assert.equal(link.getAttribute("target"), null);
+
+  // No duck assigned, or any value that is not a usable visible number, must
+  // never produce a link.
+  for (const value of [null, undefined, 0, -3, 1.5, "128", Number.NaN]) {
+    assert.equal(duckDetailLink(document, value), null, String(value));
+  }
+});
+
+test("browser duck-detail wording is generated from the server projection", () => {
+  const { duckHeatStatusLabel, duckOfficialResult } = duckLinkHelpers();
+
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(publicHeatStatusLabels).map((status) => [status, duckHeatStatusLabel(status)])),
+    publicHeatStatusLabels,
+  );
+  assert.deepEqual(
+    Object.fromEntries(Object.keys(publicOfficialResults).map((outcome) => [outcome, duckOfficialResult(outcome)])),
+    publicOfficialResults,
+  );
+
+  // Unknown and prototype-shaped values fall back instead of leaking enum text.
+  for (const value of ["", "SOMETHING_NEW", "constructor", "toString"]) {
+    assert.equal(duckHeatStatusLabel(value), "Status being checked", value);
+    assert.equal(duckOfficialResult(value), null, value);
+  }
+  // Outcomes without a finalized heat have no official finishing result.
+  for (const outcome of ["NOT_RACED", "RUNNING", "AWAITING_RESULT", "FINALIST", "AWAITING_DUCK_PAIRING"]) {
+    assert.equal(duckOfficialResult(outcome), null, outcome);
+  }
+});
+
+const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = null } = {}) => {
+  const document = new FakeDocument(false);
+  const personal = document.createElement("div");
+  personal.dataset.livePersonal = "number";
+  const nodes = {
+    "[data-live-board]": document.createElement("section"),
+    "[data-live-board-stage]": document.createElement("p"),
+    "[data-live-board-title]": document.createElement("h2"),
+    "[data-live-board-summary]": document.createElement("p"),
+    "[data-live-board-content]": document.createElement("div"),
+    "[data-live-board-error]": document.createElement("p"),
+    "[data-live-personal]": personal,
+    main: document.createElement("main"),
+  };
+  document.querySelector = (selector) => nodes[selector] ?? null;
+  const requests = [];
+  const subscriptions = [];
+  const reloads = [];
+  const fetchStub = async (url) => {
+    requests.push(url);
+    if (url.startsWith("/api/v1/race-board")) {
+      return { ok: true, status: 200, async json() { return { event: boardEvent }; } };
+    }
+    return {
+      ok: personalStatus === 200,
+      status: personalStatus,
+      async json() { return { raceStatus }; },
+    };
+  };
+  const api = new Function(
+    "document",
+    "fetch",
+    "globalThis",
+    "location",
+    `${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell };`,
+  )(
+    document,
+    fetchStub,
+    { quickDucksLive: { subscribe(options) { subscriptions.push(options); } } },
+    { pathname: "/duck/128", reload() { reloads.push("reload"); }, replace(value) { reloads.push(value); } },
+  );
+  return { api, nodes, personal, requests, subscriptions, reloads };
+};
+
+test("the public duck detail page subscribes to the shared live hub and refetches authoritatively", async () => {
+  const page = liveDuckPage({
+    raceStatus: {
+      participantDisplayName: "Jamie R.",
+      duck: { visibleNumber: 128 },
+      assignedHeat: { roundOne: { number: 7, status: "FINALIZED" }, final: { number: 1, status: "RUNNING" } },
+      currentHeat: { round: "FINAL", number: 1, status: "RUNNING" },
+      outcome: "ROUND_ONE_WINNER",
+    },
+  });
+
+  assert.equal(page.subscriptions.length, 1);
+  assert.deepEqual(page.subscriptions[0].domains, ["event", "participants", "ducks", "heats", "returns"]);
+  assert.equal(page.subscriptions[0].root, page.nodes["[data-live-board]"]);
+
+  await page.api.liveRefreshWork();
+
+  // D1 stays authoritative: the refresh refetches both public projections.
+  assert.deepEqual(page.requests, ["/api/v1/race-board", "/api/v1/ducks/number/128"]);
+  const facts = page.personal.children[0];
+  assert.equal(facts.className, "facts");
+  assert.deepEqual(facts.children.map((fact) => fact.children.map((part) => part.textContent)), [
+    ["Participant", "Jamie R."],
+    ["Duck", "Duck #128"],
+    ["Round one heat", "Heat 7 · Result official"],
+    ["Final heat", "Heat 1 · Racing now"],
+    ["Currently running", "Final · Heat 1 · Racing now"],
+    ["Race status", "Round one winner"],
+    ["Official result", "Won its round-one heat"],
+  ]);
+});
+
+test("the public duck detail page omits an official result until a heat is finalized", async () => {
+  const page = liveDuckPage({
+    raceStatus: {
+      participantDisplayName: "Jamie R.",
+      duck: { visibleNumber: 9 },
+      assignedHeat: { roundOne: null, final: null },
+      currentHeat: null,
+      outcome: "HEAT_ASSIGNMENT_PENDING",
+    },
+  });
+
+  await page.api.liveRefreshWork();
+
+  assert.deepEqual(page.personal.children[0].children.map((fact) => fact.children.map((part) => part.textContent)), [
+    ["Participant", "Jamie R."],
+    ["Duck", "Duck #9"],
+    ["Round one heat", "Not assigned yet"],
+    ["Final heat", "Not in the final"],
+    ["Currently running", "No heat is running right now"],
+    ["Race status", "Heat assignment pending"],
+  ]);
+});
+
+test("a duck number that stops resolving clears the page and reloads into the not-found state", async () => {
+  const page = liveDuckPage({ personalStatus: 404 });
+
+  await page.api.liveRefreshWork();
+
+  assert.deepEqual(page.reloads, ["reload"]);
+  assert.equal(page.nodes.main.children.length, 0);
+});
+
+test("live board entries link a visible duck number and stay plain text when unassigned", () => {
+  const { api } = liveDuckPage();
+
+  const paired = api.liveBoardDuckCell({ participantDisplayName: "Jamie R.", duckNumber: 128, place: null });
+  assert.equal(paired.children.length, 1);
+  assert.equal(paired.children[0].tagName, "A");
+  assert.equal(paired.children[0].href, "/duck/128");
+  assert.equal(nodeText(paired), "Duck #128");
+
+  const placed = api.liveBoardDuckCell({ participantDisplayName: "Jamie R.", duckNumber: 4, place: 1 });
+  assert.equal(placed.children[0].href, "/duck/4");
+  assert.equal(nodeText(placed), "Duck #4 · 1st place");
+
+  // No duck assigned means no link at all, not an empty or dead one.
+  const pending = api.liveBoardDuckCell({ participantDisplayName: "Jamie R.", duckNumber: null, place: null });
+  assert.equal(pending.children.length, 0);
+  assert.equal(nodeText(pending), "Duck number pending");
+  assert.equal(pending.children.some((child) => child.tagName === "A"), false);
+});
+
+const participantCards = () => {
+  const document = new FakeDocument(false);
+  document.querySelector = () => null;
+  document.querySelectorAll = () => [];
+  const api = new Function(
+    "document",
+    "window",
+    "location",
+    "fetch",
+    `${duckDetailHelpersScript}${participantScript}; return { participantAddRaceFacts };`,
+  )(
+    document,
+    { addEventListener() {} },
+    { search: "", pathname: "/my-ducks", hash: "" },
+    async () => { throw new Error("offline"); },
+  );
+  const card = () => document.createElement("article");
+  return { ...api, card };
+};
+
+test("My Ducks paired cards link the duck number and awaiting cards do not", () => {
+  const { participantAddRaceFacts, card } = participantCards();
+
+  const paired = card();
+  participantAddRaceFacts(paired, {
+    duck: { visibleNumber: 42 },
+    assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
+    currentHeat: null,
+    outcome: "NOT_RACED",
+  });
+  const pairedDuckFact = paired.children[0].children[0];
+  assert.deepEqual(pairedDuckFact.children.map((part) => part.tagName), ["DT", "DD"]);
+  assert.equal(pairedDuckFact.children[0].textContent, "Duck");
+  const link = pairedDuckFact.children[1].children[0];
+  assert.equal(link.tagName, "A");
+  assert.equal(link.href, "/duck/42");
+  assert.equal(link.textContent, "Duck #42");
+
+  const awaiting = card();
+  participantAddRaceFacts(awaiting, {
+    duck: null,
+    assignedHeat: { roundOne: null, final: null },
+    currentHeat: null,
+    outcome: "AWAITING_DUCK_PAIRING",
+  });
+  const awaitingDuckFact = awaiting.children[0].children[0];
+  assert.equal(awaitingDuckFact.children[1].textContent, "Waiting for duck assignment");
+  assert.equal(
+    awaitingDuckFact.children.some((part) => part.children.some((child) => child.tagName === "A")),
+    false,
+  );
+});
+
+test("the shared duck-link helper is declared once across the public classic scripts", () => {
+  // live.js and participant.js both build duck links, so the declaration lives
+  // in the runtime both pages already load rather than in either script.
+  assert.match(liveUiScript, /const duckDetailLink =/);
+  assert.doesNotMatch(liveScript, /const duckDetailLink =/);
+  assert.doesNotMatch(participantScript, /const duckDetailLink =/);
+  assert.doesNotThrow(
+    () => new Function([liveUiScript, liveScript, homeScript, participantScript].join("\n")),
+    "duck-link helpers must not redeclare an existing public global",
+  );
+  for (const script of [duckDetailHelpersScript, liveScript, participantScript]) {
+    assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  }
+  // The public duck views never read or render private material.
+  assert.doesNotMatch(duckDetailHelpersScript, /email|phone|lookupCode|privateToken|tagToken|token/i);
 });

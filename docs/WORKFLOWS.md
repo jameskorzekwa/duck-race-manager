@@ -279,11 +279,20 @@ expiry refresh as the full collection endpoint, but queries only whether one
 collection link exists. It never selects or returns names, lookup codes, race
 entries, status details, contact fields, or private paths.
 
+A collection link records how it was created. A link created by registering in
+that browser is `REGISTRATION`; a link added from the public name search is
+`FOLLOWED`. Registering always claims the link as `REGISTRATION`, so following a
+participant first can never suppress that browser's own registration data.
+
 The dedicated noindex `/my-ducks` page loads the full safe collection. It shows,
 for each collected registration:
 
-- Full participant name from the private browser collection.
-- Staff lookup code.
+- For a registered entry, the full participant name and the staff lookup code
+  from the private browser collection.
+- For a followed entry, a **Following** tag, the event's policy-filtered public
+  display name, and no lookup code at all. The collection response returns
+  `lookupCode: null` and null name parts for these entries, because the public
+  search that produced them exposes neither.
 - Registration status.
 - Privacy-filtered race status, including duck, heat, current heat, and outcome
   when public race status is available.
@@ -291,9 +300,12 @@ for each collected registration:
 Cards are grouped into separate horizontally swipeable **Awaiting Participants**
 and paired **My Ducks** sections with keyboard and previous/next controls. A live
 or polling refresh immediately regroups a card when staff pair or unpair its
-participant. Both authoritative empty-state messages remain hidden until the
-first successful full collection response. If that initial request fails, the
-page shows only an unavailable/delayed update message and keeps checking.
+participant. A group with no participants hides its entire section, including
+its heading and controls, rather than rendering an empty state; when both groups
+are empty the page keeps one guidance message so it is never blank. Both
+sections stay hidden until the first successful full collection response, so a
+failed initial request shows only the error-only line and keeps checking rather
+than claiming an empty collection.
 
 After the registration redirect, the page highlights the matching registration.
 Only after that UUID appears in a successful full collection response does the
@@ -358,11 +370,63 @@ show pairing pending, assigned duck, heat, current heat, and race outcome. It
 never returns contact details, lookup codes, private links, staff notes,
 inventory state, location, or audit data.
 
-Name search restores public status only. It does not restore the private link or
-browser collection and does not show withdrawn or disqualified registrations.
-After a submitted search, relevant event, participant, duck, heat, and return
-signals rerun that same authoritative search automatically. Unsaved edits in the
-search control are not replaced.
+Each result also carries an opaque `followId` and an `inMyDucks` flag. The flag
+is a read-only probe of the caller's own collection cookie; a search never
+refreshes or issues that cookie. The identifier unlocks nothing beyond the
+public status already shown in the same response.
+
+Name search restores public status only. It does not restore the private link,
+the lookup code, or a full name, and it does not show withdrawn or disqualified
+registrations. After a submitted search, relevant event, participant, duck,
+heat, and return signals rerun that same authoritative search automatically.
+Unsaved edits in the search control are not replaced.
+
+### Adding a Search Result to My Ducks
+
+**Implemented:** each search result offers one **Add to My Ducks** action that
+posts its `followId` to `POST /api/v1/registrations/mine/follow`. The endpoint
+requires `application/json`, a bounded body, and the exact application `Origin`,
+validates the identifier's shape and the shared public rate limit before any
+database access, and then requires the identifier to still resolve to a publicly
+searchable entry of the current public event. Anything else is rejected without
+a write. Adding the same participant twice is a no-op success.
+
+The link is written as `FOLLOWED`, and the action confirms in place and reveals
+the **My Ducks** navigation. A result already in the collection renders the
+confirmed state instead of the action. Because the search response carries no
+lookup code and no private token, a followed entry can never gain either one,
+and `/api/v1/registrations/mine` returns `lookupCode: null` for it.
+
+### Public Duck Detail View
+
+**Implemented:** `/duck/<visible-number>` is a public page for one duck,
+addressed by the number printed on the duck and shown on the live board. It
+needs no tag, no token, and no cookie.
+
+The number is resolved against the same event the public race board renders, and
+only while that event is between `REGISTRATION_OPEN` and `COMPLETED`. The page
+reuses the shared public status projection, so it can show the event, the
+policy-filtered participant name, the visible duck number, the round-one heat,
+the final heat, the heat currently running, the race outcome, and an official
+finishing place once a heat is finalized. It never shows contact details, lookup
+codes, private links, raw tag tokens, inventory location, staff notes, or audit
+history.
+
+`GET /api/v1/ducks/number/<visible-number>` returns the same projection as
+`{ "raceStatus": ... }`. Only canonical positive integers resolve; a
+non-canonical value is rejected before any database access.
+
+Unknown numbers, ducks that exist in inventory but are not paired, and ducks
+outside the current public event are indistinguishable: all three return `404`
+from the API and one identical friendly page, sent `noindex, nofollow` like the
+other public duck and status pages. The page therefore adds no enumeration
+signal beyond the duck numbers the board already publishes.
+
+The live race board and the paired My Ducks cards link their duck numbers to
+this view as plain navigations. An entry with no duck assigned renders text and
+no link. The page itself refreshes through the shared live hub on the `event`,
+`participants`, `ducks`, `heats`, and `returns` domains and refetches the
+authoritative API, exactly like the other public pages.
 
 ## Duck Tag Scans
 
@@ -1079,7 +1143,13 @@ Historical result revisions remain until the race purge.
 from `REGISTRATION_OPEN` through `COMPLETED`. The prominent board appears on the
 home page, private status pages, and public duck-tag status pages. It includes:
 
-- Safe event lifecycle status and date.
+- Safe event lifecycle status and date. The board turns that status into a
+  prominent plain-language stage chip and summary line beside the event name:
+  `DRAFT` race being prepared, `REGISTRATION_OPEN` participant registration
+  open, `REGISTRATION_CLOSED` registration closed while heats are finalized,
+  `ROUND_ONE` round one under way, `FINAL` final under way, `COMPLETED` results
+  official, and `RETURN_PROCESSING`/`ARCHIVED` race complete. An unrecognized
+  status falls back to neutral wording instead of raw enum text.
 - Ordered round-one and final heats.
 - Safe heat status, including calling, running, and awaiting-result emphasis.
 - Policy-filtered participant display names and visible duck numbers.
@@ -1474,10 +1544,17 @@ area, restore connectivity, refresh server state, and then perform the action.
 For critical race-day work, use one authoritative online device until another
 device has refreshed current state.
 
-The words `Updates are arriving live`, `Updated just now`, or a delayed/reconnect
-message describe connection freshness only. They do not acknowledge an
-authoritative mutation. Operators must still wait for the mutation's saved
-response and refreshed state.
+The UI shows no ambient freshness or connection-status text. There is no
+`Updated just now`, `Updates are arriving live`, or delayed/reconnect line, and
+no page claims a connection state. Refresh behavior is unchanged: WebSocket
+signals still prompt refetches and polling still recovers.
+
+Because no message ever implies success, operators must judge a mutation only by
+its authoritative saved response and the refreshed state that follows. Station
+pages report actionable operational errors through `data-station-message` and
+`data-intake-message`. The public live board and My Ducks each keep one
+error-only line that appears solely when their authoritative request fails and
+clears on the next success.
 
 ## Security and Privacy Boundaries
 
@@ -1489,6 +1566,10 @@ response and refreshed state.
   notes, inventory location, or audit details.
 - Exact public name search is rate-limited and event-scoped, but it is still
   public status, not identity verification.
+- Adding a search result to My Ducks is rate-limited, same-origin, and revalidated
+  against the public search predicate. It grants only what the search already
+  showed: a followed collection entry never carries a lookup code, a private
+  link, or a name beyond the event's public name policy.
 - Every staff request requires a valid Cognito token and active D1 profile.
 - Browser staff mutations require exact same-origin requests; Bearer clients
   remain responsible for protecting their access tokens.
