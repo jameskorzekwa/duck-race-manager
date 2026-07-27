@@ -19,7 +19,7 @@ import {
   staffHomeScript,
   startLineScript,
 } from "./client-scripts.ts";
-import { getPublicPhase, type PublicPhase } from "./public-phase.ts";
+import { publicPhaseForRender, type PublicPhase } from "./public-phase.ts";
 import {
   faviconSvg,
   manifestJson,
@@ -119,9 +119,11 @@ export const createWorker = (
       html(body, status, true, new URL(env.COGNITO_DOMAIN).origin);
     // One lightweight current-event query per HTML request. Every page renders
     // its navigation, and the public pages their whole body, from this phase, so
-    // the first paint is already correct.
+    // the first paint is already correct. `publicPhaseForRender` degrades a
+    // database failure to the Preparing phase instead of failing the render, so
+    // no page on this path can 500 because of the phase query alone.
     let phaseResolution: Promise<PublicPhase> | undefined;
-    const publicPhase = (): Promise<PublicPhase> => (phaseResolution ??= getPublicPhase(env));
+    const publicPhase = (): Promise<PublicPhase> => (phaseResolution ??= publicPhaseForRender(env));
     let sessionAuthentication: Awaited<ReturnType<typeof authenticateStaffSession>> | undefined;
     const authenticateRequest: typeof authenticateStaff = async (authRequest, authEnv) => {
       sessionAuthentication ??= await authenticateStaffSession(authRequest, authEnv, authenticate, tokenFetch);

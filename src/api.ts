@@ -2,7 +2,12 @@ import {
   hashToken,
   isCommandId,
   isPrivateToken,
+  isRegistrationId,
   randomLookupCode,
+  registrationDeletionAuditStatement,
+  registrationDeletionCommitted,
+  registrationDeletionStatements,
+  removableRegistrationSql,
   validateRegistration,
 } from "./registration.ts";
 import { authenticateStaff } from "./auth.ts";
@@ -451,6 +456,10 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
   }
   const collection = await refreshBrowserCollection(env, existingCollection);
 
+  // `is_deletable` is the exact predicate the delete endpoint re-checks inside
+  // its guarded write, so the button this projection enables can never disagree
+  // with the write that follows it. A followed link is excluded here rather
+  // than only in the client: it is someone else's registration.
   const registrations = await env.DB.prepare(
     `SELECT r.id AS registration_id, re.id AS race_entry_id,
             r.first_name, r.last_name, r.lookup_code, r.status,
@@ -459,7 +468,11 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
               SELECT 1
                 FROM duck_assignments da
                WHERE da.race_entry_id = re.id AND da.valid_to IS NULL
-            ) AS is_paired
+            ) AS is_paired,
+            (
+              bcr.added_via = 'REGISTRATION'
+              AND ${removableRegistrationSql}
+            ) AS is_deletable
        FROM browser_collection_registrations bcr
        JOIN registrations r ON r.id = bcr.registration_id
        JOIN race_entries re ON re.registration_id = r.id
@@ -476,6 +489,7 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
     added_via: string | null;
     public_name_policy: string;
     is_paired: number;
+    is_deletable: number;
   }>();
 
   // A followed entry came from the public name search, which exposes neither a
@@ -494,6 +508,7 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
       followed,
       registrationStatus: row.status,
       paired: row.is_paired === 1,
+      deletable: !followed && row.is_deletable === 1,
       raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),
     };
   }));
@@ -658,6 +673,144 @@ const followRegistration = async (request: Request, env: Env): Promise<Response>
     "set-cookie": browserCollectionCookie(collection.cookieToken),
   });
 };
+
+interface DeleteRegistrationPayload {
+  commandId?: unknown;
+  registrationId?: unknown;
+}
+
+// Self-service removal of a registration this browser created, for the person
+// who registered by mistake. The browser collection cookie is the only
+// credential, so this endpoint mirrors the follow endpoint's transport rules
+// exactly: same-origin only, small body, validation before any database access,
+// and the same public rate limiter.
+//
+// Authorization is deliberately narrow. The caller may remove a registration
+// only through a link this browser holds as 'REGISTRATION', never a 'FOLLOWED'
+// link, and only while the entry has no duck assignment and no heat place. The
+// preflight read below exists to produce a useful message; the guarded command
+// insert inside the batch re-checks the identical conditions and is what
+// actually authorizes the write.
+const deleteMyRegistration = async (request: Request, env: Env): Promise<Response> => {
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return json({ error: "Content-Type must be application/json." }, 415);
+  }
+
+  const contentLength = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > 1_024) {
+    return json({ error: "Request body is too large." }, 413);
+  }
+
+  if (request.headers.get("origin") !== new URL(env.APP_ORIGIN).origin) {
+    return json({ error: "Same-origin request required." }, 403);
+  }
+
+  let payload: DeleteRegistrationPayload;
+  try {
+    const body = await request.text();
+    if (body.length > 1_024) return json({ error: "Request body is too large." }, 413);
+    const parsed = JSON.parse(body) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return json({ error: "Request body must be a JSON object." }, 400);
+    }
+    payload = parsed as DeleteRegistrationPayload;
+  } catch {
+    return json({ error: "Request body must be valid JSON." }, 400);
+  }
+
+  const { commandId, registrationId } = payload;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || typeof registrationId !== "string" || !isRegistrationId(registrationId)
+  ) {
+    return json({ error: "Invalid command or registration identifier." }, 400);
+  }
+
+  const clientKey = request.headers.get("cf-connecting-ip") ?? "unknown-client";
+  const rateLimit = await env.PUBLIC_SEARCH_RATE_LIMITER.limit({ key: `delete:${clientKey}` });
+  if (!rateLimit.success) {
+    return json({ error: "Too many requests. Please wait and try again." }, 429);
+  }
+
+  // Replay is resolved before anything else touches the collection, because a
+  // committed delete leaves no registration and no collection link to re-read.
+  // A retry of the same command therefore has to be answered from the command
+  // history alone, which is what makes deleting twice a deterministic success.
+  const previous = await env.DB.prepare(
+    "SELECT command_type, result_id FROM race_commands WHERE id = ?",
+  ).bind(commandId).first<{ command_type: string; result_id: string | null }>();
+  if (previous !== null) {
+    return previous.command_type === "DELETE_REGISTRATION" && previous.result_id === registrationId
+      ? json({ deleted: true, replayed: true })
+      : json({ error: "Command identifier has already been used." }, 409);
+  }
+
+  const collection = await getBrowserCollection(request, env);
+  // A missing or unknown collection, an unrelated registration, and a followed
+  // link are one indistinguishable 404, so this never reports whether some
+  // other browser's registration exists.
+  if (collection === null) return json({ error: "That registration cannot be deleted." }, 404);
+
+  const target = await env.DB.prepare(
+    `SELECT r.id AS registration_id,
+            EXISTS (
+              SELECT 1 FROM duck_assignments da WHERE da.race_entry_id = re.id
+            ) AS has_assignment,
+            EXISTS (
+              SELECT 1 FROM heat_entries he WHERE he.race_entry_id = re.id
+            ) AS has_heat_entry
+       FROM browser_collection_registrations bcr
+       JOIN registrations r ON r.id = bcr.registration_id
+       JOIN race_entries re ON re.registration_id = r.id
+       JOIN events e ON e.id = r.event_id
+      WHERE bcr.collection_id = ?
+        AND bcr.registration_id = ?
+        AND bcr.added_via = 'REGISTRATION'
+        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
+      LIMIT 1`,
+  ).bind(collection.id, registrationId).first<{
+    registration_id: string;
+    has_assignment: number;
+    has_heat_entry: number;
+  }>();
+  if (target === null) return json({ error: "That registration cannot be deleted." }, 404);
+  if (target.has_assignment === 1 || target.has_heat_entry === 1) {
+    return json({
+      error: "This registration already has a race duck, so it can no longer be deleted here. Ask race staff for help.",
+    }, 409);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at)
+         SELECT ?, r.event_id, 'DELETE_REGISTRATION', r.id, ?, ?
+           FROM registrations r
+           JOIN events e ON e.id = r.event_id
+           JOIN race_entries re ON re.registration_id = r.id
+           JOIN browser_collection_registrations bcr
+             ON bcr.registration_id = r.id
+            AND bcr.collection_id = ?
+            AND bcr.added_via = 'REGISTRATION'
+          WHERE r.id = ?
+            AND ${removableRegistrationSql}`,
+      ).bind(commandId, now, now, collection.id, registrationId),
+      registrationDeletionAuditStatement(env, commandId, registrationId, "PUBLIC", now, {
+        deleted_via: "PUBLIC_COLLECTION",
+      }),
+      ...registrationDeletionStatements(env, commandId, registrationId),
+    ]);
+  } catch {
+    return json({ error: "That registration could not be deleted. Please try again." }, 409);
+  }
+
+  return await registrationDeletionCommitted(env, commandId, registrationId)
+    ? json({ deleted: true, replayed: false })
+    : json({ error: "That registration cannot be deleted." }, 409);
+};
+
 const handleApiRequest = async (
   request: Request,
   env: Env,
@@ -728,6 +881,10 @@ const handleApiRequest = async (
 
   if (url.pathname === "/api/v1/registrations/mine/follow" && request.method === "POST") {
     return followRegistration(request, env);
+  }
+
+  if (url.pathname === "/api/v1/registrations/mine/delete" && request.method === "POST") {
+    return deleteMyRegistration(request, env);
   }
 
   if (url.pathname === "/api/v1/race-status/search" && request.method === "GET") {

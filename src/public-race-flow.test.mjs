@@ -4,6 +4,7 @@ import test from "node:test";
 import { liveScript, liveUiScript, participantScript, sitePhaseNavScript } from "./client-scripts.ts";
 import worker from "./index.ts";
 import {
+  fallbackPublicPhase,
   getPublicPhase,
   homePhaseCta,
   phaseAllowsRaceStatus,
@@ -11,6 +12,7 @@ import {
   phaseShowsMyDucks,
   phaseShowsRaceStatusNav,
   phaseShowsRegisterNav,
+  publicPhaseForRender,
   publicPhaseForStatus,
   racePreparingMessage,
   registrationClosedMessage,
@@ -194,6 +196,183 @@ test("no current event resolves to Preparing without inventing a status", async 
   const env = { DB: { prepare: () => ({ async first() { return null; } }) } };
 
   assert.equal(await getPublicPhase(env), "PREPARING");
+});
+
+// --- degraded phase resolution ----------------------------------------------
+
+// Before the site became phase-driven, public pages rendered without touching
+// D1 at all. A page render must therefore never be turned into a 500 by the
+// phase query alone: an unavailable, degraded, or transient D1 failure degrades
+// to Preparing and the live hub repaints the nav once D1 recovers.
+const d1Failure = () => new Error("D1_ERROR: no such table: events");
+
+// Only the phase query fails; every other statement answers normally. This is
+// the precise regression, and it also proves nothing else got caught with it.
+const brokenPhaseEnv = () => {
+  const queries = [];
+  return {
+    ...baseEnv,
+    queries,
+    DB: {
+      prepare: (sql) => {
+        queries.push(sql);
+        const isPhaseQuery = /^SELECT status\s+FROM events/.test(sql);
+        return {
+          async first() {
+            if (isPhaseQuery) throw d1Failure();
+            return null;
+          },
+          bind: () => ({ async first() { return null; } }),
+        };
+      },
+    },
+  };
+};
+
+// A total outage: every statement rejects, which is what the API paths see.
+const deadDatabaseEnv = () => ({
+  ...baseEnv,
+  DB: {
+    prepare: () => ({
+      bind() { return this; },
+      async first() { throw d1Failure(); },
+      async all() { throw d1Failure(); },
+      async run() { throw d1Failure(); },
+    }),
+    batch: async () => { throw d1Failure(); },
+  },
+});
+
+const failedPage = async (path, env = brokenPhaseEnv()) => {
+  const response = await worker.fetch(new Request(`https://quickducks.com${path}`), env);
+  return { queries: env.queries, response, body: await response.text() };
+};
+
+test("the phase query resolver still rejects so D1-dependent callers fail loudly", async () => {
+  await assert.rejects(getPublicPhase(deadDatabaseEnv()), /D1_ERROR/);
+});
+
+test("the render-time resolver degrades a failed phase query to Preparing", async () => {
+  // Preparing is the conservative fallback: it is the same phase "no public
+  // event" produces, and it advertises neither Register nor Race Status, so a
+  // database hiccup can never invite a visitor into a flow that is not open.
+  assert.equal(fallbackPublicPhase, "PREPARING");
+  assert.equal(await publicPhaseForRender(deadDatabaseEnv()), "PREPARING");
+  assert.equal(await publicPhaseForRender(brokenPhaseEnv()), "PREPARING");
+  // A working query is passed through untouched.
+  assert.equal(await publicPhaseForRender(phaseEnv("FINAL")), "RACING");
+  assert.equal(await publicPhaseForRender(phaseEnv("REGISTRATION_OPEN")), "REGISTRATION");
+  assert.equal(await publicPhaseForRender(phaseEnv(undefined)), "PREPARING");
+});
+
+test("every public page still renders with the Preparing nav when the phase query fails", async () => {
+  for (const path of ["/", "/register", "/race", "/my-ducks", "/r/mock", "/t/mock"]) {
+    const { queries, response, body } = await failedPage(path);
+
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8", path);
+    assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000", path);
+    // The query really was attempted; the page is not skipping the read.
+    assert.ok(queries.some((sql) => /^SELECT status\s+FROM events/.test(sql)), path);
+    assert.deepEqual(visibleNav(body), expectedNav.PREPARING, path);
+    assert.match(navMarkup(body), /data-phase="PREPARING"/, path);
+    // A degraded paint never advertises a flow that may not be open.
+    assert.equal(
+      navEntries(body).some((entry) => !entry.hidden && ["/register", "/race"].includes(entry.href)),
+      false,
+      path,
+    );
+    // Every public content page keeps the marker the live hub needs to repaint
+    // the nav from `GET /api/v1/events/current` once D1 recovers.
+    assert.match(navMarkup(body), /data-live-nav/, path);
+    assert.match(body, /src="\/assets\/live-ui\.js"/, path);
+  }
+});
+
+test("the home page degrades to the Preparing hero instead of a 500", async () => {
+  const { response, body } = await failedPage("/");
+
+  assert.equal(response.status, 200);
+  assert.equal(homeCta(body), null);
+  assert.match(body, /data-home-preparing>The next race is being prepared\./);
+  assert.match(body, /Find your duck\. Follow the race\./);
+});
+
+test("/register and /race degrade to their own preparing wording, never each other's", async () => {
+  const register = await failedPage("/register");
+  assert.equal(register.response.status, 200);
+  assert.ok(register.body.includes(registrationPreparingMessage));
+  assert.equal(register.body.includes(racePreparingMessage), false);
+  assert.match(register.body, /data-registration-preparing/);
+
+  const race = await failedPage("/race");
+  assert.equal(race.response.status, 200);
+  assert.ok(race.body.includes(racePreparingMessage));
+  assert.equal(race.body.includes(registrationPreparingMessage), false);
+});
+
+test("/my-ducks renders its saved-ducks surface after a failed phase query", async () => {
+  const { response, body } = await failedPage("/my-ducks");
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.match(body, /data-my-ducks-page/);
+  assert.match(body, /data-status-search-section/);
+  // My Ducks stays in the document so the presence probe can still reveal it.
+  assert.match(navMarkup(body), /data-my-ducks-nav data-phase-visible="false" hidden/);
+});
+
+test("a failed phase query cannot 500 the record-backed public pages either", async () => {
+  // `/duck/<number>` resolves its record first and only then the phase, so the
+  // failing phase read must not change its outcome. The mock resolves no duck,
+  // which is the already-tested not-found page, not a server error.
+  const duck = await failedPage("/duck/128");
+  assert.equal(duck.response.status, 404);
+  assert.equal(duck.response.headers.get("content-type"), "text/html; charset=utf-8");
+  assert.deepEqual(visibleNav(duck.body), expectedNav.PREPARING);
+
+  // The private status preview and the tag preview render a full page.
+  for (const path of ["/r/mock", "/t/mock"]) {
+    const { response, body } = await failedPage(path);
+    assert.equal(response.status, 200, path);
+    assert.deepEqual(visibleNav(body), expectedNav.PREPARING, path);
+  }
+});
+
+test("the not-found page still resolves no phase at all, failing database or not", async () => {
+  const { queries, response, body } = await failedPage("/no-such-page");
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(queries, [], "unmatched paths must never reach the database");
+  assert.deepEqual(visibleNav(body), ["Home", "Staff"]);
+});
+
+test("a total database outage still paints the public pages", async () => {
+  for (const path of ["/", "/register", "/race", "/my-ducks"]) {
+    const response = await worker.fetch(new Request(`https://quickducks.com${path}`), deadDatabaseEnv());
+    const body = await response.text();
+
+    assert.equal(response.status, 200, path);
+    assert.deepEqual(visibleNav(body), expectedNav.PREPARING, path);
+  }
+});
+
+test("API routes that depend on D1 keep surfacing their failures", async () => {
+  // The page fallback is deliberately not shared with the API layer: these
+  // routes exist to report authoritative state, so a hidden failure would be a
+  // wrong answer rather than a degraded one.
+  for (const path of [
+    "/api/v1/events/current",
+    "/api/v1/race-board",
+    `/api/v1/registrations/${"a".repeat(43)}`,
+    "/api/v1/ducks/number/128",
+  ]) {
+    await assert.rejects(
+      worker.fetch(new Request(`https://quickducks.com${path}`), deadDatabaseEnv()),
+      /D1_ERROR/,
+      path,
+    );
+  }
 });
 
 // --- navigation matrix ------------------------------------------------------

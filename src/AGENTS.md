@@ -73,6 +73,11 @@ scan-first pairing.
   request and passes it into the renderers; `live-ui.js` re-renders the nav from
   `GET /api/v1/events/current` on live event signals. Never re-derive that
   mapping in a page, a browser client, or a test fixture.
+- Page renders resolve the phase through `publicPhaseForRender`, which degrades
+  a failed phase query to `PREPARING` so a database failure cannot 500 a public
+  page; the client refetch repairs the paint. `getPublicPhase` stays honest and
+  rejects. Never give the API layer that fallback: routes that report
+  authoritative state must keep failing loudly.
 - Preparing wording belongs to the page, not to the phase. `/register` owns the
   approved come-back-and-register sentence and `/race` owns its own race-status
   sentence; never render one page's message on the other.

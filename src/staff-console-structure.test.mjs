@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { staffAccessScript, staffHomeScript } from "./client-scripts.ts";
+import { liveUiScript, staffAccessScript, staffHomeScript } from "./client-scripts.ts";
 import {
   renderFinishLine,
   renderInventoryIntake,
@@ -316,8 +316,11 @@ test("the access client is standalone, DOM-safe, and subscribes to the staff dom
   assert.match(staffAccessScript, /replaceChildren/);
   assert.match(staffAccessScript, /textContent/);
 
-  // The confirmation dialog is composed in, like the other staff clients.
-  assert.match(staffAccessScript, /appConfirmationQueue/);
+  // The confirmation dialog ships once in `live-ui.js`, which this page loads
+  // first, so the access client uses it without redeclaring it.
+  assert.doesNotMatch(staffAccessScript, /appConfirmationQueue/);
+  assert.match(liveUiScript, /appConfirmationQueue/);
+  assert.match(renderStaffAccess("Administrator"), /<script src="\/assets\/live-ui\.js" defer><\/script>/);
   assert.ok(staffAccessScript.includes(
     'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;',
   ));

@@ -187,6 +187,11 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && pathname === "/api/v1/registrations") {
     return domains("participants");
   }
+  // Public self-service deletion removes a participant from the race dataset,
+  // so every participant surface has to refetch, exactly like creation.
+  if (method === "POST" && pathname === "/api/v1/registrations/mine/delete") {
+    return domains("participants");
+  }
   if (method === "POST" && pathname === "/api/v1/staff/profiles") return domains("staff");
   if (method === "POST" && /^\/api\/v1\/staff\/profiles\/[^/]{1,128}\/(role|deactivate|reactivate)$/.test(pathname)) {
     return domains("staff");
@@ -212,7 +217,7 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/registrations$/.test(pathname)) {
     return domains("participants");
   }
-  if (["PATCH", "POST"].includes(method) && /^\/api\/v1\/staff\/registrations\/[^/]{1,128}(?:\/(withdraw|reactivate|disqualify))?$/.test(pathname)) {
+  if (["DELETE", "PATCH", "POST"].includes(method) && /^\/api\/v1\/staff\/registrations\/[^/]{1,128}(?:\/(withdraw|reactivate|disqualify))?$/.test(pathname)) {
     return domains("participants", "ducks", "heats");
   }
 

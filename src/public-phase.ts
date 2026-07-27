@@ -66,10 +66,21 @@ export const homePhaseCta: Readonly<Record<PublicPhase, PublicPhaseCta | null>> 
   RESULTS: { href: "/race", label: "View results" },
 };
 
+// The phase a page renders when the current-event query cannot be answered.
+// PREPARING is the same phase "no public event" already produces, so a degraded
+// paint is an ordinary, already-tested page rather than a new state, and it is
+// the conservative choice: it advertises neither Register nor Race Status, so a
+// database hiccup can never invite a visitor into a flow that is not open.
+export const fallbackPublicPhase: PublicPhase = "PREPARING";
+
 // One lightweight query so every server-rendered page can paint the correct
 // navigation immediately. The status ordering matches `GET /api/v1/events/current`
 // in `api.ts`, which is the same projection the browser re-reads when the live
 // hub signals an event change; the two must not disagree.
+//
+// This resolver stays honest and rejects on a database failure. Page renders
+// must use `publicPhaseForRender`; API handlers that legitimately depend on D1
+// keep surfacing their errors.
 export const getPublicPhase = async (env: Env): Promise<PublicPhase> => {
   const row = await env.DB.prepare(
     `SELECT status
@@ -93,4 +104,28 @@ export const getPublicPhase = async (env: Env): Promise<PublicPhase> => {
       LIMIT 1`,
   ).first<{ status: string }>();
   return publicPhaseForStatus(row?.status);
+};
+
+// Navigation chrome is not worth an outage. Before the site became
+// phase-driven, public pages such as the home page rendered without touching D1
+// at all, so an unavailable, degraded, or transient D1 failure must not turn a
+// page render into a 500 the way it would if the rejection escaped.
+//
+// The degraded paint self-corrects: every public content page carries
+// `data-live-nav`, and `live-ui.js` rebuilds the navigation from
+// `GET /api/v1/events/current` on the next live signal or poll, so the visitor
+// sees the true phase within seconds of D1 recovering.
+//
+// Only HTML page renders may use this. API routes must keep failing loudly.
+export const publicPhaseForRender = async (env: Env): Promise<PublicPhase> => {
+  try {
+    return await getPublicPhase(env);
+  } catch {
+    // Deliberately not logged: Worker invocation logs stay disabled because
+    // private credentials occur in URL paths. The failure stays observable
+    // where that is already the convention — `/health` and every API route that
+    // reads the same data still fail on a broken database — so this catch
+    // narrows a page render, not the diagnosis.
+    return fallbackPublicPhase;
+  }
 };

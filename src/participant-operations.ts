@@ -1,10 +1,15 @@
 import type { StaffActor } from "./auth.ts";
 import { requireAnyRole } from "./authorization.ts";
 import {
+  DELETABLE_EVENT_STATUSES,
   hashToken,
   isCommandId,
   isPrivateToken,
   randomLookupCode,
+  registrationDeletionAuditStatement,
+  registrationDeletionCommitted,
+  registrationDeletionStatements,
+  removableRegistrationSql,
   validateRegistration,
   type RegistrationInput,
 } from "./registration.ts";
@@ -729,6 +734,99 @@ const changeRegistrationStatus = async (
     : registrationResult(updated, false, 201);
 };
 
+// Staff removal of a registration that should never have existed. It is a real
+// delete, not a status change, so it protects race integrity instead of tearing
+// it down: a participant holding a duck assignment, or already placed on a heat
+// roster, is refused with the unassign-first instruction rather than having
+// those rows removed underneath the race. The guarded command insert re-checks
+// both conditions inside the batch, so the roster-lock trigger on `heat_entries`
+// is never reachable from this path at all.
+const deleteRegistration = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  registrationId: string,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  if (payload === null) return json({ error: "A valid JSON request is required." }, 400);
+  const commandId = payload.commandId;
+  const expectedRevision = payload.expectedRevision;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || !Number.isInteger(expectedRevision) || (expectedRevision as number) < 0
+  ) {
+    return json({ error: "A valid command and expected revision are required." }, 400);
+  }
+
+  // The registration is gone after a committed delete, so a retry is answered
+  // from command history alone rather than by re-reading the subject.
+  const previous = await findCommand(env, commandId);
+  if (previous !== null) {
+    return previous.command_type === "DELETE_REGISTRATION" && previous.result_id === registrationId
+      ? json({ deleted: true, registrationId, replayed: true })
+      : json({ error: "This command identifier was already used for another operation." }, 409);
+  }
+
+  const current = await getRegistration(env, registrationId);
+  if (current === null) return json({ error: "Registration not found." }, 404);
+  if (!(DELETABLE_EVENT_STATUSES as readonly string[]).includes(current.event_status)) {
+    return json({ error: "Registrations cannot be deleted in this event state." }, 409);
+  }
+  if (current.registration_revision !== expectedRevision) {
+    return json({ error: "Registration changed since it was loaded.", currentRevision: current.registration_revision }, 409);
+  }
+
+  const blocking = await env.DB.prepare(
+    `SELECT EXISTS (
+              SELECT 1 FROM duck_assignments da WHERE da.race_entry_id = ?
+            ) AS has_assignment,
+            EXISTS (
+              SELECT 1 FROM heat_entries he WHERE he.race_entry_id = ?
+            ) AS has_heat_entry`,
+  ).bind(current.race_entry_id, current.race_entry_id).first<{
+    has_assignment: number;
+    has_heat_entry: number;
+  }>();
+  if (blocking?.has_assignment === 1) {
+    return json({
+      error: "This participant still has a duck assignment. Unassign the duck from inventory first, then delete the registration.",
+    }, 409);
+  }
+  if (blocking?.has_heat_entry === 1) {
+    return json({
+      error: "This participant is on a heat roster. Unassign their duck and remove them from the heat first, then delete the registration.",
+    }, 409);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+         SELECT ?, r.event_id, 'DELETE_REGISTRATION', r.id, ?, ?, ?
+           FROM registrations r
+           JOIN events e ON e.id = r.event_id
+           JOIN race_entries re ON re.registration_id = r.id
+          WHERE r.id = ? AND r.revision = ?
+            AND ${removableRegistrationSql}`,
+      ).bind(commandId, now, now, actor.id, registrationId, expectedRevision),
+      registrationDeletionAuditStatement(env, commandId, registrationId, "STAFF", now, {
+        staff_profile_id: actor.id,
+        created_via: current.created_via,
+        previous_revision: current.registration_revision,
+      }),
+      ...registrationDeletionStatements(env, commandId, registrationId),
+    ]);
+  } catch {
+    return json({ error: "Registration deletion conflicted with another update. Refresh and try again." }, 409);
+  }
+
+  return await registrationDeletionCommitted(env, commandId, registrationId)
+    ? json({ deleted: true, registrationId, replayed: false })
+    : json({ error: "Registration deletion conflicted with another update. Refresh and try again." }, 409);
+};
+
 export const handleParticipantOperations = async (
   request: Request,
   env: Env,
@@ -762,6 +860,9 @@ export const handleParticipantOperations = async (
   }
   if (operation === undefined && request.method === "PATCH") {
     return editRegistration(request, env, actor, registrationId);
+  }
+  if (operation === undefined && request.method === "DELETE") {
+    return deleteRegistration(request, env, actor, registrationId);
   }
   if (operation !== undefined && request.method === "POST") {
     return changeRegistrationStatus(request, env, actor, registrationId, operation as StatusOperation);
