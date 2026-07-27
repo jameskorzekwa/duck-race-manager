@@ -7,7 +7,7 @@
 | Source and releases | `jameskorzekwa/duck-race-manager` | GitHub |
 | Canonical origin | `https://quickducks.com` | Cloudflare DNS and Worker Custom Domain |
 | Redirect origin | `https://www.quickducks.com` | Worker Custom Domain; application returns `308` |
-| Web and API | Cloudflare Worker `quickducks` | `wrangler.jsonc` and tagged releases |
+| Web and API | Cloudflare Worker `quickducks` | `wrangler.jsonc` and merge-driven production releases |
 | Database | Cloudflare D1 `quickducks-prod` | Wrangler and `db/migrations` |
 | Live refresh fan-out | Durable Object class `RaceUpdates`, binding `RACE_UPDATES` | Wrangler class migration and Worker deployment |
 | Public search limit | Workers binding `PUBLIC_SEARCH_RATE_LIMITER` | `wrangler.jsonc` |
@@ -47,7 +47,8 @@ are production resources. Do not create substitutes during a release.
 - Workflow permissions are job-scoped. Only the deployment job can request an
   OIDC token and only the final job can write a GitHub release.
 - Production releases use one concurrency group with `queue: max`. Up to 100
-  tag runs wait FIFO, execute one at a time, and are not canceled in progress.
+  `main` and version-tag runs wait in one FIFO queue, execute one at a time, and
+  are not canceled in progress.
 - Before any AWS, D1, or Worker mutation, the release lists encrypted Worker
   secret names and requires the complete documented set. Secret values are
   never requested or printed.
@@ -99,13 +100,13 @@ request code must never run in a privileged context.
 
 Create a GitHub environment named exactly `production`. Configure:
 
-- One or more required reviewers who understand the CloudFormation and D1
-  changes in the release. This solo-maintainer repository currently requires
-  James's approval and allows self-review; enable **Prevent self-review** after
-  adding another eligible reviewer so releases do not deadlock.
-- No administrator bypass, where the repository plan supports it.
-- A deployment tag rule allowing only `v*` tags. The workflow performs an
-  additional semantic-version check.
+- No required reviewers after the remote production configuration and bootstrap
+  have been completed. A protected merge to `main` is the release approval, and
+  deployment must proceed unattended.
+- No administrator bypass.
+- Selected deployment branches and tags allowing exactly the `main` branch and
+  `v*` tags. The workflow narrows tags further to `v*.*.*` and validates strict
+  canonical SemVer before credentials become available.
 - An environment URL of `https://quickducks.com` if desired; the workflow also
   publishes this URL from `PRODUCTION_URL`.
 
@@ -133,23 +134,30 @@ jobs can read non-secret deployment metadata:
 `GITHUB_TOKEN` is issued automatically for each job and is not a manually
 configured secret. It receives `contents: write` only in the release job.
 
-The first-time setup order is:
+The one-time setup order is:
 
-1. Create and protect the exact GitHub `production` environment.
+1. Create and protect the exact GitHub `production` environment, initially
+   keeping the release workflow disabled until every remaining gate is ready.
 2. Deploy and review the AWS bootstrap stack.
 3. Set both role-output variables and the remaining repository variables.
 4. Deploy or update `quickducks-production` with the execution-role output.
 5. Copy the application outputs into the committed Worker configuration.
 6. Complete the Cloudflare, D1, queue, DNS, SES, Turnstile, and Worker-secret
-   gates below before creating a release tag.
+   gates below.
+7. Confirm the environment has no reviewer, allows only `main` and `v*`, and
+   retains no-admin-bypass, then enable merge-driven releases.
 
 Protect semantic-version tags with a repository ruleset. Limit tag creation and
-updates to release maintainers, block force updates and deletion, and configure
-the required signed-tag policy. The workflow fetches full history and
-independently requires the peeled tagged commit to be an ancestor of the
-repository default branch before the production environment can be approved.
-Tag signatures and tag-rule enforcement remain repository/release-maintainer
-controls; the workflow does not claim to verify signature trust.
+updates to the final release workflow and release maintainers, block force
+updates and deletion, and require review of intentional maintainer-created tags.
+The final workflow job must be allowed to create automatic lightweight patch
+tags with its job-scoped `GITHUB_TOKEN`; a blanket signed-tag requirement must
+not block that automation. Maintainers should sign intentional major, minor, and
+prerelease tags. The workflow fetches full history and tags and independently
+requires every explicit tag's peeled commit to be an ancestor of the repository
+default branch. Tag signatures and tag-rule enforcement remain repository and
+release-maintainer controls; the workflow does not claim to verify signature
+trust.
 
 ## AWS Bootstrap
 
@@ -367,17 +375,24 @@ these committed values, `AppOrigin`, or `AWS_REGION` do not match. It will not
 turn a misspelled stack name into a new stack.
 
 The manually bootstrapped stack has no automated-release `Version` or `Commit`
-tag. The first automated release may add both. Every later tag must have greater
-SemVer precedence than the stack's normalized `Version`; an exact same version
-is permitted only when `Commit` is also the same peeled tagged commit, for a
-recovery rerun. A lower version, an equal-precedence version with different
-build metadata, a same version at another commit, or a stack with `Commit` but
-no `Version` is rejected before CloudFormation deployment.
-For every higher version, the recorded commit must also exist in the full
-checkout and be an ancestor of the incoming tagged commit. A missing recorded
-object, shallow/incomplete history, older source commit, divergent history, or
-Git ancestry error fails closed. Only the first release, where both stack tags
-are absent, has no prior ancestry to prove.
+tag. The first automated release may add both. Every later release must have
+greater SemVer precedence than the stack's normalized `Version`, with two
+deliberate forward-recovery exceptions. First, an exact same version is
+permitted when `Commit` is also the same verified source commit, for a
+same-source recovery rerun, and additionally when that recorded version was
+deployed but never published as a release tag: a later default-branch commit may
+then claim the still-untagged version instead of deadlocking, because no tag
+ever fixed it to the earlier commit. Second, a stable release may follow a
+deployed explicit prerelease even with lower SemVer precedence, because
+prereleases never join the stable release train. A lower stable version over a
+deployed stable version, an equal-precedence version with different build
+metadata, a same version whose tag exists at another commit, or a stack with
+`Commit` but no `Version` is rejected before CloudFormation deployment.
+For every release with a recorded predecessor, the recorded commit must also
+exist in the full checkout and be an ancestor of the incoming source commit. A
+missing recorded object, shallow/incomplete history, older source commit,
+divergent history, or Git ancestry error fails closed. Only the first release,
+where both stack tags are absent, has no prior ancestry to prove.
 
 ### Cognito and SES Gates
 
@@ -604,12 +619,14 @@ records described above. Wait for both Custom Domain certificates to become
 active. Follow the permanent-domain and NFC pre-provisioning gate in
 [DOMAIN_SETUP.md](DOMAIN_SETUP.md) before writing any physical tag.
 
-## First Deployment
+## Historical First Bootstrap
 
-Before creating the first version tag, verify all of the following manually:
+These checks were required before enabling continuous deployment. They are
+historical bootstrap gates, not approval steps to repeat for every merge:
 
-- The GitHub `production` environment, reviewer rule, secret, and repository
-  variables are configured.
+- The GitHub `production` environment has no required reviewer, allows only
+  `main` and `v*`, disables administrator bypass, and contains the secret and
+  repository variables described above.
 - Both configured role ARNs exactly match the bootstrap stack outputs.
 - The AWS OIDC role trusts only this repository's `production` environment,
   the GitHub role controls only the named stack, and that stack records the
@@ -623,9 +640,9 @@ Before creating the first version tag, verify all of the following manually:
   modified schema that is absent from `db/migrations`.
 - The Worker's four encrypted runtime secret names exist.
 - Both custom hostnames are active and Turnstile allows the production host.
-- The reviewer accepts that the first deployment of `RaceUpdates` migration
-  `v1` has no rollback path to a pre-migration Worker and has a forward-fix
-  recovery plan ready.
+- The reviewed change enabling `RaceUpdates` migration `v1` records that there
+  is no rollback path to a pre-migration Worker and has a forward-fix recovery
+  plan ready.
 
 Run the credential-free release checks locally:
 
@@ -643,60 +660,89 @@ npm run db:migrate:local
 Do not use `npm run db:migrate:remote` or `npm run deploy` for a normal release;
 the protected workflow owns those production operations.
 
-## Release Procedure
+## Continuous Deployment
 
-Releases are triggered only by a canonical, `v`-prefixed semantic-version tag
-such as `v1.2.3`, `v1.2.3-rc.1`, or `v1.2.3-alpha-beta+build-1`. Validation runs
-the locked direct `semver` dependency after `npm ci`; it rejects numeric
-prerelease identifiers with leading zeroes, emits the normalized version without
-`v`, and emits an exact prerelease boolean. A hyphen inside a valid identifier is
-accepted, and build metadata alone does not mark a release as prerelease.
-Publishing a GitHub release without pushing a matching tag does not deploy
-production.
+Every protected merge to `main` is a production release. There is no routine
+manual tag or environment approval:
 
-1. Merge the release commit through the protected default branch and wait for
-   CI to pass.
-2. Review every new D1 migration for forward compatibility with both the old
-   and new Worker versions, and review every Wrangler Durable Object migration
-   as a one-way platform schema declaration.
-3. Review the CloudFormation diff and confirm required manual DNS or SES work
-   is already complete.
-4. Create a signed version tag on the reviewed commit, as required by repository
-   policy, and push it:
+1. A pull request passes the required credential-free `Validate` CI job. Review
+   every D1 migration for compatibility with the old and new Worker, every
+   Durable Object migration as a one-way declaration, and every CloudFormation
+   change together with required manual platform work.
+2. The reviewed pull request merges to `main`. Its push starts the release
+   workflow directly; the workflow does not use `workflow_run` or inherit trust
+   from the separate CI run.
+3. The release checks out the exact 40-character event SHA with full history and
+   tags and no persisted checkout credential. It requires a `push`, branch ref
+   type, ref name exactly equal to the repository default branch, and checked-out
+   HEAD equal to both the event SHA and the fetched default-branch tip. A stale
+   queued `main` run fails rather than deploying an older source.
+4. The version selector derives the automatic version strictly from existing
+   tags. Among tags matching `v*.*.*`, malformed and noncanonical tags are
+   ignored rather than trusted, valid prereleases are never automatic bases, and
+   stable tags with build metadata contribute precedence only. If a
+   highest-precedence stable tag already points to the source commit, it is
+   reused for recovery; otherwise the highest stable version's patch is
+   incremented exactly once. For example, the first new merge after `v1.1.0`
+   releases as `v1.1.1`, even if a `v1.2.0-rc.1` prerelease was deployed in
+   between. Missing stable tags, malformed SHAs, and Git errors fail closed. It
+   does not use dates or run numbers and does not modify `package.json`.
+5. Still without production credentials, the workflow repeats `npm ci`, the
+   high-severity audit, TypeScript check, full tests, every Wrangler-config
+   dry-run, and fresh local D1 migration validation. Only that successful job can
+   unlock the `production` deployment job.
+6. The unattended deployment verifies the exact account, region, stack and
+   bootstrap role ARN shapes, all four Worker secret names, D1 legacy-role
+   safety, the existing named CloudFormation stack, current Cognito outputs and
+   `AppOrigin`, monotonic stack version, and source ancestry. It validates both
+   templates, deploys CloudFormation with the dedicated execution role, verifies
+   the result, applies D1 migrations, and deploys the Worker.
+7. The workflow checks the D1-backed apex `/health` endpoint, exact `308` `www`
+   redirect, and a real same-origin WebSocket connection under bounded timeouts.
+8. Only after every deploy and smoke gate succeeds does the final job receive
+   `contents: write`. It fails if the selected tag resolves to another commit,
+   creates a missing automatic lightweight tag at the exact source SHA with the
+   job-scoped `GITHUB_TOKEN` Git ref API, re-resolves it, and creates or updates
+   the GitHub release. Generated notes target that exact SHA.
 
-   ```sh
-   git tag -s v1.2.3 <reviewed-commit-sha>
-   git push origin v1.2.3
-   ```
+Tags created with the workflow's repository `GITHUB_TOKEN` do not start new
+workflow runs under GitHub's current recursive-workflow prevention behavior, so
+the automatic `v*.*.*` tag does not cause a second tag deployment. No tag is
+created before deployment. If deployment fails first, rerunning validation sees
+the unchanged previous stable tag and derives the same patch. If deployment
+succeeds but tag creation or release publication is rejected, the final job
+fails loudly and the state is forward-recoverable: a rerun of the same source
+derives the same patch, passes the stack gate as a same-commit recovery, and
+completes the missing tag and release idempotently, while the next merged
+commit instead derives the same still-untagged patch, is allowed to claim it
+because no tag ever published that version, and tags it at its own commit. The
+skipped commit simply remains untagged; no release tag is ever moved.
 
-5. The unprivileged release job checks out full history, proves the peeled tag
-   commit is on the current default branch, then repeats the locked install,
-   SemVer validation, dependency audit, TypeScript check, full tests, every
-   Wrangler-config dry-run, and fresh local D1 migration validation.
-6. A production reviewer checks the exact tag, commit, normalized version,
-   workflow diff, CloudFormation change, and migrations, then approves the
-   environment gate. For the first `RaceUpdates` release, approval explicitly
-   accepts the pre-migration rollback boundary and forward-fix-only recovery.
-7. Before mutation, the deployment job verifies the exact account, region,
-   stack and bootstrap role ARN shapes, all four Worker secret names, D1
-   legacy-role safety, the existing named CloudFormation stack, current Cognito
-   outputs and `AppOrigin`, monotonic stack version, and that the recorded stack
-   commit is an available ancestor of the incoming commit. It validates both
-   templates, deploys the application stack with
-   `--role-arn "$AWS_CLOUDFORMATION_ROLE_ARN"`, verifies it again, applies D1
-   migrations, and deploys the Worker.
-8. The workflow checks the D1-backed apex `/health` endpoint, requires an exact
-   `308` redirect from `www`, and opens then cleanly closes a real WebSocket at
-   `wss://<production-host>/api/v1/live` with exact `Origin: PRODUCTION_URL`, all
-   under bounded timeouts.
-9. Only after every smoke test passes, the workflow creates or updates the
-   GitHub release with version, commit, timestamp, URL, Worker version, D1,
-   CloudFormation stack, region, workflow-run information, and the validated
-   prerelease state.
+### Intentional Major, Minor, and Prerelease Versions
+
+An intentional major or minor release remains a reviewed protected tag on a
+commit already in the default branch. The explicit tag may also be a canonical
+prerelease or contain build metadata, for example `v2.0.0`, `v1.2.0`, or
+`v2.0.0-rc.1`:
+
+```sh
+git tag -s v2.0.0 <reviewed-default-branch-commit>
+git push origin v2.0.0
+```
+
+The tag push runs the same complete validation, deployment, ancestry, smoke, and
+release gates but uses the explicit version and prerelease state. The single
+FIFO production concurrency group serializes manual tag runs with automatic
+`main` runs. Protect and review intentional major/minor tags; do not create a
+manual patch tag for each ordinary merge. An explicit prerelease deployment
+never joins the stable release train: automatic selection ignores prerelease
+tags, and the next merge to `main` still derives one patch above the highest
+stable tag and deploys even though its SemVer precedence is below the deployed
+prerelease.
 
 Do not pre-publish a release when GitHub immutable releases are enabled. Let the
-tag workflow create the release after deployment; a published immutable release
-cannot be updated on a rerun.
+workflow publish only after deployment; a published immutable release cannot be
+updated on a rerun.
 
 ## Failure and Rollback
 
@@ -706,9 +752,9 @@ The production order is intentional:
 2. D1 migrations.
 3. Worker deployment, including any new Durable Object class migration.
 4. Apex, redirect, and WebSocket smoke tests.
-5. GitHub release publication.
+5. Automatic tag creation when needed, then GitHub release publication.
 
-If validation or environment approval fails, production is unchanged. If
+If validation or environment configuration fails, production is unchanged. If
 CloudFormation fails, AWS rolls back the stack update by default and D1 is
 untouched. Inspect stack events before retrying; do not delete the retained,
 deletion-protected identity resources.
@@ -716,7 +762,7 @@ deletion-protected identity resources.
 If D1 migration fails, Wrangler rolls back the failing migration while retaining
 previous migrations that completed successfully. The old Worker remains active,
 but the AWS update and any earlier migrations may already be live. Fix forward
-with a new migration and a new version tag; never edit or renumber a migration
+through a reviewed pull request and merge; never edit or renumber a migration
 that production recorded.
 
 If Worker deployment fails, the migrated database remains live with the old
@@ -772,12 +818,25 @@ and SES identities unless an AWS incident procedure explicitly requires their
 replacement. DNS, Turnstile, queue, and SES-account changes are manual platform
 changes and must be rolled back through their platform audit history.
 
-If only GitHub release publication fails after successful smoke tests,
-production is already deployed. Re-run the failed release job or the workflow
-for the same tag only after confirming the tag still resolves to the same
-commit. The stack version gate permits that exact version only when its recorded
-commit also matches. D1 migrations are idempotently skipped once recorded, and
-the release metadata block is updated rather than duplicated.
+If only automatic tag or GitHub release publication fails after successful smoke
+tests, production is already deployed and the failure is forward-recoverable.
+Rerun the failed job or complete workflow while the source is still the
+default-branch tip; it derives the same patch, and if the tag was already
+created it must resolve to the same source and is reused. If a fix or ordinary
+merge lands first instead, its run derives the same still-unpublished patch
+version, the stack gate permits the deployed-but-untagged version to move to
+that descendant commit, and the new run tags its own commit; the earlier commit
+simply remains untagged. The stack version gate otherwise permits an exact
+version only when its recorded commit also matches. D1 migrations are
+idempotently skipped once recorded, and the release metadata block is updated
+rather than duplicated. A release tag that resolves to another commit fails
+closed and requires incident review, not tag movement.
+
+For any failed production mutation or smoke test, stop merges and disable the
+release workflow if more pushes may arrive. Record which CloudFormation, D1,
+Worker, smoke, tag, and release stages completed before choosing a compatible
+forward fix. Do not bypass validation, weaken the environment allowlist, move a
+release tag, or enable administrator bypass to clear the queue.
 
 ## Credential Rotation and Recovery
 
@@ -797,10 +856,10 @@ the release metadata block is updated rather than duplicated.
   `AWS_CLOUDFORMATION_ROLE_ARN` together, and validate a controlled release.
   The environment change must be coordinated because it changes the exact OIDC
   subject.
-- To suspend automation, disable the release workflow or production environment
-  approvals before changing IAM. Do not delete
-  `quickducks-cloudformation-execution` while `quickducks-production` records it
-  as the service role. CloudFormation cannot return that stack to caller
+- To suspend automation, disable the release workflow before changing IAM. Do
+  not add a routine reviewer gate as a substitute for incident handling. Do not
+  delete `quickducks-cloudformation-execution` while `quickducks-production`
+  records it as the service role. CloudFormation cannot return that stack to caller
   credentials. First associate a reviewed replacement execution role or retire
   the application stack, then remove the old role. Delete the bootstrap stack
   only after confirming the GitHub OIDC provider is not shared and no stack

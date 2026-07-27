@@ -140,6 +140,8 @@ test("release requires the bootstrap execution role without weakening deployment
   assert.match(release, /assertReleaseCommitAncestry/);
   assert.match(release, /NOT EXISTS \(SELECT 1 FROM staff_role_assignments/);
   assert.equal(release.match(/fetch-depth: 0/g)?.length, 2, "Both release jobs must fetch full Git history");
+  assert.equal(release.match(/fetch-tags: true/g)?.length, 2, "Both release jobs must fetch every release tag");
+  assert.equal(release.match(/persist-credentials: false/g)?.length, 2, "Release checkouts must not persist credentials");
 
   const lines = release.split("\n");
   const deployCommands = [];
