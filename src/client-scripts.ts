@@ -1,3 +1,5 @@
+import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
+
 export const confirmationDialogScript = String.raw`
 const appConfirmationQueue = [];
 let appConfirmationActive = false;
@@ -372,15 +374,15 @@ const participantConsumeHandoff = (storage, expectedRegistrationId, appOrigin) =
 export const participantScript = participantHandoffHelpersScript + String.raw`
 const participantNav = document.querySelector("[data-my-ducks-nav]");
 const participantRoot = document.querySelector("[data-my-ducks-page]");
-const participantFreshness = document.querySelector("[data-my-ducks-freshness]");
+const participantError = document.querySelector("[data-my-ducks-error]");
 const participantSuccess = document.querySelector("[data-registration-success]");
 const participantSections = Array.from(document.querySelectorAll("[data-participant-section]"));
+const participantEmpty = document.querySelector("[data-my-ducks-empty]");
 let participantRegisteredId = participantRoot
   ? new URLSearchParams(location.search).get("registered")
   : null;
 let participantCurrentId = null;
 let participantPrivateStatusPath = null;
-let participantHasLoaded = false;
 let participantVersion = null;
 
 const participantText = (tag, value, className) => {
@@ -388,6 +390,15 @@ const participantText = (tag, value, className) => {
   element.textContent = value == null ? "" : String(value);
   if (className) element.className = className;
   return element;
+};
+
+// Error-only line: it stays hidden while refreshes succeed and never reports a
+// "current"/"updated" state. It exists so a hard load failure on this page is
+// not silent, because My Ducks has no other message surface.
+const participantShowError = (message) => {
+  if (!participantError) return;
+  participantError.textContent = message === null ? "" : message;
+  participantError.hidden = message === null;
 };
 
 const participantHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase()
@@ -410,15 +421,28 @@ const participantAddFact = (container, label, value) => {
   container.append(fact);
 };
 
+// A paired card links its duck number to the public duck detail view. An
+// awaiting card has no duck number, so it keeps plain text and no link.
+const participantAddDuckFact = (facts, status) => {
+  const link = duckDetailLink(document, status.duck ? status.duck.visibleNumber : null);
+  if (link === null) {
+    participantAddFact(facts, "Duck", "Waiting for duck assignment");
+    return;
+  }
+  const fact = participantText("div", "", "fact");
+  const value = participantText("dd", "");
+  value.append(link);
+  fact.append(participantText("dt", "Duck"), value);
+  facts.append(fact);
+};
+
 const participantAddRaceFacts = (card, status) => {
   if (!status) {
     card.append(participantText("p", "Race status is not currently public.", "muted"));
     return;
   }
   const facts = participantText("dl", "", "facts");
-  participantAddFact(facts, "Duck", status.duck
-    ? "Duck #" + status.duck.visibleNumber
-    : "Waiting for duck assignment");
+  participantAddDuckFact(facts, status);
   const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
   participantAddFact(facts, "Assigned heat", assigned
     ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
@@ -431,6 +455,15 @@ const participantAddRaceFacts = (card, status) => {
   card.append(facts);
 };
 
+// Followed entries were added from the public name search, so the server sends
+// a policy-filtered display name and no lookup code for them.
+const participantDisplayName = (registration) => {
+  if (typeof registration.displayName === "string" && registration.displayName.length > 0) {
+    return registration.displayName;
+  }
+  return [registration.firstName, registration.lastName].filter(Boolean).join(" ");
+};
+
 const participantCard = (registration) => {
   const current = registration.registrationId === participantCurrentId;
   const card = participantText("article", "", "duck-card participant-card" + (current ? " is-current" : ""));
@@ -439,12 +472,14 @@ const participantCard = (registration) => {
     card.tabIndex = -1;
     card.setAttribute("aria-current", "true");
     card.append(participantText("span", "Just registered", "success-tag"));
+  } else if (registration.followed) {
+    card.append(participantText("span", "Following", "success-tag"));
   }
-  card.append(
-    participantText("h3", registration.firstName + " " + registration.lastName),
-    participantText("p", "Staff lookup code: " + registration.lookupCode),
-    participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"),
-  );
+  card.append(participantText("h3", participantDisplayName(registration)));
+  card.append(registration.followed
+    ? participantText("p", "Added from the public race status search. Followed participants have no staff lookup code here.", "muted")
+    : participantText("p", "Staff lookup code: " + registration.lookupCode));
+  card.append(participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"));
   participantAddRaceFacts(card, registration.raceStatus);
   return card;
 };
@@ -495,19 +530,18 @@ window.addEventListener("resize", () => {
   for (const section of participantSections) participantUpdateControls(section);
 });
 
+// An empty group hides its whole section (heading, description, and controls)
+// rather than showing an empty state. Both sections stay hidden until the first
+// successful full collection response, so nothing flashes before data loads.
 const participantRenderSection = (kind, registrations) => {
   const section = participantSections.find((item) => item.dataset.participantSection === kind);
   const track = section.querySelector("[data-participant-track]");
-  const empty = section.querySelector("[data-carousel-empty]");
   const controls = section.querySelector("[data-carousel-controls]");
   track.replaceChildren(...registrations.map(participantCard));
   const hasRegistrations = registrations.length > 0;
+  section.hidden = !hasRegistrations;
   track.hidden = !hasRegistrations;
   controls.hidden = !hasRegistrations;
-  empty.hidden = hasRegistrations;
-  empty.textContent = kind === "awaiting"
-    ? "No participants are waiting for a duck."
-    : "No paired ducks are saved on this device yet.";
   if (hasRegistrations) requestAnimationFrame(() => participantUpdateControls(section));
 };
 
@@ -538,15 +572,15 @@ const participantRender = (registrations) => {
     participantVersion = version;
     participantRenderSection("awaiting", registrations.filter((registration) => !registration.paired));
     participantRenderSection("paired", registrations.filter((registration) => registration.paired));
+    // Both sections can be hidden, so keep one guidance message instead of an
+    // otherwise blank page.
+    if (participantEmpty) participantEmpty.hidden = registrations.length > 0;
   }
-  participantFreshness.textContent = registrations.length === 0
-    ? "No registrations are saved on this device yet."
-    : "Updated just now.";
   if (!justRegistered) return;
 
   participantSuccess.replaceChildren(
     participantText("strong", "Registration saved. "),
-    participantText("span", justRegistered.firstName + " " + justRegistered.lastName + " is highlighted below."),
+    participantText("span", participantDisplayName(justRegistered) + " is highlighted below."),
   );
   if (participantPrivateStatusPath !== null) {
     const privateLink = participantText("a", "Open private status", "card-link");
@@ -580,7 +614,6 @@ const participantFetch = async () => {
     return;
   }
   if (!body || !Array.isArray(body.registrations)) throw new Error("invalid collection response");
-  participantHasLoaded = true;
   if (participantNav) participantNav.hidden = body.registrations.length === 0;
   if (!document.hidden) participantRender(body.registrations);
 };
@@ -588,8 +621,9 @@ const participantFetch = async () => {
 const participantRefreshWork = async () => {
   try {
     await participantFetch();
+    participantShowError(null);
   } catch {
-    if (participantFreshness) participantFreshness.textContent = "Saved registrations are temporarily unavailable. This page will keep checking.";
+    participantShowError("Saved registrations could not be loaded. This page keeps trying automatically.");
   }
 };
 
@@ -602,15 +636,6 @@ if (participantRoot) {
     domains: ["event", "participants", "ducks", "heats", "returns"],
     root: participantRoot,
     refresh: participantRefreshWork,
-    status: (status) => {
-      if (status === "connected") {
-        if (participantHasLoaded) participantFreshness.textContent = "Updates are arriving live.";
-        return;
-      }
-      participantFreshness.textContent = participantHasLoaded
-        ? "Reconnecting; this page is still checking for updates."
-        : "Saved registrations are temporarily unavailable. This page will keep checking.";
-    },
   });
 } else {
   participantFetch().catch(() => {});
@@ -625,9 +650,6 @@ const liveReconnectDelay = (attempt, randomValue = Math.random()) => {
   const base = Math.min(1000 * (2 ** attempt), 15000);
   return Math.round(Math.min(15000, base * (0.8 + (0.4 * randomValue))));
 };
-const liveSuccessfulFreshness = (secondaryResults) => secondaryResults.some((result) => result.status === "rejected")
-  ? "The public race board is current, but personal details are delayed. This page will keep checking."
-  : "Updated just now.";
 const liveParseRefreshSignal = (value) => {
   if (typeof value !== "string" || value.length === 0 || value.length > 512) return null;
   try {
@@ -754,9 +776,6 @@ const liveCreateHub = ({
   const refreshAll = () => {
     for (const subscriber of subscribers) subscriber.queue();
   };
-  const setStatus = (status) => {
-    for (const subscriber of subscribers) subscriber.status?.(status);
-  };
   const verifyStaffAccess = () => {
     const root = documentObject.querySelector?.("[data-live-staff]");
     if (!root) return Promise.resolve(true);
@@ -824,7 +843,6 @@ const liveCreateHub = ({
       if (socket !== candidate) return;
       reconnectAttempt = 0;
       poller.schedule(true);
-      setStatus("connected");
       refreshAll();
     });
     candidate.addEventListener("message", (event) => {
@@ -835,7 +853,6 @@ const liveCreateHub = ({
       if (socket !== candidate) return;
       socket = null;
       poller.schedule(false);
-      setStatus("disconnected");
       const delay = liveReconnectDelay(reconnectAttempt);
       reconnectAttempt = Math.min(reconnectAttempt + 1, 4);
       clearTimer(reconnectTimer);
@@ -876,11 +893,10 @@ const liveCreateHub = ({
       startRequested = true;
       activate();
     },
-    subscribe({ domains, refresh, isBlocked = () => false, signal, status, root }) {
+    subscribe({ domains, refresh, isBlocked = () => false, signal, root }) {
       const subscriber = {
         domains,
         signal,
-        status,
         root: root ?? documentObject,
         dirtySince: null,
       };
@@ -901,7 +917,35 @@ const liveCreateHub = ({
 };
 `;
 
-export const liveUiScript = liveRuntimeHelpersScript + String.raw`
+// Shared public duck-detail helpers. They are declared once, in the runtime
+// every rendered page already loads, so live.js and participant.js can both
+// build the same link without redeclaring a global in the shared classic scope.
+// The label maps are serialized from the server projection so browser wording
+// can never drift from the server-rendered page.
+export const duckDetailHelpersScript = String.raw`
+const duckHeatStatusLabels = ${JSON.stringify(publicHeatStatusLabels)};
+const duckHeatStatusLabel = (status) => Object.prototype.hasOwnProperty.call(duckHeatStatusLabels, status)
+  ? duckHeatStatusLabels[status]
+  : "Status being checked";
+const duckOfficialResults = ${JSON.stringify(publicOfficialResults)};
+const duckOfficialResult = (outcome) => Object.prototype.hasOwnProperty.call(duckOfficialResults, outcome)
+  ? duckOfficialResults[outcome]
+  : null;
+const duckDetailPath = (duckNumber) => "/duck/" + encodeURIComponent(String(duckNumber));
+// Returns null unless a real duck number is assigned, so an unpaired entry
+// renders plain text and never an empty or misleading link. The node is built
+// with safe DOM APIs and is a plain navigation with no script behaviour.
+const duckDetailLink = (documentObject, duckNumber) => {
+  if (typeof duckNumber !== "number" || !Number.isInteger(duckNumber) || duckNumber <= 0) return null;
+  const link = documentObject.createElement("a");
+  link.className = "duck-number-link";
+  link.href = duckDetailPath(duckNumber);
+  link.textContent = "Duck #" + duckNumber;
+  return link;
+};
+`;
+
+export const liveUiScript = liveRuntimeHelpersScript + duckDetailHelpersScript + String.raw`
 globalThis.quickDucksLive = liveCreateHub();
 globalThis.quickDucksLive.start();
 `;
@@ -925,13 +969,52 @@ const stationHeatRenderKey = (event, detail) => [
 ].join(":");
 `;
 
-export const liveScript = String.raw`
+// Every event lifecycle status accepted by the events table maps to plain
+// race-day language. The public board projection currently publishes only
+// REGISTRATION_OPEN through COMPLETED, but the remaining statuses are mapped so
+// the board never falls back to raw enum text.
+export const liveBoardStageScript = String.raw`
+const liveEventStages = {
+  DRAFT: ["Race being prepared", "Race staff are still preparing this race."],
+  REGISTRATION_OPEN: ["Participant registration open", "Registration is open. Sign up to put a duck in this race."],
+  REGISTRATION_CLOSED: ["Registration closed", "Registration is closed while staff finalize the heats."],
+  ROUND_ONE: ["Round one under way", "Round one is under way."],
+  FINAL: ["Final under way", "The final is under way."],
+  COMPLETED: ["Results official", "Every heat is finished and the results are final."],
+  RETURN_PROCESSING: ["Race complete", "The race is complete and staff are collecting the ducks."],
+  ARCHIVED: ["Race complete", "The race is complete."],
+};
+const liveEventStage = (status) => {
+  const stage = liveEventStages[Object.prototype.hasOwnProperty.call(liveEventStages, status) ? status : ""];
+  return stage === undefined
+    ? { label: "Race stage updating", summary: "The race stage is being confirmed." }
+    : { label: stage[0], summary: stage[1] };
+};
+const liveStageSummary = (status, heatDetail, hasHeats) => {
+  const stage = liveEventStage(status);
+  if (heatDetail) return stage.summary + " Running now: " + heatDetail + ".";
+  if (!hasHeats) return stage.summary + " Heats have not been posted yet.";
+  return stage.summary + " The latest official heats and results are below.";
+};
+`;
+
+export const liveScript = liveBoardStageScript + String.raw`
 const liveBoardRoot = document.querySelector("[data-live-board]");
+const liveBoardStageChip = document.querySelector("[data-live-board-stage]");
 const liveBoardTitle = document.querySelector("[data-live-board-title]");
 const liveBoardSummary = document.querySelector("[data-live-board-summary]");
 const liveBoardContent = document.querySelector("[data-live-board-content]");
-const liveFreshness = document.querySelector("[data-live-freshness]");
+const liveBoardError = document.querySelector("[data-live-board-error]");
 let liveBoardVersion = null;
+
+// Error-only line: hidden while the board loads, shown only when the
+// authoritative board request fails, and cleared on the next success. It never
+// reports a "current"/"updated" state.
+const liveShowBoardError = (message) => {
+  if (!liveBoardError) return;
+  liveBoardError.textContent = message === null ? "" : message;
+  liveBoardError.hidden = message === null;
+};
 
 const liveText = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -981,6 +1064,45 @@ const liveRaceFacts = (container, status, includeParticipant) => {
   container.append(facts);
 };
 
+// A board entry links to the public duck detail view whenever it actually shows
+// a duck number. Entries still waiting for a duck keep plain pending text.
+const liveBoardDuckCell = (entry) => {
+  const cell = liveText("span", "");
+  const link = duckDetailLink(document, entry.duckNumber);
+  if (link === null) cell.textContent = "Duck number pending";
+  else cell.append(link);
+  if (entry.place !== null) {
+    cell.append(liveText("span", " · " + livePlaceLabel(entry.place) + " place"));
+  }
+  return cell;
+};
+
+// Mirrors the server-rendered duck detail facts exactly, so an authoritative
+// refetch never rewrites the page into a different shape or wording.
+const liveDuckDetailFacts = (container, status) => {
+  if (!status) {
+    container.append(liveText("p", "Race status is not currently public.", "muted"));
+    return;
+  }
+  const facts = liveText("dl", "", "facts");
+  liveAddFact(facts, "Participant", status.participantDisplayName);
+  liveAddFact(facts, "Duck", status.duck ? "Duck #" + status.duck.visibleNumber : "Waiting for duck assignment");
+  liveAddFact(facts, "Round one heat", status.assignedHeat.roundOne
+    ? "Heat " + status.assignedHeat.roundOne.number + " · " + duckHeatStatusLabel(status.assignedHeat.roundOne.status)
+    : "Not assigned yet");
+  liveAddFact(facts, "Final heat", status.assignedHeat.final
+    ? "Heat " + status.assignedHeat.final.number + " · " + duckHeatStatusLabel(status.assignedHeat.final.status)
+    : "Not in the final");
+  liveAddFact(facts, "Currently running", status.currentHeat
+    ? liveRoundLabel(status.currentHeat.round) + " · Heat " + status.currentHeat.number
+      + " · " + duckHeatStatusLabel(status.currentHeat.status)
+    : "No heat is running right now");
+  liveAddFact(facts, "Race status", liveHumanize(status.outcome));
+  const official = duckOfficialResult(status.outcome);
+  if (official !== null) liveAddFact(facts, "Official result", official);
+  container.append(facts);
+};
+
 const liveHeatCard = (heat, currentHeat) => {
   const isCurrent = currentHeat && currentHeat.round === heat.round && currentHeat.number === heat.number;
   const card = liveText("article", "", "board-heat" + (isCurrent ? " current" : ""));
@@ -993,11 +1115,7 @@ const liveHeatCard = (heat, currentHeat) => {
   } else {
     for (const entry of heat.roster) {
       const row = liveText("p", "", "board-entry");
-      row.append(
-        liveText("span", entry.participantDisplayName),
-        liveText("span", (entry.duckNumber === null ? "Duck number pending" : "Duck #" + entry.duckNumber)
-          + (entry.place === null ? "" : " · " + livePlaceLabel(entry.place) + " place")),
-      );
+      row.append(liveText("span", entry.participantDisplayName), liveBoardDuckCell(entry));
       card.append(row);
     }
   }
@@ -1019,25 +1137,33 @@ const liveRenderBoard = (board) => {
   liveBoardVersion = version;
   liveBoardContent.replaceChildren();
   if (!board.event) {
+    liveBoardStageChip.textContent = "No race scheduled";
     liveBoardTitle.textContent = "No race is live right now.";
     liveBoardSummary.textContent = "The board will be ready when registration opens for the next event.";
     liveBoardContent.append(liveText("p", "There are no race heats to show yet.", "empty-state"));
     return;
   }
   const event = board.event;
+  const heatDetail = event.currentHeat
+    ? liveRoundLabel(event.currentHeat.round) + " · Heat " + event.currentHeat.number
+      + " · " + liveHeatStatus(event.currentHeat.status)
+    : null;
+  liveBoardStageChip.textContent = liveEventStage(event.status).label;
   liveBoardTitle.textContent = event.name;
-  liveBoardSummary.textContent = event.currentHeat
-    ? liveRoundLabel(event.currentHeat.round) + " Heat " + event.currentHeat.number + " · " + liveHeatStatus(event.currentHeat.status)
-    : event.roundOneHeats.length + event.finalHeats.length === 0
-      ? "Heats have not been posted yet."
-      : "No heat is active right now. The latest official results are below.";
+  liveBoardSummary.textContent = liveStageSummary(
+    event.status,
+    heatDetail,
+    event.roundOneHeats.length + event.finalHeats.length > 0,
+  );
   if (event.podium.length > 0) {
     const podium = liveText("section", "", "board-round");
     podium.append(liveText("h3", "Official podium"));
     const places = liveText("div", "", "podium");
     for (const entry of event.podium) {
-      places.append(liveText("p", livePlaceLabel(entry.place) + " · " + entry.participantDisplayName
-        + (entry.duckNumber === null ? "" : " · Duck #" + entry.duckNumber), "podium-place"));
+      const place = liveText("p", livePlaceLabel(entry.place) + " · " + entry.participantDisplayName, "podium-place");
+      const link = duckDetailLink(document, entry.duckNumber);
+      if (link !== null) place.append(liveText("span", " · "), link);
+      places.append(place);
     }
     podium.append(places);
     liveBoardContent.append(podium);
@@ -1088,6 +1214,16 @@ const liveRefreshPersonal = async () => {
       if (event) event.textContent = "Keep this page private. This is your status link for " + body.eventName + ".";
       return;
     }
+    // The public duck detail view is addressed by the visible number, so its
+    // authoritative refetch uses the number endpoint. A 404 is handled by the
+    // shared catch below, which reloads into the friendly not-found page.
+    if (personal.dataset.livePersonal === "number") {
+      const body = await liveFetchJson("/api/v1/ducks/number/" + encodeURIComponent(token));
+      if (document.hidden) return;
+      personal.replaceChildren();
+      liveDuckDetailFacts(personal, body.raceStatus);
+      return;
+    }
     const body = await liveFetchJson("/api/v1/ducks/" + encodeURIComponent(token));
     if (document.hidden) return;
     personal.replaceChildren();
@@ -1108,14 +1244,14 @@ const liveRefreshPersonal = async () => {
 const liveRefreshWork = async () => {
   try {
     const board = await liveFetchJson("/api/v1/race-board");
-    const secondary = await Promise.allSettled([
+    await Promise.allSettled([
       liveRefreshPersonal(),
     ]);
     if (document.hidden) return;
     liveRenderBoard(board);
-    liveFreshness.textContent = liveSuccessfulFreshness(secondary);
+    liveShowBoardError(null);
   } catch {
-    liveFreshness.textContent = "Updates are delayed. This page will keep checking.";
+    liveShowBoardError("The race board could not be loaded. This page keeps trying automatically.");
   }
 };
 if (liveBoardRoot) {
@@ -1123,18 +1259,12 @@ if (liveBoardRoot) {
     domains: ["event", "participants", "ducks", "heats", "returns"],
     root: liveBoardRoot,
     refresh: liveRefreshWork,
-    status: (status) => {
-      liveFreshness.textContent = status === "connected"
-        ? "Updates are arriving live."
-        : "Reconnecting; this page is still checking for updates.";
-    },
   });
 }
 `;
 
 export const startLineScript = confirmationDialogScript + stationStateHelpersScript + String.raw`
 const startRoot = document.querySelector("[data-start-line]");
-const startFreshness = document.querySelector("[data-station-freshness]");
 const startEvent = document.querySelector("[data-station-event]");
 const startHeatTitle = document.querySelector("[data-station-heat]");
 const startFacts = document.querySelector("[data-station-facts]");
@@ -1255,7 +1385,6 @@ const startLoadWork = async () => {
     const event = events.events.find((item) => ["ROUND_ONE", "FINAL"].includes(item.status));
     if (!event) {
       startEmpty("No race round is active right now.");
-      startFreshness.textContent = "Updated just now.";
       return;
     }
     const listed = await startApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats");
@@ -1263,18 +1392,14 @@ const startLoadWork = async () => {
     const heat = startPickHeat(listed.heats, event.status === "FINAL" ? "FINAL" : "ROUND_ONE");
     if (!heat) {
       startEmpty(event.name + " has no unfinished heat in this round.");
-      startFreshness.textContent = "Updated just now.";
       return;
     }
     const detail = await startApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats/" + encodeURIComponent(heat.id));
     if (document.hidden) return;
     startRender(event, detail);
-    startFreshness.textContent = "Updated just now.";
   } catch (error) {
-    if (error.message !== "signed-out") {
-      startFreshness.textContent = "Updates are delayed. This page will keep checking.";
-      startMessage.textContent = error.message;
-    }
+    // The station message line remains the actionable operational error surface.
+    if (error.message !== "signed-out") startMessage.textContent = error.message;
   }
 };
 const startLoad = startLoadWork;
@@ -1284,11 +1409,6 @@ if (startRoot) {
     root: startRoot,
     refresh: startLoadWork,
     isBlocked: () => startCommandBusy,
-    status: (status) => {
-      startFreshness.textContent = status === "connected"
-        ? "Updates are arriving live."
-        : "Reconnecting; this station is still checking for updates.";
-    },
   });
 }
 `;
@@ -1443,7 +1563,6 @@ export const finishLineScript = confirmationDialogScript + stationStateHelpersSc
   + finishSelectionValidationScript + finishHandoffHelpersScript + finishScanSerializationScript
   + finishNfcHelpersScript + String.raw`
 const finishRoot = document.querySelector("[data-finish-line]");
-const finishFreshness = document.querySelector("[data-station-freshness]");
 const finishEventLabel = document.querySelector("[data-station-event]");
 const finishHeatTitle = document.querySelector("[data-station-heat]");
 const finishFacts = document.querySelector("[data-station-facts]");
@@ -1721,7 +1840,6 @@ const finishLoadWork = async () => {
     const event = events.events.find((item) => ["ROUND_ONE", "FINAL"].includes(item.status));
     if (!event) {
       finishEmpty("No race round is active right now.");
-      finishFreshness.textContent = "Updated just now.";
       await finishConsumeHandoff();
       return;
     }
@@ -1731,20 +1849,16 @@ const finishLoadWork = async () => {
     const heat = finishPickHeat(listed.heats, round);
     if (!heat) {
       finishEmpty(event.name + " has no running heat or result waiting.");
-      finishFreshness.textContent = "Updated just now.";
       await finishConsumeHandoff();
       return;
     }
     const detail = await finishApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats/" + encodeURIComponent(heat.id));
     if (document.hidden) return;
     finishRender(event, detail);
-    finishFreshness.textContent = "Updated just now.";
     await finishConsumeHandoff();
   } catch (error) {
-    if (error.message !== "signed-out") {
-      finishFreshness.textContent = "Updates are delayed. This station will keep checking.";
-      finishMessage.textContent = error.message;
-    }
+    // The station message line remains the actionable operational error surface.
+    if (error.message !== "signed-out") finishMessage.textContent = error.message;
   }
 };
 const finishLoad = finishLoadWork;
@@ -1820,11 +1934,6 @@ if (finishRoot) {
     root: finishRoot,
     refresh: finishLoadWork,
     isBlocked: () => finishScanBusy || finishCommandBusy || finishSelected.length > 0,
-    status: (status) => {
-      finishFreshness.textContent = status === "connected"
-        ? "Updates are arriving live."
-        : "Reconnecting; this station is still checking for updates.";
-    },
   });
 }
 `;

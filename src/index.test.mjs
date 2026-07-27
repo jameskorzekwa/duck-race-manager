@@ -73,6 +73,22 @@ test("serves the home-page status client", async () => {
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
   assert.match(body, /\/api\/v1\/race-status\/search/);
+  assert.match(body, /\/api\/v1\/registrations\/mine\/follow/);
+});
+
+test("the public home page explains the race without linking out of its cards", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/"), env);
+  const body = await response.text();
+  const explainers = body.match(/<section id="how-it-works"[\s\S]*?<\/section>/)?.[0];
+
+  assert.equal(response.status, 200);
+  assert.ok(explainers);
+  assert.equal((explainers.match(/<a\b/g) ?? []).length, 0);
+  assert.doesNotMatch(explainers, /href=/);
+  assert.match(explainers, /<strong>Before the race<\/strong>/);
+  assert.match(explainers, /<strong>At check-in<\/strong>/);
+  assert.match(explainers, /<strong>On race day<\/strong>/);
+  assert.doesNotMatch(body, /Open registration →|Open staff tools →|Preview status →/);
 });
 
 test("serves registration and staff pairing browser clients", async () => {
@@ -126,9 +142,14 @@ test("renders the private My Ducks page with two accessible horizontal sections"
   assert.match(body, /data-carousel-next/);
   assert.match(body, /tabindex="0" aria-label="Awaiting participant registrations"/);
   assert.match(body, /scroll-snap-type:x mandatory/);
-  assert.match(body, /data-my-ducks-freshness[^>]*>Loading saved registrations/);
-  assert.match(body, /data-carousel-empty hidden>No participants are waiting for a duck/);
-  assert.match(body, /data-carousel-empty hidden>No paired ducks are saved on this device yet/);
+  assert.doesNotMatch(body, /data-my-ducks-freshness|Loading saved registrations|Updated just now/);
+  assert.match(body, /<p class="message-line muted" data-my-ducks-error role="alert" hidden><\/p>/);
+  // Neither group ships a per-section empty state; an empty group hides its
+  // whole section and the page keeps one guidance message instead.
+  assert.doesNotMatch(body, /data-carousel-empty/);
+  assert.match(body, /data-participant-section="awaiting" aria-labelledby="awaiting-participants-title" hidden>/);
+  assert.match(body, /data-participant-section="paired" aria-labelledby="paired-participants-title" hidden>/);
+  assert.match(body, /<p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet\./);
   assert.match(body, /Register another participant/);
   assert.match(body, /src="\/assets\/participant\.js"/);
   assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
@@ -788,4 +809,137 @@ test("renders a secured noindex not-found page", async () => {
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
   assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
   assert.match(body, /Nothing is swimming here/);
+});
+
+const duckStatusRow = {
+  event_id: "event_test",
+  event_slug: "test-race",
+  event_name: "Summer Duck Race",
+  event_date: "2026-08-30",
+  event_status: "FINAL",
+  public_name_policy: "FIRST_NAME_LAST_INITIAL",
+  first_name: "Jamie",
+  last_name: "Rivera",
+  registration_status: "ACTIVE",
+  race_entry_id: "entry_test",
+  visible_number: 128,
+  round_one_heat_number: 7,
+  round_one_heat_status: "FINALIZED",
+  round_one_place: 2,
+  final_heat_number: 1,
+  final_heat_status: "FINALIZED",
+  final_place: 1,
+  email: "jamie@example.com",
+  phone: "555-0100",
+  lookup_code: "DUCK8234",
+};
+
+const duckPageEnv = (row = duckStatusRow) => ({
+  ...env,
+  DB: {
+    prepare(sql) {
+      const statement = {
+        sql,
+        args: [],
+        bind(...args) {
+          this.args = args;
+          return this;
+        },
+        async first() {
+          if (sql.includes("FROM race_entries")) return row;
+          if (sql.includes("FROM heats")) return { round: "FINAL", heat_number: 1, status: "RUNNING" };
+          if (sql.includes("FROM events")) {
+            return {
+              id: "event_test",
+              name: "Summer Duck Race",
+              event_date: "2026-08-30",
+              status: "FINAL",
+              public_name_policy: "FIRST_NAME_LAST_INITIAL",
+            };
+          }
+          return null;
+        },
+      };
+      return statement;
+    },
+  },
+});
+
+test("renders a public duck detail view addressed by the visible duck number", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/duck/128"), duckPageEnv());
+  const body = await response.text();
+  const panel = body.match(/<section class="page-panel">[\s\S]*?<\/section>/)?.[0];
+  assert.ok(panel);
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.match(body, /<meta name="robots" content="noindex,nofollow">/);
+  assert.match(body, /<h1 class="page-title">Duck #128<\/h1>/);
+  assert.match(body, /<title>Duck #128 · QuickDucks<\/title>/);
+  assert.match(body, /Follow this duck through Summer Duck Race\./);
+
+  // Every fact the view promises, under the event's public-name policy.
+  assert.match(body, /<dt>Participant<\/dt><dd>Jamie R\.<\/dd>/);
+  assert.match(body, /<dt>Duck<\/dt><dd>Duck #128<\/dd>/);
+  assert.match(body, /<dt>Round one heat<\/dt><dd>Heat 7 · Result official<\/dd>/);
+  assert.match(body, /<dt>Final heat<\/dt><dd>Heat 1 · Result official<\/dd>/);
+  assert.match(body, /<dt>Currently running<\/dt><dd>Final · Heat 1 · Racing now<\/dd>/);
+  assert.match(body, /<dt>Race status<\/dt><dd>First place<\/dd>/);
+  assert.match(body, /<dt>Official result<\/dt><dd>1st place · Official podium<\/dd>/);
+
+  // It updates through the shared live hub like the other public pages.
+  assert.match(body, /<div data-live-personal="number">/);
+  assert.match(body, /data-live-board/);
+  assert.match(body, /src="\/assets\/live\.js"/);
+  assert.match(body, /src="\/assets\/live-ui\.js"/);
+
+  // Public means public: no contact details, codes, tokens, or tag links.
+  assert.doesNotMatch(body, /jamie@example\.com|555-0100|DUCK8234|Rivera/);
+  assert.doesNotMatch(body, /href="\/t\//);
+  assert.doesNotMatch(panel, /lookup code|private status|inventory|staff note/i);
+});
+
+test("an unknown or unpaired duck number renders a friendly not-found state", async () => {
+  const missing = await worker.fetch(new Request("https://quickducks.com/duck/9999"), duckPageEnv(null));
+  const body = await missing.text();
+  const panel = body.match(/<section class="page-panel">[\s\S]*?<\/section>/)?.[0];
+
+  assert.ok(panel);
+  assert.equal(missing.status, 404);
+  assert.equal(missing.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.match(body, /<meta name="robots" content="noindex,nofollow">/);
+  assert.match(body, /Duck #9999 isn’t racing\./);
+  assert.match(body, /No duck with this number is paired with a participant in the current race\./);
+  assert.match(body, /href="\/"/);
+  // A missing duck exposes no live surface and no enumeration detail: the copy
+  // never distinguishes an unknown number from an unpaired inventory duck.
+  assert.doesNotMatch(body, /data-live-personal/);
+  assert.doesNotMatch(panel, /inventory|available|reserved|unpaired|does not exist|unknown/i);
+});
+
+test("non-canonical duck numbers fall through to the ordinary not-found page", async () => {
+  for (const path of ["/duck/012", "/duck/0", "/duck/1234567890", "/duck/abc", "/duck/", "/duck/1/2"]) {
+    const response = await worker.fetch(new Request(`https://quickducks.com${path}`), duckPageEnv());
+    const body = await response.text();
+
+    assert.equal(response.status, 404, path);
+    assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow", path);
+    assert.doesNotMatch(body, /data-live-personal/, path);
+  }
+});
+
+test("the duck detail route is read-only and leaves the tag scan flow untouched", async () => {
+  const post = await worker.fetch(
+    new Request("https://quickducks.com/duck/128", { method: "POST" }),
+    duckPageEnv(),
+  );
+  assert.equal(post.status, 404);
+
+  // An anonymous unpaired tag scan still redirects home rather than rendering.
+  const scan = await worker.fetch(
+    new Request(`https://quickducks.com/t/${"c".repeat(32)}`),
+    duckPageEnv(null),
+  );
+  assert.equal(scan.status, 303);
+  assert.equal(scan.headers.get("location"), "/");
 });

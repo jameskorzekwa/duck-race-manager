@@ -185,4 +185,16 @@ test("public board does not revive a closed pre-race duck assignment", async (co
   const board = await responseBoard(database);
   assert.equal(board.event.roundOneHeats[0].roster[0].participantDisplayName, "Daisy D.");
   assert.equal(board.event.roundOneHeats[0].roster[0].duckNumber, null);
+
+  // The stage wording on the public board is driven by this one public field.
+  assert.equal(board.event.status, "REGISTRATION_CLOSED");
+  assert.deepEqual(Object.keys(board.event).sort(), [
+    "currentHeat",
+    "eventDate",
+    "finalHeats",
+    "name",
+    "podium",
+    "roundOneHeats",
+    "status",
+  ]);
 });

@@ -1,5 +1,9 @@
 import { operationalRoles, type OperationalRole } from "./authorization.ts";
-import type { PublicRaceStatus } from "./race-status.ts";
+import {
+  publicHeatStatusLabel,
+  publicOfficialResult,
+  type PublicRaceStatus,
+} from "./race-status.ts";
 import type { RegistrationStatusRecord } from "./types.ts";
 
 const escapeHtml = (value: string): string =>
@@ -86,6 +90,7 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .duck-card { padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
 .duck-card h3 { margin-bottom:.55rem; }
 .duck-card p { margin-bottom:.35rem; line-height:1.45; }
+.duck-card > .actions { margin-top:.75rem; }
 .page-panel.my-ducks-panel { max-width:70rem; }
 .participant-section { margin:2rem 0; padding-top:1.5rem; border-top:3px solid var(--ink); }
 .participant-section-head { display:flex; flex-wrap:wrap; align-items:end; justify-content:space-between; gap:.8rem; margin-bottom:.8rem; }
@@ -177,6 +182,9 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .fact { padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
 .fact dt { color:var(--muted); font-size:.75rem; font-weight:950; letter-spacing:.08em; text-transform:uppercase; }
 .fact dd { margin:.25rem 0 0; font-size:1.08rem; font-weight:850; }
+.duck-number-link { color:var(--water-dark); font-weight:950; text-decoration:underline; text-underline-offset:.2em; }
+.duck-number-link:hover { text-decoration-thickness:.18em; }
+.duck-number-link:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
 .privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
 .privacy strong { flex:none; }
 .page-panel > .privacy + .actions { margin-top:1rem; }
@@ -235,7 +243,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .private-result { overflow-wrap:anywhere; }
 .live-board { border-width:4px; background:#fff; box-shadow:7px 7px 0 var(--ink); }
 .live-board-title { max-width:none; margin-bottom:.5rem; }
-.freshness { display:inline-block; max-width:100%; margin:.2rem 0 1rem; padding:.45rem .7rem; border:2px solid var(--water-dark); border-radius:999px; background:#e4f4f8; color:#245264; font-weight:900; line-height:1.4; overflow-wrap:anywhere; }
+.live-board-stage { max-width:100%; margin:.2rem 0 .6rem; padding:.4rem .8rem; background:var(--yellow); font-size:.85rem; line-height:1.4; overflow-wrap:anywhere; }
 .board-round { margin-top:1.5rem; }
 .board-round h3 { font-size:1.65rem; }
 .board-grid { display:grid; gap:.8rem; }
@@ -314,9 +322,10 @@ const page = ({ title, description, content, robots = "index,follow" }: PageOpti
 const liveBoard = (): string => `
   <section class="status-section live-board" data-live-board aria-labelledby="live-board-title">
     <p class="eyebrow">Live race board</p>
+    <p class="status-chip live-board-stage" data-live-board-stage aria-live="polite">Loading race stage…</p>
     <h2 class="live-board-title" id="live-board-title" data-live-board-title>Checking the race…</h2>
     <p class="lede" data-live-board-summary>Loading the latest official race information.</p>
-    <p class="freshness" data-live-freshness aria-live="polite">Checking for fresh updates…</p>
+    <p class="message-line muted" data-live-board-error role="alert" hidden></p>
     <div data-live-board-content><p class="empty-state">The board will appear here when race information is available.</p></div>
   </section>`;
 
@@ -337,9 +346,9 @@ export const renderHome = (): string => page({
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
     ${liveBoard()}
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
-      <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p><a class="card-link" href="/register">Open registration →</a></article>
-      <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p><a class="card-link" href="/staff">Open staff tools →</a></article>
-      <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p><a class="card-link" href="/r/mock">Preview status →</a></article>
+      <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p></article>
+      <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p></article>
+      <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p></article>
     </section>
     <section class="status-section" aria-labelledby="find-status-title">
       <p class="eyebrow">Lost your saved list?</p>
@@ -368,9 +377,10 @@ export const renderMyDucks = (): string => page({
       <p class="lede">Swipe through every participant registered in this browser and follow each duck from pairing to finish.</p>
       <div class="privacy"><strong>Private by design.</strong><span>Email and phone never appear here. Immediately after registration, this tab can show the one-time private status link so you can bookmark it; saved collection responses never include that link.</span></div>
       <div class="notice" data-registration-success aria-live="polite" hidden></div>
-      <p class="freshness" data-my-ducks-freshness aria-live="polite">Loading saved registrations…</p>
+      <p class="message-line muted" data-my-ducks-error role="alert" hidden></p>
+      <p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet. Register a participant, or add someone from the race status search on the home page.</p>
 
-      <section class="participant-section" data-participant-section="awaiting" aria-labelledby="awaiting-participants-title">
+      <section class="participant-section" data-participant-section="awaiting" aria-labelledby="awaiting-participants-title" hidden>
         <div class="participant-section-head">
           <h2 id="awaiting-participants-title">Awaiting Participants</h2>
           <div class="carousel-controls" data-carousel-controls hidden>
@@ -379,11 +389,10 @@ export const renderMyDucks = (): string => page({
           </div>
         </div>
         <p class="muted">Registrations waiting for staff to pair a physical duck.</p>
-        <p class="empty-state" data-carousel-empty hidden>No participants are waiting for a duck.</p>
         <div class="participant-track" id="awaiting-participants" data-participant-track tabindex="0" aria-label="Awaiting participant registrations" hidden></div>
       </section>
 
-      <section class="participant-section" data-participant-section="paired" aria-labelledby="paired-participants-title">
+      <section class="participant-section" data-participant-section="paired" aria-labelledby="paired-participants-title" hidden>
         <div class="participant-section-head">
           <h2 id="paired-participants-title">My Ducks</h2>
           <div class="carousel-controls" data-carousel-controls hidden>
@@ -392,7 +401,6 @@ export const renderMyDucks = (): string => page({
           </div>
         </div>
         <p class="muted">Participants already paired with their race duck.</p>
-        <p class="empty-state" data-carousel-empty hidden>No paired ducks are saved on this device yet.</p>
         <div class="participant-track" id="paired-participants" data-participant-track tabindex="0" aria-label="Paired participant registrations" hidden></div>
       </section>
 
@@ -533,6 +541,57 @@ export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string =>
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, or private links.</span></div>
       <div class="actions"><a class="button secondary" href="/">Visit QuickDucks</a></div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
+});
+
+const heatFact = (heat: { number: number; status: string } | null, missing: string): string =>
+  heat === null ? missing : `Heat ${heat.number} · ${publicHeatStatusLabel(heat.status)}`;
+
+// Every value here comes from the shared public projection, so this view can
+// never render contact details, lookup codes, tokens, or staff data.
+const duckDetailFacts = (status: PublicRaceStatus): string => {
+  const officialResult = publicOfficialResult(status.outcome);
+  const facts = [
+    ["Participant", status.participantDisplayName],
+    ["Duck", status.duck === null ? "Waiting for duck assignment" : `Duck #${status.duck.visibleNumber}`],
+    ["Round one heat", heatFact(status.assignedHeat.roundOne, "Not assigned yet")],
+    ["Final heat", heatFact(status.assignedHeat.final, "Not in the final")],
+    ["Currently running", status.currentHeat === null
+      ? "No heat is running right now"
+      : `${roundLabel(status.currentHeat.round)} · Heat ${status.currentHeat.number} · ${publicHeatStatusLabel(status.currentHeat.status)}`],
+    ["Race status", outcomeLabel(status.outcome)],
+    ...(officialResult === null ? [] : [["Official result", officialResult]]),
+  ];
+  return `<dl class="facts">${facts
+    .map(([label, value]) => `<div class="fact"><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`)
+    .join("")}</dl>`;
+};
+
+export const renderPublicDuck = (status: PublicRaceStatus = mockRaceStatus): string => {
+  const heading = status.duck === null ? "This duck" : `Duck #${status.duck.visibleNumber}`;
+  return page({
+    title: heading,
+    description: "Public QuickDucks race status for one duck number.",
+    robots: "noindex,nofollow",
+    content: `
+    <section class="page-panel">
+      ${duck()}
+      <p class="eyebrow">Public duck detail</p>
+      <h1 class="page-title">${escapeHtml(heading)}</h1>
+      <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
+      <div data-live-personal="number">${duckDetailFacts(status)}</div>
+      <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, private links, or the duck’s tag.</span></div>
+      <div class="actions"><a class="button secondary" href="/">Back to the race board</a></div>
+    </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
+  });
+};
+
+// Unknown numbers, inventory ducks that are not paired, and ducks outside the
+// current public event all render this identical page.
+export const renderPublicDuckNotFound = (visibleNumber?: string): string => page({
+  title: "Duck not racing",
+  description: "The requested QuickDucks duck number is not in the current race.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel">${duck()}<p class="eyebrow">Public duck detail</p><h1 class="page-title">${visibleNumber === undefined ? "That duck isn’t racing." : `Duck #${escapeHtml(visibleNumber)} isn’t racing.`}</h1><p class="lede">No duck with this number is paired with a participant in the current race. Check the number printed on the duck, or find it on the live race board.</p><a class="button" href="/">Back to the race board</a></section>`,
 });
 
 export const renderStaffLogin = (returnTo = "/staff"): string => page({
@@ -758,7 +817,6 @@ export const renderStartLine = (
   content: `<section class="page-panel station-panel" data-start-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Start line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     <p class="eyebrow">Start-line station</p><h1 class="page-title">Prepare the next heat.</h1>
-    <p class="freshness" data-station-freshness aria-live="polite">Checking the race…</p>
     <p class="lede" data-station-event>Finding the active event and next heat.</p>
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
     <h3>Roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
@@ -780,7 +838,6 @@ export const renderFinishLine = (
   content: `<section class="page-panel station-panel" data-finish-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Finish line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
-    <p class="freshness" data-station-freshness aria-live="polite">Checking the race…</p>
     <p class="lede" data-station-event>Finding a running heat.</p>
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
     <h3>Authoritative roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
@@ -951,14 +1008,57 @@ const describeStatus = (status) => {
   return parts.join(" · ");
 };
 
-const appendStatusCard = (container, title, status, lookupCode) => {
-  const card = createText("article", "", "duck-card");
-  card.append(createText("h3", title));
-  if (lookupCode) card.append(createText("p", "Staff lookup code: " + lookupCode));
-  card.append(createText("p", describeStatus(status), "muted"));
-  if (status && status.currentHeat) {
-    card.append(createText("p", "Currently running: " + status.currentHeat.round.replaceAll("_", " ").toLowerCase() + " heat " + status.currentHeat.number, "muted"));
+// The public name search deliberately carries no lookup code and no private
+// token, so a result card renders public race status only.
+const myDucksNav = document.querySelector("[data-my-ducks-nav]");
+const addedTag = () => createText("span", "In My Ducks", "success-tag");
+
+const addToMyDucks = async (followId, actions, button, feedback) => {
+  button.disabled = true;
+  button.textContent = "Adding…";
+  feedback.textContent = "";
+  feedback.hidden = true;
+  try {
+    const response = await fetch("/api/v1/registrations/mine/follow", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ followId }),
+    });
+    if (!response.ok) throw new Error("follow failed");
+    actions.replaceChildren(addedTag());
+    if (myDucksNav) myDucksNav.hidden = false;
+  } catch {
+    button.disabled = false;
+    button.textContent = "Add to My Ducks";
+    feedback.textContent = "That participant could not be added to My Ducks. Please try again.";
+    feedback.hidden = false;
   }
+};
+
+const followControls = (result) => {
+  const actions = createText("div", "", "actions");
+  const feedback = createText("p", "", "message-line muted");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
+  if (result.inMyDucks === true) {
+    actions.append(addedTag());
+    return [actions, feedback];
+  }
+  const button = createText("button", "Add to My Ducks", "button small");
+  button.type = "button";
+  button.addEventListener("click", () => addToMyDucks(result.followId, actions, button, feedback));
+  actions.append(button);
+  return [actions, feedback];
+};
+
+const appendStatusCard = (container, result) => {
+  const card = createText("article", "", "duck-card");
+  card.append(createText("h3", result.participantDisplayName));
+  card.append(createText("p", describeStatus(result), "muted"));
+  if (result.currentHeat) {
+    card.append(createText("p", "Currently running: " + result.currentHeat.round.replaceAll("_", " ").toLowerCase() + " heat " + result.currentHeat.number, "muted"));
+  }
+  if (typeof result.followId === "string") card.append(...followControls(result));
   container.append(card);
 };
 
@@ -991,7 +1091,7 @@ const runStatusSearch = async (name) => {
       searchMessage.textContent = "No matching public race status was found.";
       return;
     }
-    for (const result of results) appendStatusCard(searchResults, result.participantDisplayName, result, null);
+    for (const result of results) appendStatusCard(searchResults, result);
     searchMessage.textContent = results.length === 1 ? "1 match found." : results.length + " matches found.";
   } catch {
     searchMessage.textContent = "Status search is temporarily unavailable. Please try again.";

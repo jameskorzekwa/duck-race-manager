@@ -532,22 +532,29 @@ still authenticates and authorizes independently.
 
 Operator smoke checks after deployment:
 
-1. Load `/` and confirm the live board reaches `Updated just now` even when no
-   event or heat exists.
+1. Load `/` and confirm the live board resolves its stage chip, event name, and
+   summary even when no event or heat exists, and that no freshness text appears.
 2. Confirm an ordinary non-upgrade `GET /api/v1/live` returns `426`.
 3. In browser developer tools, confirm the same-origin live connection upgrades;
    then perform a controlled non-production mutation and verify another open
    public page and another signed-in staff device refetch their matching APIs.
-4. Interrupt the live connection and confirm the page reports delayed updates,
-   reconnects with bounded jitter, and still refreshes through five-second
-   polling. Restore the connection and confirm polling slows to the 30-second
-   integrity interval.
+4. Interrupt the live connection and confirm the page reports no connection
+   status, reconnects with bounded jitter, and still refreshes through
+   five-second polling. Restore the connection and confirm polling slows to the
+   30-second integrity interval.
 5. Send a client frame in a controlled browser test and confirm the socket closes
    with code `1008`; ordinary clients never send frames.
 6. With an unsaved non-destructive form on one device, mutate matching data on a
    second device and confirm the first device defers its queued refresh until the
    form is saved/reset. Separately verify staff deactivation and test-data purge
    clear protected/participant rendering immediately instead of deferring.
+7. On a browser with no saved registrations, search a controlled test
+   participant by exact name, use **Add to My Ducks**, and confirm the action
+   confirms in place and the **My Ducks** navigation appears. Then open
+   `/my-ducks` and confirm the followed card shows the **Following** tag and the
+   event's public display name with no staff lookup code, and that any group
+   with no participants hides its whole section instead of showing an empty
+   state.
 
 Failure of this channel is degraded freshness, not lost race data. Operators may
 continue only after the station's authoritative mutation response and refreshed

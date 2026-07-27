@@ -24,6 +24,13 @@
   heat/result corrections and constraints.
 - `0010`-`0012`: staff lifecycle, support/returns/purge claims, composable staff
   role assignments.
+- `0013`: browser-collection link source (`added_via`).
+
+`0013` adds `browser_collection_registrations.added_via` with a
+`'REGISTRATION'` default so links written by the previously deployed Worker keep
+today's projection. `'FOLLOWED'` marks a link added from the public name search;
+that source must never be projected with a staff lookup code or an unmasked
+name.
 
 `0012` intentionally grants no operational roles to pre-existing regular staff.
 The release preflight blocks that migration when an unmapped non-administrator

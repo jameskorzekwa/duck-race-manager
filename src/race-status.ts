@@ -44,6 +44,41 @@ export interface PublicRaceStatus {
   outcome: string;
 }
 
+// Plain race-day language for heat status and for the finalized outcomes that
+// represent an official result. Server rendering and the browser client both
+// read these maps so a page never changes its wording after a live refetch.
+export const publicHeatStatusLabels: Record<string, string> = {
+  PLANNED: "Coming up",
+  LOADING: "Ducks are being prepared",
+  READY: "Ready to call",
+  CALLING: "Calling racers now",
+  RUNNING: "Racing now",
+  AWAITING_RESULT: "Race finished; checking the result",
+  FINALIZED: "Result official",
+  CANCELLED: "Not running",
+};
+
+export const publicHeatStatusLabel = (status: string): string =>
+  Object.prototype.hasOwnProperty.call(publicHeatStatusLabels, status)
+    ? publicHeatStatusLabels[status]
+    : "Status being checked";
+
+// Only outcomes decided by a finalized heat appear here. Everything else has no
+// official finishing result yet and must not render one.
+export const publicOfficialResults: Record<string, string> = {
+  FIRST_PLACE: "1st place · Official podium",
+  SECOND_PLACE: "2nd place · Official podium",
+  THIRD_PLACE: "3rd place · Official podium",
+  FINAL_COMPLETE: "Finished the final · Off the podium",
+  ROUND_ONE_WINNER: "Won its round-one heat",
+  ELIMINATED: "Did not advance past round one",
+};
+
+export const publicOfficialResult = (outcome: string): string | null =>
+  Object.prototype.hasOwnProperty.call(publicOfficialResults, outcome)
+    ? publicOfficialResults[outcome]
+    : null;
+
 const displayName = (policy: string, firstName: string, lastName: string): string => {
   if (policy === "FULL_NAME") return `${firstName} ${lastName}`;
   if (policy === "FIRST_NAME_ONLY" || lastName.length === 0) return firstName;
@@ -168,6 +203,25 @@ export const getPublicStatusByTag = async (
        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
      LIMIT 1`,
   ).bind(token).first<StatusRow>();
+  return row === null ? null : buildStatus(env, row);
+};
+
+// The visible number is already public: it is printed on the duck and shown on
+// the live board. This reuses the same projection as the tag and race-entry
+// lookups, and additionally scopes the row to one caller-supplied public event
+// so a number can never reach an entry outside the current public race.
+export const getPublicStatusByDuckNumber = async (
+  env: Env,
+  eventId: string,
+  visibleNumber: number,
+): Promise<PublicRaceStatus | null> => {
+  const row = await env.DB.prepare(
+    `${statusSelect}
+     WHERE re.event_id = ?
+       AND d.visible_number = ?
+       AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
+     LIMIT 1`,
+  ).bind(eventId, visibleNumber).first<StatusRow>();
   return row === null ? null : buildStatus(env, row);
 };
 

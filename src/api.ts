@@ -10,11 +10,13 @@ import {
   browserCollectionCookie,
   clearBrowserCollectionCookie,
   collectionStatements,
+  followStatements,
   getBrowserCollection,
   prepareBrowserCollection,
   refreshBrowserCollection,
 } from "./browser-collection.ts";
 import {
+  getPublicStatusByDuckNumber,
   getPublicStatusByRaceEntry,
   getPublicStatusByTag,
   type PublicRaceStatus,
@@ -31,7 +33,7 @@ import {
   mutationRefreshDomains,
   scheduleRaceUpdate,
 } from "./live-updates.ts";
-import { getPublicRaceBoard } from "./race-board.ts";
+import { getCurrentPublicEvent, getPublicRaceBoard, publicDisplayName } from "./race-board.ts";
 import type { Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
 
 const apiHeaders = {
@@ -112,6 +114,22 @@ export const findDuckRaceStatus = async (
 ): Promise<PublicRaceStatus | null> => {
   if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return null;
   return getPublicStatusByTag(env, token);
+};
+
+// Canonical positive integers only. A non-canonical or oversized value resolves
+// to nothing rather than being coerced, so one duck number has one address.
+export const isDuckVisibleNumber = (value: string): boolean => /^[1-9][0-9]{0,8}$/.test(value);
+
+// Resolves a board-visible duck number inside the current public event. It
+// returns the same public projection as the tag lookup and never widens it.
+export const findDuckNumberRaceStatus = async (
+  visibleNumber: string,
+  env: Env,
+): Promise<PublicRaceStatus | null> => {
+  if (!isDuckVisibleNumber(visibleNumber)) return null;
+  const event = await getCurrentPublicEvent(env);
+  if (event === null) return null;
+  return getPublicStatusByDuckNumber(env, event.id, Number(visibleNumber));
 };
 
 interface TurnstileResult {
@@ -415,6 +433,16 @@ const getDuck = async (token: string, env: Env): Promise<Response> => {
     : json({ destination: "RACE_STATUS", raceStatus: status });
 };
 
+// Unknown, unpaired, and out-of-event numbers are indistinguishable here: all
+// three return the same 404, so this adds no enumeration signal beyond the
+// duck numbers the public board already publishes.
+const getDuckByNumber = async (visibleNumber: string, env: Env): Promise<Response> => {
+  const status = await findDuckNumberRaceStatus(visibleNumber, env);
+  return status === null
+    ? json({ error: "Not found." }, 404)
+    : json({ raceStatus: status });
+};
+
 const getMyRegistrations = async (request: Request, env: Env): Promise<Response> => {
   const existingCollection = await getBrowserCollection(request, env);
   if (existingCollection === null) {
@@ -427,6 +455,7 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
   const registrations = await env.DB.prepare(
     `SELECT r.id AS registration_id, re.id AS race_entry_id,
             r.first_name, r.last_name, r.lookup_code, r.status,
+            bcr.added_via, e.public_name_policy,
             EXISTS (
               SELECT 1
                 FROM duck_assignments da
@@ -435,6 +464,7 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
        FROM browser_collection_registrations bcr
        JOIN registrations r ON r.id = bcr.registration_id
        JOIN race_entries re ON re.registration_id = r.id
+       JOIN events e ON e.id = r.event_id
       WHERE bcr.collection_id = ?
       ORDER BY bcr.added_at`,
   ).bind(collection.id).all<{
@@ -444,18 +474,30 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
     last_name: string;
     lookup_code: string;
     status: string;
+    added_via: string | null;
+    public_name_policy: string;
     is_paired: number;
   }>();
 
-  const items = await Promise.all(registrations.results.map(async (row) => ({
-    registrationId: row.registration_id,
-    firstName: row.first_name,
-    lastName: row.last_name,
-    lookupCode: row.lookup_code,
-    registrationStatus: row.status,
-    paired: row.is_paired === 1,
-    raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),
-  })));
+  // A followed entry came from the public name search, which exposes neither a
+  // lookup code nor an unfiltered name. Projecting it back must not grant more
+  // than that search already did.
+  const items = await Promise.all(registrations.results.map(async (row) => {
+    const followed = row.added_via === "FOLLOWED";
+    return {
+      registrationId: row.registration_id,
+      firstName: followed ? null : row.first_name,
+      lastName: followed ? null : row.last_name,
+      displayName: followed
+        ? publicDisplayName(row.public_name_policy, row.first_name, row.last_name)
+        : `${row.first_name} ${row.last_name}`,
+      lookupCode: followed ? null : row.lookup_code,
+      followed,
+      registrationStatus: row.status,
+      paired: row.is_paired === 1,
+      raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),
+    };
+  }));
 
   return json({ registrations: items }, 200, {
     "set-cookie": browserCollectionCookie(collection.cookieToken),
@@ -490,8 +532,17 @@ const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Pro
   const clientKey = request.headers.get("cf-connecting-ip") ?? "unknown-client";
   const rateLimit = await env.PUBLIC_SEARCH_RATE_LIMITER.limit({ key: `${eventId}:${clientKey}` });
   if (!rateLimit.success) return json({ error: "Too many searches. Please wait and try again." }, 429);
+
+  // Read-only membership probe for this browser's own collection so a result
+  // can render its already-added state. It never refreshes or issues a cookie.
+  const collection = await getBrowserCollection(request, env);
   const matches = await env.DB.prepare(
-    `SELECT DISTINCT re.id AS race_entry_id
+    `SELECT DISTINCT re.id AS race_entry_id,
+            EXISTS (
+              SELECT 1
+                FROM browser_collection_registrations bcr
+               WHERE bcr.collection_id = ? AND bcr.registration_id = r.id
+            ) AS in_collection
        FROM registrations r
        JOIN race_entries re ON re.registration_id = r.id
        JOIN events e ON e.id = r.event_id
@@ -505,12 +556,108 @@ const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Pro
         )
       ORDER BY r.last_name COLLATE NOCASE, r.first_name COLLATE NOCASE
       LIMIT 10`,
-  ).bind(eventId, name, name, name).all<{ race_entry_id: string }>();
+  ).bind(collection?.id ?? "", eventId, name, name, name).all<{
+    race_entry_id: string;
+    in_collection: number;
+  }>();
 
-  const results = (await Promise.all(
-    matches.results.map((row) => getPublicStatusByRaceEntry(env, row.race_entry_id)),
-  )).filter((status) => status !== null);
+  // `followId` is the only identifier this projection exposes. It is inert on
+  // its own: it unlocks nothing except the same public status already returned
+  // here, and the follow endpoint revalidates it against this same predicate.
+  const results = (await Promise.all(matches.results.map(async (row) => {
+    const status = await getPublicStatusByRaceEntry(env, row.race_entry_id);
+    return status === null ? null : {
+      ...status,
+      followId: row.race_entry_id,
+      inMyDucks: row.in_collection === 1,
+    };
+  }))).filter((status) => status !== null);
   return json({ results });
+};
+
+interface FollowPayload {
+  followId?: unknown;
+}
+
+const isFollowId = (value: string): boolean =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+
+const followRegistration = async (request: Request, env: Env): Promise<Response> => {
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return json({ error: "Content-Type must be application/json." }, 415);
+  }
+
+  const contentLength = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > 1_024) {
+    return json({ error: "Request body is too large." }, 413);
+  }
+
+  // This mutation is authenticated only by the browser collection cookie, so it
+  // requires the exact application origin rather than merely tolerating one.
+  if (request.headers.get("origin") !== new URL(env.APP_ORIGIN).origin) {
+    return json({ error: "Same-origin request required." }, 403);
+  }
+
+  let payload: FollowPayload;
+  try {
+    const body = await request.text();
+    if (body.length > 1_024) return json({ error: "Request body is too large." }, 413);
+    const parsed = JSON.parse(body) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return json({ error: "Request body must be a JSON object." }, 400);
+    }
+    payload = parsed as FollowPayload;
+  } catch {
+    return json({ error: "Request body must be valid JSON." }, 400);
+  }
+
+  if (typeof payload.followId !== "string" || !isFollowId(payload.followId)) {
+    return json({ error: "Invalid participant identifier." }, 400);
+  }
+
+  const clientKey = request.headers.get("cf-connecting-ip") ?? "unknown-client";
+  const rateLimit = await env.PUBLIC_SEARCH_RATE_LIMITER.limit({ key: `follow:${clientKey}` });
+  if (!rateLimit.success) {
+    return json({ error: "Too many requests. Please wait and try again." }, 429);
+  }
+
+  const event = await getCurrentEvent(env);
+  if (event === null) return json({ error: "That participant cannot be added." }, 404);
+
+  // The identifier must still resolve to a publicly searchable entry of the
+  // current public event, so this endpoint can never reach an arbitrary
+  // internal race entry.
+  const entry = await env.DB.prepare(
+    `SELECT re.registration_id
+       FROM race_entries re
+       JOIN registrations r ON r.id = re.registration_id
+       JOIN events e ON e.id = re.event_id
+      WHERE re.id = ?
+        AND re.event_id = ?
+        AND r.status IN ('SUBMITTED', 'ACTIVE')
+        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
+      LIMIT 1`,
+  ).bind(payload.followId, event.id).first<{ registration_id: string }>();
+  if (entry === null) return json({ error: "That participant cannot be added." }, 404);
+
+  const collection = await prepareBrowserCollection(request, env);
+  const existing = collection.isNew ? null : await env.DB.prepare(
+    `SELECT 1 AS present
+       FROM browser_collection_registrations
+      WHERE collection_id = ? AND registration_id = ?
+      LIMIT 1`,
+  ).bind(collection.id, entry.registration_id).first<{ present: number }>();
+
+  await env.DB.batch(await followStatements(
+    env,
+    collection,
+    entry.registration_id,
+    new Date().toISOString(),
+  ));
+
+  return json({ followed: true, alreadyInCollection: existing !== null }, 200, {
+    "set-cookie": browserCollectionCookie(collection.cookieToken),
+  });
 };
 const handleApiRequest = async (
   request: Request,
@@ -580,6 +727,10 @@ const handleApiRequest = async (
     return getMyRegistrationPresence(request, env);
   }
 
+  if (url.pathname === "/api/v1/registrations/mine/follow" && request.method === "POST") {
+    return followRegistration(request, env);
+  }
+
   if (url.pathname === "/api/v1/race-status/search" && request.method === "GET") {
     return searchPublicRaceStatus(request, url, env);
   }
@@ -587,6 +738,13 @@ const handleApiRequest = async (
   const registrationMatch = url.pathname.match(/^\/api\/v1\/registrations\/([A-Za-z0-9_-]+)$/);
   if (registrationMatch !== null && request.method === "GET") {
     return getRegistrationStatus(registrationMatch[1], env);
+  }
+
+  // Matched before the single-segment tag route so the tag scan flow keeps its
+  // exact shape and can never be reached with a visible duck number.
+  const duckNumberMatch = url.pathname.match(/^\/api\/v1\/ducks\/number\/([0-9]{1,9})$/);
+  if (duckNumberMatch !== null && request.method === "GET") {
+    return getDuckByNumber(duckNumberMatch[1], env);
   }
 
   const duckMatch = url.pathname.match(/^\/api\/v1\/ducks\/([A-Za-z0-9_-]+)$/);

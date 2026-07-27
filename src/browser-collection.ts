@@ -82,37 +82,60 @@ export const refreshBrowserCollection = async (
   return { ...collection, expiresAt };
 };
 
+const collectionOwnerStatement = async (
+  env: Env,
+  collection: BrowserCollection,
+  now: string,
+): Promise<D1PreparedStatement> => collection.isNew
+  ? env.DB.prepare(
+    `INSERT INTO browser_registration_collections
+        (id, token_hash, created_at, last_seen_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+  ).bind(
+    collection.id,
+    await hashToken(collection.cookieToken),
+    now,
+    now,
+    collection.expiresAt,
+  )
+  : env.DB.prepare(
+    `UPDATE browser_registration_collections
+          SET last_seen_at = ?, expires_at = ?
+        WHERE id = ?`,
+  ).bind(now, collection.expiresAt, collection.id);
+
+// Links created by registering in this browser. Registering always wins over a
+// pre-existing followed link, because this browser genuinely holds the
+// registration's lookup code and private token.
 export const collectionStatements = async (
   env: Env,
   collection: BrowserCollection,
   registrationId: string,
   now: string,
-): Promise<D1PreparedStatement[]> => {
-  const statements: D1PreparedStatement[] = [];
-  if (collection.isNew) {
-    statements.push(env.DB.prepare(
-      `INSERT INTO browser_registration_collections
-        (id, token_hash, created_at, last_seen_at, expires_at)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).bind(
-      collection.id,
-      await hashToken(collection.cookieToken),
-      now,
-      now,
-      collection.expiresAt,
-    ));
-  } else {
-    statements.push(env.DB.prepare(
-      `UPDATE browser_registration_collections
-          SET last_seen_at = ?, expires_at = ?
-        WHERE id = ?`,
-    ).bind(now, collection.expiresAt, collection.id));
-  }
+): Promise<D1PreparedStatement[]> => [
+  await collectionOwnerStatement(env, collection, now),
+  env.DB.prepare(
+    `INSERT INTO browser_collection_registrations
+      (collection_id, registration_id, added_at, added_via)
+     VALUES (?, ?, ?, 'REGISTRATION')
+     ON CONFLICT (collection_id, registration_id)
+     DO UPDATE SET added_via = 'REGISTRATION'`,
+  ).bind(collection.id, registrationId, now),
+];
 
-  statements.push(env.DB.prepare(
+// Links created from the public name search. These are idempotent and must
+// never upgrade an existing link, so a followed entry can never gain the staff
+// lookup code that the public search deliberately withholds.
+export const followStatements = async (
+  env: Env,
+  collection: BrowserCollection,
+  registrationId: string,
+  now: string,
+): Promise<D1PreparedStatement[]> => [
+  await collectionOwnerStatement(env, collection, now),
+  env.DB.prepare(
     `INSERT OR IGNORE INTO browser_collection_registrations
-      (collection_id, registration_id, added_at)
-     VALUES (?, ?, ?)`,
-  ).bind(collection.id, registrationId, now));
-  return statements;
-};
+      (collection_id, registration_id, added_at, added_via)
+     VALUES (?, ?, ?, 'FOLLOWED')`,
+  ).bind(collection.id, registrationId, now),
+];
