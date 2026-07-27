@@ -565,13 +565,19 @@ jobs:
               if (process.env.AUTOMATIC_RELEASE !== 'true') {
                 throw new Error(`Explicit release tag ${tag} no longer exists; refusing to recreate it.`);
               }
+              let creationRejection;
               try {
                 await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
               } catch (error) {
                 if (error.status !== 422) throw error;
+                creationRejection = error.message ?? 'unknown 422 rejection';
               }
               taggedCommit = await resolveTagCommit();
               if (taggedCommit !== sha) {
+                if (creationRejection !== undefined) {
+                  throw new Error(`Automatic tag ${tag} creation was rejected: ${creationRejection}. `
+                    + 'Deployment already succeeded; fix the tag rule or permissions, then rerun this job.');
+                }
                 throw new Error(`Automatic tag ${tag} was not created at validated source ${sha}.`);
               }
             }
