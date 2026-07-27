@@ -31,13 +31,23 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
     "/heats/round-one/plan-preview",
     "/results/",
     "/api/v1/staff/support/events/",
-    "/return-batches",
-    "/purge-claim",
-    "/purge",
     "/force-delete",
   ]) {
     assert.ok(staffHomeScript.includes(endpoint), `missing endpoint ${endpoint}`);
   }
+  // Returns and the staged purge ceremony are gone; delete event is the only
+  // cleanup call the console can make.
+  for (const endpoint of [
+    "/return-batches",
+    "/purge-claim",
+    "/purge-gate",
+    "/purge-ready",
+    "/dispositions",
+    "return-review",
+  ]) {
+    assert.ok(!staffHomeScript.includes(endpoint), `retired endpoint still present: ${endpoint}`);
+  }
+  assert.doesNotMatch(staffHomeScript, /canReturns|loadReturnReview|loadPurgeGate|reviewEvent/);
   assert.ok(!staffHomeScript.includes("/api/v1/staff/profiles"), "staff profiles moved off the console");
 });
 
@@ -228,8 +238,8 @@ test("the event section leads with create event, then the picker, then the selec
   // The non-administrator region keeps only readiness, with its unchanged canRaceRead wording.
   const directorRegion = directorSection.slice(directorSection.indexOf('<div class="event-detail"'));
   assert.match(directorRegion, /<h3>Readiness and lifecycle<\/h3><p class="muted">Every transition is checked again by the server\./);
-  const stewardRegion = eventSection(renderStaffHome("Return Steward", false, ["RETURN_STEWARD"]));
-  assert.match(stewardRegion, /Use your assigned station section for operational work\./);
+  const registrationRegion = eventSection(renderStaffHome("Registration Staff", false, ["REGISTRATION"]));
+  assert.match(registrationRegion, /Use your assigned station section for operational work\./);
   assert.ok(!directorRegion.includes("data-event-config-card"));
   assert.ok(!directorRegion.includes("data-delete-draft-card"));
 });
@@ -442,9 +452,10 @@ test("lifecycle readiness marks achieved transitions done and a moot reopen not 
     `${eventLifecycleHelpersScript}; return { lifecycleReadinessPresentation, lifecycleStatusOrder };`,
   )();
 
+  // Exactly the six-status lifecycle, in order, with COMPLETED terminal.
   assert.deepEqual(lifecycleStatusOrder, [
     "DRAFT", "REGISTRATION_OPEN", "REGISTRATION_CLOSED", "ROUND_ONE",
-    "FINAL", "COMPLETED", "RETURN_PROCESSING", "ARCHIVED",
+    "FINAL", "COMPLETED",
   ]);
 
   const transition = (fromStatus, toStatus, allowed) => ({
@@ -456,7 +467,6 @@ test("lifecycle readiness marks achieved transitions done and a moot reopen not 
     "start-round-one": transition("REGISTRATION_CLOSED", "ROUND_ONE", false),
     "start-final": transition("ROUND_ONE", "FINAL", false),
     complete: transition("FINAL", "COMPLETED", false),
-    "start-return-processing": transition("COMPLETED", "RETURN_PROCESSING", false),
   };
   const reopen = { ...transition("REGISTRATION_CLOSED", "REGISTRATION_OPEN", false), requiresAdmin: true };
 
@@ -473,7 +483,7 @@ test("lifecycle readiness marks achieved transitions done and a moot reopen not 
     { kind: "blocked", chipText: "Blocked", chipClass: "status-chip blocked", upcoming: true },
   );
   // Genuinely upcoming transitions keep the blocked treatment and their reasons.
-  for (const action of ["start-round-one", "start-final", "complete", "start-return-processing"]) {
+  for (const action of ["start-round-one", "start-final", "complete"]) {
     assert.deepEqual(lifecycleReadinessPresentation(forward[action], "REGISTRATION_OPEN"), {
       kind: "blocked", chipText: "Blocked", chipClass: "status-chip blocked", upcoming: true,
     }, `${action} must stay blocked while upcoming`);
@@ -483,14 +493,15 @@ test("lifecycle readiness marks achieved transitions done and a moot reopen not 
     kind: "not-needed", chipText: "Not needed", chipClass: "status-chip", upcoming: false,
   });
 
-  // ARCHIVED: every forward transition has been passed and reads as done.
+  // COMPLETED is terminal: every forward transition has been passed and reads
+  // as done, and nothing is left upcoming.
   for (const [action, state] of Object.entries(forward)) {
-    assert.deepEqual(lifecycleReadinessPresentation(state, "ARCHIVED"), {
+    assert.deepEqual(lifecycleReadinessPresentation(state, "COMPLETED"), {
       kind: "done", chipText: "Done", chipClass: "status-chip done", upcoming: false,
-    }, `${action} must read as done on an archived event`);
+    }, `${action} must read as done on a completed event`);
   }
   // Reopen keeps genuine blocked semantics when it is unavailable rather than moot.
-  assert.equal(lifecycleReadinessPresentation(reopen, "ARCHIVED").kind, "blocked");
+  assert.equal(lifecycleReadinessPresentation(reopen, "COMPLETED").kind, "blocked");
   assert.equal(lifecycleReadinessPresentation(reopen, "ROUND_ONE").kind, "blocked");
   assert.equal(lifecycleReadinessPresentation({ ...reopen, allowed: true }, "REGISTRATION_CLOSED").kind, "ready");
   assert.equal(lifecycleReadinessPresentation(reopen, "REGISTRATION_CLOSED").kind, "blocked");

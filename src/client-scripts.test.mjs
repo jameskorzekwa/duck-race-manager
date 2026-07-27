@@ -93,9 +93,13 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(staffDuckScript, /registration\.email/);
   assert.match(staffDuckScript, /registration\.phone/);
   assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
-  assert.match(staffDuckScript, /\/dispositions/);
-  assert.match(staffHomeScript, /\/api\/v1\/staff\/events\/return-review/);
-  assert.match(staffHomeScript, /\/purge-ready/);
+  // Returns tracking is gone from every browser client.
+  assert.doesNotMatch(staffDuckScript, /\/dispositions|disposition/);
+  assert.doesNotMatch(staffHomeScript, /return-review|\/purge-ready|\/purge-claim|\/purge-gate|return-batches/);
+  assert.doesNotMatch(staffHomeScript, /disposition|RETURN_STEWARD|RETURN_PROCESSING|ARCHIVED/);
+  // Delete event is the console's only cleanup call.
+  assert.match(staffHomeScript, /\/force-delete/);
+  assert.doesNotMatch(staffHomeScript, /"\/purge"|\/purge",/);
   assert.match(staffHomeScript, /Administrator/);
   assert.doesNotMatch(staffHomeScript, /duckKeepPreference|duck_keep_preference/);
   // Staff account and role management moved to its own /staff/access client.
@@ -404,11 +408,7 @@ const confirmationCallsites = [
   [staffHomeScript, 'if (!await appConfirm(confirmation)) return;'],
   [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Commit this exact balanced plan? Rosters become operational race data.")) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Mark this event purge-ready and disable normal race changes?", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Finalize this return batch? Every staged disposition will become authoritative.")) return;'],
   [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Claim this event for permanent purge? Support mutations will be frozen.", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Permanently delete the complete race dataset now? This cannot be undone.", { danger: true })) return;'],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
 ];
 
@@ -419,8 +419,8 @@ test("every confirmation callsite preserves its warning and returns before mutat
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((inventoryIntakeScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // One staff-access confirmation left the console with its page.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 19);
+  // 19 minus the four retired returns/purge confirmations.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 15);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
 
   let mutations = 0;
@@ -1610,8 +1610,6 @@ test("the live board names the stage for every event lifecycle status", () => {
         "ROUND_ONE",
         "FINAL",
         "COMPLETED",
-        "RETURN_PROCESSING",
-        "ARCHIVED",
       ].map((status) => [status, liveEventStage(status).label]),
     ),
     {
@@ -1621,13 +1619,15 @@ test("the live board names the stage for every event lifecycle status", () => {
       ROUND_ONE: "Round one under way",
       FINAL: "Final under way",
       COMPLETED: "Results official",
-      RETURN_PROCESSING: "Race complete",
-      ARCHIVED: "Race complete",
     },
   );
 
+  // Retired statuses are unknown values now and must fall back like any other.
   // Unknown and prototype-shaped values fall back instead of leaking enum text.
-  for (const status of ["", "SOMETHING_NEW", "constructor", "toString", undefined, null]) {
+  for (const status of [
+    "", "SOMETHING_NEW", "constructor", "toString", undefined, null,
+    "RETURN_PROCESSING", "ARCHIVED",
+  ]) {
     assert.deepEqual(
       liveEventStage(status),
       { label: "Race stage updating", summary: "The race stage is being confirmed." },
@@ -1663,9 +1663,11 @@ test("the live board summary leads with the stage and keeps running-heat detail"
     liveStageSummary("COMPLETED", null, true),
     "Every heat is finished and the results are final. The latest official heats and results are below.",
   );
-  assert.match(liveStageSummary("RETURN_PROCESSING", null, true), /^The race is complete and staff are collecting the ducks\./);
-  assert.match(liveStageSummary("ARCHIVED", null, false), /^The race is complete\./);
   assert.match(liveStageSummary("DRAFT", null, false), /^Race staff are still preparing this race\./);
+  // Retired statuses get the neutral fallback, not a returns-flavoured message.
+  for (const status of ["RETURN_PROCESSING", "ARCHIVED"]) {
+    assert.match(liveStageSummary(status, null, true), /^The race stage is being confirmed\./, status);
+  }
 });
 
 test("the live board renders the stage chip from the public board status only", () => {
@@ -2295,7 +2297,7 @@ test("the public duck detail page subscribes to the shared live hub and refetche
   });
 
   assert.equal(page.subscriptions.length, 1);
-  assert.deepEqual(page.subscriptions[0].domains, ["event", "participants", "ducks", "heats", "returns"]);
+  assert.deepEqual(page.subscriptions[0].domains, ["event", "participants", "ducks", "heats"]);
   assert.equal(page.subscriptions[0].root, page.nodes["[data-live-board]"]);
 
   await page.api.liveRefreshWork();

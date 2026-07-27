@@ -355,7 +355,10 @@ export const createWorker = (
         login.searchParams.set("returnTo", url.pathname);
         return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
       }
-      if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"])) {
+      // Must stay identical to the role set `staff-api.ts` requires for
+      // `GET /api/v1/staff/ducks/:token`, which this page fetches immediately.
+      // A wider page allow-list only renders a console that instantly 403s.
+      if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"])) {
         return withSessionCookies(html(renderStaffAuthError("This account does not have permission to inspect staff duck records.", actor), 403, true));
       }
       return withSessionCookies(staffHtml(renderStaffDuck(

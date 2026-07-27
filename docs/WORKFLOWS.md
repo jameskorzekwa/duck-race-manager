@@ -49,20 +49,21 @@ not authorized.
 | Open `/staff/start-line` | `HEAT_RUNNER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/finish-line` and resolve a roster duck by tag URL/number | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
-| Return review, dispositions, and return-batch create/stage/undo/finalize | `RETURN_STEWARD` or `RACE_DIRECTOR` | Yes |
 | Create/configure/delete draft; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
 | Open `/staff/access` | None | Yes |
-| Purge readiness, cancellation, claim, and permanent purge | None | Yes |
-| Force delete of the whole event dataset in any state | None | Yes |
+| Delete event: the whole dataset in any state | None | Yes |
+
+The operational role vocabulary is `REGISTRATION`, `DUCK_MANAGER`, `ANNOUNCER`,
+`HEAT_RUNNER`, `RESULT_TAKER`, and `RACE_DIRECTOR`. Granting or assigning any
+other value is rejected as an invalid request.
 
 All staff APIs still require an active profile. Authentication loads and
 validates current assignment rows from D1 on every request. A regular account
 with no current roles receives `403` for operational routes; there is no broad
 production fallback. Role checks happen server-side even when the console hides
 an unauthorized section. Heat and announcer responses include roster names as
-required for race operation, but no contact fields. Duck/return-only inspection
-also omits participant identity and contact fields.
+required for race operation, but no contact fields.
 
 ## State Models
 
@@ -77,17 +78,18 @@ DRAFT
   -> ROUND_ONE
   -> FINAL
   -> COMPLETED
-  -> RETURN_PROCESSING
-  -> ARCHIVED
-  -> deleted by purge
+  -> deleted by Delete event
 ```
 
+The lifecycle is exactly these six statuses.
+
 `REGISTRATION_CLOSED` can return to `REGISTRATION_OPEN` only before any heat
-exists and only by a system administrator. `COMPLETED` can move to
-`RETURN_PROCESSING` explicitly or when the first disposition or return batch is
-finalized. `ARCHIVED` is a temporary purge-ready state, not retained event
-history. A system administrator can cancel purge readiness and return the event
-to `RETURN_PROCESSING` before a purge claim is made.
+exists and only by a system administrator. `COMPLETED` is terminal: race results
+stay publicly visible there indefinitely. The only way out of `COMPLETED` is a
+system administrator running Delete event, which removes the whole dataset.
+
+Duck returns and dispositions are not tracked. There is no return review, no
+return batch, and no staged purge ceremony.
 
 ### Registration
 
@@ -136,10 +138,9 @@ The supported complete sequence is:
 10. Race readers verify automatic finalist promotion and the race director
     starts the final.
 11. Heat runners run the final and a result taker publishes the complete podium.
-12. The race director completes the event and return stewards reconcile every
-    physical duck.
-13. A system administrator marks the event purge-ready, checks and claims the
-    final purge gate, then permanently purges the race dataset.
+12. The race director completes the event. Results stay publicly visible.
+13. When the race is finished with, a system administrator deletes the event,
+    which permanently removes the whole race dataset.
 
 ### Lifecycle Command Retry and Refresh
 
@@ -211,8 +212,8 @@ the duck. Staff record only the actual physical disposition after the race.
 The database retains the legacy `race_entries.duck_keep_preference` column for
 compatibility. New entries use its existing default, and the application does
 not read, explicitly write, expose, or make decisions from that column. Stored
-values on existing rows are ignored and are removed with the race entry during
-the final purge.
+values on existing rows are ignored and are removed with the race entry when the
+event is deleted.
 
 **Implemented security checks:** the API requires JSON, limits the request to
 16 KiB, rejects a non-matching `Origin` header, validates the event and fields,
@@ -331,9 +332,9 @@ private status tokens. Clearing or expiring the cookie removes the shortcut but
 does not withdraw or delete registrations. There is no current control to
 remove one registration from the collection.
 
-Public race status in a collection becomes `null` once the event enters
-`RETURN_PROCESSING` or `ARCHIVED`, although the collection's registration name,
-code, and registration status remain until purge.
+Public race status in a collection stays available through `COMPLETED`. It
+becomes `null` only when an administrator deletes the event, which also removes
+the collection's registration entries.
 
 ### Private Status Link
 
@@ -350,7 +351,7 @@ The private HTML page refreshes these registration and race facts after live
 signals and through the same polling fallback. The private token remains the
 credential and is never sent through the live signal channel. A missing private
 record clears the rendered participant facts instead of leaving stale data on
-screen; a complete purge revalidates the server route immediately.
+screen; deleting the event revalidates the server route immediately.
 
 **Operator step:** tell participants to bookmark the private link and separately
 save the short lookup code. The short code is not authorization for the private
@@ -444,8 +445,7 @@ these are true:
 - The event is between `REGISTRATION_OPEN` and `COMPLETED`.
 
 Otherwise the request redirects to the home page. Unknown, invalid, retired,
-unassigned, return-processing, archived, and purged tags therefore do not expose
-inventory metadata. A successful status page can show the event, policy-filtered
+unassigned, and deleted tags therefore do not expose inventory metadata. A successful status page can show the event, policy-filtered
 participant name, visible duck number, assigned round-one/final heat, current
 active heat, and race outcome. It never shows contact details, lookup codes,
 private links, staff history, or storage location.
@@ -453,20 +453,17 @@ private links, staff history, or storage location.
 ### Authenticated Staff Scan
 
 **Implemented:** a staff browser opening `/t/<tag-token>` is redirected to the
-protected staff duck page. `REGISTRATION`, `DUCK_MANAGER`, `RETURN_STEWARD`,
-`RACE_DIRECTOR`, and administrators may inspect a known tag. Registration and
-race-director views can include participant identity, lookup code, email, and
-phone. Duck-manager views retain inventory/relationship data without participant
-identity or contacts. Return-only views contain return-relevant duck, event,
-assignment-presence, and disposition state only.
+protected staff duck page. `REGISTRATION`, `DUCK_MANAGER`, `RACE_DIRECTOR`, and
+administrators may inspect a known tag. Registration and race-director views can
+include participant identity, lookup code, email, and phone. Duck-manager views
+retain inventory/relationship data without participant identity or contacts.
 
-An active, available or event-reserved, unassigned duck with no disposition is
-offered for pairing only to registration-authorized accounts. An assigned or
-ineligible duck remains an inspection view.
+An active, available or event-reserved, unassigned duck is offered for pairing
+only to registration-authorized accounts. An assigned or ineligible duck remains
+an inspection view.
 Closed historical assignments remain in history but do not appear as the
-current assignment or suppress the pairing prompt after unassignment.
-During `COMPLETED` or `RETURN_PROCESSING`, the same page offers disposition entry
-or correction.
+current assignment or suppress the pairing prompt after unassignment. The page
+offers pairing and inspection only; there is no disposition entry.
 
 **Implemented scan stations:** `/staff/finish-line` can read an NFC URL through
 Android Web NFC when `NDEFReader` is available. Its first-class
@@ -613,13 +610,13 @@ and system administrators.
 ### Console Event Existence Gating
 
 The console's **Event** section is always available. **Participants**,
-**Inventory**, **Heats**, **Returns**, and **Support**, and their console
+**Inventory**, **Heats**, and **Support**, and their console
 navigation anchors, are event-scoped: they are hidden in the served markup and
 are revealed only when an event loads, so no section flashes and then vanishes.
 Role gating still applies on top of event existence, so an event-scoped section
 the actor may not use stays hidden even once an event exists.
 
-While no event row exists the console hides all five sections and their anchors
+While no event row exists the console hides all four sections and their anchors
 and shows the Event section with a **No race yet** state and, for a system
 administrator, the **Create event** card already open.
 
@@ -732,10 +729,9 @@ A race director or system administrator can complete the event when the final is
 all final heats are finalized or cancelled, and each finalized final contains
 exactly places 1 through `min(3, final roster size)`.
 
-A race director or system administrator can explicitly start return processing from
-`COMPLETED` when no heat is `CALLING`, `RUNNING`, or `AWAITING_RESULT`. Recording
-the first disposition or finalizing the first return batch also changes a
-`COMPLETED` event to `RETURN_PROCESSING`.
+`COMPLETED` is the final lifecycle status. There is no transition past it; the
+event stays there, with results publicly visible, until an administrator runs
+Delete event.
 
 ## Participant Corrections and Status Changes
 
@@ -875,8 +871,8 @@ session history/count once, enters **Remove duck**, and then returns to
 already-registered warning.
 
 An exact canonical URL absent from the current dataset is reusable rather than a
-permanent duplicate. This is the expected state for a physical duck after complete
-race purge: the normal two-phase flow allocates new inventory and overwrites the
+permanent duplicate. This is the expected state for a physical duck after the
+event is deleted: the normal two-phase flow allocates new inventory and overwrites the
 old URL with newly generated provisioning information. No tombstone or
 cross-race compatibility row is retained. Blank tags and unrelated NDEF content
 are likewise writable after the station starts.
@@ -1164,9 +1160,8 @@ the final roster is locked or underway.
 ### Final Correction
 
 Current final result correction and reopen routes are available only after the
-event has been moved to `COMPLETED` and before return processing has begun.
-Therefore an operator who finds a podium error must first complete the event,
-then correct or reopen it.
+event has been moved to `COMPLETED`. Therefore an operator who finds a podium
+error must first complete the event, then correct or reopen it.
 
 A direct final correction supersedes the old podium and publishes a new result
 revision while the event remains `COMPLETED`. Reopening supersedes and removes
@@ -1174,10 +1169,9 @@ the podium, changes the heat to `AWAITING_RESULT`, and moves the event back to
 `FINAL`; staff must republish the podium and complete the event again.
 
 Final correction and reopen are blocked after any event duck reservation is
-released or any disposition exists. They are also unavailable once the event
-has explicitly entered `RETURN_PROCESSING`.
+released.
 
-Historical result revisions remain until the race purge.
+Historical result revisions remain until the event is deleted.
 
 ## Public Race Results
 
@@ -1189,9 +1183,9 @@ home page, private status pages, and public duck-tag status pages. It includes:
   prominent plain-language stage chip and summary line beside the event name:
   `DRAFT` race being prepared, `REGISTRATION_OPEN` participant registration
   open, `REGISTRATION_CLOSED` registration closed while heats are finalized,
-  `ROUND_ONE` round one under way, `FINAL` final under way, `COMPLETED` results
-  official, and `RETURN_PROCESSING`/`ARCHIVED` race complete. An unrecognized
-  status falls back to neutral wording instead of raw enum text.
+  `ROUND_ONE` round one under way, `FINAL` final under way, and `COMPLETED`
+  results official. An unrecognized status falls back to neutral wording
+  instead of raw enum text.
 - Ordered round-one and final heats.
 - Safe heat status, including calling, running, and awaiting-result emphasis.
 - Policy-filtered participant display names and visible duck numbers.
@@ -1232,7 +1226,7 @@ frame with WebSocket policy code `1008`.
 
 After a successful mutating API handler has committed, the Worker classifies its
 fixed route into one or more finite domains: `event`, `participants`, `ducks`,
-`heats`, `returns`, `staff`, or `support`. Permanent purge uses `all`.
+`heats`, `staff`, or `support`. Delete event uses `all`.
 Publication runs best-effort through `ExecutionContext.waitUntil`.
 Read-only GETs, round-one plan preview, and provisioning tag classification do
 not publish. Replayed successful mutation responses may publish a harmless
@@ -1262,72 +1256,14 @@ rosters are replaced only when heat ID, revision, or state changed, with focus
 restored when possible.
 
 An `all` signal is exceptional: every page removes its rendered main content and
-server-reloads immediately so purge cannot leave participant or staff data on
+server-reloads immediately so deletion cannot leave participant or staff data on
 screen. Staff deactivation and reduced roles use the authorization revalidation
 path above and likewise override dirty-form deferral. D1/API data is always
 authoritative, and a failed live publication never changes a committed mutation
 response.
 
-Public race status is available only through `COMPLETED`. Starting return
-processing removes tag and name-search race status from public access before
-the final purge.
-
-## Returns and Dispositions
-
-### Single Duck
-
-After racing is `COMPLETED` or in `RETURN_PROCESSING`, a return steward, race director, or administrator
-can record a disposition by opening an active tag or entering a visible duck
-number in return review. Allowed dispositions and resulting inventory states
-are:
-
-| Disposition | Inventory state |
-| --- | --- |
-| `RETURNED` | `AVAILABLE` |
-| `QUARANTINED` | `QUARANTINED` |
-| `DAMAGED` | `DAMAGED` |
-| `RETIRED` | `RETIRED` |
-| `KEPT` | `KEPT` |
-| `MISSING` | `MISSING` |
-| `UNACCOUNTED_FOR` | `UNACCOUNTED_FOR` |
-
-The atomic command creates or updates the event disposition, closes any active
-assignment, releases the event reservation, updates inventory, audits the
-action, and moves a completed event to `RETURN_PROCESSING`. Submitting another
-disposition for the same event duck is an explicit correction and updates the
-authoritative outcome.
-
-**Operator step:** visually confirm the physical duck and select the actual
-outcome. There is no advance participant preference to consult. Use
-visible-number entry for missing/unreadable tags. Disposition does not change
-the duck's stored physical-condition field; it changes inventory state.
-
-### Bulk Return Batch
-
-Return stewards, race directors, and administrators can:
-
-1. Start an open batch for a completed/writable event.
-2. Stage unresolved, unreleased ducks by visible number and disposition.
-3. Undo only the latest non-undone item in that open batch.
-4. Finalize a nonempty batch.
-
-Staging does not change assignment, reservation, disposition, or inventory.
-Finalization applies every active item atomically, closes assignments, releases
-reservations, updates inventory, changes the event to `RETURN_PROCESSING`, and
-marks the batch finalized. A duck cannot be actively staged twice, and a duck
-already given a disposition cannot be staged.
-
-There is no cancel/delete operation for an accidentally created open batch. An
-open or `FINALIZING` batch blocks the final purge gate. Operators should not
-start a batch until they intend to add at least one unresolved duck and finalize
-it. An abandoned empty batch currently has no console recovery path.
-
-### Return Review
-
-Return stewards, race directors, and administrators can view the current completed, return-processing, or archived
-event's total ducks, unresolved duck numbers, unreleased reservations,
-disposition counts, active-assignment flag, and blocking-heat flag. The review
-does not expose participant data.
+Public race status is available through `COMPLETED` and stays available there.
+It disappears only when an administrator deletes the event.
 
 ## Staff Access Lifecycle
 
@@ -1340,7 +1276,6 @@ assignments from this fixed vocabulary:
 - `ANNOUNCER`
 - `HEAT_RUNNER`
 - `RESULT_TAKER`
-- `RETURN_STEWARD`
 - `RACE_DIRECTOR`
 
 System administrators have no assignment rows. Migration `0012` deliberately
@@ -1387,7 +1322,7 @@ Deactivation does not revoke operational assignments, so reactivation restores
 the same role set. Promotion to administrator closes current assignment rows;
 demotion requires a new nonempty set. An inactive profile cannot authenticate
 even with an otherwise valid Cognito token. Staff access, assignment history,
-and lifecycle command/audit records are retained across race purges.
+and lifecycle command/audit records are retained across event deletions.
 
 ## Audit and Support
 
@@ -1404,7 +1339,7 @@ administrators. Duck inventory/relationship history is restricted to duck
 managers, race directors, and administrators, with participant identity omitted
 unless the actor also has participant-PII authority. Only a system administrator
 can open support summary, notification records/attempts, the redacted event
-audit timeline, and purge-gate diagnostics.
+and audit timeline diagnostics.
 
 The support audit timeline intentionally returns event/action/subject,
 actor type and display name, time, and a safe notification error code. It does
@@ -1426,83 +1361,17 @@ currently delivered, regardless of the stored email-notification setting.
 Notification support controls operate only on records inserted by some external
 or future process and must not be presented as proof that delivery exists.
 
-## Purge Readiness and Permanent Purge
+## Delete Event (Any State)
 
-Purge has three distinct administrator-only stages.
+Deleting the event is the only cleanup path. There is no purge-readiness stage,
+no purge gate, no purge claim, and no physical reconciliation prerequisite.
 
-### Stage 1: Mark Purge-Ready
-
-The system administrator reviews all physical outcomes and acknowledges
-permanent deletion. QuickDucks moves the event to `ARCHIVED` only when:
-
-- No heat is `RUNNING` or `AWAITING_RESULT`.
-- Every event duck has a disposition.
-- Every event reservation is released.
-- Every duck assignment is closed.
-
-`ARCHIVED` disables normal race operation. Before a purge claim, an
-administrator can cancel purge readiness with a reason, returning the event to
-`RETURN_PROCESSING` for corrections.
-
-### Stage 2: Check and Claim Purge
-
-The administrator opens the purge gate. Claim is allowed only when:
-
-- The event is `ARCHIVED`.
-- It is the only event dataset.
-- No heat is running or awaiting a result.
-- No race command has a null completion time.
-- Every notification is terminal: delivered, failed, bounced, complained,
-  suppressed, or cancelled.
-- Every event duck has a disposition and released reservation.
-- No active duck assignment remains.
-- No return batch is open or finalizing.
-- No prior purge claim exists.
-
-The administrator types exactly `DELETE <event name>`. A successful claim
-records `PURGING`, writes command/audit history, and freezes event updates.
-Support notification and return mutations also reject a claimed event.
-
-### Stage 3: Permanently Delete
-
-The administrator again acknowledges deletion and types exactly
-`DELETE <event name>`. Final purge requires the archived event, active purge
-claim, no other event, and a disposition for every event duck. It then deletes
-in one D1 batch:
-
-- Browser collection links and browser collections.
-- Email notifications and attempts.
-- Current and superseded heat results, entries, and heats.
-- Return batches and items.
-- Dispositions, assignments, reservations, and duck inventory events.
-- Event audit events and race commands.
-- Race entries, registrations, and the event.
-- Every duck and tag row.
-
-The response clears browser cache, cookies, and storage and expires the browser
-collection cookie. Repeating purge after the event is absent returns success
-without another delete.
-
-Staff profiles, staff access/lifecycle history, organization event defaults,
-schema, and infrastructure remain. The next event starts with no race duck/tag
-rows, so each physically selected duck must be intaken again.
-
-The application purge deletes the primary D1 rows it manages. It does not
-operate Cloudflare account-level recovery systems, D1 time-travel retention,
-external exports, third-party logs, or backups. Operators must manage those
-systems consistently with the stated privacy policy.
-
-## Administrator Force Delete (Any State)
-
-`POST /api/v1/staff/events/{id}/force-delete` is a separate administrator-only
-escape hatch that permanently deletes an event and its complete dataset in any
-event status, including mid-race. It does not replace the staged purge and has
-no readiness, reconciliation, or claim prerequisites; the staged purge workflow
-is unchanged. Like the staged purge, it does require the event to be the only
-race dataset: force delete works from any state, but only while its event is
-the only event row. If another event exists, the request returns `409` and
-deletes nothing, and the same only-event guard is re-checked inside the atomic
-batch so a concurrently created second event makes the batch delete nothing.
+`POST /api/v1/staff/events/{id}/force-delete` is administrator-only and
+permanently deletes an event and its complete dataset from any event status,
+including mid-race and from `COMPLETED`. It does require the event to be the
+only race dataset: if another event exists the request returns `409` and deletes
+nothing, and the same only-event guard is re-checked inside the atomic batch so
+a concurrently created second event makes the batch delete nothing.
 
 The request requires an RFC 4122 v4 `commandId`, the event's current
 `revision`, and `confirmName` typed exactly as the event name. The staff
@@ -1512,21 +1381,27 @@ enforces the administrator requirement regardless of the console. A stale
 revision returns `409` without deleting anything; a wrong typed name returns
 `422`.
 
-One atomic D1 batch deletes the same complete dataset as the final purge:
-registrations, race entries, duck assignments, event duck reservations,
-dispositions, duck inventory events, ducks and tags, heats, heat entries,
-current and superseded heat results, return batches and items, email
-notifications and attempts, browser collection links and collections, any purge
-claim, race commands, audit events, and the event row itself. Staff profiles,
-staff access/lifecycle history, and organization event defaults remain.
+One atomic D1 batch deletes the complete dataset: registrations, race entries,
+duck assignments, event duck reservations, duck inventory events, ducks and
+tags, heats, heat entries, current and superseded heat results, email
+notifications and attempts, browser collection links and collections, race
+commands, audit events, and the event row itself. Staff profiles, staff
+access/lifecycle history, and organization event defaults remain. The next event
+starts with no race duck/tag rows, so each physically selected duck must be
+intaken again.
+
+The deletion removes the primary D1 rows the application manages. It does not
+operate Cloudflare account-level recovery systems, D1 time-travel retention,
+external exports, third-party logs, or backups. Operators must manage those
+systems consistently with the stated privacy policy.
 
 Because the deletion removes its own command and audit history, a successful
-force delete records nothing afterward. A surviving command record with the
-same identifier always belongs to a different operation and returns `409`; a
+delete records nothing afterward. A surviving command record with the same
+identifier always belongs to a different operation and returns `409`; a
 well-formed retry against the now-missing event returns a deterministic
 already-deleted success (`deleted: true, alreadyDeleted: true`) instead of a
 stored replay. This is irreversible, and connected consoles receive an `all`
-refresh signal exactly as they do for permanent purge.
+refresh signal so no page keeps deleted data on screen.
 
 ## Failure, Retry, Idempotency, and Concurrency
 
@@ -1535,14 +1410,14 @@ refresh signal exactly as they do for permanent purge.
 Most current mutations accept a client-generated UUID command ID. A matching
 replay returns the stored result and `replayed: true`; reuse for another
 operation or materially different request returns a conflict. Event and heat
-commands use request fingerprints where needed. Permanent purge itself has no
-command ID but is idempotent once its event no longer exists.
+commands use request fingerprints where needed. Delete event is idempotent once
+its event no longer exists.
 
 Public registration preserves its pending command/private-token pair across a
 network failure and is safe to retry. The staff console generally creates a new
 command ID for each button submission and does not persist that ID in an
 offline outbox. If a staff response is lost after a possible save, refresh the
-relevant event, participant, duck, heat, batch, or support view before pressing
+relevant event, participant, duck, heat, or support view before pressing
 the action again. A state conflict is safer than assuming the first action
 failed.
 
@@ -1555,17 +1430,16 @@ returns `409` and no accepted partial state. The operator should refresh, review
 the new state, and make a new decision rather than repeatedly submitting stale
 data.
 
-Pairing and return staging rely on current-state predicates and uniqueness
-constraints rather than a user-supplied entity revision. Concurrent claims of
-the same duck, participant, heat slot, result place, batch duck, active tag, or
-purge claim cannot both commit.
+Pairing relies on current-state predicates and uniqueness constraints rather
+than a user-supplied entity revision. Concurrent claims of the same duck,
+participant, heat slot, result place, or active tag cannot both commit.
 
 ### Atomicity
 
 D1 batches make the command, domain changes, and audit records all-or-nothing
 for implemented workflows. This includes registration, pairing, inventory/tag
-changes, result publication/correction, return batch finalization, purge claim,
-and purge. Errors report conflict/retry rather than accepting known partial
+changes, result publication/correction, and event deletion. Errors report
+conflict/retry rather than accepting known partial
 database changes.
 
 External Cognito changes cannot share a D1 transaction. Staff grant and
@@ -1629,7 +1503,7 @@ clears on the next success.
   lookup codes, private tokens, tag tokens, or credentials in logs or exports.
 - Public registration is Turnstile-protected. The current code does not apply a
   separate registration rate limiter or a private-status rate limiter.
-- Race purge removes application-managed race, participant, duck, tag, browser,
+- Deleting the event removes application-managed race, participant, duck, tag, browser,
   result, command, and event-audit rows. Staff identity and staff-access history
   are intentionally retained.
 
@@ -1665,7 +1539,7 @@ Use these operating rules with older or non-technical staff:
 8. Use visible duck numbers at the finish station and for return exceptions when
    a tag cannot be opened. It is not a universal fallback for other workflows.
 9. Keep destructive administrator tasks separate from routine race operation.
-   Purge requires return review, two typed confirmations, and a distinct claim.
+   Delete event requires a typed event name and an explicit danger dialog.
 10. Do not teach unsupported offline, camera scan, random-draw scanning, or
     email-notification procedures as if they work. NFC writing works only in the
     protected blank-sticker provisioning station.
@@ -1755,7 +1629,7 @@ Important reconciliations include:
 | Lost-duck replacement, swap, and location tracking work throughout the race | Only pre-race reassignment and tag replacement are implemented. |
 | Result correction is administrator/race-director only | This is current behavior; result takers can finalize but cannot correct or reopen. |
 | Announcer checklist and physical placement are recorded | Only read-only rosters exist; these are operator steps. |
-| Multiple annual events/history are retained | Only one event dataset may exist, and full race data is purged before the next event. |
+| Multiple annual events/history are retained | Only one event dataset may exist, and the previous race is deleted before the next event. |
 
 Infrastructure and domain setup documents remain authoritative for their own
 deployment and permanent-origin subjects, but not for application workflows.

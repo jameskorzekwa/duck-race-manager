@@ -31,7 +31,7 @@ wrangler.jsonc       # Production Worker, D1, queue, rate-limit, and domain bind
 | Live board and refresh signals | `src/race-board.ts`, `src/live-updates.ts` | D1 remains authoritative; WebSockets carry refresh signals only |
 | Staff route composition | `src/api.ts` | Handler ordering and fallthrough are deliberate |
 | Event, participant, duck, heat, support operations | `src/*-operations.ts` | HTTP validation, SQL, audit, and responses stay together |
-| Scan pairing, single returns, final purge | `src/staff-api.ts` | Legacy fallback owns several active routes |
+| Scan pairing and staff duck inspection | `src/staff-api.ts` | Legacy fallback owns several active routes |
 | Staff roles | `src/authorization.ts`, `src/auth.ts` | Admin bypass plus composable operational roles |
 | HTML/CSS and browser behavior | `src/site.ts`, `src/client-scripts.ts` | No frontend build pipeline |
 | Current product behavior | `docs/WORKFLOWS.md` | Canonical over older design documents |
@@ -65,8 +65,9 @@ tests, dependency audit, or migrations. CI also runs
   WebSocket channel.
 - API/database rows use `snake_case`; public responses map explicitly to
   `camelCase`.
-- The application supports one active event dataset and purges the whole race
-  after physical return reconciliation.
+- The application supports one active event dataset. Race results stay visible
+  through `COMPLETED` until an administrator deletes the event, which is the
+  only cleanup path.
 
 ## SECURITY RULES
 
@@ -80,8 +81,8 @@ tests, dependency audit, or migrations. CI also runs
 - Keep Worker invocation logs disabled because private credentials occur in URL
   paths.
 - Tag GETs are read-only. NFC/QR tags contain only the permanent canonical URL.
-- Purge is administrator-only, gated, irreversible, and clears the complete
-  event dataset. Never weaken its claim and typed-confirmation sequence.
+- Delete event is administrator-only, irreversible, and clears the complete
+  event dataset. Never weaken its typed event-name confirmation.
 
 ## REPOSITORY RULES
 

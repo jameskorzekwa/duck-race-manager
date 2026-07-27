@@ -54,6 +54,9 @@ test("Durable Object broadcasts one bounded privacy-safe signal to every device"
     JSON.stringify({ type: "refresh", domains: ["participants", "participants"], version }),
     JSON.stringify({ type: "refresh", domains: ["private-token"], version }),
     JSON.stringify({ type: "refresh", domains: ["all", "participants"], version }),
+    // The retired domain is outside the finite vocabulary and is refused.
+    JSON.stringify({ type: "refresh", domains: ["returns"], version }),
+    JSON.stringify({ type: "refresh", domains: ["ducks", "returns"], version }),
   ]) {
     const invalid = await object.fetch(new Request("https://race-updates.internal/publish", { method: "POST", body }));
     assert.equal(invalid.status, 400);
@@ -172,10 +175,6 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
     ["DELETE", "/api/v1/staff/events/event", ["event"]],
     ["POST", "/api/v1/staff/events/event/open-registration", ["event", "participants"]],
     ["POST", "/api/v1/staff/events/event/start-round-one", ["event", "participants", "ducks", "heats"]],
-    ["POST", "/api/v1/staff/events/event/start-return-processing", ["event", "ducks", "returns"]],
-    ["POST", "/api/v1/staff/events/event/purge-ready", ["event", "returns", "support"]],
-    ["POST", "/api/v1/staff/events/event/purge-ready/cancel", ["event", "returns", "support"]],
-    ["POST", "/api/v1/staff/events/event/purge", ["all"]],
     ["POST", "/api/v1/staff/events/event/force-delete", ["all"]],
     ["POST", "/api/v1/staff/events/event/registrations", ["participants"]],
     ["PATCH", "/api/v1/staff/registrations/registration", ["participants", "ducks", "heats"]],
@@ -193,12 +192,7 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
     ["PUT", "/api/v1/staff/events/event/heats/heat/roster", ["event", "participants", "heats"]],
     ["POST", "/api/v1/staff/events/event/heats/heat/results/finalize", ["event", "participants", "heats"]],
     ["POST", "/api/v1/staff/events/event/heats/heat/start", ["event", "participants", "heats"]],
-    ["POST", "/api/v1/staff/events/event/ducks/42/dispositions", ["ducks", "returns", "support"]],
-    ["POST", "/api/v1/staff/ducks/tag/dispositions", ["ducks", "returns", "support"]],
-    ["POST", "/api/v1/staff/support/events/event/return-batches", ["ducks", "returns", "support"]],
-    ["POST", "/api/v1/staff/support/events/event/return-batches/batch/items", ["ducks", "returns", "support"]],
     ["POST", "/api/v1/staff/support/events/event/notifications/notification/retry", ["support"]],
-    ["POST", "/api/v1/staff/support/events/event/purge-claim", ["event", "support"]],
   ];
 
   for (const [method, path, expected] of cases) {
@@ -212,9 +206,34 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
     ["POST", "/api/v1/staff/events/event/heats/round-one/plan-preview"],
     ["POST", "/api/v1/staff/inventory/provisioning/classify"],
     ["POST", "/api/v1/unknown"],
+    // Retired return and purge routes classify to nothing at all.
+    ["POST", "/api/v1/staff/events/event/start-return-processing"],
+    ["POST", "/api/v1/staff/events/event/purge-ready"],
+    ["POST", "/api/v1/staff/events/event/purge-ready/cancel"],
+    ["POST", "/api/v1/staff/events/event/purge"],
+    ["POST", "/api/v1/staff/events/event/ducks/42/dispositions"],
+    ["POST", "/api/v1/staff/ducks/tag/dispositions"],
+    ["POST", "/api/v1/staff/support/events/event/return-batches"],
+    ["POST", "/api/v1/staff/support/events/event/return-batches/batch/items"],
+    ["POST", "/api/v1/staff/support/events/event/purge-claim"],
   ]) {
     assert.equal(mutationRefreshDomains(new Request(`https://quickducks.com${path}`, { method })), null);
   }
+});
+
+// The domain vocabulary is finite and shared with every browser client. The
+// retired `returns` domain must not be publishable or accepted on a signal.
+test("the live-update domain vocabulary no longer contains returns", () => {
+  assert.deepEqual([...LIVE_UPDATE_DOMAINS], [
+    "all",
+    "event",
+    "participants",
+    "ducks",
+    "heats",
+    "staff",
+    "support",
+  ]);
+  assert.equal(LIVE_UPDATE_DOMAINS.includes("returns"), false);
 });
 
 test("scheduled publication contains domains and random version only", async () => {

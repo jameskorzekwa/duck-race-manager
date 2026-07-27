@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { handleApi } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
-import { hasAllRoles, hasAnyRole } from "./authorization.ts";
+import { hasAllRoles, hasAnyRole, readStoredOperationalRoles } from "./authorization.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 
 const migrationsUrl = new URL("../db/migrations/", import.meta.url);
@@ -87,6 +87,43 @@ test("shared any/all checks fail closed and allow administrator bypass", () => {
   assert.equal(hasAllRoles({ ...regular, isSystemAdmin: true, roles: [] }, ["REGISTRATION", "RACE_DIRECTOR"]), true);
 });
 
+// The tolerant D1 projection is the only place unknown stored vocabulary is
+// accepted, so it is pinned directly: it filters the fixed internal enum rather
+// than trusting, coercing, or de-duplicating whatever D1 happens to hold.
+test("stored role projection keeps only exact known roles, once each, and grants nothing else", () => {
+  // Non-strings can never match an enum member and must not throw.
+  assert.deepEqual(readStoredOperationalRoles([null]), []);
+  assert.deepEqual(readStoredOperationalRoles([0]), []);
+  assert.deepEqual(readStoredOperationalRoles([undefined]), []);
+  // Prototype keys are values, not lookups: nothing is inherited or granted.
+  assert.deepEqual(readStoredOperationalRoles(["__proto__"]), []);
+  assert.deepEqual(readStoredOperationalRoles(["constructor"]), []);
+  // Matching is exact and case-sensitive.
+  assert.deepEqual(readStoredOperationalRoles(["registration"]), []);
+  assert.deepEqual(readStoredOperationalRoles(["REGISTRATION "]), []);
+  // A duplicated stored row projects one role, not two.
+  assert.deepEqual(readStoredOperationalRoles(["REGISTRATION", "REGISTRATION"]), ["REGISTRATION"]);
+  // The retired vocabulary is ignored instead of failing authentication.
+  assert.deepEqual(readStoredOperationalRoles(["RETURN_STEWARD"]), []);
+  assert.deepEqual(readStoredOperationalRoles([]), []);
+  // Valid roles survive alongside stale ones, in the canonical enum order.
+  assert.deepEqual(
+    readStoredOperationalRoles(["RACE_DIRECTOR", "RETURN_STEWARD", "REGISTRATION", "registration"]),
+    ["REGISTRATION", "RACE_DIRECTOR"],
+  );
+  // An ignored value can never satisfy a required-role check.
+  const stale = {
+    id: "stale",
+    cognitoSub: "stale-sub",
+    email: "stale@example.com",
+    displayName: "Stale",
+    isSystemAdmin: false,
+    roles: readStoredOperationalRoles(["RETURN_STEWARD"]),
+    authentication: "bearer",
+  };
+  assert.equal(hasAnyRole(stale, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"]), false);
+});
+
 test("0012 does not seed existing regular staff and enforces normalized role constraints", () => {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
@@ -151,6 +188,10 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     announcer: "ANNOUNCER",
     heats: "HEAT_RUNNER",
     results: "RESULT_TAKER",
+    // Deliberately stale: RETURN_STEWARD is retired from the vocabulary but
+    // its rows survive in D1 until the PR 4 schema rebuild. This actor proves
+    // the deploy window is safe — the session still loads, and the retired
+    // role confers nothing.
     returns: "RETURN_STEWARD",
     director: "RACE_DIRECTOR",
   };
@@ -191,6 +232,11 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   assert.deepEqual(actors.admin.roles, []);
   assert.deepEqual(actors.registration.roles, ["REGISTRATION"]);
   assert.deepEqual(actors.none.roles, []);
+  // A live D1 row carrying the retired role authenticates without crashing and
+  // projects no roles, so it is indistinguishable from an actor with none.
+  assert.notEqual(actors.returns, null);
+  assert.deepEqual(actors.returns.roles, []);
+  assert.equal(actors.returns.isSystemAdmin, false);
 
   const api = (actor, path, options = {}) => {
     const headers = new Headers({ authorization: "Bearer test.actor.token" });
@@ -277,12 +323,17 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     commandId: command(), revision: 0,
   })).status, 403);
 
-  const returnScan = await json(await api(
-    actors.returns, `/api/v1/staff/ducks/${duckOneToken}`,
-  ), 200, "return steward reads return-relevant duck");
-  assert.equal(JSON.stringify(returnScan).includes("daisy@example.com"), false);
-  assert.equal(JSON.stringify(returnScan).includes("lookupCode"), false);
-  assert.equal((await api(actors.returns, `/api/v1/staff/registrations/${registrationId}`)).status, 403);
+  // The stale RETURN_STEWARD row grants nothing anywhere, including the duck
+  // scan it used to unlock and every other station's read.
+  for (const path of [
+    `/api/v1/staff/ducks/${duckOneToken}`,
+    `/api/v1/staff/registrations/${registrationId}`,
+    `/api/v1/staff/events/${eventId}/heats`,
+    "/api/v1/staff/inventory/ducks",
+    `/api/v1/staff/support/events/${eventId}/summary`,
+  ]) {
+    assert.equal((await api(actors.returns, path)).status, 403, `stale role denied ${path}`);
+  }
 
   await json(await post(actors.director, `/api/v1/staff/events/${eventId}/close-registration`, {
     commandId: command(),
@@ -356,35 +407,47 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     commandId: command(),
   }), 201, "race director completes event");
 
-  await json(await api(actors.returns, "/api/v1/staff/events/return-review"), 200, "return steward reviews returns");
-  const batch = await json(await post(
-    actors.returns,
-    `/api/v1/staff/support/events/${eventId}/return-batches`,
-    { commandId: command() },
-  ), 201, "return steward creates batch");
-  await json(await post(
-    actors.returns,
-    `/api/v1/staff/support/events/${eventId}/return-batches/${batch.batch.id}/items`,
-    { commandId: command(), visibleNumber: 102, disposition: "RETURNED" },
-  ), 201, "return steward stages duck");
-  await json(await post(
-    actors.returns,
-    `/api/v1/staff/support/events/${eventId}/return-batches/${batch.batch.id}/undo-last`,
-    { commandId: command() },
-  ), 201, "return steward undoes staged duck");
-  await json(await post(
-    actors.returns,
-    `/api/v1/staff/support/events/${eventId}/return-batches/${batch.batch.id}/items`,
-    { commandId: command(), visibleNumber: 102, disposition: "RETURNED" },
-  ), 201, "return steward restages duck");
-  await json(await post(
-    actors.returns,
-    `/api/v1/staff/support/events/${eventId}/return-batches/${batch.batch.id}/finalize`,
-    { commandId: command() },
-  ), 201, "return steward finalizes batch");
-  await json(await post(actors.returns, `/api/v1/staff/ducks/${duckOneToken}/dispositions`, {
-    commandId: command(), eventId, disposition: "RETURNED",
-  }), 201, "return steward records disposition");
+  // COMPLETED is terminal. Every retired return and purge route is gone for
+  // every actor, including the administrator, and nothing advances past it.
+  // "return-review" is no longer a route; it is just an unknown event id, so
+  // the roleless stale actor is denied and role holders get a plain not-found.
+  assert.equal((await api(actors.returns, "/api/v1/staff/events/return-review")).status, 403);
+  for (const actorName of ["director", "admin"]) {
+    const response = await api(actors[actorName], "/api/v1/staff/events/return-review");
+    assert.equal(response.status, 404, `${actorName} return-review`);
+    assert.equal((await response.json()).error, "Event not found.");
+  }
+  for (const [actorName, path] of [
+    ["returns", `/api/v1/staff/ducks/${duckOneToken}/dispositions`],
+    ["director", `/api/v1/staff/ducks/${duckOneToken}/dispositions`],
+    ["admin", `/api/v1/staff/events/${eventId}/ducks/102/dispositions`],
+    ["admin", `/api/v1/staff/support/events/${eventId}/return-batches`],
+    ["admin", `/api/v1/staff/support/events/${eventId}/return-batches/batch_test/items`],
+    ["admin", `/api/v1/staff/support/events/${eventId}/return-batches/batch_test/undo-last`],
+    ["admin", `/api/v1/staff/support/events/${eventId}/return-batches/batch_test/finalize`],
+    ["admin", `/api/v1/staff/support/events/${eventId}/purge-claim`],
+    ["admin", `/api/v1/staff/events/${eventId}/purge-ready`],
+    ["admin", `/api/v1/staff/events/${eventId}/purge-ready/cancel`],
+    ["admin", `/api/v1/staff/events/${eventId}/purge`],
+    ["director", `/api/v1/staff/events/${eventId}/start-return-processing`],
+  ]) {
+    const response = await post(actors[actorName], path, {
+      commandId: command(),
+      eventId,
+      disposition: "RETURNED",
+      visibleNumber: 102,
+      confirmation: "DELETE Role Matrix Race",
+      returnReviewCompleted: true,
+      permanentDeletionAcknowledged: true,
+      reason: "correction reason",
+    });
+    assert.equal(response.status, 404, `${actorName} POST ${path}`);
+  }
+  assert.equal((await api(actors.admin, `/api/v1/staff/support/events/${eventId}/purge-gate`)).status, 404);
+
+  // The event stays COMPLETED and its results stay readable.
+  const stillCompleted = await json(await api(actors.announcer, `/api/v1/staff/events/${eventId}`), 200, "event after returns removal");
+  assert.equal(stillCompleted.event.status, "COMPLETED");
 
   assert.equal((await api(actors.director, `/api/v1/staff/support/events/${eventId}/summary`)).status, 403);
   assert.equal((await api(actors.admin, "/api/v1/staff/inventory/ducks")).status, 200);

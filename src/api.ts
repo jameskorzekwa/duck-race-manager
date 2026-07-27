@@ -65,8 +65,7 @@ const getCurrentEvent = (env: Env): Promise<EventRecord | null> =>
         'REGISTRATION_CLOSED',
         'ROUND_ONE',
         'FINAL',
-        'COMPLETED',
-        'RETURN_PROCESSING'
+        'COMPLETED'
       )
       ORDER BY CASE status
         WHEN 'REGISTRATION_OPEN' THEN 0

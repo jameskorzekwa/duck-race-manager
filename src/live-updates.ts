@@ -8,7 +8,6 @@ export const LIVE_UPDATE_DOMAINS = [
   "participants",
   "ducks",
   "heats",
-  "returns",
   "staff",
   "support",
 ] as const;
@@ -200,9 +199,6 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "DELETE" && /^\/api\/v1\/staff\/events\/[^/]{1,128}$/.test(pathname)) {
     return domains("event");
   }
-  if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/purge$/.test(pathname)) {
-    return domains("all");
-  }
   if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/force-delete$/.test(pathname)) {
     return domains("all");
   }
@@ -211,12 +207,6 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   }
   if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/(start-round-one|start-final|complete)$/.test(pathname)) {
     return domains("event", "participants", "ducks", "heats");
-  }
-  if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/start-return-processing$/.test(pathname)) {
-    return domains("event", "ducks", "returns");
-  }
-  if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/purge-ready(?:\/cancel)?$/.test(pathname)) {
-    return domains("event", "returns", "support");
   }
 
   if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/registrations$/.test(pathname)) {
@@ -247,17 +237,8 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
     return domains("event", "participants", "heats");
   }
 
-  if (method === "POST" && /^\/api\/v1\/staff\/(?:events\/[^/]{1,128}\/ducks\/[1-9][0-9]{0,8}|ducks\/[A-Za-z0-9_-]+)\/dispositions$/.test(pathname)) {
-    return domains("ducks", "returns", "support");
-  }
-  if (method === "POST" && /^\/api\/v1\/staff\/support\/events\/[^/]{1,128}\/return-batches(?:\/[^/]{1,128}\/(?:items|undo-last|finalize))?$/.test(pathname)) {
-    return domains("ducks", "returns", "support");
-  }
   if (method === "POST" && /^\/api\/v1\/staff\/support\/events\/[^/]{1,128}\/notifications\/[^/]{1,128}\/(retry|suppress|cancel)$/.test(pathname)) {
     return domains("support");
-  }
-  if (method === "POST" && /^\/api\/v1\/staff\/support\/events\/[^/]{1,128}\/purge-claim$/.test(pathname)) {
-    return domains("event", "support");
   }
 
   return null;

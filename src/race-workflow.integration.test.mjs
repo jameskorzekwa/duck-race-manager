@@ -116,6 +116,8 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       ('staff-announcer', 'staff', 'ANNOUNCER', '2026-07-26T00:00:00Z'),
       ('staff-heats', 'staff', 'HEAT_RUNNER', '2026-07-26T00:00:00Z'),
       ('staff-results', 'staff', 'RESULT_TAKER', '2026-07-26T00:00:00Z'),
+      -- A stale retired assignment that PR 4 will clean up. The whole workflow
+      -- below must run normally with this row present.
       ('staff-returns', 'staff', 'RETURN_STEWARD', '2026-07-26T00:00:00Z'),
       ('staff-director', 'staff', 'RACE_DIRECTOR', '2026-07-26T00:00:00Z');
   `);
@@ -600,96 +602,51 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(publicSearch.results[0].participantDisplayName, "Daisy D.");
   assert.equal(/email|phone|lookupCode/i.test(JSON.stringify(publicSearch)), false);
 
-  const returnsStarted = await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-return-processing`, {
-    commandId: crypto.randomUUID(),
-  }), 201, "start return processing");
-  assert.equal(returnsStarted.event.status, "RETURN_PROCESSING");
-  const regularPurgeReady = await post(`/api/v1/staff/events/${eventId}/purge-ready`, {
-    commandId: crypto.randomUUID(),
-    returnReviewCompleted: true,
-    permanentDeletionAcknowledged: true,
-  });
-  assert.equal(regularPurgeReady.status, 403);
-  const unresolvedPurgeReady = await post(`/api/v1/staff/events/${eventId}/purge-ready`, {
-    commandId: crypto.randomUUID(),
-    returnReviewCompleted: true,
-    permanentDeletionAcknowledged: true,
-  }, adminToken);
-  assert.equal(unresolvedPurgeReady.status, 409);
-
-  const returnBatch = await jsonBody(await post(
+  // COMPLETED is terminal and results stay publicly visible there. Every
+  // retired return and purge step is gone, so the only way onward is deletion.
+  for (const path of [
+    `/api/v1/staff/events/${eventId}/start-return-processing`,
+    `/api/v1/staff/events/${eventId}/purge-ready`,
+    `/api/v1/staff/events/${eventId}/purge`,
     `/api/v1/staff/support/events/${eventId}/return-batches`,
-    { commandId: crypto.randomUUID() },
-  ), 201, "create return batch");
-  const dispositions = ["RETURNED", "KEPT", "DAMAGED", "MISSING", "QUARANTINED", "RETIRED"];
-  for (const [index, participant] of participants.entries()) {
-    await jsonBody(await post(
-      `/api/v1/staff/support/events/${eventId}/return-batches/${returnBatch.batch.id}/items`,
-      {
-        commandId: crypto.randomUUID(),
-        visibleNumber: participant.visibleNumber,
-        disposition: dispositions[index],
-      },
-    ), 201, `stage disposition ${participant.visibleNumber}`);
+    `/api/v1/staff/support/events/${eventId}/purge-claim`,
+  ]) {
+    const retired = await post(path, {
+      commandId: crypto.randomUUID(),
+      confirmation: "DELETE Annual Duck Race",
+      returnReviewCompleted: true,
+      permanentDeletionAcknowledged: true,
+    }, adminToken);
+    assert.equal(retired.status, 404, `retired ${path}`);
   }
-  const finalizedReturns = await jsonBody(await post(
-    `/api/v1/staff/support/events/${eventId}/return-batches/${returnBatch.batch.id}/finalize`,
-    { commandId: crypto.randomUUID() },
-  ), 201, "finalize returns");
-  assert.equal(finalizedReturns.batch.status, "FINALIZED");
-  assert.equal(finalizedReturns.batch.itemCount, participants.length);
+  const stillCompleted = await jsonBody(await api(`/api/v1/staff/events/${eventId}`, {
+    token: adminToken,
+  }), 200, "event stays completed");
+  assert.equal(stillCompleted.event.status, "COMPLETED");
+  const publicAfterCompletion = await jsonBody(await api("/api/v1/events/current"), 200, "public event at completion");
+  assert.equal(publicAfterCompletion.event.status, "COMPLETED");
+  const boardAfterCompletion = await jsonBody(await api("/api/v1/race-board"), 200, "public board at completion");
+  assert.equal(boardAfterCompletion.event.status, "COMPLETED");
 
-  const returnReview = await jsonBody(await api("/api/v1/staff/events/return-review", {
-    token: staffToken,
-  }), 200, "return review");
-  assert.equal(returnReview.review.totalDucks, participants.length);
-  assert.equal(returnReview.review.unresolvedDucks, 0);
-  assert.equal(returnReview.review.unreleasedDucks, 0);
-  assert.equal(returnReview.review.hasActiveAssignment, false);
-  assert.deepEqual(returnReview.review.dispositions, Object.fromEntries(dispositions.map((value) => [value, 1])));
-  assert.equal(database.prepare(
-    "SELECT COUNT(*) AS count FROM duck_assignments WHERE valid_to IS NULL",
-  ).get().count, 0);
-  assert.equal(database.prepare(
-    "SELECT COUNT(*) AS count FROM event_ducks WHERE released_at IS NULL",
-  ).get().count, 0);
-  assert.deepEqual(database.prepare(
-    "SELECT inventory_status FROM ducks ORDER BY visible_number",
-  ).all().map((row) => row.inventory_status), [
-    "AVAILABLE", "KEPT", "DAMAGED", "MISSING", "QUARANTINED", "RETIRED",
-  ]);
-
-  const purgeReady = await jsonBody(await post(`/api/v1/staff/events/${eventId}/purge-ready`, {
+  // Delete event is the only cleanup path, and it stays administrator-only.
+  const regularDelete = await post(`/api/v1/staff/events/${eventId}/force-delete`, {
     commandId: crypto.randomUUID(),
-    returnReviewCompleted: true,
-    permanentDeletionAcknowledged: true,
-  }, adminToken), 201, "mark purge ready");
-  assert.equal(purgeReady.event.status, "ARCHIVED");
-  const purgeGate = await jsonBody(await api(
-    `/api/v1/staff/support/events/${eventId}/purge-gate`,
-    { token: adminToken },
-  ), 200, "purge gate");
-  assert.equal(purgeGate.ready, true);
-  assert.ok(Object.values(purgeGate.blockers).every((value) => value === false || value === 0));
-
-  const regularClaim = await post(`/api/v1/staff/support/events/${eventId}/purge-claim`, {
-    commandId: crypto.randomUUID(),
-    confirmation: "DELETE Annual Duck Race",
+    revision: stillCompleted.event.revision,
+    confirmName: "Annual Duck Race",
   });
-  assert.equal(regularClaim.status, 403);
-  await jsonBody(await post(`/api/v1/staff/support/events/${eventId}/purge-claim`, {
+  assert.equal(regularDelete.status, 403);
+  const wrongName = await post(`/api/v1/staff/events/${eventId}/force-delete`, {
     commandId: crypto.randomUUID(),
-    confirmation: "DELETE Annual Duck Race",
-  }, adminToken), 201, "claim purge");
-  const regularPurge = await post(`/api/v1/staff/events/${eventId}/purge`, {
-    confirmation: "DELETE Annual Duck Race",
-  });
-  assert.equal(regularPurge.status, 403);
-  const purge = await post(`/api/v1/staff/events/${eventId}/purge`, {
-    confirmation: "DELETE Annual Duck Race",
+    revision: stillCompleted.event.revision,
+    confirmName: "Wrong Race Name",
   }, adminToken);
-  assert.equal(purge.status, 204);
-  assert.equal(purge.headers.get("clear-site-data"), '"cache", "cookies", "storage"');
+  assert.equal(wrongName.status, 422);
+  const deleted = await jsonBody(await post(`/api/v1/staff/events/${eventId}/force-delete`, {
+    commandId: crypto.randomUUID(),
+    revision: stillCompleted.event.revision,
+    confirmName: "Annual Duck Race",
+  }, adminToken), 200, "delete event");
+  assert.deepEqual(deleted, { deleted: true, alreadyDeleted: false });
 
   const purgedTables = [
     "events",

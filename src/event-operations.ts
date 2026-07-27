@@ -34,15 +34,15 @@ const readJson = async (request: Request): Promise<Record<string, unknown> | nul
   }
 };
 
+// The complete lifecycle vocabulary. COMPLETED is terminal: results stay
+// publicly visible until an administrator deletes the event outright.
 type EventStatus =
   | "DRAFT"
   | "REGISTRATION_OPEN"
   | "REGISTRATION_CLOSED"
   | "ROUND_ONE"
   | "FINAL"
-  | "COMPLETED"
-  | "RETURN_PROCESSING"
-  | "ARCHIVED";
+  | "COMPLETED";
 
 interface EventRow {
   id: string;
@@ -247,7 +247,7 @@ const createEvent = async (
   }
 
   const current = await env.DB.prepare("SELECT id FROM events LIMIT 1").first<{ id: string }>();
-  if (current !== null) return json({ error: "Delete or purge the existing event before creating another." }, 409);
+  if (current !== null) return json({ error: "Delete the existing event before creating another." }, 409);
   const defaults = await env.DB.prepare(
     `SELECT timezone, email_required, heat_assignment_mode,
             round_one_heat_capacity, final_heat_capacity, public_name_policy
@@ -608,7 +608,6 @@ interface ReadinessStats {
   final_unfinished_heat_count: number;
   final_finalized_heat_count: number;
   final_missing_result_count: number;
-  in_progress_heat_count: number;
   any_heat_count: number;
 }
 
@@ -686,9 +685,6 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
               SELECT COUNT(*) FROM heat_entries he
                WHERE he.event_id = e.id AND he.heat_id = h.id
             ))) AS final_missing_result_count,
-       (SELECT COUNT(*) FROM heats h
-         WHERE h.event_id = e.id
-           AND h.status IN ('CALLING', 'RUNNING', 'AWAITING_RESULT')) AS in_progress_heat_count,
        (SELECT COUNT(*) FROM heats h WHERE h.event_id = e.id) AS any_heat_count
      FROM events e
      WHERE e.id = ?`,
@@ -700,8 +696,7 @@ type LifecycleAction =
   | "reopen-registration"
   | "start-round-one"
   | "start-final"
-  | "complete"
-  | "start-return-processing";
+  | "complete";
 
 interface LifecycleDefinition {
   action: LifecycleAction;
@@ -887,26 +882,6 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
       WHERE id = ? AND status = 'FINAL'
         AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'COMPLETE_EVENT')`,
   },
-  "start-return-processing": {
-    action: "start-return-processing",
-    commandType: "START_RETURN_PROCESSING",
-    auditAction: "RETURN_PROCESSING_STARTED",
-    from: "COMPLETED",
-    to: "RETURN_PROCESSING",
-    requiresAdmin: false,
-    commandSql: `INSERT INTO race_commands
-      (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
-     SELECT ?, e.id, 'START_RETURN_PROCESSING', e.id, ?, ?, ?
-       FROM events e
-      WHERE e.id = ? AND e.status = 'COMPLETED'
-        AND NOT EXISTS (
-          SELECT 1 FROM heats h WHERE h.event_id = e.id
-            AND h.status IN ('CALLING', 'RUNNING', 'AWAITING_RESULT')
-        )`,
-    updateSql: `UPDATE events SET status = 'RETURN_PROCESSING', revision = revision + 1, updated_at = ?
-      WHERE id = ? AND status = 'COMPLETED'
-        AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'START_RETURN_PROCESSING')`,
-  },
 };
 
 const hasCompletedLifecycleTransition = async (
@@ -928,9 +903,8 @@ const hasCompletedLifecycleTransition = async (
            WHERE candidate.event_id = rc.event_id
              AND candidate.command_type IN (
                'OPEN_REGISTRATION', 'CLOSE_REGISTRATION', 'REOPEN_REGISTRATION',
-               'START_ROUND_ONE', 'START_FINAL', 'COMPLETE_EVENT', 'START_RETURN_PROCESSING',
-               'REOPEN_HEAT_RESULT', 'RECORD_DUCK_DISPOSITION', 'FINALIZE_RETURN_BATCH',
-               'MARK_EVENT_PURGE_READY', 'CANCEL_EVENT_PURGE_READY'
+               'START_ROUND_ONE', 'START_FINAL', 'COMPLETE_EVENT',
+               'REOPEN_HEAT_RESULT'
              )
         )
       LIMIT 1`,
@@ -1042,9 +1016,6 @@ const readinessFor = (
       if (stats.final_finalized_heat_count === 0) blockers.push("At least one final heat must be finalized.");
       if (stats.final_unfinished_heat_count > 0) blockers.push("Every final heat must be finalized or cancelled.");
       if (stats.final_missing_result_count > 0) blockers.push("Every finalized final heat needs a complete podium result.");
-      break;
-    case "start-return-processing":
-      if (stats.in_progress_heat_count > 0) blockers.push("No heat may be active or awaiting a result.");
       break;
     case "close-registration":
       break;
@@ -1182,7 +1153,6 @@ interface DraftSafetyRow {
   heat_count: number;
   heat_entry_count: number;
   heat_result_count: number;
-  disposition_count: number;
   unsafe_command_count: number;
   unsafe_audit_count: number;
 }
@@ -1197,7 +1167,6 @@ const getDraftSafety = (eventId: string, env: Env): Promise<DraftSafetyRow | nul
        (SELECT COUNT(*) FROM heats WHERE event_id = e.id) AS heat_count,
        (SELECT COUNT(*) FROM heat_entries WHERE event_id = e.id) AS heat_entry_count,
        (SELECT COUNT(*) FROM heat_results WHERE event_id = e.id) AS heat_result_count,
-       (SELECT COUNT(*) FROM duck_event_dispositions WHERE event_id = e.id) AS disposition_count,
        (SELECT COUNT(*) FROM race_commands
          WHERE event_id = e.id AND command_type NOT IN ('CREATE_EVENT', 'CONFIGURE_EVENT')) AS unsafe_command_count,
        (SELECT COUNT(*) FROM audit_events
@@ -1211,7 +1180,7 @@ const draftSafetyBlockers = (event: EventRow, safety: DraftSafetyRow): string[] 
   if (event.status !== "DRAFT") blockers.push("Only a draft event can be deleted as a mistake.");
   const dataCount = safety.registration_count + safety.race_entry_count + safety.event_duck_count
     + safety.duck_assignment_count + safety.heat_count + safety.heat_entry_count
-    + safety.heat_result_count + safety.disposition_count;
+    + safety.heat_result_count;
   if (dataCount > 0) blockers.push("The draft contains race data and cannot be deleted.");
   if (safety.unsafe_command_count > 0 || safety.unsafe_audit_count > 0) {
     blockers.push("The draft has operational history and cannot be deleted.");
@@ -1285,7 +1254,6 @@ const deleteDraft = async (
     AND NOT EXISTS (SELECT 1 FROM heats WHERE event_id = e.id)
     AND NOT EXISTS (SELECT 1 FROM heat_entries WHERE event_id = e.id)
     AND NOT EXISTS (SELECT 1 FROM heat_results WHERE event_id = e.id)
-    AND NOT EXISTS (SELECT 1 FROM duck_event_dispositions WHERE event_id = e.id)
     AND NOT EXISTS (
       SELECT 1 FROM race_commands
        WHERE event_id = e.id AND command_type NOT IN ('CREATE_EVENT', 'CONFIGURE_EVENT')
@@ -1366,12 +1334,12 @@ const deleteDraft = async (
   return new Response(null, { status: 204, headers });
 };
 
-// Force delete removes the complete event dataset in any status. Unlike the
-// staged purge it has no readiness, claim, or reconciliation prerequisites; it
-// is the administrator-only escape hatch for abandoning a race outright. It
-// does share the purge's single-dataset prerequisite: several statements below
-// delete globally (ducks, duck tags, browser collections, audit events), which
-// is safe only while this event is the only race dataset.
+// Force delete removes the complete event dataset in any status. It is the one
+// and only cleanup path: there is no readiness gate, purge claim, or physical
+// reconciliation step, just an administrator confirming the event name. It does
+// keep a single-dataset prerequisite: several statements below delete globally
+// (ducks, duck tags, browser collections, audit events), which is safe only
+// while this event is the only race dataset.
 //
 // Idempotency semantics: the whole batch deletes command history, audit rows,
 // and the event itself, so a successful force delete leaves no replay record.
@@ -1426,9 +1394,14 @@ const forceDeleteEvent = async (
     SELECT 1 FROM race_commands
      WHERE id = ? AND event_id = ? AND command_type = 'FORCE_DELETE_EVENT'
   )`;
-  // The archived-status update satisfies the locked-roster delete trigger and
-  // the synthetic PURGING claim satisfies the archived-event delete trigger.
-  // Both sentinels vanish with the dataset inside the same atomic batch.
+  // ARCHIVED is no longer a lifecycle state; it survives here only as a
+  // transient value required by the CURRENTLY migrated schema. The status
+  // update satisfies `heat_entries_delete_unlocked`'s archived escape and the
+  // synthetic PURGING claim satisfies `events_require_purge_claim`. Both are
+  // written and destroyed inside this one atomic batch, so ARCHIVED is never
+  // observable through the UI or API and never persists past the delete.
+  // PR 4 drops those triggers and the event_purge_claims table; delete this
+  // status update and the synthetic claim insert at the same time.
   const scoped = (table: string): D1PreparedStatement =>
     env.DB.prepare(`DELETE FROM ${table} WHERE event_id = ? AND ${sentinel}`)
       .bind(eventId, commandId, eventId);
@@ -1463,6 +1436,9 @@ const forceDeleteEvent = async (
       scoped("heat_results"),
       scoped("heat_entries"),
       scoped("heats"),
+      // Retired return tables. No code writes them any more, but rows recorded
+      // before this release still exist under the current schema, so the delete
+      // must clear them. PR 4 drops the tables and these three statements.
       scoped("return_batch_items"),
       scoped("return_batches"),
       scoped("duck_event_dispositions"),
@@ -1471,6 +1447,19 @@ const forceDeleteEvent = async (
       scoped("duck_inventory_events"),
       global("browser_collection_registrations"),
       global("browser_registration_collections"),
+      // `duck_tags.supersedes_tag_id` is the only self-reference in this delete
+      // set, and it is declared ON DELETE RESTRICT. Once a tag has been
+      // replaced, the ACTIVE replacement still points at its RETIRED parent, so
+      // the multi-row delete below hits the parent row while a child still
+      // references it and SQLite aborts the whole batch. Clearing the column
+      // for every row first drops all of those links at once, so it is
+      // chain-safe at any replacement depth (t1 <- t2 <- t3) and cannot violate
+      // `CHECK (supersedes_tag_id IS NULL OR supersedes_tag_id != id)`. It
+      // carries the same sentinel guard as its neighbours and runs inside the
+      // same batch, so a refused delete still leaves every link intact.
+      env.DB.prepare(
+        `UPDATE duck_tags SET supersedes_tag_id = NULL WHERE ${sentinel}`,
+      ).bind(commandId, eventId),
       global("duck_tags"),
       global("ducks"),
       global("audit_events"),
@@ -1529,7 +1518,7 @@ export const handleEventOperations = async (
   }
 
   const lifecycleMatch = url.pathname.match(
-    new RegExp(`^/api/v1/staff/events/${eventIdPattern}/(open-registration|close-registration|reopen-registration|start-round-one|start-final|complete|start-return-processing)$`),
+    new RegExp(`^/api/v1/staff/events/${eventIdPattern}/(open-registration|close-registration|reopen-registration|start-round-one|start-final|complete)$`),
   );
   if (lifecycleMatch !== null && request.method === "POST") {
     const action = lifecycleMatch[2] as LifecycleAction;
@@ -1544,7 +1533,7 @@ export const handleEventOperations = async (
   }
 
   const detailMatch = url.pathname.match(new RegExp(`^/api/v1/staff/events/${eventIdPattern}$`));
-  if (detailMatch !== null && detailMatch[1] !== "return-review") {
+  if (detailMatch !== null) {
     if (request.method === "GET") {
       const denied = requireAnyRole(actor, operationalRoles);
       return denied ?? eventDetail(detailMatch[1], env);

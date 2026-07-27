@@ -75,7 +75,7 @@ delivery phases, and acceptance criteria.
 - Read-only duck status inspection and recovery tools
 - Guided lost-duck replacement, tag replacement, and duck swapping
 - Role-specific, scan-first staff screens with plain-language recovery
-- Guided post-race return processing, complete data purge, and empty new-race setup
+- Administrator delete-event cleanup and empty new-race setup
 - Round-one winner recording and finalist promotion
 - Final verification and first/second/third place recording
 - Public heat results and final podium

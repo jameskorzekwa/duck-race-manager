@@ -1182,10 +1182,8 @@ const supersedeResultStatements = (
 const downstreamFinalGuard = async (env: Env, eventId: string): Promise<boolean> => {
   const dependency = await env.DB.prepare(
     `SELECT 1 AS blocked FROM event_ducks ed
-      WHERE ed.event_id = ? AND (
-        ed.released_at IS NOT NULL
-        OR EXISTS (SELECT 1 FROM duck_event_dispositions ded WHERE ded.event_duck_id = ed.id)
-      ) LIMIT 1`,
+      WHERE ed.event_id = ? AND ed.released_at IS NOT NULL
+      LIMIT 1`,
   ).bind(eventId).first<{ blocked: number }>();
   return dependency !== null;
 };
@@ -1245,10 +1243,7 @@ const reopenResults = async (
             OR (h.round = 'FINAL' AND e.status = 'COMPLETED'
               AND NOT EXISTS (
                 SELECT 1 FROM event_ducks ed
-                 WHERE ed.event_id = e.id AND (
-                   ed.released_at IS NOT NULL
-                   OR EXISTS (SELECT 1 FROM duck_event_dispositions ded WHERE ded.event_duck_id = ed.id)
-                 )
+                 WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
               )))`,
     ).bind(commandId, eventId, heatId, now, now, actor.id, reason, requestFingerprint, heatId, eventId, revision),
     ...supersedeResultStatements(env, eventId, heatId, actor.id, commandId, reason, now),
@@ -1359,10 +1354,7 @@ const correctResults = async (
             OR (h.round = 'FINAL' AND e.status = 'COMPLETED'
               AND NOT EXISTS (
                 SELECT 1 FROM event_ducks ed
-                 WHERE ed.event_id = e.id AND (
-                   ed.released_at IS NOT NULL
-                   OR EXISTS (SELECT 1 FROM duck_event_dispositions ded WHERE ded.event_duck_id = ed.id)
-                 )
+                 WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
               )))`,
     ).bind(commandId, eventId, heatId, now, now, actor.id, reason, requestFingerprint, heatId, eventId, revision),
     ...supersedeResultStatements(env, eventId, heatId, actor.id, commandId, reason, now),

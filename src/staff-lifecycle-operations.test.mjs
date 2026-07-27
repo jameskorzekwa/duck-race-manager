@@ -581,3 +581,95 @@ test("authentication rejects a valid Cognito token for an inactive staff profile
   assert.equal(result, null);
   database.close();
 });
+
+// RETURN_STEWARD left the role vocabulary. Granting or assigning it is now a
+// malformed request, rejected with 400 before any database access.
+test("a role change requesting the retired RETURN_STEWARD role is rejected as invalid", async () => {
+  for (const roles of [
+    ["RETURN_STEWARD"],
+    ["REGISTRATION", "RETURN_STEWARD"],
+    ["RETURN_STEWARD", "RACE_DIRECTOR"],
+  ]) {
+    const db = makeDb();
+    const response = await handleStaffLifecycleOperations(
+      request(`/api/v1/staff/profiles/${profile.id}/role`, {
+        commandId: crypto.randomUUID(), role: "STAFF", roles, revision: 0,
+      }),
+      makeEnv(db),
+      actor,
+    );
+
+    assert.equal(response.status, 400, roles.join(","));
+    assert.match((await response.json()).error, /operational roles are required/);
+    assert.equal(db.statements.length, 0, "an invalid role must not reach the database");
+    assert.equal(db.batches.length, 0);
+  }
+});
+
+// A target profile whose D1 rows still carry the retired role must still list
+// and project cleanly: the stale value is ignored, the valid ones survive.
+test("staff listing ignores a stale RETURN_STEWARD assignment without dropping valid roles", async () => {
+  const db = makeDb(() => null, (sql) =>
+    sql.includes("FROM staff_profiles p")
+      ? { results: [{ ...profile, roles_csv: "REGISTRATION,RETURN_STEWARD,RACE_DIRECTOR" }] }
+      : { results: [] });
+  const response = await handleStaffLifecycleOperations(
+    request("/api/v1/staff/profiles", undefined, "GET"),
+    makeEnv(db),
+    actor,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body.staff[0].roles, ["REGISTRATION", "RACE_DIRECTOR"]);
+});
+
+// Authentication must survive the retired role in live D1 rather than denying
+// the session, which would lock the account out during the deploy window.
+test("a live D1 profile carrying only the retired role authenticates with no roles", async () => {
+  const database = new DatabaseSync(":memory:");
+  for (const name of [
+    "0001_staff_identity.sql",
+    "0002_registration_foundation.sql",
+    "0003_assignment_and_heat_status.sql",
+    "0004_pairing_status_and_purge.sql",
+    "0005_staff_access_management.sql",
+    "0006_participant_operations.sql",
+    "0007_duck_inventory_operations.sql",
+    "0008_event_operations.sql",
+    "0009_heat_result_operations.sql",
+    "0010_staff_lifecycle.sql",
+    "0011_support_operations.sql",
+    "0012_staff_role_assignments.sql",
+  ]) {
+    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
+  }
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, display_name, is_system_admin, is_active)
+    VALUES ('stale', 'stale-sub', 'stale@example.com', 'Stale Steward', 0, 1);
+    INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+    VALUES ('stale-role', 'stale', 'RETURN_STEWARD', '2026-07-26T00:00:00Z');
+  `);
+  const env = makeEnv({
+    prepare: (sql) => ({
+      sql,
+      args: [],
+      bind(...args) { this.args = args; return this; },
+      async first() { return database.prepare(this.sql).get(...this.args) ?? null; },
+      async all() { return { results: database.prepare(this.sql).all(...this.args) }; },
+    }),
+  });
+
+  const staleActor = await authenticateStaff(
+    new Request("https://quickducks.com/api/v1/staff/events", {
+      headers: { authorization: "Bearer valid.test.token" },
+    }),
+    env,
+    async () => ({ sub: "stale-sub" }),
+  );
+
+  assert.notEqual(staleActor, null, "the session must not be denied by a retired role");
+  assert.deepEqual(staleActor.roles, []);
+  assert.equal(staleActor.isSystemAdmin, false);
+  database.close();
+});

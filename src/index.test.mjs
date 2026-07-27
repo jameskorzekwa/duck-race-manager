@@ -3,6 +3,7 @@ import test from "node:test";
 
 import worker, { createWorker } from "./index.ts";
 import { renderStaffHome } from "./site.ts";
+import { handleStaffApi } from "./staff-api.ts";
 
 const env = {
   APP_ORIGIN: "https://quickducks.com",
@@ -115,7 +116,7 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.match(await staff.text(), /\/api\/v1\/staff\/ducks/);
   assert.equal(staffHome.status, 200);
   assert.equal(staffHome.headers.get("cache-control"), "no-store");
-  assert.match(await staffHome.text(), /\/api\/v1\/staff\/events\/return-review/);
+  assert.match(await staffHome.text(), /\/api\/v1\/staff\/events/);
   // The staff access client is served like the other protected staff assets.
   assert.equal(staffAccess.status, 200);
   assert.equal(staffAccess.headers.get("cache-control"), "no-store");
@@ -234,7 +235,7 @@ test("gates the standalone staff access page to system administrators", async ()
   assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Faccess");
 
   // Authenticated non-administrators: 403 through the shared staff auth error.
-  for (const roles of [[], ["REGISTRATION"], ["RACE_DIRECTOR"], ["DUCK_MANAGER", "RETURN_STEWARD"]]) {
+  for (const roles of [[], ["REGISTRATION"], ["RACE_DIRECTOR"], ["DUCK_MANAGER", "RESULT_TAKER"]]) {
     const denied = await page(actor(roles));
     const body = await denied.text();
     assert.equal(denied.status, 403, roles.join(","));
@@ -318,6 +319,63 @@ test("gates focused station pages by operational role", async () => {
   assert.equal((await page(actor(["RACE_DIRECTOR"]), "/staff/finish-line")).status, 200);
   assert.equal((await page(actor([], true), "/staff/start-line")).status, 200);
   assert.equal((await page(actor([], true), "/staff/finish-line")).status, 200);
+});
+
+// The staff duck page immediately fetches GET /api/v1/staff/ducks/:token, so a
+// page allow-list wider than the API's only renders a console that instantly
+// 403s. The API is the authority; this pins the two to the same role set.
+test("the staff duck page opens for exactly the roles the staff duck API allows", async () => {
+  const token = "a".repeat(32);
+  const staffActor = (roles, isSystemAdmin = false) => ({
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Duck Staff",
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  const page = (currentActor) => createWorker(async () => currentActor).fetch(
+    new Request(`https://quickducks.com/staff/ducks/${token}`), env,
+  );
+  // No row matches, so an authorized caller gets 404 rather than 403.
+  const apiEnv = {
+    APP_ORIGIN: "https://quickducks.com",
+    DB: {
+      prepare: () => ({
+        bind() {
+          return this;
+        },
+        async first() {
+          return null;
+        },
+        async all() {
+          return { results: [] };
+        },
+      }),
+    },
+  };
+  const api = (currentActor) => handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${token}`), apiEnv, currentActor,
+  );
+
+  for (const currentActor of [
+    staffActor(["REGISTRATION"]),
+    staffActor(["DUCK_MANAGER"]),
+    staffActor(["RACE_DIRECTOR"]),
+    staffActor([], true),
+  ]) {
+    const label = currentActor.isSystemAdmin ? "admin" : currentActor.roles.join(",");
+    const allowed = await page(currentActor);
+    assert.equal(allowed.status, 200, label);
+    assert.notEqual((await api(currentActor)).status, 403, label);
+  }
+
+  // RESULT_TAKER used to open this page while the API refused it.
+  for (const roles of [["RESULT_TAKER"], ["ANNOUNCER"], ["HEAT_RUNNER"], []]) {
+    const currentActor = staffActor(roles);
+    const label = roles.join(",");
+    const denied = await page(currentActor);
+    assert.equal(denied.status, 403, label);
+    assert.equal(denied.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.match(await denied.text(), /permission to inspect staff duck records/);
+    assert.equal((await api(currentActor)).status, 403, label);
+  }
 });
 
 test("protects newly composed staff operation routes", async () => {
@@ -797,7 +855,8 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   );
   const workingBody = await working.text();
   assert.match(workingBody, /data-staff-duck/);
-  assert.match(workingBody, /data-disposition-form/);
+  // Returns are gone: the scan page is pairing and inspection only.
+  assert.doesNotMatch(workingBody, /data-disposition-form|data-disposition-work/);
   assert.match(workingBody, /\/assets\/staff-duck\.js/);
 
   const staffHome = await worker.fetch(
@@ -805,7 +864,6 @@ test("renders protected staff pairing preview with code and contact lookup", asy
     env,
   );
   const staffHomeBody = await staffHome.text();
-  assert.match(staffHomeBody, /data-return-review/);
   assert.match(staffHomeBody, /data-system-admin="true"/);
   // Staff access is its own page now; the console links to it and renders no
   // account-management markup.
@@ -815,9 +873,12 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.match(staffHomeBody, /id="participants"/);
   assert.match(staffHomeBody, /id="inventory"/);
   assert.match(staffHomeBody, /id="heats"/);
-  assert.match(staffHomeBody, /id="returns"/);
   assert.match(staffHomeBody, /id="support"/);
-  assert.match(staffHomeBody, /data-final-purge-form/);
+  // The Returns section and the whole purge ceremony are removed; Delete event
+  // in the Event section is the only cleanup path left.
+  assert.doesNotMatch(staffHomeBody, /id="returns"|data-return-review|data-return-batch-item-form/);
+  assert.doesNotMatch(staffHomeBody, /data-final-purge-form|data-purge-claim-form|data-purge-gate|data-purge-ready-form/);
+  assert.match(staffHomeBody, /data-force-delete-form/);
   assert.match(staffHomeBody, /Administrator/);
   assert.match(staffHomeBody, /\/assets\/staff-home\.js/);
 
@@ -832,16 +893,25 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.match(await startLine.text(), /data-start-line/);
   assert.match(await finishLine.text(), /data-finish-line/);
 
-  const regularStaffHome = renderStaffHome("Regular Staff", false, ["RETURN_STEWARD"]);
+  const regularStaffHome = renderStaffHome("Regular Staff", false, ["DUCK_MANAGER"]);
   assert.doesNotMatch(regularStaffHome, /data-staff-access-form/);
   assert.doesNotMatch(regularStaffHome, /Administrators have deletion authority/);
   assert.doesNotMatch(regularStaffHome, /id="support"/);
-  assert.doesNotMatch(regularStaffHome, /data-final-purge-form/);
-  assert.match(regularStaffHome, /data-return-batch-item-form/);
-  assert.match(regularStaffHome, /<a href="#returns" data-event-scoped hidden>Returns<\/a>/);
+  assert.doesNotMatch(regularStaffHome, /data-final-purge-form|data-force-delete-form/);
+  assert.doesNotMatch(regularStaffHome, /id="returns"|Returns/);
   assert.doesNotMatch(regularStaffHome, /<a href="#participants"/);
   assert.match(regularStaffHome, /id="participants"[^>]* hidden/);
-  assert.match(regularStaffHome, /id="returns"/);
+  assert.match(regularStaffHome, /<a href="#inventory" data-event-scoped hidden>Inventory<\/a>/);
+
+  // Authentication filters the retired role away, so the console for a stale
+  // RETURN_STEWARD-only account is exactly the console for no roles at all.
+  const staleFilteredHome = renderStaffHome("Stale Steward", false, []);
+  assert.match(staleFilteredHome, /No operational roles assigned/);
+  assert.doesNotMatch(staleFilteredHome, /id="returns"|>Returns<|Return steward/);
+  // Even if the retired value reached the renderer it unlocks nothing.
+  const staleRoleHome = renderStaffHome("Stale Steward", false, ["RETURN_STEWARD"]);
+  assert.doesNotMatch(staleRoleHome, /id="returns"|>Returns<|Return steward/);
+  assert.doesNotMatch(staleRoleHome, /data-return-review|data-numbered-disposition-form/);
 
   const announcerHome = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
   assert.match(announcerHome, /<a href="#heats" data-event-scoped hidden>Heats<\/a>/);
