@@ -170,6 +170,38 @@ test("administrator event forms render automatic read-only slug previews", () =>
   assert.doesNotMatch(markup, /name="slug"/);
 });
 
+test("event rendering only reads config fields that exist so the delete card still reveals", () => {
+  const markup = renderStaffHome("Administrator", true, []);
+  const configForm = markup.match(/<form data-event-config-form>[^]*?<\/form>/)?.[0];
+  assert.ok(configForm, "config form markup is present");
+
+  const fieldNames = new Set(
+    [...configForm.matchAll(/(?:name|data-[a-z-]*)="([^"]+)"/g)].map((match) => match[1]),
+  );
+  // Named form controls the script may address through form.elements.
+  const namedControls = new Set([...configForm.matchAll(/name="([^"]+)"/g)].map((match) => match[1]));
+
+  const referenced = [...staffHomeScript.matchAll(/eventConfigForm\.elements\.([A-Za-z_$][\w$]*)/g)]
+    .map((match) => match[1]);
+  assert.ok(referenced.length > 0, "the script populates the config form");
+  for (const name of referenced) {
+    assert.ok(
+      namedControls.has(name),
+      `eventConfigForm.elements.${name} has no matching named control and would throw during renderEvent`,
+    );
+  }
+
+  // The removed auto-slug input must not be read, and the read-only preview must remain.
+  assert.doesNotMatch(staffHomeScript, /eventConfigForm\.elements\.slug\b/);
+  assert.ok(fieldNames.has("roundOneHeatCapacity"));
+
+  // renderEvent must still reveal the administrator force-delete card after populating the form.
+  const populateIndex = staffHomeScript.indexOf("eventConfigForm.elements.name.value");
+  const revealIndex = staffHomeScript.indexOf("forceDeleteCard.hidden = false");
+  assert.ok(populateIndex > 0 && revealIndex > populateIndex,
+    "the delete-event card is revealed after the config form is populated");
+});
+
 test("event creation requires a hinted ducks-per-heat field wired into the create command", () => {
   const adminMarkup = renderStaffHome("Administrator", true, []);
   const directorMarkup = renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]);
