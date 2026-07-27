@@ -174,6 +174,16 @@ device, a top-level visible page, and a user gesture. The operator selects the
 race and optional station location, presses Start once, and then taps one blank
 sticker per duck without entering per-duck data.
 
+The Worker authenticates the staff member and checks the inventory role before
+examining the page request's user agent. Missing and non-Android user agents get
+a noindex unsupported-device response with a staff-inventory return link and no
+station configuration, script, or provisioning data. This user-agent gate is
+only an early compatibility guard and provides no security or trust signal; user
+agents are spoofable. The accepted page keeps controls hidden and makes no
+station API request until runtime checks confirm Android Chrome, `NDEFReader`,
+HTTPS, top-level browsing, and document visibility, and it checks the runtime
+again before starting NFC.
+
 The server generates the duck UUID, next globally unique internal number, and
 cryptographically random 32-byte base64url token. The browser writes only the
 exact configured-origin `https://quickducks.com/t/<token>` URL. Web NFC
@@ -187,6 +197,10 @@ protection, and live API connectivity. A server-side `NEW`/`NEEDS_TAG` duck and
 `RESERVED` tag survive reload or a failed write but are not event-reserved or
 publicly active. Confirmation after a successful write atomically marks the duck
 good and race-reserved, activates the tag, and creates intake history. The
+provisioning APIs deliberately do not use user-agent detection: authentication,
+inventory roles, and same-origin provenance for cookie-authenticated mutations
+remain authoritative, and automated API tests and clients need no browser user
+agent. The
 current actor recovers that pending record and must retap the same sticker;
 QuickDucks never allocates another while it remains pending. There is no offline
 queue or service-worker retry. NFC hardware serials are used only for transient

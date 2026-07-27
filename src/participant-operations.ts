@@ -6,7 +6,6 @@ import {
   isPrivateToken,
   randomLookupCode,
   validateRegistration,
-  type DuckKeepPreference,
   type RegistrationInput,
 } from "./registration.ts";
 import type { Env } from "./types.ts";
@@ -69,7 +68,6 @@ interface RegistrationRow {
   status_changed_at: string;
   updated_at: string;
   registration_revision: number;
-  duck_keep_preference: DuckKeepPreference;
   race_entry_revision: number;
   assignment_id: string | null;
   assignment_valid_from: string | null;
@@ -86,7 +84,7 @@ const registrationSelect = `
          r.email_notifications_enabled, r.created_via, r.staff_notes,
          r.submitted_at, r.status_changed_at, r.updated_at,
          r.revision AS registration_revision,
-         re.duck_keep_preference, re.revision AS race_entry_revision,
+         re.revision AS race_entry_revision,
          da.id AS assignment_id, da.valid_from AS assignment_valid_from,
          d.id AS duck_id, d.visible_number AS duck_visible_number
     FROM registrations r
@@ -107,7 +105,6 @@ const registrationJson = (row: RegistrationRow): Record<string, unknown> => ({
   status: row.status,
   lookupCode: row.lookup_code,
   emailNotificationsEnabled: row.email_notifications_enabled === 1,
-  duckKeepPreference: row.duck_keep_preference,
   notes: row.staff_notes,
   createdVia: row.created_via,
   submittedAt: row.submitted_at,
@@ -273,12 +270,6 @@ const validateParticipant = (
   if (hasOwn(payload, "emailNotificationsEnabled") && typeof payload.emailNotificationsEnabled !== "boolean") {
     errors.emailNotificationsEnabled = "Must be true or false.";
   }
-  const preference = hasOwn(payload, "duckKeepPreference")
-    ? payload.duckKeepPreference
-    : current?.duck_keep_preference ?? "UNDECIDED";
-  if (preference !== "KEEP" && preference !== "RETURN" && preference !== "UNDECIDED") {
-    errors.duckKeepPreference = "Choose keep, return, or undecided.";
-  }
   const noteValue = hasOwn(payload, "notes") ? payload.notes : current?.staff_notes ?? null;
   const staffNotes = typeof noteValue === "string" ? noteValue.trim() || null : null;
   if (staffNotes !== null && staffNotes.length > 2000) errors.notes = "Use 2000 characters or fewer.";
@@ -297,7 +288,6 @@ const validateParticipant = (
   if (typeof email === "string") form.set("email", email);
   if (typeof phone === "string") form.set("phone", phone);
   if (notifications === true) form.set("email_notifications_enabled", "on");
-  form.set("duck_keep_preference", preference as string);
   const validation = validateRegistration(form, emailRequired);
   if (validation.value === undefined) return { errors: validation.errors };
   return { value: { input: validation.value, staffNotes }, errors };
@@ -397,9 +387,9 @@ const createWalkUp = async (
         now,
       ),
       env.DB.prepare(
-        `INSERT INTO race_entries (id, event_id, registration_id, duck_keep_preference)
-         VALUES (?, ?, ?, ?)`,
-      ).bind(raceEntryId, eventId, registrationId, value.input.duckKeepPreference),
+        `INSERT INTO race_entries (id, event_id, registration_id)
+         VALUES (?, ?, ?)`,
+      ).bind(raceEntryId, eventId, registrationId),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -458,7 +448,6 @@ const editRegistration = async (
     "email",
     "phone",
     "emailNotificationsEnabled",
-    "duckKeepPreference",
     "notes",
   ];
   if (!editableFields.some((field) => hasOwn(payload, field))) {
@@ -498,7 +487,6 @@ const editRegistration = async (
   if ((value.input.emailNotificationsEnabled ? 1 : 0) !== current.email_notifications_enabled) {
     changedFields.push("email_notifications_enabled");
   }
-  if (value.input.duckKeepPreference !== current.duck_keep_preference) changedFields.push("duck_keep_preference");
   if (value.staffNotes !== current.staff_notes) changedFields.push("staff_notes");
 
   const now = new Date().toISOString();
@@ -534,13 +522,6 @@ const editRegistration = async (
       expectedRevision,
     ),
   ];
-  if (value.input.duckKeepPreference !== current.duck_keep_preference) {
-    statements.push(env.DB.prepare(
-      `UPDATE race_entries
-          SET duck_keep_preference = ?, updated_at = ?, revision = revision + 1
-        WHERE id = ? AND revision = ?`,
-    ).bind(value.input.duckKeepPreference, now, current.race_entry_id, current.race_entry_revision));
-  }
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id,

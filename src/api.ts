@@ -26,7 +26,11 @@ import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 import { handleSupportOperations } from "./support-operations.ts";
-import { handleLiveConnection, scheduleRaceUpdate } from "./live-updates.ts";
+import {
+  handleLiveConnection,
+  mutationRefreshDomains,
+  scheduleRaceUpdate,
+} from "./live-updates.ts";
 import { getPublicRaceBoard } from "./race-board.ts";
 import type { Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
 
@@ -152,7 +156,6 @@ interface RegistrationPayload {
   email?: unknown;
   phone?: unknown;
   emailNotificationsEnabled?: unknown;
-  duckKeepPreference?: unknown;
   turnstileToken?: unknown;
   clientTimestamp?: unknown;
 }
@@ -252,9 +255,6 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   if (typeof payload.email === "string") form.set("email", payload.email);
   if (typeof payload.phone === "string") form.set("phone", payload.phone);
   if (payload.emailNotificationsEnabled === true) form.set("email_notifications_enabled", "on");
-  if (typeof payload.duckKeepPreference === "string") {
-    form.set("duck_keep_preference", payload.duckKeepPreference);
-  }
   const validation = validateRegistration(form, event.email_required === 1);
   if (validation.value === undefined) {
     return json({ error: "Registration validation failed.", fields: validation.errors }, 422);
@@ -312,9 +312,9 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         now,
       ),
       env.DB.prepare(
-        `INSERT INTO race_entries (id, event_id, registration_id, duck_keep_preference)
-         VALUES (?, ?, ?, ?)`,
-      ).bind(raceEntryId, event.id, registrationId, value.duckKeepPreference),
+        `INSERT INTO race_entries (id, event_id, registration_id)
+         VALUES (?, ?, ?)`,
+      ).bind(raceEntryId, event.id, registrationId),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
@@ -325,7 +325,7 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         payload.commandId,
         registrationId,
         now,
-        JSON.stringify({ created_via: "PUBLIC", duck_keep_preference: value.duckKeepPreference }),
+        JSON.stringify({ created_via: "PUBLIC" }),
       ),
       ...await collectionStatements(env, collection, registrationId, now),
     ];
@@ -377,7 +377,7 @@ export const findRegistrationStatus = async (
   const row = await env.DB.prepare(
     `SELECT r.first_name, r.last_name, r.status, r.lookup_code,
              r.submitted_at, e.name AS event_name, e.event_date,
-             re.id AS race_entry_id, re.duck_keep_preference
+             re.id AS race_entry_id
        FROM registrations r
        JOIN events e ON e.id = r.event_id
        JOIN race_entries re ON re.registration_id = r.id
@@ -403,7 +403,6 @@ const getRegistrationStatus = async (token: string, env: Env): Promise<Response>
     submittedAt: registration.submitted_at,
     eventName: registration.event_name,
     eventDate: registration.event_date,
-    duckKeepPreference: registration.duck_keep_preference,
     raceStatus: registration.raceStatus,
   });
 };
@@ -537,6 +536,14 @@ const handleApiRequest = async (
     ) {
       return json({ error: "Same-origin staff request required." }, 403);
     }
+    if (url.pathname === "/api/v1/staff/session" && request.method === "GET") {
+      return json({
+        access: {
+          isSystemAdmin: actor.isSystemAdmin,
+          roles: actor.roles,
+        },
+      });
+    }
     const operationHandlers = [
       handleStaffLifecycleOperations,
       handleEventOperations,
@@ -597,9 +604,7 @@ export const handleApi = async (
   ctx?: ExecutionContext,
 ): Promise<Response> => {
   const response = await handleApiRequest(request, env, authenticate);
-  const path = new URL(request.url).pathname;
-  const mayChangeState = !["GET", "HEAD", "OPTIONS"].includes(request.method)
-    && !path.endsWith("/heats/round-one/plan-preview");
-  if (response.ok && mayChangeState) scheduleRaceUpdate(env, ctx);
+  const refreshDomains = mutationRefreshDomains(request);
+  if (response.ok && refreshDomains !== null) scheduleRaceUpdate(env, ctx, refreshDomains);
   return response;
 };

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  confirmationDialogScript,
+  eventSlugHelpersScript,
   finishLineScript,
   finishHandoffHelpersScript,
   finishNfcHelpersScript,
@@ -11,6 +13,7 @@ import {
   inventoryIntakeScript,
   liveScript,
   liveRuntimeHelpersScript,
+  liveUiScript,
   participantHandoffHelpersScript,
   participantScript,
   registrationHandoffHelpersScript,
@@ -22,6 +25,21 @@ import {
 } from "./client-scripts.ts";
 import { homeScript } from "./site.ts";
 
+const eventSlugHelpers = () => new Function(
+  `${eventSlugHelpersScript}; return { eventSlugFromName };`,
+)();
+
+test("staff client generates and live-previews server-compatible event slugs", () => {
+  const { eventSlugFromName } = eventSlugHelpers();
+  assert.equal(eventSlugFromName("  Crème   Brûlée / Duck---Race!  "), "creme-brulee-duck-race");
+  assert.equal(eventSlugFromName("東京 🦆"), "event-o05wec");
+  assert.match(eventSlugFromName("東京 🦆"), /^event-[a-z0-9]+$/);
+  assert.ok(eventSlugFromName("Long event name ".repeat(20)).length <= 80);
+  assert.match(staffHomeScript, /elements\.name\.addEventListener\("input"/);
+  assert.match(staffHomeScript, /updateEventSlugPreview\(eventConfigForm, eventConfigSlugPreview, currentEvent\)/);
+  assert.doesNotMatch(staffHomeScript, /slug:\s*String\(values\.get\("slug"\)\)/);
+});
+
 test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotThrow(() => new Function(homeScript));
   assert.doesNotThrow(() => new Function(registrationScript));
@@ -32,10 +50,12 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotThrow(() => new Function(startLineScript));
   assert.doesNotThrow(() => new Function(finishLineScript));
   assert.doesNotThrow(() => new Function(inventoryIntakeScript));
+  assert.doesNotThrow(() => new Function(liveUiScript));
   assert.match(registrationScript, /\/api\/v1\/registrations/);
   assert.match(registrationScript, /publicNamePolicy/);
   assert.match(registrationScript, /Your name will appear publicly as/);
   assert.match(registrationScript, /Your email and phone stay private/);
+  assert.doesNotMatch(registrationScript, /duckKeepPreference|duck_keep_preference/);
   assert.match(registrationScript, /\/my-ducks\?registered=/);
   assert.match(registrationScript, /registrationStoreHandoff\(globalThis\.sessionStorage/);
   assert.doesNotMatch(registrationScript, /\/my-ducks\?registered=.*privateStatusPath/);
@@ -46,6 +66,7 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(participantScript, /history\.replaceState/);
   assert.match(participantScript, /card\.focus/);
   assert.match(participantScript, /card\.scrollIntoView/);
+  assert.doesNotMatch(participantScript, /duckKeepPreference|duck_keep_preference/);
   for (const script of [homeScript, registrationScript, participantScript]) {
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   }
@@ -60,11 +81,12 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(staffHomeScript, /\/api\/v1\/staff\/profiles/);
   assert.match(staffHomeScript, /Regular staff/);
   assert.match(staffHomeScript, /Administrator/);
+  assert.doesNotMatch(staffHomeScript, /duckKeepPreference|duck_keep_preference/);
   assert.match(inventoryIntakeScript, /\/api\/v1\/staff\/inventory\/provisioning/);
   assert.match(inventoryIntakeScript, /provisioning\/classify/);
   assert.match(inventoryIntakeScript, /provisioning\/confirm/);
   assert.match(inventoryIntakeScript, /provisioning\/takeover/);
-  assert.match(inventoryIntakeScript, /window\.confirm/);
+  assert.match(inventoryIntakeScript, /appConfirm/);
   assert.match(inventoryIntakeScript, /data-takeover-provisioning/);
   assert.match(inventoryIntakeScript, /data-end-intake-nfc/);
   assert.match(inventoryIntakeScript, /new AbortController/);
@@ -75,6 +97,324 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotMatch(inventoryIntakeScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   assert.doesNotMatch(inventoryIntakeScript, /localStorage|sessionStorage|serviceWorker|makeReadOnly|console\./);
   assert.doesNotMatch(inventoryIntakeScript, /tagToken|physicallyPresent|console\./);
+});
+
+class FakeElement {
+  constructor(tagName, ownerDocument, nativeDialog = false) {
+    this.tagName = tagName.toUpperCase();
+    this.ownerDocument = ownerDocument;
+    this.children = [];
+    this.listeners = new Map();
+    this.attributes = new Map();
+    this.className = "";
+    this.hidden = false;
+    this.id = "";
+    this.isConnected = false;
+    this.open = false;
+    this.parentNode = null;
+    this.textContent = "";
+    this.type = "";
+    this.showModalCalls = 0;
+    this.closeCalls = 0;
+    this.classList = {
+      add: (...names) => this.updateClasses(names, []),
+      contains: (name) => this.className.split(/\s+/).includes(name),
+      remove: (...names) => this.updateClasses([], names),
+      toggle: (name, force) => {
+        const present = this.classList.contains(name);
+        const next = force === undefined ? !present : Boolean(force);
+        this.updateClasses(next ? [name] : [], next ? [] : [name]);
+        return next;
+      },
+    };
+    if (nativeDialog) {
+      this.showModal = () => {
+        this.showModalCalls += 1;
+        this.open = true;
+      };
+      this.close = () => {
+        this.closeCalls += 1;
+        this.open = false;
+      };
+    }
+  }
+
+  updateClasses(add, remove) {
+    const names = new Set(this.className.split(/\s+/).filter(Boolean));
+    for (const name of add) names.add(name);
+    for (const name of remove) names.delete(name);
+    this.className = [...names].join(" ");
+  }
+
+  append(...children) {
+    for (const child of children) {
+      child.parentNode = this;
+      child.setConnected(this.isConnected);
+      this.children.push(child);
+    }
+  }
+
+  setConnected(value) {
+    this.isConnected = value;
+    for (const child of this.children) child.setConnected(value);
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+    if (name === "open") this.open = true;
+  }
+
+  getAttribute(name) {
+    return this.attributes.get(name) ?? null;
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
+    if (name === "open") this.open = false;
+  }
+
+  addEventListener(name, listener) {
+    if (!this.listeners.has(name)) this.listeners.set(name, new Set());
+    this.listeners.get(name).add(listener);
+  }
+
+  removeEventListener(name, listener) {
+    this.listeners.get(name)?.delete(listener);
+  }
+
+  dispatch(name, init = {}) {
+    const event = {
+      ...init,
+      type: name,
+      target: init.target ?? this,
+      defaultPrevented: false,
+      preventDefault() { this.defaultPrevented = true; },
+    };
+    for (const listener of [...(this.listeners.get(name) ?? [])]) listener(event);
+    return event;
+  }
+
+  contains(target) {
+    return target === this || this.children.some((child) => child.contains(target));
+  }
+
+  focus() {
+    this.ownerDocument.activeElement = this;
+    this.ownerDocument.dispatch("focusin", { target: this });
+  }
+}
+
+class FakeDocument {
+  constructor(nativeDialog) {
+    this.nativeDialog = nativeDialog;
+    this.elements = [];
+    this.listeners = new Map();
+    this.body = this.createElement("body");
+    this.body.setConnected(true);
+    this.activeElement = this.body;
+  }
+
+  createElement(tagName) {
+    const element = new FakeElement(tagName, this, this.nativeDialog && tagName === "dialog");
+    this.elements.push(element);
+    return element;
+  }
+
+  addEventListener(name, listener) {
+    if (!this.listeners.has(name)) this.listeners.set(name, new Set());
+    this.listeners.get(name).add(listener);
+  }
+
+  removeEventListener(name, listener) {
+    this.listeners.get(name)?.delete(listener);
+  }
+
+  dispatch(name, init = {}) {
+    const event = { ...init, type: name, target: init.target ?? this };
+    for (const listener of [...(this.listeners.get(name) ?? [])]) listener(event);
+  }
+
+  find(predicate) {
+    return this.elements.find(predicate);
+  }
+}
+
+const confirmationHarness = (nativeDialog = true) => {
+  const document = new FakeDocument(nativeDialog);
+  const trigger = document.createElement("button");
+  trigger.textContent = "Open confirmation";
+  document.body.append(trigger);
+  trigger.focus();
+  const appConfirm = new Function(
+    "document",
+    `${confirmationDialogScript}; return appConfirm;`,
+  )(document);
+  return {
+    appConfirm,
+    backdrop: document.find((element) => element.classList.contains("app-confirmation-backdrop")),
+    cancel: document.find((element) => element.textContent === "Cancel"),
+    confirm: document.find((element) => element.textContent === "Confirm"),
+    dialog: document.find((element) => element.tagName === "DIALOG"),
+    document,
+    message: document.find((element) => element.id === "app-confirmation-message"),
+    trigger,
+  };
+};
+
+test("confirmation dialog is DOM-safe and compatible with the page CSP", () => {
+  assert.doesNotThrow(() => new Function(confirmationDialogScript));
+  assert.match(confirmationDialogScript, /createElement\("dialog"\)/);
+  assert.match(confirmationDialogScript, /showModal/);
+  assert.match(confirmationDialogScript, /aria-modal/);
+  assert.doesNotMatch(
+    confirmationDialogScript,
+    /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write|\b(?:eval|Function)\s*\(|\.style\b|setAttribute\("style"/,
+  );
+  assert.doesNotMatch(confirmationDialogScript, /\.on(?:click|keydown|cancel|focusin)\s*=/);
+});
+
+test("confirmation dialog traps focus, cancels with Escape, and returns focus", async () => {
+  const harness = confirmationHarness();
+  const pending = harness.appConfirm('<img src=x onerror="unsafe">');
+
+  assert.equal(harness.dialog.showModalCalls, 1);
+  assert.equal(harness.dialog.getAttribute("role"), "dialog");
+  assert.equal(harness.dialog.getAttribute("aria-modal"), "true");
+  assert.equal(harness.message.textContent, '<img src=x onerror="unsafe">');
+  assert.equal(harness.document.activeElement, harness.cancel);
+
+  harness.dialog.dispatch("keydown", { key: "Tab" });
+  assert.equal(harness.document.activeElement, harness.confirm);
+  harness.dialog.dispatch("keydown", { key: "Tab" });
+  assert.equal(harness.document.activeElement, harness.cancel);
+  harness.dialog.dispatch("keydown", { key: "Tab", shiftKey: true });
+  assert.equal(harness.document.activeElement, harness.confirm);
+
+  const outside = harness.document.createElement("button");
+  harness.document.body.append(outside);
+  outside.focus();
+  assert.equal(harness.document.activeElement, harness.cancel);
+
+  const escape = harness.dialog.dispatch("keydown", { key: "Escape" });
+  assert.equal(escape.defaultPrevented, true);
+  assert.equal(await pending, false);
+  assert.equal(harness.dialog.hidden, true);
+  assert.equal(harness.document.activeElement, harness.trigger);
+});
+
+test("confirmation dialog handles cancel and confirm controls with danger styling", async () => {
+  const harness = confirmationHarness();
+  const cancelled = harness.appConfirm("Cancel this action");
+  harness.cancel.dispatch("click");
+  assert.equal(await cancelled, false);
+
+  const nativeCancelled = harness.appConfirm("Browser cancel event");
+  const cancelEvent = harness.dialog.dispatch("cancel");
+  assert.equal(cancelEvent.defaultPrevented, true);
+  assert.equal(await nativeCancelled, false);
+
+  const confirmed = harness.appConfirm("Delete this action", { danger: true });
+  assert.equal(harness.dialog.classList.contains("danger-zone"), true);
+  assert.equal(harness.confirm.classList.contains("danger"), true);
+  harness.confirm.dispatch("click");
+  assert.equal(await confirmed, true);
+  assert.equal(harness.document.activeElement, harness.trigger);
+});
+
+test("confirmation dialog fallback supplies a blocking backdrop and cancellation", async () => {
+  const harness = confirmationHarness(false);
+  const pending = harness.appConfirm("Fallback confirmation");
+
+  assert.equal(harness.dialog.classList.contains("fallback"), true);
+  assert.equal(harness.dialog.open, true);
+  assert.equal(harness.backdrop.hidden, false);
+  assert.equal(harness.document.activeElement, harness.cancel);
+  harness.backdrop.dispatch("click");
+  assert.equal(await pending, false);
+  assert.equal(harness.backdrop.hidden, true);
+  assert.equal(harness.document.activeElement, harness.trigger);
+});
+
+test("confirmation requests serialize without overlapping dialogs", async () => {
+  const harness = confirmationHarness();
+  const first = harness.appConfirm("First confirmation");
+  const second = harness.appConfirm("Second confirmation", { confirmLabel: "Proceed" });
+
+  assert.equal(harness.dialog.showModalCalls, 1);
+  assert.equal(harness.message.textContent, "First confirmation");
+  harness.confirm.dispatch("click");
+  assert.equal(await first, true);
+  assert.equal(harness.dialog.showModalCalls, 2);
+  assert.equal(harness.message.textContent, "Second confirmation");
+  assert.equal(harness.confirm.textContent, "Proceed");
+  harness.cancel.dispatch("click");
+  assert.equal(await second, false);
+  assert.equal(harness.dialog.closeCalls, 2);
+});
+
+const confirmationCallsites = [
+  [startLineScript, 'if (!await appConfirm(readback, { danger: true })) return;'],
+  [finishLineScript, 'if (!await appConfirm("Submit this official result now? Read back: " + readback + ". This publishes immediately.", { danger: true })) return;'],
+  [inventoryIntakeScript, `if (!await appConfirm(
+    "Take over pending Duck #" + candidate.visibleNumber
+    + "? Continue only if the previous provisioning station has been abandoned.",
+    { danger: true },
+  )) return;`],
+  [staffHomeScript, 'if (!await appConfirm("Run “" + button.textContent + "” for " + event.name + "?")) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Delete this empty draft? This cannot be undone.", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Permanently delete this event and every record for it, in any state? This cannot be undone.", { danger: true })) return;'],
+  [staffHomeScript, 'if (dangerous && !await appConfirm(label + " for " + selectedRegistration.firstName + " " + selectedRegistration.lastName + "?", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Reactivate this participant?")) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Retire the current tag and activate this verified replacement?", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Retire this tag without a replacement? The duck will be quarantined.", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Assign Duck #" + selectedDuck.visibleNumber + " to this race entry?")) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Unassign Duck #" + selectedDuck.visibleNumber + " from its participant?", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Release Duck #" + selectedDuck.visibleNumber + " from this event?", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;'],
+  [staffHomeScript, 'if (!await appConfirm(confirmation)) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Commit this exact balanced plan? Rosters become operational race data.")) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Mark this event purge-ready and disable normal race changes?", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Finalize this return batch? Every staged disposition will become authoritative.")) return;'],
+  [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Claim this event for permanent purge? Support mutations will be frozen.", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Permanently delete the complete race dataset now? This cannot be undone.", { danger: true })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
+];
+
+test("every confirmation callsite preserves its warning and returns before mutation on cancel", async () => {
+  for (const [script, guardedWarning] of confirmationCallsites) {
+    assert.ok(script.includes(guardedWarning), `missing guarded confirmation: ${guardedWarning}`);
+  }
+  assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  assert.equal((inventoryIntakeScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 20);
+
+  let mutations = 0;
+  const harness = confirmationHarness();
+  const guardedMutation = async () => {
+    if (!await harness.appConfirm("Guarded mutation")) return;
+    mutations += 1;
+  };
+  const pending = guardedMutation();
+  harness.cancel.dispatch("click");
+  await pending;
+  assert.equal(mutations, 0);
+});
+
+test("browser clients contain no native confirmation calls", () => {
+  for (const script of [
+    registrationScript,
+    participantScript,
+    staffDuckScript,
+    staffHomeScript,
+    liveScript,
+    liveUiScript,
+    startLineScript,
+    finishLineScript,
+    inventoryIntakeScript,
+  ]) assert.doesNotMatch(script, /\b(?:window\.)?confirm\s*\(/);
 });
 
 const registrationHandoffHelpers = () => new Function(
@@ -141,8 +481,65 @@ test("My Ducks consumes only the matching same-origin relative private handoff o
 });
 
 const inventoryHelpers = () => new Function(
-  `${inventoryIntakeHelpersScript}; return { intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
+  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
 )();
+
+const androidChromeUserAgent = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
+
+test("inventory runtime gate requires visible top-level Android Chrome Web NFC", () => {
+  const { intakeProvisioningRuntimeIssue } = inventoryHelpers();
+  const supported = {
+    userAgent: androidChromeUserAgent,
+    hasNdefReader: true,
+    secureContext: true,
+    topLevel: true,
+    visible: true,
+  };
+  assert.equal(intakeProvisioningRuntimeIssue(supported), null);
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, userAgent: "" }), "android-chrome");
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, userAgent: "Mozilla/5.0 (iPhone) Version/18.5 Mobile Safari/604.1" }), "android-chrome");
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, userAgent: "Mozilla/5.0 (Macintosh) Chrome/138.0.0.0 Safari/537.36" }), "android-chrome");
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, userAgent: "Mozilla/5.0 (Linux; Android 15) Firefox/140.0" }), "android-chrome");
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, userAgent: "Mozilla/5.0 (Linux; Android 15; wv) Version/4.0 Chrome/138.0.0.0 Mobile Safari/537.36" }), "android-chrome");
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, hasNdefReader: false }), "web-nfc");
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, secureContext: false }), "secure-context");
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, topLevel: false }), "top-level");
+  assert.equal(intakeProvisioningRuntimeIssue({ ...supported, visible: false }), "visible");
+});
+
+test("spoofed Android user agent without Web NFC reveals nothing and calls no API", () => {
+  const runtimeNotice = { hidden: true };
+  const runtimeMessage = { textContent: "" };
+  const controls = { hidden: true };
+  const elements = new Map([
+    ["[data-intake-runtime]", runtimeNotice],
+    ["[data-intake-runtime-message]", runtimeMessage],
+    ["[data-intake-controls]", controls],
+  ]);
+  const document = {
+    visibilityState: "visible",
+    querySelector: (selector) => elements.get(selector) ?? {},
+    createElement: () => ({ setAttribute: () => {}, append: () => {} }),
+    body: { append: () => {} },
+  };
+  const window = {};
+  window.top = window;
+  window.self = window;
+  let apiCalls = 0;
+
+  new Function("document", "navigator", "window", "isSecureContext", "fetch", inventoryIntakeScript)(
+    document,
+    { userAgent: androidChromeUserAgent },
+    window,
+    true,
+    () => { apiCalls += 1; },
+  );
+
+  assert.equal(apiCalls, 0);
+  assert.equal(controls.hidden, true);
+  assert.equal(runtimeNotice.hidden, false);
+  assert.match(runtimeMessage.textContent, /does not expose Web NFC/);
+});
 
 test("inventory takeover metadata is redacted and never auto-adopted", async () => {
   const { intakeSafeTakeoverCandidate } = inventoryHelpers();
@@ -638,25 +1035,40 @@ test("canonical existing URLs are classified before any write or allocation", as
 });
 
 test("live clients build safe DOM and retain reconnect plus polling fallback", () => {
-  for (const script of [liveScript, startLineScript, finishLineScript]) {
+  for (const script of [
+    homeScript,
+    registrationScript,
+    participantScript,
+    liveScript,
+    startLineScript,
+    finishLineScript,
+    inventoryIntakeScript,
+    staffHomeScript,
+    staffDuckScript,
+  ]) {
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
-    assert.match(script, /new WebSocket/);
-    assert.match(script, /liveReconnectDelay/);
-    assert.match(script, /15000/);
-    assert.match(script, /liveCreatePollScheduler/);
-    assert.doesNotMatch(script, /setInterval/);
-    assert.match(script, /replaceChildren/);
-    assert.match(script, /textContent/);
+    assert.match(script, /quickDucksLive\.subscribe/);
   }
+  for (const script of [liveUiScript, participantScript, liveScript, startLineScript, finishLineScript]) {
+    assert.doesNotMatch(script, /setInterval/);
+  }
+  for (const script of [participantScript, liveScript, startLineScript, finishLineScript]) {
+    assert.doesNotMatch(script, /new WebSocket\(|liveCreatePollScheduler\(/);
+  }
+  assert.match(liveUiScript, /new WebSocketClass/);
+  assert.match(liveUiScript, /liveReconnectDelay/);
+  assert.match(liveUiScript, /15000/);
+  assert.match(liveUiScript, /liveCreatePollScheduler/);
+  assert.match(liveUiScript, /\/api\/v1\/live/);
+  assert.match(liveUiScript, /\/api\/v1\/staff\/session/);
+  assert.match(liveUiScript, /data-live-dirty/);
   assert.match(liveScript, /\/api\/v1\/race-board/);
   assert.doesNotMatch(liveScript, /\/api\/v1\/registrations\/mine/);
+  assert.match(participantScript, /\/api\/v1\/registrations\/mine/);
   assert.match(liveScript, /Updates are delayed/);
-  assert.match(liveScript, /personal details are delayed/);
-  assert.doesNotMatch(participantScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
-  assert.match(participantScript, /new WebSocket/);
-  assert.match(participantScript, /\/api\/v1\/live/);
-  assert.match(participantScript, /participantSchedulePolling/);
-  assert.match(participantScript, /participantConnected \? 30000 : 5000/);
+  assert.match(liveUiScript, /personal details are delayed/);
+  assert.match(liveScript, /replaceChildren/);
+  assert.match(liveScript, /textContent/);
   assert.match(participantScript, /ArrowLeft/);
   assert.match(participantScript, /replaceChildren/);
   assert.match(participantScript, /textContent/);
@@ -690,7 +1102,7 @@ test("station state helpers prioritize unpublished results and stable render key
 
 test("live runtime helpers coalesce refreshes and switch fake poll timers", async () => {
   const helpers = new Function(
-    `${liveRuntimeHelpersScript}; return { livePollDelay, liveReconnectDelay, liveSuccessfulFreshness, liveCreateRefreshQueue, liveCreatePollScheduler };`,
+    `${liveRuntimeHelpersScript}; return { livePollDelay, liveReconnectDelay, liveSuccessfulFreshness, liveParseRefreshSignal, liveSignalMatches, liveCreateRefreshQueue, liveCreatePollScheduler, liveCreateHub };`,
   )();
   assert.equal(helpers.livePollDelay(false), 5000);
   assert.equal(helpers.livePollDelay(true), 30000);
@@ -738,6 +1150,271 @@ test("live runtime helpers coalesce refreshes and switch fake poll timers", asyn
   hidden = true;
   scheduler.schedule(true);
   assert.equal(timers.size, 0);
+});
+
+const makeLiveHarness = () => {
+  const documentListeners = new Map();
+  const timers = new Map();
+  let nextTimer = 0;
+  const main = { clears: 0, replaceChildren() { this.clears += 1; } };
+  let staffRoot = null;
+  const documentObject = {
+    hidden: false,
+    addEventListener(type, listener) { documentListeners.set(type, listener); },
+    querySelector(selector) {
+      if (selector === "main") return main;
+      if (selector === "[data-live-staff]") return staffRoot;
+      return null;
+    },
+  };
+  class FakeSocket {
+    static instances = [];
+    constructor(url) {
+      this.url = url;
+      this.listeners = new Map();
+      FakeSocket.instances.push(this);
+    }
+    addEventListener(type, listener) { this.listeners.set(type, listener); }
+    close() { this.listeners.get("close")?.(); }
+    emit(type, event = {}) { this.listeners.get(type)?.(event); }
+  }
+  const locationCalls = [];
+  const locationObject = {
+    protocol: "https:",
+    host: "quickducks.com",
+    reload() { locationCalls.push(["reload"]); },
+    replace(path) { locationCalls.push(["replace", path]); },
+  };
+  const helpers = new Function(`${liveRuntimeHelpersScript}; return { liveCreateHub, liveParseRefreshSignal };`)();
+  let nowValue = 0;
+  const hub = helpers.liveCreateHub({
+    WebSocketClass: FakeSocket,
+    documentObject,
+    locationObject,
+    setTimer(callback, delay) {
+      const id = ++nextTimer;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    clearTimer(id) { timers.delete(id); },
+    now: () => nowValue,
+  });
+  return {
+    documentListeners,
+    documentObject,
+    FakeSocket,
+    helpers,
+    hub,
+    locationCalls,
+    main,
+    setNow(value) { nowValue = value; },
+    setStaffRoot(value) { staffRoot = value; },
+    timers,
+  };
+};
+
+// A subscriber root with one form control that the hub can mark dirty/clean.
+const makeDirtyRoot = () => {
+  const control = { dataset: {}, matches: () => true, querySelectorAll: () => [] };
+  const root = {
+    dataset: {},
+    querySelector: (selector) => selector === "[data-live-dirty='true']" && control.dataset.liveDirty === "true"
+      ? control
+      : null,
+    querySelectorAll: (selector) => selector === "[data-live-dirty='true']" && control.dataset.liveDirty === "true"
+      ? [control]
+      : [],
+  };
+  return { control, root };
+};
+
+const liveFrame = (domains = ["participants"]) => JSON.stringify({
+  type: "refresh",
+  domains,
+  version: "11111111-1111-4111-8111-111111111111",
+});
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test("shared live hub validates frames, reconnects, coalesces, and defers dirty or busy refreshes", async () => {
+  const harness = makeLiveHarness();
+  let refreshes = 0;
+  let release = null;
+  harness.hub.subscribe({
+    domains: ["participants"],
+    refresh: async () => {
+      refreshes += 1;
+      if (release !== null) await new Promise((resolve) => { release.resolve = resolve; });
+    },
+  });
+  await settle();
+  assert.equal(refreshes, 1);
+
+  harness.hub.start();
+  const socket = harness.FakeSocket.instances[0];
+  assert.equal(socket.url, "wss://quickducks.com/api/v1/live");
+  socket.emit("open");
+  await settle();
+  assert.equal(refreshes, 2);
+
+  socket.emit("message", { data: JSON.stringify({ type: "refresh", domains: ["participants"], version: "participant-name" }) });
+  await settle();
+  assert.equal(refreshes, 2);
+
+  release = {};
+  socket.emit("message", { data: liveFrame() });
+  socket.emit("message", { data: liveFrame() });
+  await settle();
+  assert.equal(refreshes, 3);
+  release.resolve();
+  release = null;
+  await settle();
+  assert.equal(refreshes, 4);
+
+  const control = {
+    dataset: {},
+    matches() { return true; },
+    querySelectorAll() { return []; },
+  };
+  harness.documentObject.querySelector = (selector) => selector === "[data-live-dirty='true']" && control.dataset.liveDirty === "true"
+    ? control
+    : selector === "main" ? harness.main : null;
+  harness.documentListeners.get("input")({ target: control });
+  socket.emit("message", { data: liveFrame() });
+  await settle();
+  assert.equal(refreshes, 4);
+  harness.hub.markClean(control);
+  await settle();
+  assert.equal(refreshes, 5);
+
+  const endBusy = harness.hub.beginBusy();
+  socket.emit("message", { data: liveFrame() });
+  await settle();
+  assert.equal(refreshes, 5);
+  endBusy();
+  await settle();
+  assert.equal(refreshes, 6);
+
+  socket.emit("close");
+  const reconnect = [...harness.timers.values()].find((timer) => timer.delay < 2000);
+  assert.ok(reconnect);
+  reconnect.callback();
+  assert.equal(harness.FakeSocket.instances.length, 2);
+});
+
+test("live hub opens no socket and schedules no polls without subscribers", async () => {
+  const harness = makeLiveHarness();
+  harness.hub.start();
+  await settle();
+  assert.equal(harness.FakeSocket.instances.length, 0);
+  assert.equal(harness.timers.size, 0);
+
+  let refreshes = 0;
+  harness.hub.subscribe({ domains: ["participants"], refresh: async () => { refreshes += 1; } });
+  await settle();
+  assert.equal(harness.FakeSocket.instances.length, 1);
+  assert.equal(harness.FakeSocket.instances[0].url, "wss://quickducks.com/api/v1/live");
+  assert.ok(harness.timers.size > 0);
+  assert.equal(refreshes, 1);
+});
+
+test("live hub connects on start when a subscriber already exists", async () => {
+  const harness = makeLiveHarness();
+  harness.hub.subscribe({ domains: ["participants"], refresh: async () => {} });
+  await settle();
+  assert.equal(harness.FakeSocket.instances.length, 0);
+  harness.hub.start();
+  assert.equal(harness.FakeSocket.instances.length, 1);
+});
+
+test("an abandoned edit in one root defers only that subscriber, not the others", async () => {
+  const harness = makeLiveHarness();
+  const blocked = makeDirtyRoot();
+  const unblocked = makeDirtyRoot();
+  let blockedRefreshes = 0;
+  let unblockedRefreshes = 0;
+  harness.hub.subscribe({
+    domains: ["participants"],
+    root: blocked.root,
+    refresh: async () => { blockedRefreshes += 1; },
+  });
+  harness.hub.subscribe({
+    domains: ["participants"],
+    root: unblocked.root,
+    refresh: async () => { unblockedRefreshes += 1; },
+  });
+  harness.hub.start();
+  await settle();
+  assert.equal(blockedRefreshes, 1);
+  assert.equal(unblockedRefreshes, 1);
+
+  const socket = harness.FakeSocket.instances[0];
+  socket.emit("open");
+  await settle();
+  harness.documentListeners.get("input")({ target: blocked.control });
+  socket.emit("message", { data: liveFrame() });
+  await settle();
+  assert.equal(blockedRefreshes, 2, "dirty root must defer its own subscriber");
+  assert.equal(unblockedRefreshes, 3, "a clean root must keep refreshing");
+
+  harness.hub.markClean(blocked.root);
+  await settle();
+  assert.equal(blockedRefreshes, 3, "cleaning the root must release the deferred refresh");
+});
+
+test("a subscriber blocked by an abandoned edit recovers after five minutes", async () => {
+  const harness = makeLiveHarness();
+  const { control, root } = makeDirtyRoot();
+  let refreshes = 0;
+  harness.hub.subscribe({
+    domains: ["participants"],
+    root,
+    refresh: async () => { refreshes += 1; },
+  });
+  harness.hub.start();
+  await settle();
+  assert.equal(refreshes, 1);
+  const socket = harness.FakeSocket.instances[0];
+  socket.emit("open");
+  await settle();
+  assert.equal(refreshes, 2);
+
+  harness.documentListeners.get("input")({ target: control });
+  socket.emit("message", { data: liveFrame() });
+  await settle();
+  assert.equal(refreshes, 2, "a fresh edit must defer the refresh");
+
+  harness.setNow(299999);
+  socket.emit("message", { data: liveFrame() });
+  await settle();
+  assert.equal(refreshes, 2, "the deferral must hold inside the five-minute bound");
+
+  harness.setNow(300000);
+  socket.emit("message", { data: liveFrame() });
+  await settle();
+  assert.equal(refreshes, 3, "an abandoned edit must stop blocking after five minutes");
+});
+
+test("purge and staff deactivation clear rendered private data before navigation", async (context) => {
+  const purge = makeLiveHarness();
+  purge.hub.subscribe({ domains: ["participants"], refresh: async () => {} });
+  purge.hub.start();
+  purge.FakeSocket.instances[0].emit("message", { data: liveFrame(["all"]) });
+  await settle();
+  assert.equal(purge.main.clears, 1);
+  assert.deepEqual(purge.locationCalls, [["reload"]]);
+
+  const deactivation = makeLiveHarness();
+  deactivation.setStaffRoot({ dataset: { systemAdmin: "false", roles: "REGISTRATION" } });
+  context.mock.method(globalThis, "fetch", async () => Response.json(
+    { error: "Staff authentication required." },
+    { status: 401 },
+  ));
+  deactivation.hub.subscribe({ domains: ["staff"], refresh: async () => {} });
+  deactivation.hub.start();
+  deactivation.FakeSocket.instances[0].emit("message", { data: liveFrame(["staff"]) });
+  await settle();
+  assert.equal(deactivation.main.clears, 1);
+  assert.deepEqual(deactivation.locationCalls, [["replace", "/staff"]]);
 });
 
 test("finish selection rejects wrong-heat and duplicate race entries", () => {

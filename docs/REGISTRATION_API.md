@@ -34,7 +34,6 @@ Example request:
   "email": "daisy@example.com",
   "phone": null,
   "emailNotificationsEnabled": true,
-  "duckKeepPreference": "UNDECIDED",
   "turnstileToken": "turnstile-response-token",
   "clientTimestamp": "2026-07-26T00:00:00.000Z"
 }
@@ -63,6 +62,11 @@ Successful response:
 
 Registration creation writes the command, registration, stable race entry,
 and audit event in one D1 batch. No duck or heat is assigned at submission.
+Registration does not ask whether a participant plans to keep or return a duck.
+The legacy `race_entries.duck_keep_preference` column remains for database
+compatibility, receives its existing default for new rows, and is not read,
+written explicitly, or exposed by the application. Existing stored values are
+ignored.
 
 Public registration fails closed unless:
 
@@ -78,10 +82,10 @@ GET /api/v1/registrations/{privateToken}
 ```
 
 The high-entropy token is the authorization credential. The response includes
-participant name, registration status, staff lookup code, event details, and
-keep/return preference. Email and phone remain staff-only and are not returned,
-even with the private token. Never place this endpoint or its response in
-analytics, application logs, public links, or search indexes.
+participant name, registration status, staff lookup code, and event details.
+Email and phone remain staff-only and are not returned, even with the private
+token. Never place this endpoint or its response in analytics, application
+logs, public links, or search indexes.
 
 The short lookup code is for staff search only and must never authorize this
 endpoint.

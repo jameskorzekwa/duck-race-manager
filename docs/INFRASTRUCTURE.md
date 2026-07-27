@@ -489,15 +489,31 @@ is closed with policy code `1008` because the channel is server-to-client signal
 only. Do not add client network identifiers to admission, socket metadata,
 signals, or logs.
 
-The object broadcasts only a validated small `{type, version}` refresh signal.
-It contains no authoritative race data, participant data, tokens, client
-network identifiers, or durable application state. A mutation response is
-returned from committed API state independently; publication is scheduled with
-`ExecutionContext.waitUntil` and failures are isolated. Clients always refetch
-D1-backed APIs. They poll approximately every five seconds only while WebSocket
-is unavailable/disconnected and use an approximately 30-second integrity
-refresh while connected. Hidden tabs pause polling/rendering, reconnects use
-jitter, and concurrent refresh triggers are coalesced.
+The object broadcasts only a validated bounded
+`{type:"refresh", domains:[...], version:<random UUID>}` signal. Domains come
+from the fixed `all`, `event`, `participants`, `ducks`, `heats`, `returns`,
+`staff`, and `support` allowlist. The frame contains no authoritative race data,
+IDs, names, contact details, event/participant/duck labels, lookup codes, tokens,
+tag URLs, commands, mutation payloads, client network identifiers, or durable
+application state.
+
+Successful mutating routes are classified after their handler returns from its
+committed D1/API work. Publication is scheduled with
+`ExecutionContext.waitUntil`; failures are isolated from the committed response.
+Read-only POST operations such as heat-plan preview and tag classification are
+explicitly excluded. Clients use domains only to choose authoritative D1-backed
+API refetches. They poll approximately every five seconds while WebSocket is
+unavailable/disconnected and use an approximately 30-second integrity refresh
+while connected. Hidden tabs pause polling/rendering, reconnects use jitter and
+refetch immediately, and concurrent refresh triggers are coalesced.
+
+The shared browser hub defers ordinary refreshes while a form, scan, NFC write,
+result selection, or command is dirty/in flight. Purge's `all` signal clears
+rendered main content and server-reloads without deferral. A `staff` signal calls
+the PII-free `/api/v1/staff/session` projection; deactivation or reduced access
+clears protected rendering and navigates/reloads immediately. These behaviors
+are application safety rules, not WebSocket authorization; every API refetch
+still authenticates and authorizes independently.
 
 Operator smoke checks after deployment:
 
@@ -506,13 +522,17 @@ Operator smoke checks after deployment:
 2. Confirm an ordinary non-upgrade `GET /api/v1/live` returns `426`.
 3. In browser developer tools, confirm the same-origin live connection upgrades;
    then perform a controlled non-production mutation and verify another open
-   page refreshes.
+   public page and another signed-in staff device refetch their matching APIs.
 4. Interrupt the live connection and confirm the page reports delayed updates,
    reconnects with bounded jitter, and still refreshes through five-second
    polling. Restore the connection and confirm polling slows to the 30-second
    integrity interval.
 5. Send a client frame in a controlled browser test and confirm the socket closes
    with code `1008`; ordinary clients never send frames.
+6. With an unsaved non-destructive form on one device, mutate matching data on a
+   second device and confirm the first device defers its queued refresh until the
+   form is saved/reset. Separately verify staff deactivation and test-data purge
+   clear protected/participant rendering immediately instead of deferring.
 
 Failure of this channel is degraded freshness, not lost race data. Operators may
 continue only after the station's authoritative mutation response and refreshed

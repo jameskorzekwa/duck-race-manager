@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { authenticateStaff } from "./auth.ts";
 import { createWorker } from "./index.ts";
+import { LIVE_UPDATE_DOMAINS } from "./live-updates.ts";
 import { randomToken } from "./registration.ts";
 
 class D1Statement {
@@ -230,16 +231,16 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(/id|email|phone|token|lookup/i.test(JSON.stringify(openBoard)), false);
 
   const participantInputs = [
-    ["Daisy", "Duck", "RETURN"],
-    ["Donald", "Mallard", "KEEP"],
-    ["Della", "Drake", "RETURN"],
-    ["Dewey", "Bird", "UNDECIDED"],
-    ["Huey", "Bird", "RETURN"],
-    ["Louie", "Bird", "RETURN"],
+    ["Daisy", "Duck"],
+    ["Donald", "Mallard"],
+    ["Della", "Drake"],
+    ["Dewey", "Bird"],
+    ["Huey", "Bird"],
+    ["Louie", "Bird"],
   ];
   const participants = [];
   let browserCookie;
-  for (const [index, [firstName, lastName, duckKeepPreference]] of participantInputs.entries()) {
+  for (const [index, [firstName, lastName]] of participantInputs.entries()) {
     const privateToken = randomToken();
     const registration = await api("/api/v1/registrations", {
       method: "POST",
@@ -254,7 +255,6 @@ test("runs the complete race workflow through real API handlers and migrated SQL
         email: `${firstName.toLowerCase()}@example.com`,
         phone: `+1555000000${index}`,
         emailNotificationsEnabled: true,
-        duckKeepPreference,
         turnstileToken: `turnstile-${index}`,
       },
     });
@@ -271,6 +271,10 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     });
   }
   assert.equal(turnstileChecks, participants.length);
+  // Simulate a persisted pre-removal preference; the remaining workflow must ignore it.
+  database.prepare(
+    "UPDATE race_entries SET duck_keep_preference = 'KEEP' WHERE registration_id = ?",
+  ).run(participants[0].registrationId);
 
   const mineBeforePairing = await jsonBody(await api("/api/v1/registrations/mine", {
     cookie: browserCookie,
@@ -278,7 +282,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(mineBeforePairing.registrations.length, participants.length);
   assert.ok(mineBeforePairing.registrations.every((item) => item.raceStatus.outcome === "AWAITING_DUCK_PAIRING"));
   assert.ok(mineBeforePairing.registrations.every((item) => item.paired === false));
-  assert.equal(/email|phone/i.test(JSON.stringify(mineBeforePairing)), false);
+  assert.equal(/email|phone|duckKeepPreference/i.test(JSON.stringify(mineBeforePairing)), false);
 
   const publicBeforePairing = await jsonBody(await api(
     `/api/v1/race-status/search?eventId=${eventId}&name=Daisy`,
@@ -339,6 +343,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   }), 200, "paired browser registration collection");
   assert.ok(mineAfterPairing.registrations.every((item) => item.paired === true));
   assert.ok(mineAfterPairing.registrations.every((item) => item.raceStatus.duck !== null));
+  assert.equal(/duckKeepPreference/i.test(JSON.stringify(mineAfterPairing)), false);
 
   const duplicatePairing = await post(`/api/v1/staff/ducks/${participants[0].tagToken}/assignments`, {
     commandId: crypto.randomUUID(),
@@ -567,6 +572,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     assert.equal(privateStatus.raceStatus.outcome, publicStatus.raceStatus.outcome);
     assert.equal("email" in privateStatus, false);
     assert.equal("phone" in privateStatus, false);
+    assert.equal("duckKeepPreference" in privateStatus, false);
   }
   const privatePage = await api(`/r/${participants[0].privateToken}`);
   const privatePageBody = await privatePage.text();
@@ -718,7 +724,15 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.deepEqual(emptyBrowserCollection, { registrations: [] });
   await Promise.all(updateTasks);
   assert.ok(updateSignals.length > 50);
-  assert.deepEqual(Object.keys(updateSignals[0]).sort(), ["type", "version"]);
-  assert.ok(updateSignals.every((signal) => signal.type === "refresh" && typeof signal.version === "string"));
-  assert.equal(/event|participant|duck|heat|result|token/i.test(JSON.stringify(updateSignals)), false);
+  assert.deepEqual(Object.keys(updateSignals[0]).sort(), ["domains", "type", "version"]);
+  assert.ok(updateSignals.every((signal) => signal.type === "refresh"
+    && typeof signal.version === "string"
+    && Array.isArray(signal.domains)
+    && signal.domains.length > 0
+    && signal.domains.every((domain) => LIVE_UPDATE_DOMAINS.includes(domain))));
+  assert.ok(updateSignals.some((signal) => signal.domains.includes("all")));
+  assert.ok(updateSignals.some((signal) => signal.domains.includes("participants")));
+  assert.ok(updateSignals.some((signal) => signal.domains.includes("ducks")));
+  assert.ok(updateSignals.some((signal) => signal.domains.includes("heats")));
+  assert.equal(/email|phone|lookup|token|firstName|lastName|eventId|duckId|participantId/i.test(JSON.stringify(updateSignals)), false);
 });

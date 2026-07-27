@@ -189,6 +189,26 @@ test("requires same-origin protection for cookie-authenticated staff mutations",
   assert.equal(allowed.status, 404);
 });
 
+test("staff session revalidation returns authorization state without identity or PII", async () => {
+  const response = await handleApi(
+    new Request("https://quickducks.com/api/v1/staff/session"),
+    makeEnv(makeDb(() => null)),
+    async () => actor,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(body, {
+    access: {
+      isSystemAdmin: false,
+      roles: actor.roles,
+    },
+  });
+  assert.equal(JSON.stringify(body).includes(actor.id), false);
+  assert.equal(JSON.stringify(body).includes(actor.email), false);
+  assert.equal(JSON.stringify(body).includes(actor.displayName), false);
+});
+
 test("regular staff cannot list or add staff access", async () => {
   const db = makeDb(() => null);
   let provisioned = false;

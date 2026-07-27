@@ -267,7 +267,11 @@ export const staffLogoutResponse = async (
   if (request.method !== "POST") {
     return new Response(null, {
       status: 405,
-      headers: { allow: "POST", "cache-control": "no-store" },
+      headers: {
+        allow: "POST",
+        "cache-control": "no-store",
+        "content-type": "text/plain; charset=utf-8",
+      },
     });
   }
 
@@ -288,7 +292,13 @@ export const staffLogoutResponse = async (
     }
   }
   if (!hasSameOriginProvenance) {
-    return new Response(null, { status: 403, headers: { "cache-control": "no-store" } });
+    return new Response(null, {
+      status: 403,
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "text/plain; charset=utf-8",
+      },
+    });
   }
 
   const refreshToken = readCookie(request, staffRefreshCookieName);
@@ -313,6 +323,7 @@ export const staffLogoutResponse = async (
   }).toString();
   const headers = new Headers({
     "cache-control": "no-store",
+    "content-type": "text/plain; charset=utf-8",
     location: logoutUrl.toString(),
   });
   for (const cookie of clearStaffCookies()) headers.append("set-cookie", cookie);

@@ -3,17 +3,22 @@ import test from "node:test";
 
 import {
   handleLiveConnection,
+  LIVE_UPDATE_DOMAINS,
   MAX_LIVE_CONNECTIONS,
+  mutationRefreshDomains,
   RaceUpdates,
   scheduleRaceUpdate,
 } from "./live-updates.ts";
 
-test("Durable Object broadcasts only the supplied small refresh signal", async () => {
+const version = "11111111-1111-4111-8111-111111111111";
+
+test("Durable Object broadcasts one bounded privacy-safe signal to every device", async () => {
   const received = [];
   let failedClosed = false;
   const object = new RaceUpdates({
     getWebSockets() {
       return [
+        { send(value) { received.push(value); } },
         { send(value) { received.push(value); } },
         {
           send() { throw new Error("gone"); },
@@ -26,22 +31,33 @@ test("Durable Object broadcasts only the supplied small refresh signal", async (
       ];
     },
   });
-  const signal = JSON.stringify({ type: "refresh", version: "version-1" });
+  const signal = JSON.stringify({ type: "refresh", domains: ["participants", "ducks"], version });
   const response = await object.fetch(new Request("https://race-updates.internal/publish", {
     method: "POST",
     body: signal,
   }));
 
   assert.equal(response.status, 204);
-  assert.deepEqual(received, [signal]);
+  assert.deepEqual(received, [signal, signal]);
   assert.equal(failedClosed, true);
+  assert.deepEqual(Object.keys(JSON.parse(signal)).sort(), ["domains", "type", "version"]);
   assert.equal(Object.hasOwn(JSON.parse(signal), "race"), false);
 
   const dataSignal = await object.fetch(new Request("https://race-updates.internal/publish", {
     method: "POST",
-    body: JSON.stringify({ type: "refresh", version: "version-2", race: {} }),
+    body: JSON.stringify({ type: "refresh", domains: ["participants"], version, race: {} }),
   }));
   assert.equal(dataSignal.status, 400);
+
+  for (const body of [
+    JSON.stringify({ type: "refresh", domains: ["participants"], version: "participant-name" }),
+    JSON.stringify({ type: "refresh", domains: ["participants", "participants"], version }),
+    JSON.stringify({ type: "refresh", domains: ["private-token"], version }),
+    JSON.stringify({ type: "refresh", domains: ["all", "participants"], version }),
+  ]) {
+    const invalid = await object.fetch(new Request("https://race-updates.internal/publish", { method: "POST", body }));
+    assert.equal(invalid.status, 400);
+  }
 });
 
 test("live endpoint requires same-origin upgrades and routes to one named object", async () => {
@@ -142,4 +158,89 @@ test("failed best-effort publication settles inside waitUntil", async () => {
 
   assert.ok(scheduled);
   await assert.doesNotReject(scheduled);
+});
+
+test("successful mutation routes have explicit bounded refresh domains", () => {
+  const cases = [
+    ["POST", "/api/v1/registrations", ["participants"]],
+    ["POST", "/api/v1/staff/profiles", ["staff"]],
+    ["POST", "/api/v1/staff/profiles/profile/role", ["staff"]],
+    ["POST", "/api/v1/staff/profiles/profile/deactivate", ["staff"]],
+    ["POST", "/api/v1/staff/profiles/profile/reactivate", ["staff"]],
+    ["POST", "/api/v1/staff/events", ["event"]],
+    ["PATCH", "/api/v1/staff/events/event/configuration", ["event"]],
+    ["DELETE", "/api/v1/staff/events/event", ["event"]],
+    ["POST", "/api/v1/staff/events/event/open-registration", ["event", "participants"]],
+    ["POST", "/api/v1/staff/events/event/start-round-one", ["event", "participants", "ducks", "heats"]],
+    ["POST", "/api/v1/staff/events/event/start-return-processing", ["event", "ducks", "returns"]],
+    ["POST", "/api/v1/staff/events/event/purge-ready", ["event", "returns", "support"]],
+    ["POST", "/api/v1/staff/events/event/purge-ready/cancel", ["event", "returns", "support"]],
+    ["POST", "/api/v1/staff/events/event/purge", ["all"]],
+    ["POST", "/api/v1/staff/events/event/force-delete", ["all"]],
+    ["POST", "/api/v1/staff/events/event/registrations", ["participants"]],
+    ["PATCH", "/api/v1/staff/registrations/registration", ["participants", "ducks", "heats"]],
+    ["POST", "/api/v1/staff/registrations/registration/withdraw", ["participants", "ducks", "heats"]],
+    ["POST", "/api/v1/staff/inventory/provisioning", ["ducks", "support"]],
+    ["POST", "/api/v1/staff/inventory/provisioning/takeover", ["ducks", "support"]],
+    ["POST", "/api/v1/staff/inventory/provisioning/confirm", ["ducks", "support"]],
+    ["POST", "/api/v1/staff/inventory/ducks", ["ducks", "event"]],
+    ["PATCH", "/api/v1/staff/inventory/ducks/duck", ["ducks", "participants", "heats"]],
+    ["POST", "/api/v1/staff/inventory/ducks/duck/tags/replace", ["ducks", "participants", "heats"]],
+    ["POST", "/api/v1/staff/inventory/ducks/duck/assignments", ["ducks", "participants", "heats"]],
+    ["POST", "/api/v1/staff/inventory/assignments/assignment/unassign", ["ducks", "participants", "heats"]],
+    ["POST", "/api/v1/staff/ducks/tag/assignments", ["ducks", "participants", "heats"]],
+    ["POST", "/api/v1/staff/events/event/heats/round-one/plan-commit", ["event", "participants", "heats"]],
+    ["PUT", "/api/v1/staff/events/event/heats/heat/roster", ["event", "participants", "heats"]],
+    ["POST", "/api/v1/staff/events/event/heats/heat/results/finalize", ["event", "participants", "heats"]],
+    ["POST", "/api/v1/staff/events/event/heats/heat/start", ["event", "participants", "heats"]],
+    ["POST", "/api/v1/staff/events/event/ducks/42/dispositions", ["ducks", "returns", "support"]],
+    ["POST", "/api/v1/staff/ducks/tag/dispositions", ["ducks", "returns", "support"]],
+    ["POST", "/api/v1/staff/support/events/event/return-batches", ["ducks", "returns", "support"]],
+    ["POST", "/api/v1/staff/support/events/event/return-batches/batch/items", ["ducks", "returns", "support"]],
+    ["POST", "/api/v1/staff/support/events/event/notifications/notification/retry", ["support"]],
+    ["POST", "/api/v1/staff/support/events/event/purge-claim", ["event", "support"]],
+  ];
+
+  for (const [method, path, expected] of cases) {
+    const actual = mutationRefreshDomains(new Request(`https://quickducks.com${path}`, { method }));
+    assert.deepEqual(actual, expected, `${method} ${path}`);
+    assert.ok(actual.every((domain) => LIVE_UPDATE_DOMAINS.includes(domain)));
+  }
+  for (const [method, path] of [
+    ["GET", "/api/v1/staff/events"],
+    ["GET", "/api/v1/registrations/mine"],
+    ["POST", "/api/v1/staff/events/event/heats/round-one/plan-preview"],
+    ["POST", "/api/v1/staff/inventory/provisioning/classify"],
+    ["POST", "/api/v1/unknown"],
+  ]) {
+    assert.equal(mutationRefreshDomains(new Request(`https://quickducks.com${path}`, { method })), null);
+  }
+});
+
+test("scheduled publication contains domains and random version only", async () => {
+  let scheduled;
+  let frame;
+  scheduleRaceUpdate({
+    RACE_UPDATES: {
+      idFromName() { return "object-id"; },
+      get() {
+        return {
+          async fetch(_url, init) {
+            frame = init.body;
+            return new Response(null, { status: 204 });
+          },
+        };
+      },
+    },
+  }, {
+    waitUntil(promise) { scheduled = promise; },
+  }, ["participants", "ducks"]);
+  await scheduled;
+
+  const parsed = JSON.parse(frame);
+  assert.deepEqual(Object.keys(parsed).sort(), ["domains", "type", "version"]);
+  assert.deepEqual(parsed.domains, ["participants", "ducks"]);
+  assert.equal(parsed.type, "refresh");
+  assert.match(parsed.version, /^[0-9a-f-]{36}$/i);
+  assert.doesNotMatch(frame, /name|email|token|code|participantId|duckId|eventId/i);
 });

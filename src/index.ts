@@ -9,6 +9,7 @@ import {
   finishLineScript,
   inventoryIntakeScript,
   liveScript,
+  liveUiScript,
   participantScript,
   registrationScript,
   staffDuckScript,
@@ -27,6 +28,7 @@ import {
   renderStaffDuck,
   renderFinishLine,
   renderInventoryIntake,
+  renderInventoryIntakeUnsupported,
   renderMyDucks,
   renderStaffHome,
   renderStaffLogin,
@@ -63,14 +65,15 @@ const json = (value: unknown, status = 200): Response =>
     },
   });
 
-const html = (body: string, status = 200, noindex = false): Response =>
+const html = (body: string, status = 200, noindex = false, formActionOrigin?: string): Response =>
   new Response(body, {
     status,
     headers: {
       ...securityHeaders,
       "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self' data:; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'unsafe-inline'; upgrade-insecure-requests",
+      "content-security-policy": `default-src 'none'; base-uri 'none'; connect-src 'self' https://challenges.cloudflare.com; form-action 'self'${formActionOrigin === undefined ? "" : ` ${formActionOrigin}`}; frame-ancestors 'none'; frame-src https://challenges.cloudflare.com; img-src 'self' data:; object-src 'none'; script-src 'self' https://challenges.cloudflare.com; style-src 'unsafe-inline'; upgrade-insecure-requests`,
       "content-type": "text/html; charset=utf-8",
+      ...(formActionOrigin === undefined ? {} : { "referrer-policy": "same-origin" }),
       ...(noindex ? { "x-robots-tag": "noindex, nofollow" } : {}),
     },
   });
@@ -85,6 +88,10 @@ const safeReturnTo = (value: string | null): string =>
     ? value
     : "/staff";
 
+// Compatibility-only page routing. Authorization and API protections never trust this value.
+const hasAndroidUserAgent = (request: Request): boolean =>
+  /\bAndroid\b/i.test(request.headers.get("user-agent") ?? "");
+
 export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
@@ -94,6 +101,8 @@ export const createWorker = (
     const appOrigin = new URL(env.APP_ORIGIN);
     const localHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
     const localPreview = appOrigin.protocol === "http:" && localHosts.has(appOrigin.hostname);
+    const staffHtml = (body: string, status = 200): Response =>
+      html(body, status, true, new URL(env.COGNITO_DOMAIN).origin);
     let sessionAuthentication: Awaited<ReturnType<typeof authenticateStaffSession>> | undefined;
     const authenticateRequest: typeof authenticateStaff = async (authRequest, authEnv) => {
       sessionAuthentication ??= await authenticateStaffSession(authRequest, authEnv, authenticate, tokenFetch);
@@ -147,24 +156,26 @@ export const createWorker = (
       });
     }
 
-    if (["/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)) {
-      const script = url.pathname === "/assets/register.js"
-        ? registrationScript
-        : url.pathname === "/assets/participant.js"
-          ? participantScript
-          : url.pathname === "/assets/staff-home.js"
-            ? staffHomeScript
-            : url.pathname === "/assets/live.js"
-              ? liveScript
-              : url.pathname === "/assets/start-line.js"
-                ? startLineScript
-                : url.pathname === "/assets/finish-line.js"
-                  ? finishLineScript
-                  : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
+    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)) {
+      const script = url.pathname === "/assets/live-ui.js"
+        ? liveUiScript
+        : url.pathname === "/assets/register.js"
+          ? registrationScript
+          : url.pathname === "/assets/participant.js"
+            ? participantScript
+            : url.pathname === "/assets/staff-home.js"
+              ? staffHomeScript
+              : url.pathname === "/assets/live.js"
+                ? liveScript
+                : url.pathname === "/assets/start-line.js"
+                  ? startLineScript
+                  : url.pathname === "/assets/finish-line.js"
+                    ? finishLineScript
+                    : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": ["/assets/staff-duck.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)
+          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)
             ? "no-store"
             : "public, max-age=3600",
           "content-type": "text/javascript; charset=utf-8",
@@ -216,16 +227,16 @@ export const createWorker = (
       return html(renderStaffPairing(), 200, true);
     }
     if (url.pathname === "/mock/staff/ducks/128/working" && request.method === "GET") {
-      return html(renderStaffDuck("a".repeat(32), "Staff Preview"), 200, true);
+      return staffHtml(renderStaffDuck("a".repeat(32), "Staff Preview"));
     }
     if (url.pathname === "/mock/staff/home" && request.method === "GET") {
-      return html(renderStaffHome("Administrator Preview", true, []), 200, true);
+      return staffHtml(renderStaffHome("Administrator Preview", true, []));
     }
     if (url.pathname === "/mock/staff/start-line" && request.method === "GET") {
-      return html(renderStartLine("Start-line Preview", false), 200, true);
+      return staffHtml(renderStartLine("Start-line Preview", false));
     }
     if (url.pathname === "/mock/staff/finish-line" && request.method === "GET") {
-      return html(renderFinishLine("Finish-line Preview", false), 200, true);
+      return staffHtml(renderFinishLine("Finish-line Preview", false));
     }
 
     if (url.pathname === "/staff/login/start" && request.method === "GET") {
@@ -255,8 +266,8 @@ export const createWorker = (
     if (url.pathname === "/staff" && request.method === "GET") {
       const actor = await authenticateRequest(request, env);
       return withSessionCookies(actor === null
-        ? html(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo"))), 200, true)
-        : html(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles), 200, true));
+        ? staffHtml(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo"))))
+        : staffHtml(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles)));
     }
 
     if (url.pathname === "/staff/inventory-intake" && request.method === "GET") {
@@ -267,9 +278,21 @@ export const createWorker = (
         return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
       }
       if (!hasAnyRole(actor, ["DUCK_MANAGER", "RACE_DIRECTOR"])) {
-        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use the inventory intake station."), 403, true));
+        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use the inventory intake station.", actor), 403, true));
       }
-      return withSessionCookies(html(renderInventoryIntake(actor.displayName ?? actor.email, appOrigin.origin), 200, true));
+      if (!hasAndroidUserAgent(request)) {
+        const response = staffHtml(renderInventoryIntakeUnsupported(actor.displayName ?? actor.email), 400);
+        response.headers.set("vary", "User-Agent");
+        return withSessionCookies(response);
+      }
+      const response = staffHtml(renderInventoryIntake(
+        actor.displayName ?? actor.email,
+        appOrigin.origin,
+        actor.isSystemAdmin,
+        actor.roles,
+      ));
+      response.headers.set("vary", "User-Agent");
+      return withSessionCookies(response);
     }
 
     if ((url.pathname === "/staff/start-line" || url.pathname === "/staff/finish-line") && request.method === "GET") {
@@ -284,10 +307,15 @@ export const createWorker = (
         ? hasAnyRole(actor, ["HEAT_RUNNER", "RACE_DIRECTOR"])
         : hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
       if (!allowed) {
-        return withSessionCookies(html(renderStaffAuthError(`This account does not have permission to use the ${startLine ? "start-line" : "finish-line"} station.`), 403, true));
+        return withSessionCookies(html(renderStaffAuthError(
+          `This account does not have permission to use the ${startLine ? "start-line" : "finish-line"} station.`,
+          actor,
+        ), 403, true));
       }
       const displayName = actor.displayName ?? actor.email;
-      return withSessionCookies(html(startLine ? renderStartLine(displayName) : renderFinishLine(displayName), 200, true));
+      return withSessionCookies(staffHtml(startLine
+        ? renderStartLine(displayName, true, actor.isSystemAdmin, actor.roles)
+        : renderFinishLine(displayName, true, actor.isSystemAdmin, actor.roles)));
     }
 
     const staffDuckMatch = url.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
@@ -299,9 +327,14 @@ export const createWorker = (
         return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
       }
       if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"])) {
-        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to inspect staff duck records."), 403, true));
+        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to inspect staff duck records.", actor), 403, true));
       }
-      return withSessionCookies(html(renderStaffDuck(staffDuckMatch[1], actor.displayName ?? actor.email), 200, true));
+      return withSessionCookies(staffHtml(renderStaffDuck(
+        staffDuckMatch[1],
+        actor.displayName ?? actor.email,
+        actor.isSystemAdmin,
+        actor.roles,
+      )));
     }
 
     const privateStatusMatch = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);

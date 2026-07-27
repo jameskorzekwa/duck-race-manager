@@ -277,12 +277,17 @@ test("revokes best-effort, clears both local cookies, and redirects through Cogn
   assert.equal(location.searchParams.get("client_id"), env.COGNITO_USER_POOL_CLIENT_ID);
   assert.equal(location.searchParams.get("logout_uri"), env.APP_ORIGIN);
   assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(response.headers.get("content-disposition"), null);
   const revokeBody = new URLSearchParams(revokeRequest.options.body);
   assert.equal(revokeRequest.url, "https://quickducks-staff.example.com/oauth2/revoke");
   assert.equal(revokeBody.get("client_id"), env.COGNITO_USER_POOL_CLIENT_ID);
   assert.equal(revokeBody.get("token"), "valid.refresh.token");
-  assert.match(response.headers.get("set-cookie"), /__Host-quickducks_staff=;/);
-  assert.match(response.headers.get("set-cookie"), /__Host-quickducks_staff_refresh=;/);
+  assert.deepEqual(response.headers.getSetCookie(), [
+    "__Host-quickducks_staff=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax",
+    "__Host-quickducks_staff_refresh=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax",
+  ]);
+  assert.equal(await response.text(), "");
 });
 
 test("completes local logout when Cognito revocation returns non-2xx", async () => {
@@ -305,9 +310,32 @@ test("completes local logout when Cognito revocation returns non-2xx", async () 
   assert.equal(revokeCalled, true);
   assert.equal(response.status, 303);
   assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.match(response.headers.get("set-cookie"), /__Host-quickducks_staff=;/);
-  assert.match(response.headers.get("set-cookie"), /__Host-quickducks_staff_refresh=;/);
+  assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(response.headers.getSetCookie().length, 2);
   assert.match(response.headers.get("location"), /^https:\/\/quickducks-staff\.example\.com\/logout/);
+});
+
+test("logs out without cookies without making a revocation request", async () => {
+  let revokeCalls = 0;
+  const response = await staffLogoutResponse(
+    new Request("https://quickducks.com/staff/logout", {
+      method: "POST",
+      headers: { origin: env.APP_ORIGIN },
+    }),
+    env,
+    async () => {
+      revokeCalls += 1;
+      return new Response(null, { status: 200 });
+    },
+  );
+
+  assert.equal(revokeCalls, 0);
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.getSetCookie().length, 2);
+  assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(response.headers.get("content-disposition"), null);
+  assert.match(response.headers.get("location"), /^https:\/\/quickducks-staff\.example\.com\/logout/);
+  assert.equal(await response.text(), "");
 });
 
 test("rejects logout without a same-origin POST before revocation or cookie clearing", async () => {
@@ -334,6 +362,8 @@ test("rejects logout without a same-origin POST before revocation or cookie clea
     const response = await staffLogoutResponse(request, env, revokeFetch);
     assert.equal(response.status, index === 0 ? 405 : 403);
     assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(response.headers.get("content-disposition"), null);
     assert.equal(response.headers.get("set-cookie"), null);
   }
   assert.equal(revokeCalls, 0);

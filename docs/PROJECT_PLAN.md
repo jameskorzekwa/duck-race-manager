@@ -100,7 +100,7 @@ successfully.
 | Staff UX | Role-specific, scan-first, plain-language guided workflows |
 | Event history | Entire race dataset is deleted after return processing |
 | Duck reuse | Returned physical ducks are re-registered from scratch before the next race |
-| Keep option | Participant preference plus staff-confirmed final disposition |
+| Duck disposition | Staff record the actual physical outcome after the race; there is no advance participant preference |
 | Advancement | One winner from each first-round heat |
 | Final result | First, second, and third place |
 | Email queue | Cloudflare Queues |
@@ -356,9 +356,8 @@ location. Detailed behavior is specified in
 
 Participant accounts are not required. If no email or phone is supplied, the
 confirmation page must clearly tell the participant to retain the code or QR.
-Registration or duck pairing also records whether the participant plans to
-keep, return, or has not decided about the duck. This preference helps planning
-but does not change inventory until staff record the physical disposition.
+Registration and duck pairing do not ask about a future keep or return choice.
+Staff record the actual physical disposition after the race.
 
 The browser receives an opaque, secure collection cookie after registration.
 One collection can retain many independent registrations, allowing a parent to
@@ -1016,7 +1015,7 @@ are acceptable to the race director.
 | --- | --- | --- |
 | 0. Hardware proof | Tag audit, Android write/read prototype, iPhone URL scan test, wet-use test | Existing tags and supported phones pass |
 | 1. Foundation | Next.js PWA on Workers, D1 migrations, CI, Cloudflare Access | Staging deployment and staff login work |
-| 2. Registration | Event settings, public form, confirmation code/QR, staff lookup, walk-ups | Configurable email requirement and preference work |
+| 2. Registration | Event settings, public form, confirmation code/QR, staff lookup, walk-ups | Configurable email requirement works |
 | 3. Inventory | Ducks, visible numbers, tag token model, provisioning and verification | Numbered test batch is repeatably provisioned |
 | 4. Assignment | Active operations, NFC/QR/manual resolution, assignment constraints | Cross-platform duck assignment works |
 | 5. Race domain | Both assignment modes, bagging, announcer view, inspection, winner promotion, final podium | Both complete online race modes succeed |
