@@ -3,7 +3,6 @@ import {
   canViewParticipantPii,
   hasAnyRole,
   normalizeOperationalRoles,
-  readStoredOperationalRoles,
   requireAnyRole,
   type OperationalRole,
 } from "./authorization.ts";
@@ -52,10 +51,10 @@ interface StaffProfileRow {
   requested_roles_json?: string;
 }
 
-// Stored assignments are read tolerantly: retired vocabulary that survives
-// until the PR 4 cleanup is ignored rather than blanking the whole role list.
-const rolesFromCsv = (value: string | undefined): OperationalRole[] =>
-  readStoredOperationalRoles(value === undefined || value === "" ? [] : value.split(","));
+const rolesFromCsv = (value: string | undefined): OperationalRole[] => {
+  const roles = value === undefined || value === "" ? [] : value.split(",");
+  return normalizeOperationalRoles(roles) ?? [];
+};
 
 const staffProfileResponse = (
   profile: StaffProfileRow,

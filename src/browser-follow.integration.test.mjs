@@ -370,21 +370,23 @@ test("the follow endpoint refuses entries outside the current public event", asy
   const followId = (await followDaisy(api)).followId;
   assert.ok(owner.lookupCode);
 
-  database.prepare("UPDATE events SET status = 'RETURN_PROCESSING' WHERE id = 'event-follow'").run();
-  const afterReturn = await api("/api/v1/registrations/mine/follow", {
+  // DRAFT is the one remaining non-public status.
+  database.prepare("UPDATE events SET status = 'DRAFT' WHERE id = 'event-follow'").run();
+  const draft = await api("/api/v1/registrations/mine/follow", {
     method: "POST",
     headers: { origin: "https://quickducks.com" },
     body: { followId },
   });
-  assert.equal(afterReturn.status, 404);
+  assert.equal(draft.status, 404);
 
-  database.prepare("UPDATE events SET status = 'ARCHIVED' WHERE id = 'event-follow'").run();
-  const archived = await api("/api/v1/registrations/mine/follow", {
-    method: "POST",
-    headers: { origin: "https://quickducks.com" },
-    body: { followId },
-  });
-  assert.equal(archived.status, 404);
+  // The retired statuses this test used to cover are unrepresentable now.
+  for (const status of ["RETURN_PROCESSING", "ARCHIVED"]) {
+    assert.throws(
+      () => database.prepare(`UPDATE events SET status = '${status}' WHERE id = 'event-follow'`).run(),
+      /CHECK constraint failed/,
+      status,
+    );
+  }
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM browser_collection_registrations WHERE added_via = 'FOLLOWED'").get().count,
     0,

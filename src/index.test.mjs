@@ -925,15 +925,13 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.match(regularStaffHome, /id="participants"[^>]* hidden/);
   assert.match(regularStaffHome, /<a href="#inventory" data-event-scoped hidden>Inventory<\/a>/);
 
-  // Authentication filters the retired role away, so the console for a stale
-  // RETURN_STEWARD-only account is exactly the console for no roles at all.
-  const staleFilteredHome = renderStaffHome("Stale Steward", false, []);
-  assert.match(staleFilteredHome, /No operational roles assigned/);
-  assert.doesNotMatch(staleFilteredHome, /id="returns"|>Returns<|Return steward/);
-  // Even if the retired value reached the renderer it unlocks nothing.
-  const staleRoleHome = renderStaffHome("Stale Steward", false, ["RETURN_STEWARD"]);
-  assert.doesNotMatch(staleRoleHome, /id="returns"|>Returns<|Return steward/);
-  assert.doesNotMatch(staleRoleHome, /data-return-review|data-numbered-disposition-form/);
+  // The retired role is gone from the schema and the vocabulary, so no account
+  // can carry it. An account with no operational roles gets the empty console,
+  // and the returns surfaces it used to unlock exist nowhere.
+  const rolelessHome = renderStaffHome("Roleless Staff", false, []);
+  assert.match(rolelessHome, /No operational roles assigned/);
+  assert.doesNotMatch(rolelessHome, /id="returns"|>Returns<|Return steward/);
+  assert.doesNotMatch(rolelessHome, /data-return-review|data-numbered-disposition-form/);
 
   const announcerHome = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
   assert.match(announcerHome, /<a href="#heats" data-event-scoped hidden>Heats<\/a>/);

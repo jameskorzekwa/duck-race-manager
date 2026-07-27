@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { handleApi } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
-import { hasAllRoles, hasAnyRole, readStoredOperationalRoles } from "./authorization.ts";
+import { hasAllRoles, hasAnyRole, normalizeOperationalRoles } from "./authorization.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 
 const migrationsUrl = new URL("../db/migrations/", import.meta.url);
@@ -87,47 +87,51 @@ test("shared any/all checks fail closed and allow administrator bypass", () => {
   assert.equal(hasAllRoles({ ...regular, isSystemAdmin: true, roles: [] }, ["REGISTRATION", "RACE_DIRECTOR"]), true);
 });
 
-// The tolerant D1 projection is the only place unknown stored vocabulary is
-// accepted, so it is pinned directly: it filters the fixed internal enum rather
-// than trusting, coercing, or de-duplicating whatever D1 happens to hold.
-test("stored role projection keeps only exact known roles, once each, and grants nothing else", () => {
+// One strict reader now covers both caller-supplied and stored role lists.
+// Anything outside the current vocabulary invalidates the whole list rather
+// than being silently dropped, so a corrupt stored set denies instead of
+// authorizing a guessed subset. `staff_role_assignments` constrains `role` to
+// exactly this vocabulary, so these inputs are unrepresentable in D1.
+test("role normalization is strict, exact, and rejects anything outside the vocabulary", () => {
   // Non-strings can never match an enum member and must not throw.
-  assert.deepEqual(readStoredOperationalRoles([null]), []);
-  assert.deepEqual(readStoredOperationalRoles([0]), []);
-  assert.deepEqual(readStoredOperationalRoles([undefined]), []);
+  assert.equal(normalizeOperationalRoles([null]), null);
+  assert.equal(normalizeOperationalRoles([0]), null);
+  assert.equal(normalizeOperationalRoles([undefined]), null);
   // Prototype keys are values, not lookups: nothing is inherited or granted.
-  assert.deepEqual(readStoredOperationalRoles(["__proto__"]), []);
-  assert.deepEqual(readStoredOperationalRoles(["constructor"]), []);
+  assert.equal(normalizeOperationalRoles(["__proto__"]), null);
+  assert.equal(normalizeOperationalRoles(["constructor"]), null);
   // Matching is exact and case-sensitive.
-  assert.deepEqual(readStoredOperationalRoles(["registration"]), []);
-  assert.deepEqual(readStoredOperationalRoles(["REGISTRATION "]), []);
-  // A duplicated stored row projects one role, not two.
-  assert.deepEqual(readStoredOperationalRoles(["REGISTRATION", "REGISTRATION"]), ["REGISTRATION"]);
-  // The retired vocabulary is ignored instead of failing authentication.
-  assert.deepEqual(readStoredOperationalRoles(["RETURN_STEWARD"]), []);
-  assert.deepEqual(readStoredOperationalRoles([]), []);
-  // Valid roles survive alongside stale ones, in the canonical enum order.
+  assert.equal(normalizeOperationalRoles(["registration"]), null);
+  assert.equal(normalizeOperationalRoles(["REGISTRATION "]), null);
+  // Duplicates are rejected rather than collapsed.
+  assert.equal(normalizeOperationalRoles(["REGISTRATION", "REGISTRATION"]), null);
+  // The retired vocabulary is rejected exactly like any other unknown value.
+  assert.equal(normalizeOperationalRoles(["RETURN_STEWARD"]), null);
+  assert.equal(normalizeOperationalRoles(["RACE_DIRECTOR", "RETURN_STEWARD"]), null);
+  // Valid lists normalize to canonical enum order.
+  assert.deepEqual(normalizeOperationalRoles([]), []);
   assert.deepEqual(
-    readStoredOperationalRoles(["RACE_DIRECTOR", "RETURN_STEWARD", "REGISTRATION", "registration"]),
+    normalizeOperationalRoles(["RACE_DIRECTOR", "REGISTRATION"]),
     ["REGISTRATION", "RACE_DIRECTOR"],
   );
-  // An ignored value can never satisfy a required-role check.
-  const stale = {
-    id: "stale",
-    cognitoSub: "stale-sub",
-    email: "stale@example.com",
-    displayName: "Stale",
+  // An empty projection can never satisfy a required-role check.
+  const roleless = {
+    id: "roleless",
+    cognitoSub: "roleless-sub",
+    email: "roleless@example.com",
+    displayName: "Roleless",
     isSystemAdmin: false,
-    roles: readStoredOperationalRoles(["RETURN_STEWARD"]),
+    roles: normalizeOperationalRoles([]),
     authentication: "bearer",
   };
-  assert.equal(hasAnyRole(stale, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"]), false);
+  assert.equal(hasAnyRole(roleless, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"]), false);
 });
 
 test("0012 does not seed existing regular staff and enforces normalized role constraints", () => {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
-  applyMigrations(database, migrationNames.filter((name) => name !== "0012_staff_role_assignments.sql"));
+  // Migrations are ordered, so an upgrade test for 0012 applies only 0001-0011.
+  applyMigrations(database, migrationNames.slice(0, migrationNames.indexOf("0012_staff_role_assignments.sql")));
   database.exec(`
     INSERT INTO staff_profiles (id, cognito_sub, email, is_system_admin)
     VALUES
@@ -178,7 +182,6 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     announcer: ["announcer", "announcer-sub", "announcer@example.com", 0],
     heats: ["heats", "heats-sub", "heats@example.com", 0],
     results: ["results", "results-sub", "results@example.com", 0],
-    returns: ["returns", "returns-sub", "returns@example.com", 0],
     director: ["director", "director-sub", "director@example.com", 0],
     none: ["none", "none-sub", "none@example.com", 0],
   };
@@ -188,11 +191,6 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     announcer: "ANNOUNCER",
     heats: "HEAT_RUNNER",
     results: "RESULT_TAKER",
-    // Deliberately stale: RETURN_STEWARD is retired from the vocabulary but
-    // its rows survive in D1 until the PR 4 schema rebuild. This actor proves
-    // the deploy window is safe — the session still loads, and the retired
-    // role confers nothing.
-    returns: "RETURN_STEWARD",
     director: "RACE_DIRECTOR",
   };
   const insertProfile = database.prepare(
@@ -232,11 +230,13 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   assert.deepEqual(actors.admin.roles, []);
   assert.deepEqual(actors.registration.roles, ["REGISTRATION"]);
   assert.deepEqual(actors.none.roles, []);
-  // A live D1 row carrying the retired role authenticates without crashing and
-  // projects no roles, so it is indistinguishable from an actor with none.
-  assert.notEqual(actors.returns, null);
-  assert.deepEqual(actors.returns.roles, []);
-  assert.equal(actors.returns.isSystemAdmin, false);
+  assert.equal(actors.none.isSystemAdmin, false);
+  // The retired role is no longer representable, so it cannot be assigned to a
+  // profile and then read back as a session role.
+  assert.throws(() => database.exec(
+    `INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+     VALUES ('none-returns', 'none', 'RETURN_STEWARD', '2026-07-26T00:00:00Z')`,
+  ), /CHECK constraint failed/);
 
   const api = (actor, path, options = {}) => {
     const headers = new Headers({ authorization: "Bearer test.actor.token" });
@@ -323,8 +323,8 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     commandId: command(), revision: 0,
   })).status, 403);
 
-  // The stale RETURN_STEWARD row grants nothing anywhere, including the duck
-  // scan it used to unlock and every other station's read.
+  // An actor with no operational roles reaches nothing, including the duck scan
+  // the retired steward role used to unlock and every other station's read.
   for (const path of [
     `/api/v1/staff/ducks/${duckOneToken}`,
     `/api/v1/staff/registrations/${registrationId}`,
@@ -332,7 +332,7 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     "/api/v1/staff/inventory/ducks",
     `/api/v1/staff/support/events/${eventId}/summary`,
   ]) {
-    assert.equal((await api(actors.returns, path)).status, 403, `stale role denied ${path}`);
+    assert.equal((await api(actors.none, path)).status, 403, `roleless actor denied ${path}`);
   }
 
   await json(await post(actors.director, `/api/v1/staff/events/${eventId}/close-registration`, {
@@ -410,15 +410,14 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   // COMPLETED is terminal. Every retired return and purge route is gone for
   // every actor, including the administrator, and nothing advances past it.
   // "return-review" is no longer a route; it is just an unknown event id, so
-  // the roleless stale actor is denied and role holders get a plain not-found.
-  assert.equal((await api(actors.returns, "/api/v1/staff/events/return-review")).status, 403);
+  // a roleless actor is denied and role holders get a plain not-found.
+  assert.equal((await api(actors.none, "/api/v1/staff/events/return-review")).status, 403);
   for (const actorName of ["director", "admin"]) {
     const response = await api(actors[actorName], "/api/v1/staff/events/return-review");
     assert.equal(response.status, 404, `${actorName} return-review`);
     assert.equal((await response.json()).error, "Event not found.");
   }
   for (const [actorName, path] of [
-    ["returns", `/api/v1/staff/ducks/${duckOneToken}/dispositions`],
     ["director", `/api/v1/staff/ducks/${duckOneToken}/dispositions`],
     ["admin", `/api/v1/staff/events/${eventId}/ducks/102/dispositions`],
     ["admin", `/api/v1/staff/support/events/${eventId}/return-batches`],
