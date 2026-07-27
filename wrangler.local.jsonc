@@ -1,6 +1,6 @@
 // Local development only. `npm run dev:local` uses this config; deployment never
-// does. It differs from wrangler.jsonc in exactly four ways, and each difference
-// is what makes the site runnable with no network access:
+// does. It differs from wrangler.jsonc in the ways that make the site runnable
+// with no network access:
 //
 //   1. `main` is src/local-dev.ts, which supplies an offline stand-in for the
 //      Cognito hosted UI and token endpoints.
@@ -9,18 +9,28 @@
 //   3. `COGNITO_DOMAIN` points back at the local Worker so the OAuth redirects
 //      resolve locally. It must stay a valid absolute URL: staff pages parse it
 //      to build their CSP form-action.
-//   4. The name and routes are local, so this config cannot take over the
-//      production Worker even if someone deploys it by mistake.
+//   4. Every resource identity is local. The Worker name, D1 database, and queue
+//      are all distinct from production, and no route, workers.dev subdomain, or
+//      preview URL is published.
 //
-// The D1, Durable Object, queue, and rate-limiter bindings are deliberately
-// identical to production. Wrangler simulates all four locally, and dropping the
-// rate limiter would make the public search and My Ducks routes throw.
+// Point 4 is the important one. `src/local-dev.ts` hands out an administrator
+// bearer token to anyone who asks, which is safe only because the data behind it
+// is a throwaway local database. Binding a real resource here — by copying an id
+// from wrangler.jsonc, or by reaching for `--remote` — would put that endpoint in
+// front of production data. The local entry point also refuses any request that
+// did not arrive on a loopback origin, so both mistakes fail closed.
+//
+// The binding *shapes* must stay identical to production, because that is what
+// Wrangler simulates. Dropping the rate limiter in particular would make the
+// public search and My Ducks routes throw: `src/api.ts` reads it with no
+// undefined guard.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "quickducks-local",
   "main": "src/local-dev.ts",
   "compatibility_date": "2026-07-25",
   "workers_dev": false,
+  "preview_urls": false,
   "observability": {
     "enabled": true,
     "logs": {
@@ -37,8 +47,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "quickducks-prod",
-      "database_id": "3c12a95d-3505-4b80-bd69-b91f61fe5b93",
+      "database_name": "quickducks-local",
+      "database_id": "00000000-0000-4000-8000-000000000001",
       "migrations_dir": "db/migrations"
     }
   ],
@@ -60,7 +70,7 @@
     "producers": [
       {
         "binding": "EMAIL_QUEUE",
-        "queue": "quickducks-email"
+        "queue": "quickducks-email-local"
       }
     ]
   },

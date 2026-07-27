@@ -79,8 +79,14 @@ const cookieFrom = (response, name) =>
 
 const readConfig = (name) => {
   const source = readFileSync(new URL(`../${name}`, import.meta.url), "utf8");
-  // Both configs are JSONC; the comments explain why the local one exists.
-  return JSON.parse(source.replaceAll(/^\s*\/\/.*$/gm, ""));
+  // Both configs are JSONC; the comments explain why the local one exists. Only
+  // whole-line comments are stripped, so a trailing one would land here rather
+  // than quietly skipping the assertions that follow.
+  try {
+    return JSON.parse(source.replaceAll(/^\s*\/\/.*$/gm, ""));
+  } catch (cause) {
+    throw new Error(`${name} is not parseable after removing whole-line comments`, { cause });
+  }
 };
 
 // The single most important guarantee in this file. Everything else about local
@@ -93,7 +99,7 @@ test("the deployed configuration never points at the local entry point", () => {
   assert.equal(production.name, "quickducks");
 });
 
-test("the local configuration is loopback-only and cannot take over production", () => {
+test("the local configuration is loopback-only and binds no production resource", () => {
   const local = readConfig("wrangler.local.jsonc");
   const production = readConfig("wrangler.jsonc");
 
@@ -101,12 +107,27 @@ test("the local configuration is loopback-only and cannot take over production",
   assert.equal(local.vars.APP_ORIGIN, localOrigin);
   assert.notEqual(local.name, production.name);
   assert.equal("routes" in local, false);
+  assert.equal(local.workers_dev, false);
+  assert.equal(local.preview_urls, false);
 
-  // Simulated bindings must match production or local behaviour diverges. The
-  // rate limiter in particular is read without an undefined guard.
-  assert.deepEqual(local.d1_databases, production.d1_databases);
+  // The local entry point hands an administrator token to anyone who asks, so
+  // it must never be able to reach a real resource — including through
+  // `wrangler dev --remote`, where these identifiers are what would resolve.
+  assert.notEqual(local.d1_databases[0].database_id, production.d1_databases[0].database_id);
+  assert.notEqual(local.d1_databases[0].database_name, production.d1_databases[0].database_name);
+  assert.notEqual(local.queues.producers[0].queue, production.queues.producers[0].queue);
+
+  // The binding *shapes* must still match production, or local behaviour
+  // diverges. The rate limiter in particular is read without an undefined guard.
+  assert.deepEqual(
+    local.d1_databases.map((database) => database.binding),
+    production.d1_databases.map((database) => database.binding),
+  );
   assert.deepEqual(local.durable_objects, production.durable_objects);
-  assert.deepEqual(local.queues, production.queues);
+  assert.deepEqual(
+    local.queues.producers.map((producer) => producer.binding),
+    production.queues.producers.map((producer) => producer.binding),
+  );
   assert.deepEqual(local.ratelimits, production.ratelimits);
 });
 
@@ -120,7 +141,7 @@ test("no deployed module imports the local entry point", () => {
   }
 });
 
-test("the local entry point refuses to serve a non-loopback origin", async () => {
+test("the local entry point refuses a non-loopback configuration", async () => {
   for (const appOrigin of ["https://quickducks.com", "https://staging.quickducks.com", undefined]) {
     const response = await localWorker.fetch(
       new Request("https://quickducks.com/"),
@@ -130,6 +151,47 @@ test("the local entry point refuses to serve a non-loopback origin", async () =>
     assert.equal(response.status, 500);
     assert.match(await response.text(), /Refusing to run/);
   }
+});
+
+// Covers the mistake the configuration alone cannot: `wrangler dev --remote`, or
+// a deploy that publishes a preview URL, would run this module with a loopback
+// APP_ORIGIN while serving the public internet.
+test("the local entry point refuses a request that did not arrive on loopback", async () => {
+  const database = createDatabase();
+  const env = localEnv(database);
+
+  for (
+    const url of [
+      "https://quickducks-local.someone.workers.dev/__local/staff",
+      "https://quickducks.com/",
+      "http://192.168.1.20:8787/",
+    ]
+  ) {
+    const response = await localWorker.fetch(new Request(url, { method: "POST" }), env);
+    assert.equal(response.status, 500, url);
+    assert.match(await response.text(), /Refusing to run/);
+  }
+
+  // Nothing was created by the refused bootstrap attempts.
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_profiles").get().count, 0);
+  database.close();
+});
+
+test("the bootstrap endpoint refuses a cross-origin browser request", async () => {
+  const database = createDatabase();
+  const env = localEnv(database);
+
+  const response = await localWorker.fetch(
+    new Request(`${localOrigin}/__local/staff`, {
+      method: "POST",
+      headers: { origin: "http://evil.example" },
+    }),
+    env,
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_profiles").get().count, 0);
+  database.close();
 });
 
 test("the sign-in stand-in refuses a redirect target off the application origin", async () => {
@@ -254,6 +316,17 @@ test("a bearer token authenticates exactly one seeded account", async () => {
     env,
   );
   assert.equal(malformed.status, 401);
+
+  // An access token is not a refresh token. Accepting one as the other would
+  // shift the decoded subject rather than fail, which is the kind of asymmetry
+  // that stops being harmless when a token format changes.
+  const wrongTokenKind = await localWorker.fetch(
+    new Request(`${localOrigin}/api/v1/staff/session`, {
+      headers: { cookie: `__Host-quickducks_staff_refresh=${localAccessToken("local-admin")}` },
+    }),
+    env,
+  );
+  assert.equal(wrongTokenKind.status, 401);
   database.close();
 });
 

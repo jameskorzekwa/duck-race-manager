@@ -88,11 +88,15 @@ browser has the production HSTS entry pinned and will silently force https.
 
 ## Seeding
 
-`npm run seed:local` drives the running Worker over HTTP. It writes no SQL: every
-row is produced by the same handlers, guards, and idempotency rules that run in
-production, so a seeded database is a state the application could actually have
-reached. Direct inserts can express states the real workflow forbids, and then
-local testing proves nothing.
+`npm run seed:local` drives the running Worker over HTTP. Every row is produced by
+the same handlers, guards, and idempotency rules that run in production, so a
+seeded database is a state the application could actually have reached. Direct
+inserts can express states the real workflow forbids, and then local testing
+proves nothing.
+
+The staff accounts are the one exception: `src/local-dev.ts` inserts them
+directly, because provisioning a staff identity is precisely the operation that
+belongs to Cognito. Everything downstream of sign-in goes through the API.
 
 ```sh
 npm run seed:local -- --state=registration        # default

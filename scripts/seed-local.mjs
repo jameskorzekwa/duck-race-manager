@@ -9,9 +9,18 @@
 // Usage:
 //   node scripts/seed-local.mjs --state=round-one
 //   npm run seed:local -- --state=completed --participants=12
-import { argv, exit, stdout } from "node:process";
+import { argv, exit, stderr, stdout } from "node:process";
+
+import { localPreviewTurnstileToken } from "../src/local-preview.ts";
 
 const states = ["empty", "draft", "registration", "closed", "round-one", "final", "completed"];
+
+class SeedError extends Error {
+  constructor(message, { cause, afterMutation = false } = {}) {
+    super(message, { cause });
+    this.afterMutation = afterMutation;
+  }
+}
 
 const stateDescriptions = {
   empty: "No event at all — the public site shows the Preparing phase.",
@@ -32,24 +41,27 @@ const parseArguments = () => {
   };
   for (const argument of argv.slice(2)) {
     const match = argument.match(/^--([a-z-]+)(?:=(.*))?$/);
-    if (match === null) throw new Error(`Unrecognized argument: ${argument}`);
+    if (match === null) throw new SeedError(`Unrecognized argument: ${argument}\n\n${usage()}`);
     const [, name, value = ""] = match;
     if (name === "url") options.url = value.replace(/\/$/, "");
     else if (name === "state") options.state = value;
     else if (name === "participants") options.participants = Number(value);
     else if (name === "heat-size") options.heatSize = Number(value);
     else if (name === "help") options.help = true;
-    else throw new Error(`Unrecognized option: --${name}`);
+    else throw new SeedError(`Unrecognized option: --${name}\n\n${usage()}`);
   }
   if (options.help) return options;
   if (!states.includes(options.state)) {
-    throw new Error(`--state must be one of: ${states.join(", ")}`);
+    throw new SeedError(`--state must be one of: ${states.join(", ")}`);
   }
   if (!Number.isInteger(options.heatSize) || options.heatSize < 3) {
-    throw new Error("--heat-size must be an integer of at least 3.");
+    throw new SeedError("--heat-size must be an integer of at least 3. A heat holds at least three ducks.");
   }
   if (!Number.isInteger(options.participants) || options.participants < 1) {
-    throw new Error("--participants must be a positive integer.");
+    throw new SeedError("--participants must be a positive integer.");
+  }
+  if (!/^https?:\/\/[^/]+$/.test(options.url)) {
+    throw new SeedError(`--url must be an absolute http origin, for example http://localhost:8787 (got "${options.url}")`);
   }
   return options;
 };
@@ -84,10 +96,11 @@ const participantName = (index) => ({
   lastName: lastNames[index % lastNames.length],
 });
 
-class SeedError extends Error {}
-
 const createClient = (baseUrl) => {
   let token;
+  // Set once the first write has been issued, so a failure can say whether the
+  // local database was left part-way through a race rather than untouched.
+  const progress = { mutated: false };
   const request = async (path, { method = "GET", body, expect, label, anonymous = false, cookie } = {}) => {
     const headers = new Headers();
     if (!anonymous && token !== undefined) headers.set("authorization", `Bearer ${token}`);
@@ -98,6 +111,7 @@ const createClient = (baseUrl) => {
     headers.set("origin", baseUrl);
     if (cookie !== undefined) headers.set("cookie", cookie);
 
+    if (method !== "GET") progress.mutated = true;
     let response;
     try {
       response = await fetch(`${baseUrl}${path}`, {
@@ -109,7 +123,7 @@ const createClient = (baseUrl) => {
     } catch (cause) {
       throw new SeedError(
         `Could not reach ${baseUrl}. Start the local site first with: npm run dev:local`,
-        { cause },
+        { cause, afterMutation: progress.mutated },
       );
     }
 
@@ -125,6 +139,7 @@ const createClient = (baseUrl) => {
         `${label ?? `${method} ${path}`} failed: expected ${expect.join(" or ")}, got ${response.status}\n${
           typeof parsed === "string" ? parsed.slice(0, 400) : JSON.stringify(parsed, null, 2)?.slice(0, 800)
         }`,
+        { afterMutation: progress.mutated },
       );
     }
     return { status: response.status, body: parsed, headers: response.headers };
@@ -225,10 +240,12 @@ const seed = async (options) => {
         phone: `+1555010${String(index).padStart(4, "0")}`,
         emailNotificationsEnabled: index % 2 === 0,
       }),
-      turnstileToken: "local-preview",
+      turnstileToken: localPreviewTurnstileToken,
     }, { anonymous: true, cookie: browserCookie, label: `register ${firstName}` });
-    const setCookie = response.headers.get("set-cookie")?.match(/__Host-quickducks_browser=([^;]+)/)?.[1];
-    if (setCookie !== undefined) browserCookie = `__Host-quickducks_browser=${setCookie}`;
+    const issued = response.headers.getSetCookie()
+      .find((cookie) => cookie.startsWith("__Host-quickducks_browser="))
+      ?.split(";")[0];
+    if (issued !== undefined) browserCookie = issued;
     participants.push({
       firstName,
       lastName,
@@ -282,9 +299,11 @@ const seed = async (options) => {
   }
 
   const readiness = await client.get(`/api/v1/staff/events/${eventId}/readiness`, { label: "readiness" });
-  if (readiness.body.readiness["start-round-one"].allowed !== true) {
+  const roundOneReadiness = readiness.body?.readiness?.["start-round-one"];
+  if (roundOneReadiness?.allowed !== true) {
     throw new SeedError(
-      `Round one is not ready to start: ${JSON.stringify(readiness.body.readiness["start-round-one"].blockers)}`,
+      `Round one is not ready to start: ${JSON.stringify(roundOneReadiness?.blockers ?? readiness.body)}`,
+      { afterMutation: true },
     );
   }
   await client.post(`/api/v1/staff/events/${eventId}/start-round-one`, {
@@ -413,17 +432,22 @@ const report = (options, result) => {
   stdout.write(lines.join("\n"));
 };
 
-const options = parseArguments();
-if (options.help) {
-  stdout.write(usage());
-  exit(0);
-}
 try {
+  const options = parseArguments();
+  if (options.help) {
+    stdout.write(usage());
+    exit(0);
+  }
   stdout.write(`Seeding ${options.url} to "${options.state}"…\n`);
   report(options, await seed(options));
 } catch (error) {
   if (error instanceof SeedError) {
-    process.stderr.write(`\nSeeding failed.\n${error.message}\n\n`);
+    // A failure part-way through leaves a real, self-consistent event behind.
+    // Say so, or the next person reads it as the previous run's leftovers.
+    const partial = error.afterMutation
+      ? "\nThe local database is now partially seeded. Re-run the command, or clear it with:\n  npm run seed:local -- --state=empty\n"
+      : "";
+    stderr.write(`\nSeeding failed.\n${error.message}\n${partial}\n`);
     exit(1);
   }
   throw error;

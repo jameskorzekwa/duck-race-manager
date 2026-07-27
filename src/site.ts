@@ -20,7 +20,7 @@ import {
 } from "./race-status.ts";
 import type { RegistrationStatusRecord } from "./types.ts";
 
-const escapeHtml = (value: string): string =>
+export const escapeHtml = (value: string): string =>
   value.replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;",
     "<": "&lt;",

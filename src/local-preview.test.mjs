@@ -13,7 +13,21 @@ const localOrigin = "http://localhost:8787";
 // returns true for an origin a deployment could actually use, the Turnstile
 // waiver and the Cognito stand-ins become reachable in production.
 test("local preview is limited to http loopback origins", () => {
-  for (const origin of ["http://localhost:8787", "http://localhost", "http://127.0.0.1:8787", "http://[::1]:8787"]) {
+  for (
+    const origin of [
+      "http://localhost:8787",
+      "http://localhost",
+      "http://127.0.0.1:8787",
+      "http://[::1]:8787",
+      // The host is resolved by parsing, so these normalise to loopback and are
+      // genuinely local. Pinned so a rewrite to string matching fails loudly.
+      "HTTP://LOCALHOST:8787",
+      "http://quickducks.com@localhost/",
+      "http://127.1",
+      "http://2130706433",
+      "http://[0:0:0:0:0:0:0:1]",
+    ]
+  ) {
     assert.equal(isLocalPreviewOrigin(origin), true, origin);
   }
 
@@ -27,7 +41,11 @@ test("local preview is limited to http loopback origins", () => {
       "http://notlocalhost",
       "http://localhost.evil.example",
       "http://127.0.0.1.evil.example",
+      "http://localhost@evil.example",
+      "http://localhost.",
+      "http://[::ffff:127.0.0.1]",
       "http://[::2]",
+      "http://192.168.1.20:8787",
       "//localhost:8787",
       "localhost:8787",
       "",
@@ -136,6 +154,48 @@ test("the registration page offers a submittable form only in a local preview", 
   const configured = renderRegistration("site-key-test", "REGISTRATION", true);
   assert.match(configured, /data-sitekey="site-key-test"/);
   assert.doesNotMatch(configured, /cf-turnstile-response/);
+});
+
+// The page must offer the bypass form on exactly the configurations where
+// `createRegistration` waives verification. Deriving the two from different
+// inputs is how a form gets rendered ready and then rejected on submit.
+test("the page and the API agree about protection on every key combination", async (context) => {
+  const combinations = [
+    { keys: {}, waived: true },
+    { keys: { TURNSTILE_SITE_KEY: "site-key-test" }, waived: true },
+    { keys: { TURNSTILE_SECRET_KEY: "secret-key-test" }, waived: false },
+    { keys: { TURNSTILE_SITE_KEY: "site-key-test", TURNSTILE_SECRET_KEY: "secret-key-test" }, waived: false },
+  ];
+
+  for (const { keys, waived } of combinations) {
+    const label = JSON.stringify(keys);
+    const env = { ...registrationEnv(localOrigin), ...keys };
+    const page = await (await worker.fetch(new Request(`${localOrigin}/register`), env)).text();
+    assert.equal(/name="cf-turnstile-response"/.test(page), waived, `page bypass field ${label}`);
+
+    let verified = false;
+    context.mock.method(globalThis, "fetch", async () => {
+      verified = true;
+      return Response.json({ success: false });
+    });
+    await worker.fetch(
+      new Request(`${localOrigin}/api/v1/registrations`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          eventId: "event-test",
+          commandId: crypto.randomUUID(),
+          privateToken: "a".repeat(43),
+          firstName: "Daisy",
+          lastName: "Duck",
+          turnstileToken: localPreviewTurnstileToken,
+        }),
+      }),
+      env,
+    );
+    context.mock.restoreAll();
+    assert.equal(verified, !waived, `API verification ${label}`);
+  }
 });
 
 test("the registration page keeps rendering the real widget when keys are configured", async () => {

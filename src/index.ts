@@ -279,18 +279,13 @@ export const createWorker = (
       const configuredSiteKey = siteKey && env.TURNSTILE_SECRET_KEY ? siteKey : undefined;
       // A local preview has no Turnstile keys and no route to Cloudflare's
       // siteverify endpoint, which would otherwise leave the public form
-      // permanently unsubmittable. The unprotected form is offered only when
-      // `createRegistration` will also waive verification, so the page and the
-      // API cannot disagree about whether protection is in force.
-      return html(
-        renderRegistration(
-          configuredSiteKey,
-          await publicPhase(),
-          configuredSiteKey === undefined && localPreview,
-        ),
-        200,
-        true,
-      );
+      // permanently unsubmittable. This must be the exact condition
+      // `createRegistration` uses to waive verification — the secret alone, not
+      // the pair of keys. Deriving it from the site key instead would offer a
+      // bypass form on a preview that has only a secret, and the API would then
+      // reject every submission it invited.
+      const protectionWaived = env.TURNSTILE_SECRET_KEY === undefined && localPreview;
+      return html(renderRegistration(configuredSiteKey, await publicPhase(), protectionWaived), 200, true);
     }
     // Race Status. Public for the five post-DRAFT statuses and the shared
     // preparing message before that.

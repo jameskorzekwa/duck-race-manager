@@ -14,6 +14,7 @@
 import { authenticateStaff } from "./auth.ts";
 import { createWorker } from "./index.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
+import { escapeHtml } from "./site.ts";
 import type { Env } from "./types.ts";
 
 export { RaceUpdates } from "./live-updates.ts";
@@ -28,14 +29,6 @@ const noStoreHtml = {
   "content-type": "text/html; charset=utf-8",
   "x-robots-tag": "noindex, nofollow",
 } as const;
-
-const escapeHtml = (value: string): string =>
-  value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
 
 // Staff tokens must satisfy the production charset `[A-Za-z0-9._~-]`, and a
 // Cognito subject may legitimately contain characters outside it — a locally
@@ -85,15 +78,19 @@ const formBody = (init?: RequestInit): URLSearchParams =>
 const localTokenFetch: typeof fetch = async (input, init) => {
   const url = new URL(input instanceof Request ? input.url : String(input));
 
+  // Revocation is acknowledged but not enforced: there is no token store to
+  // revoke against, so a refresh token captured before signing out still works
+  // locally. Cognito really does revoke.
   if (url.pathname === "/oauth2/revoke") return new Response(null, { status: 200 });
 
   if (url.pathname === "/oauth2/token") {
     const body = formBody(init);
     const grant = body.get("grant_type");
+    const refreshToken = body.get("refresh_token") ?? "";
     const encodedSubject = grant === "authorization_code"
       ? body.get("code")
-      : grant === "refresh_token"
-        ? (body.get("refresh_token") ?? "").slice(refreshTokenPrefix.length)
+      : grant === "refresh_token" && refreshToken.startsWith(refreshTokenPrefix)
+        ? refreshToken.slice(refreshTokenPrefix.length)
         : null;
     if (encodedSubject === null || encodedSubject === "" || decodeSubject(encodedSubject) === null) {
       return Response.json({ error: "invalid_grant" }, { status: 400 });
@@ -291,7 +288,7 @@ ${body}
 
 const refusal = (env: Env): Response =>
   new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Local development entry point</title></head><body><h1>Refusing to run</h1><p>src/local-dev.ts only runs against an http loopback origin. APP_ORIGIN is <code>${escapeHtml(env.APP_ORIGIN ?? "unset")}</code>.</p></body></html>`,
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Local development entry point</title></head><body><h1>Refusing to run</h1><p>src/local-dev.ts serves loopback requests against a loopback APP_ORIGIN only. APP_ORIGIN is <code>${escapeHtml(env.APP_ORIGIN ?? "unset")}</code>.</p></body></html>`,
     { status: 500, headers: noStoreHtml },
   );
 
@@ -299,9 +296,17 @@ const worker = createWorker(localAuthenticate, localTokenFetch);
 
 const localWorker: ExportedHandler<Env> = {
   async fetch(request, env, ctx) {
-    if (!isLocalPreviewOrigin(env.APP_ORIGIN ?? "")) return refusal(env);
-
     const url = new URL(request.url);
+    // Two independent conditions, because each covers a different mistake. The
+    // configured origin catches this module being deployed with a production
+    // config; the request origin catches this *config* being served from
+    // anywhere but the machine it was written for — `wrangler dev --remote`, or
+    // a deploy that publishes a preview URL. `wrangler dev` serves loopback, so
+    // the second costs nothing locally and closes every remote path.
+    //
+    // `APP_ORIGIN` is typed as a required string, but a config can omit the var
+    // and the type would not know, so the check tolerates it being absent.
+    if (!isLocalPreviewOrigin(env.APP_ORIGIN ?? "") || !isLocalPreviewOrigin(url.origin)) return refusal(env);
 
     if (url.pathname === "/oauth2/authorize" && request.method === "GET") {
       return signInChooser(env, url);
@@ -317,6 +322,15 @@ const localWorker: ExportedHandler<Env> = {
         status: 303,
         headers: { "cache-control": "no-store", location: target },
       });
+    }
+
+    if (url.pathname.startsWith("/__local/")) {
+      // This endpoint mints staff, so it holds the same line as every other
+      // staff mutation: a cross-origin page must not be able to reach it.
+      const origin = request.headers.get("origin");
+      if (origin !== null && origin !== new URL(env.APP_ORIGIN).origin) {
+        return Response.json({ error: "Cross-origin local bootstrap is not allowed." }, { status: 403 });
+      }
     }
 
     if (url.pathname === "/__local/staff" && request.method === "POST") {
