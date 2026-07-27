@@ -14,6 +14,7 @@ import {
 import {
   publicHeatStatusLabel,
   publicOfficialResult,
+  type PublicFollowState,
   type PublicRaceStatus,
 } from "./race-status.ts";
 import type { RegistrationStatusRecord } from "./types.ts";
@@ -201,6 +202,10 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .duck-number-link { color:var(--water-dark); font-weight:950; text-decoration:underline; text-underline-offset:.2em; }
 .duck-number-link:hover { text-decoration-thickness:.18em; }
 .duck-number-link:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
+.duck-number-note { display:block; margin-top:.2rem; color:var(--muted); font-size:.8rem; font-weight:800; letter-spacing:.04em; }
+.duck-name-form { gap:.6rem; margin-top:.9rem; padding-top:.9rem; border-top:2px dashed #b8c6c9; }
+.duck-name-form .message-line { margin:0; }
+.page-panel > .actions[data-duck-follow] { margin:1.2rem 0; }
 .privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
 .privacy strong { flex:none; }
 .page-panel > .privacy + .actions { margin-top:1rem; }
@@ -514,7 +519,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
       ${duck()}
       <p class="eyebrow">Saved on this device</p>
       <h1 class="page-title">My Ducks</h1>
-      <p class="lede">Swipe through every participant registered in this browser and follow each duck from pairing to finish.</p>
+      <p class="lede">Participants you registered on this device keep their full details and staff lookup code. Ducks you followed show public race status only.</p>
       <div class="privacy"><strong>Private by design.</strong><span>Email and phone never appear here. Immediately after registration, this tab can show the one-time private status link so you can bookmark it; saved collection responses never include that link.</span></div>
       <div class="notice" data-registration-success aria-live="polite" hidden></div>
       <p class="message-line muted" data-my-ducks-error role="alert" hidden></p>
@@ -530,7 +535,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
             <button class="button secondary small" type="button" data-carousel-next aria-controls="awaiting-participants">Next</button>
           </div>
         </div>
-        <p class="muted">Registrations waiting for staff to pair a physical duck.</p>
+        <p class="muted">Participants you registered on this device, waiting for staff to pair a physical duck. Their staff lookup code stays on this device.</p>
         <div class="participant-track" id="awaiting-participants" data-participant-track tabindex="0" aria-label="Awaiting participant registrations" hidden></div>
       </section>
 
@@ -542,8 +547,20 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
             <button class="button secondary small" type="button" data-carousel-next aria-controls="paired-participants">Next</button>
           </div>
         </div>
-        <p class="muted">Participants already paired with their race duck.</p>
+        <p class="muted">Participants you registered on this device, already paired with their race duck. Give the duck a name to see it here instead of its number.</p>
         <div class="participant-track" id="paired-participants" data-participant-track tabindex="0" aria-label="Paired participant registrations" hidden></div>
+      </section>
+
+      <section class="participant-section" data-participant-section="followed" aria-labelledby="followed-participants-title" hidden>
+        <div class="participant-section-head">
+          <h2 id="followed-participants-title">Ducks I’m Following</h2>
+          <div class="carousel-controls" data-carousel-controls hidden>
+            <button class="button secondary small" type="button" data-carousel-previous aria-controls="followed-participants">Previous</button>
+            <button class="button secondary small" type="button" data-carousel-next aria-controls="followed-participants">Next</button>
+          </div>
+        </div>
+        <p class="muted">Participants you followed from a duck tag, a duck page, or the search below. These are someone else’s registration, so they show public race status only — no staff lookup code and no duck name.</p>
+        <div class="participant-track" id="followed-participants" data-participant-track tabindex="0" aria-label="Followed participants" hidden></div>
       </section>
 ${phaseAllowsRegistration(phase) ? '\n      <div class="actions"><a class="button" href="/register">Register another participant</a></div>\n' : ""}      </div>
 ${nameSearchSection()}
@@ -706,9 +723,26 @@ const publicStatusFacts = (status: PublicRaceStatus, showParticipant = true): st
   return `<dl class="facts">${participant}<div class="fact"><dt>Duck</dt><dd>${assignment}</dd></div><div class="fact"><dt>Assigned heat</dt><dd>${heatLabel}</dd></div><div class="fact"><dt>Currently running</dt><dd>${running}</dd></div><div class="fact"><dt>Race status</dt><dd>${outcomeLabel(status.outcome)}</dd></div></dl>`;
 };
 
+// Server-rendered Follow control for the two public duck pages. It appears only
+// when the request resolved a genuinely followable participant, so a page that
+// renders no control means "cannot be followed", never "not followed yet". The
+// already-added state is a plain tag with no action, exactly like a search
+// result that is already in the collection.
+//
+// `live.js` re-renders this block from the authoritative duck response, so the
+// server paint and every later refetch agree.
+const followPanel = (follow: PublicFollowState | null): string => follow === null ? "" : `
+      <div class="actions" data-duck-follow data-follow-id="${escapeHtml(follow.followId)}">${
+  follow.inMyDucks
+    ? '<span class="success-tag" data-follow-added>In My Ducks</span><a class="button secondary small" href="/my-ducks">Open My Ducks</a>'
+    : '<button class="button" type="button" data-follow-button>Follow this duck</button>'
+}</div>
+      <p class="message-line muted" data-follow-message role="status" hidden></p>`;
+
 export const renderDuck = (
   status: PublicRaceStatus = mockRaceStatus,
   phase: PublicPhase = "PREPARING",
+  follow: PublicFollowState | null = null,
 ): string => page({
   title: status.duck === null ? "Race status" : `Duck #${status.duck.visibleNumber}`,
   description: "Public QuickDucks NFC duck race status.",
@@ -721,7 +755,7 @@ export const renderDuck = (
       <p class="eyebrow">Public race status</p>
       <h1 class="page-title">${status.duck === null ? "Waiting for a duck" : `Duck #${status.duck.visibleNumber}`}</h1>
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
-      <div data-live-personal="duck">${publicStatusFacts(status)}</div>
+      <div data-live-personal="duck">${publicStatusFacts(status)}</div>${followPanel(follow)}
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, or private links.</span></div>
       <div class="actions"><a class="button secondary" href="/">Visit QuickDucks</a></div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
@@ -760,6 +794,7 @@ const duckDetailFacts = (status: PublicRaceStatus): string => {
 export const renderPublicDuck = (
   status: PublicRaceStatus = mockRaceStatus,
   phase: PublicPhase = "PREPARING",
+  follow: PublicFollowState | null = null,
 ): string => {
   const heading = status.duck === null ? "This duck" : `Duck #${status.duck.visibleNumber}`;
   return page({
@@ -774,7 +809,7 @@ export const renderPublicDuck = (
       <p class="eyebrow">Public duck detail</p>
       <h1 class="page-title">${escapeHtml(heading)}</h1>
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
-      <div data-live-personal="number">${duckDetailFacts(status)}</div>
+      <div data-live-personal="number">${duckDetailFacts(status)}</div>${followPanel(follow)}
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, private links, or the duck’s tag.</span></div>
       <div class="actions">${boardLink(phase, "secondary")}</div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,

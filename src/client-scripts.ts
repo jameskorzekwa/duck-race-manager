@@ -1,5 +1,6 @@
 import { publicPhaseByStatus } from "./public-phase.ts";
 import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
+import { DUCK_NAME_MAX_LENGTH } from "./registration.ts";
 
 export const confirmationDialogScript = String.raw`
 const appConfirmationQueue = [];
@@ -440,10 +441,23 @@ const participantAddFact = (container, label, value) => {
   container.append(fact);
 };
 
+// A participant-chosen duck name is owner-only. The server sends it for
+// 'REGISTRATION' links and never for a followed one, and this guard repeats
+// that rule so the name can only ever be drawn on its owner's own card.
+const participantDuckName = (registration) => {
+  if (!registration || registration.followed === true) return null;
+  const name = typeof registration.duckName === "string" ? registration.duckName.trim() : "";
+  return name.length === 0 ? null : name;
+};
+
 // A paired card links its duck number to the public duck detail view. An
-// awaiting card has no duck number, so it keeps plain text and no link.
-const participantAddDuckFact = (facts, status) => {
-  const link = duckDetailLink(document, status.duck ? status.duck.visibleNumber : null);
+// awaiting card has no duck number, so it keeps plain text and no link. When
+// the owner named this duck, the name replaces "Duck #N" as the link text and
+// the number stays beside it, quietly, so the card still matches the physical
+// duck.
+const participantAddDuckFact = (facts, status, registration) => {
+  const duckName = participantDuckName(registration);
+  const link = duckDetailLink(document, status.duck ? status.duck.visibleNumber : null, duckName);
   if (link === null) {
     participantAddFact(facts, "Duck", "Waiting for duck assignment");
     return;
@@ -451,17 +465,20 @@ const participantAddDuckFact = (facts, status) => {
   const fact = participantText("div", "", "fact");
   const value = participantText("dd", "");
   value.append(link);
+  if (duckName !== null) {
+    value.append(participantText("span", "Duck #" + status.duck.visibleNumber, "duck-number-note"));
+  }
   fact.append(participantText("dt", "Duck"), value);
   facts.append(fact);
 };
 
-const participantAddRaceFacts = (card, status) => {
+const participantAddRaceFacts = (card, status, registration) => {
   if (!status) {
     card.append(participantText("p", "Race status is not currently public.", "muted"));
     return;
   }
   const facts = participantText("dl", "", "facts");
-  participantAddDuckFact(facts, status);
+  participantAddDuckFact(facts, status, registration);
   const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
   participantAddFact(facts, "Assigned heat", assigned
     ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
@@ -553,6 +570,151 @@ const participantDeleteControls = (registration) => {
   return [actions, feedback];
 };
 
+// Unfollowing is offered only for a followed link, and it removes only that
+// link. The endpoint is separate from deletion on purpose: it can never reach
+// the registration itself, which belongs to whoever created it.
+const participantCanUnfollow = (registration) => registration.followed === true;
+
+const participantUnfollow = async (registration, button, feedback) => {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Removing…";
+  feedback.textContent = "";
+  feedback.hidden = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    let removed = false;
+    try {
+      const response = await fetch("/api/v1/registrations/mine/unfollow", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          registrationId: registration.registrationId,
+        }),
+      });
+      removed = response.ok;
+    } catch {
+      removed = false;
+    }
+    if (!removed) {
+      button.disabled = false;
+      button.textContent = label;
+      feedback.textContent = "That participant could not be removed from My Ducks. Please try again.";
+      feedback.hidden = false;
+      return;
+    }
+    // The card disappears only when the authoritative collection says so.
+    participantVersion = null;
+    await participantRefreshWork();
+  } finally {
+    endBusy();
+  }
+};
+
+const participantUnfollowControls = (registration) => {
+  const actions = participantText("div", "", "actions");
+  const feedback = participantText("p", "", "message-line muted");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
+  const button = participantText("button", "Stop following", "button secondary small");
+  button.type = "button";
+  button.dataset.unfollowRegistration = registration.registrationId;
+  button.addEventListener("click", () => participantUnfollow(registration, button, feedback));
+  actions.append(button);
+  return [actions, feedback];
+};
+
+// Naming is offered only for a registration this browser created and that the
+// server still reports as nameable, which means a duck is currently paired to
+// it. The server recomputes both conditions inside its guarded write, so this
+// flag is presentation only.
+const participantCanName = (registration) =>
+  registration.followed !== true && registration.nameable === true;
+
+const participantNameLimit = ${JSON.stringify(DUCK_NAME_MAX_LENGTH)};
+
+const participantCleanName = (value) =>
+  String(value == null ? "" : value).trim().replace(/\s+/g, " ");
+
+const participantSaveName = async (registration, form, input, button, feedback) => {
+  const duckName = participantCleanName(input.value);
+  // The same bound the server and the schema enforce, checked here only so a
+  // participant sees the problem without a round trip.
+  if (duckName.length === 0 || duckName.length > participantNameLimit) {
+    feedback.textContent = "Enter a duck name of 1 to " + participantNameLimit + " characters.";
+    feedback.hidden = false;
+    return;
+  }
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Saving…";
+  feedback.textContent = "";
+  feedback.hidden = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    let saved = false;
+    try {
+      const response = await fetch("/api/v1/registrations/mine/duck-name", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          registrationId: registration.registrationId,
+          duckName,
+        }),
+      });
+      saved = response.ok;
+    } catch {
+      saved = false;
+    }
+    if (!saved) {
+      button.disabled = false;
+      button.textContent = label;
+      feedback.textContent = "That duck name could not be saved. Please try again.";
+      feedback.hidden = false;
+      return;
+    }
+    // The saved name is read back from the authoritative collection, never from
+    // this response, and the field is clean again so live refreshes resume.
+    globalThis.quickDucksLive.markClean(form);
+    participantVersion = null;
+    await participantRefreshWork();
+  } finally {
+    endBusy();
+  }
+};
+
+const participantNameControls = (registration) => {
+  const named = participantDuckName(registration) !== null;
+  const form = participantText("form", "", "duck-name-form");
+  form.dataset.duckNameForm = registration.registrationId;
+  const label = participantText("label", named ? "Rename this duck" : "Give this duck a name");
+  const input = document.createElement("input");
+  input.name = "duckName";
+  input.type = "text";
+  input.maxLength = participantNameLimit;
+  input.value = named ? participantDuckName(registration) : "";
+  input.placeholder = "Sir Quacks-a-Lot";
+  label.append(input);
+  const button = participantText("button", named ? "Save new name" : "Save name", "button small");
+  button.type = "submit";
+  const feedback = participantText("p", "", "message-line muted");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
+  form.append(
+    label,
+    button,
+    participantText("p", "Only this device sees the name you choose. Race staff and the public race board always show the duck number.", "muted"),
+    feedback,
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    return participantSaveName(registration, form, input, button, feedback);
+  });
+  return form;
+};
+
 const participantCard = (registration) => {
   const current = registration.registrationId === participantCurrentId;
   const card = participantText("article", "", "duck-card participant-card" + (current ? " is-current" : ""));
@@ -566,11 +728,13 @@ const participantCard = (registration) => {
   }
   card.append(participantText("h3", participantDisplayName(registration)));
   card.append(registration.followed
-    ? participantText("p", "Added from the public race status search. Followed participants have no staff lookup code here.", "muted")
+    ? participantText("p", "Followed from a duck tag, a duck page, or the race status search. Followed participants have no staff lookup code here.", "muted")
     : participantText("p", "Staff lookup code: " + registration.lookupCode));
   card.append(participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"));
-  participantAddRaceFacts(card, registration.raceStatus);
+  participantAddRaceFacts(card, registration.raceStatus, registration);
   if (participantCanDelete(registration)) card.append(...participantDeleteControls(registration));
+  if (participantCanUnfollow(registration)) card.append(...participantUnfollowControls(registration));
+  if (participantCanName(registration)) card.append(participantNameControls(registration));
   return card;
 };
 
@@ -625,6 +789,7 @@ window.addEventListener("resize", () => {
 // successful full collection response, so nothing flashes before data loads.
 const participantRenderSection = (kind, registrations) => {
   const section = participantSections.find((item) => item.dataset.participantSection === kind);
+  if (!section) return;
   const track = section.querySelector("[data-participant-track]");
   const controls = section.querySelector("[data-carousel-controls]");
   track.replaceChildren(...registrations.map(participantCard));
@@ -660,8 +825,17 @@ const participantRender = (registrations) => {
   }
   if (version !== participantVersion || justRegistered) {
     participantVersion = version;
-    participantRenderSection("awaiting", registrations.filter((registration) => !registration.paired));
-    participantRenderSection("paired", registrations.filter((registration) => registration.paired));
+    // Three groups, one rule: a participant registered on this device is
+    // "mine" and keeps its full detail, and everything else is a followed
+    // duck with the public projection only. The awaiting/paired split stays
+    // exactly as it was for the registrations this device owns.
+    const owned = registrations.filter((registration) => registration.followed !== true);
+    participantRenderSection("awaiting", owned.filter((registration) => !registration.paired));
+    participantRenderSection("paired", owned.filter((registration) => registration.paired));
+    participantRenderSection(
+      "followed",
+      registrations.filter((registration) => registration.followed === true),
+    );
     // Both sections can be hidden, so keep one guidance message instead of an
     // otherwise blank page.
     if (participantEmpty) participantEmpty.hidden = registrations.length > 0;
@@ -687,6 +861,116 @@ const participantRender = (registrations) => {
     participantCleanRegisteredQuery();
   });
   else participantCleanRegisteredQuery();
+};
+
+// ---------------------------------------------------------------------------
+// Duck-page follow control
+//
+// The two public duck pages (/t/<tag> and /duck/<number>) carry one optional
+// control: adding the participant this duck belongs to into this browser's My
+// Ducks list. It lives in this client, not in the board client, because this is
+// the browser-collection client: it already owns the collection endpoints and
+// the My Ducks nav presence rule.
+//
+// The server paints the control's state, and the authoritative duck response
+// repaints it, so a control is offered only while the follow endpoint would
+// actually accept it.
+// ---------------------------------------------------------------------------
+const participantFollowRoot = document.querySelector("[data-duck-follow]");
+const participantFollowMessage = document.querySelector("[data-follow-message]");
+let participantFollowBusy = false;
+
+// The duck page addresses itself by tag token or by visible number, and the
+// follow signals come from that same public endpoint.
+const participantDuckStatusPath = () => {
+  const parts = location.pathname.split("/");
+  if (parts.length !== 3 || parts[2].length === 0) return null;
+  if (parts[1] === "t") return "/api/v1/ducks/" + encodeURIComponent(parts[2]);
+  if (parts[1] === "duck") return "/api/v1/ducks/number/" + encodeURIComponent(parts[2]);
+  return null;
+};
+
+const participantShowFollowMessage = (message) => {
+  if (!participantFollowMessage) return;
+  participantFollowMessage.textContent = message === null ? "" : message;
+  participantFollowMessage.hidden = message === null;
+};
+
+const participantFollowAdded = () => {
+  const tag = participantText("span", "In My Ducks", "success-tag");
+  tag.dataset.followAdded = "";
+  const link = participantText("a", "Open My Ducks", "button secondary small");
+  link.href = "/my-ducks";
+  return [tag, link];
+};
+
+const participantFollow = async (followId, button) => {
+  participantFollowBusy = true;
+  button.disabled = true;
+  button.textContent = "Adding…";
+  participantShowFollowMessage(null);
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    let followed = false;
+    try {
+      const response = await fetch("/api/v1/registrations/mine/follow", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ followId }),
+      });
+      followed = response.ok;
+    } catch {
+      followed = false;
+    }
+    if (!followed) {
+      button.disabled = false;
+      button.textContent = "Follow this duck";
+      participantShowFollowMessage("That participant could not be added to My Ducks. Please try again.");
+      return;
+    }
+    participantFollowRoot.replaceChildren(...participantFollowAdded());
+    // This device now holds a saved entry, so record the presence half of the
+    // My Ducks nav rule and reveal the link immediately.
+    participantSetNavPresence(true);
+  } finally {
+    participantFollowBusy = false;
+    endBusy();
+  }
+};
+
+// A followId is present only while this participant is genuinely followable, so
+// its absence removes the control instead of rendering a dead button.
+const participantRenderFollow = (status) => {
+  if (!participantFollowRoot || participantFollowBusy) return;
+  if (!status || typeof status.followId !== "string") {
+    participantFollowRoot.replaceChildren();
+    participantFollowRoot.hidden = true;
+    participantShowFollowMessage(null);
+    return;
+  }
+  participantFollowRoot.hidden = false;
+  participantFollowRoot.dataset.followId = status.followId;
+  if (status.inMyDucks === true) {
+    participantFollowRoot.replaceChildren(...participantFollowAdded());
+    return;
+  }
+  const button = participantText("button", "Follow this duck", "button");
+  button.type = "button";
+  button.dataset.followButton = "";
+  button.addEventListener("click", () => participantFollow(status.followId, button));
+  participantFollowRoot.replaceChildren(button);
+};
+
+const participantRefreshFollow = async () => {
+  const path = participantDuckStatusPath();
+  if (path === null) return;
+  const response = await fetch(path, { headers: { accept: "application/json" }, cache: "no-store" });
+  // A duck that stopped being public is handled by the board client's own
+  // reload path; this control simply keeps whatever the server painted.
+  if (!response.ok) return;
+  const body = await response.json();
+  if (document.hidden) return;
+  participantRenderFollow(body.raceStatus);
 };
 
 const participantFetch = async () => {
@@ -730,6 +1014,30 @@ if (participantRoot) {
   });
 } else {
   participantFetch().catch(() => {});
+}
+
+// The server-rendered button is wired immediately so the control works before
+// any refetch, and the duck page then keeps it in step with the authoritative
+// duck response. Every other page has no follow container and subscribes
+// nothing here, so it still holds no live connection of its own.
+if (participantFollowRoot) {
+  const participantServerFollow = participantFollowRoot.querySelector("[data-follow-button]");
+  if (participantServerFollow) {
+    participantServerFollow.addEventListener("click", () => participantFollow(
+      participantFollowRoot.dataset.followId,
+      participantServerFollow,
+    ));
+  }
+  globalThis.quickDucksLive.subscribe({
+    domains: ["event", "participants", "ducks"],
+    root: participantFollowRoot,
+    refresh: async () => {
+      try {
+        await participantRefreshFollow();
+      } catch {}
+    },
+    isBlocked: () => participantFollowBusy,
+  });
 }
 `;
 
@@ -1030,12 +1338,15 @@ const duckDetailPath = (duckNumber) => "/duck/" + encodeURIComponent(String(duck
 // Returns null unless a real duck number is assigned, so an unpaired entry
 // renders plain text and never an empty or misleading link. The node is built
 // with safe DOM APIs and is a plain navigation with no script behaviour.
-const duckDetailLink = (documentObject, duckNumber) => {
+// The optional label replaces only the visible text, never the destination, and
+// only one surface passes it: the owner's own My Ducks card, where a
+// participant-chosen duck name stands in for "Duck #N".
+const duckDetailLink = (documentObject, duckNumber, label) => {
   if (typeof duckNumber !== "number" || !Number.isInteger(duckNumber) || duckNumber <= 0) return null;
   const link = documentObject.createElement("a");
   link.className = "duck-number-link";
   link.href = duckDetailPath(duckNumber);
-  link.textContent = "Duck #" + duckNumber;
+  link.textContent = typeof label === "string" && label.length > 0 ? label : "Duck #" + duckNumber;
   return link;
 };
 `;
@@ -1434,8 +1745,9 @@ const liveRefreshPersonal = async () => {
     const body = await liveFetchJson("/api/v1/ducks/" + encodeURIComponent(token));
     if (document.hidden) return;
     personal.replaceChildren();
-    if (body.destination === "RACE_STATUS") liveRaceFacts(personal, body.raceStatus, true);
-    else {
+    if (body.destination === "RACE_STATUS") {
+      liveRaceFacts(personal, body.raceStatus, true);
+    } else {
       document.querySelector("main")?.replaceChildren();
       location.replace("/");
     }

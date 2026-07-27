@@ -1,7 +1,9 @@
 import {
+  findDuckNumberFollowState,
   findDuckNumberRaceStatus,
   findDuckRaceStatus,
   findRegistrationStatus,
+  findTagFollowState,
   handleApi,
 } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
@@ -441,9 +443,16 @@ export const createWorker = (
     if (duckNumberMatch !== null && request.method === "GET") {
       const status = await findDuckNumberRaceStatus(duckNumberMatch[1], env);
       const phase = await publicPhase();
+      // The follow control is resolved from the same anonymous request, so a
+      // page painted for a browser that already follows this participant never
+      // offers to add them twice.
       return status === null
         ? html(renderPublicDuckNotFound(duckNumberMatch[1], phase), 404, true)
-        : html(renderPublicDuck(status, phase), 200, true);
+        : html(renderPublicDuck(
+          status,
+          phase,
+          await findDuckNumberFollowState(request, env, duckNumberMatch[1]),
+        ), 200, true);
     }
 
     const privateStatusMatch = url.pathname.match(/^\/r\/([A-Za-z0-9_-]+)$/);
@@ -466,9 +475,19 @@ export const createWorker = (
         }));
       }
       const status = await findDuckRaceStatus(duckTagMatch[1], env);
-      return withSessionCookies(status === null
-        ? new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } })
-        : html(renderDuck(status, await publicPhase()), 200, true));
+      if (status === null) {
+        return withSessionCookies(new Response(null, {
+          status: 303,
+          headers: { ...securityHeaders, location: "/" },
+        }));
+      }
+      // Tag GETs stay read-only: this resolves the follow control from the
+      // browser collection cookie without refreshing it or issuing one.
+      return withSessionCookies(html(renderDuck(
+        status,
+        await publicPhase(),
+        await findTagFollowState(request, env, duckTagMatch[1]),
+      ), 200, true));
     }
 
     // Catch-all. Every unmatched path lands here, including bot and scanner

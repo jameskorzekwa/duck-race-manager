@@ -61,6 +61,20 @@ export const validateRegistration = (
   };
 };
 
+// A participant-chosen duck name is free text for a public community event, so
+// it is bounded tightly and normalized once, here, for the API, the browser
+// client, and the schema CHECK that repeats the same bound.
+export const DUCK_NAME_MAX_LENGTH = 40;
+
+// Returns the value that may be stored, or null when the input is blank after
+// trimming, longer than the limit, or carries characters that could hide or
+// reorder text on someone else's screen.
+export const cleanDuckName = (value: string): string | null => {
+  const cleaned = value.trim().replace(/\s+/g, " ");
+  if (cleaned.length === 0 || cleaned.length > DUCK_NAME_MAX_LENGTH) return null;
+  return /[\p{Cc}\p{Cf}]/u.test(cleaned) ? null : cleaned;
+};
+
 export const randomToken = (byteLength = 32): string => {
   const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
   let binary = "";

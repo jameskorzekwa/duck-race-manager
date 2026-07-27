@@ -1,4 +1,6 @@
 import {
+  cleanDuckName,
+  DUCK_NAME_MAX_LENGTH,
   hashToken,
   isCommandId,
   isPrivateToken,
@@ -24,6 +26,7 @@ import {
   getPublicStatusByDuckNumber,
   getPublicStatusByRaceEntry,
   getPublicStatusByTag,
+  type PublicFollowState,
   type PublicRaceStatus,
 } from "./race-status.ts";
 import { handleDuckOperations } from "./duck-operations.ts";
@@ -134,6 +137,73 @@ export const findDuckNumberRaceStatus = async (
   const event = await getCurrentPublicEvent(env);
   if (event === null) return null;
   return getPublicStatusByDuckNumber(env, event.id, Number(visibleNumber));
+};
+
+// Follow eligibility is deliberately a separate question from status
+// visibility. A withdrawn or disqualified registration still has a public race
+// status by tag or number, but it has left the public name search and the
+// follow endpoint refuses it, so the predicate below is the follow endpoint's
+// own and is re-evaluated instead of inferred from the rendered status. It
+// therefore emits `followId` for exactly the entries the public name search
+// already exposes, and never for one it hides.
+//
+// `source` and `selector` are fixed internal SQL fragments; every external
+// value stays bound.
+const followableDuckSql = (source: string, selector: string): string => `
+    SELECT re.id AS race_entry_id,
+           EXISTS (
+             SELECT 1
+               FROM browser_collection_registrations bcr
+              WHERE bcr.collection_id = ? AND bcr.registration_id = r.id
+           ) AS in_collection
+      FROM race_entries re
+      JOIN registrations r ON r.id = re.registration_id
+      JOIN events e ON e.id = re.event_id
+      JOIN duck_assignments da ON da.race_entry_id = re.id AND da.valid_to IS NULL
+      JOIN ducks d ON d.id = da.duck_id
+      ${source}
+     WHERE ${selector}
+       AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
+       AND r.status IN ('SUBMITTED', 'ACTIVE')
+     LIMIT 1`;
+
+interface FollowableRow {
+  race_entry_id: string;
+  in_collection: number;
+}
+
+const followStateFrom = (row: FollowableRow | null): PublicFollowState | null =>
+  row === null ? null : { followId: row.race_entry_id, inMyDucks: row.in_collection === 1 };
+
+// Read-only membership probe for this browser's own collection, exactly like
+// the public search: it never refreshes the collection and never issues a
+// cookie, so a duck page stays a plain anonymous read.
+export const findTagFollowState = async (
+  request: Request,
+  env: Env,
+  token: string,
+): Promise<PublicFollowState | null> => {
+  if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return null;
+  const collection = await getBrowserCollection(request, env);
+  return followStateFrom(await env.DB.prepare(followableDuckSql(
+    "JOIN duck_tags dt ON dt.duck_id = d.id",
+    "dt.token = ? AND dt.status = 'ACTIVE'",
+  )).bind(collection?.id ?? "", token).first<FollowableRow>());
+};
+
+export const findDuckNumberFollowState = async (
+  request: Request,
+  env: Env,
+  visibleNumber: string,
+): Promise<PublicFollowState | null> => {
+  if (!isDuckVisibleNumber(visibleNumber)) return null;
+  const event = await getCurrentPublicEvent(env);
+  if (event === null) return null;
+  const collection = await getBrowserCollection(request, env);
+  return followStateFrom(await env.DB.prepare(followableDuckSql(
+    "",
+    "re.event_id = ? AND d.visible_number = ?",
+  )).bind(collection?.id ?? "", event.id, Number(visibleNumber)).first<FollowableRow>());
 };
 
 interface TurnstileResult {
@@ -429,23 +499,54 @@ const getRegistrationStatus = async (token: string, env: Env): Promise<Response>
   });
 };
 
-const getDuck = async (token: string, env: Env): Promise<Response> => {
+// `followId` and `inMyDucks` ride on the same object the public search already
+// puts them on, so a duck page and a search result read one identical shape.
+// They are present only when this entry is genuinely followable; a caller must
+// therefore treat their absence as "no follow control", never as "not followed".
+const followableStatus = (
+  status: PublicRaceStatus,
+  follow: PublicFollowState | null,
+): Record<string, unknown> => follow === null ? { ...status } : { ...status, ...follow };
+
+const getDuck = async (request: Request, token: string, env: Env): Promise<Response> => {
   if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return json({ destination: "HOME" });
   const status = await getPublicStatusByTag(env, token);
-  return status === null
-    ? json({ destination: "HOME" })
-    : json({ destination: "RACE_STATUS", raceStatus: status });
+  if (status === null) return json({ destination: "HOME" });
+  return json({
+    destination: "RACE_STATUS",
+    raceStatus: followableStatus(status, await findTagFollowState(request, env, token)),
+  });
 };
 
 // Unknown, unpaired, and out-of-event numbers are indistinguishable here: all
 // three return the same 404, so this adds no enumeration signal beyond the
 // duck numbers the public board already publishes.
-const getDuckByNumber = async (visibleNumber: string, env: Env): Promise<Response> => {
+const getDuckByNumber = async (
+  request: Request,
+  visibleNumber: string,
+  env: Env,
+): Promise<Response> => {
   const status = await findDuckNumberRaceStatus(visibleNumber, env);
-  return status === null
-    ? json({ error: "Not found." }, 404)
-    : json({ raceStatus: status });
+  if (status === null) return json({ error: "Not found." }, 404);
+  return json({
+    raceStatus: followableStatus(status, await findDuckNumberFollowState(request, env, visibleNumber)),
+  });
 };
+
+// The single duck-naming predicate. The My Ducks projection and the guarded
+// naming write both build on it, so the form this projection enables can never
+// disagree with the write that follows it. Naming requires a link this browser
+// holds as 'REGISTRATION' (never a followed one), a public event, and a duck
+// that is currently paired to this entry: a name is meaningless before there is
+// a duck to carry it. Both users join `bcr`, `r`, `re`, and `e` under these
+// exact aliases.
+const nameableRaceEntrySql = `bcr.added_via = 'REGISTRATION'
+              AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
+              AND EXISTS (
+                SELECT 1
+                  FROM duck_assignments da
+                 WHERE da.race_entry_id = re.id AND da.valid_to IS NULL
+              )`;
 
 const getMyRegistrations = async (request: Request, env: Env): Promise<Response> => {
   const existingCollection = await getBrowserCollection(request, env);
@@ -463,7 +564,7 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
   const registrations = await env.DB.prepare(
     `SELECT r.id AS registration_id, re.id AS race_entry_id,
             r.first_name, r.last_name, r.lookup_code, r.status,
-            bcr.added_via, e.public_name_policy,
+            bcr.added_via, e.public_name_policy, re.duck_name,
             EXISTS (
               SELECT 1
                 FROM duck_assignments da
@@ -472,7 +573,8 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
             (
               bcr.added_via = 'REGISTRATION'
               AND ${removableRegistrationSql}
-            ) AS is_deletable
+            ) AS is_deletable,
+            (${nameableRaceEntrySql}) AS is_nameable
        FROM browser_collection_registrations bcr
        JOIN registrations r ON r.id = bcr.registration_id
        JOIN race_entries re ON re.registration_id = r.id
@@ -488,8 +590,10 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
     status: string;
     added_via: string | null;
     public_name_policy: string;
+    duck_name: string | null;
     is_paired: number;
     is_deletable: number;
+    is_nameable: number;
   }>();
 
   // A followed entry came from the public name search, which exposes neither a
@@ -509,6 +613,11 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
       registrationStatus: row.status,
       paired: row.is_paired === 1,
       deletable: !followed && row.is_deletable === 1,
+      // The duck's chosen name is owner-only free text. It is projected here,
+      // to the one browser that wrote it, and nowhere else: not to a follower,
+      // not to the board, not to staff.
+      duckName: followed ? null : row.duck_name,
+      nameable: !followed && row.is_nameable === 1,
       raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),
     };
   }));
@@ -811,6 +920,277 @@ const deleteMyRegistration = async (request: Request, env: Env): Promise<Respons
     : json({ error: "That registration cannot be deleted." }, 409);
 };
 
+// Shared transport gate for the browser-collection mutations added alongside
+// the follow and delete endpoints. It repeats their rules exactly rather than
+// relaxing any of them: JSON only, a small body checked before and after
+// reading, and the exact application origin, because the collection cookie is
+// the only credential these endpoints have.
+type PublicCommandBody =
+  | { payload: Record<string, unknown>; error?: undefined }
+  | { payload?: undefined; error: Response };
+
+const readPublicCommandBody = async (request: Request, env: Env): Promise<PublicCommandBody> => {
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return { error: json({ error: "Content-Type must be application/json." }, 415) };
+  }
+
+  const contentLength = Number(request.headers.get("content-length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > 1_024) {
+    return { error: json({ error: "Request body is too large." }, 413) };
+  }
+
+  if (request.headers.get("origin") !== new URL(env.APP_ORIGIN).origin) {
+    return { error: json({ error: "Same-origin request required." }, 403) };
+  }
+
+  try {
+    const body = await request.text();
+    if (body.length > 1_024) return { error: json({ error: "Request body is too large." }, 413) };
+    const parsed = JSON.parse(body) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: json({ error: "Request body must be a JSON object." }, 400) };
+    }
+    return { payload: parsed as Record<string, unknown> };
+  } catch {
+    return { error: json({ error: "Request body must be valid JSON." }, 400) };
+  }
+};
+
+const publicRateLimit = (request: Request, env: Env, scope: string): Promise<RateLimitOutcome> => {
+  const clientKey = request.headers.get("cf-connecting-ip") ?? "unknown-client";
+  return env.PUBLIC_SEARCH_RATE_LIMITER.limit({ key: `${scope}:${clientKey}` });
+};
+
+const commandCommitted = async (
+  env: Env,
+  commandId: string,
+  commandType: string,
+  resultId: string,
+): Promise<boolean> => await env.DB.prepare(
+  `SELECT 1 AS committed
+     FROM race_commands
+    WHERE id = ? AND command_type = ? AND result_id = ?
+    LIMIT 1`,
+).bind(commandId, commandType, resultId).first<{ committed: number }>() !== null;
+
+// Removing a followed participant from this browser's list. It deletes one
+// collection link and nothing else: the statement is scoped to this collection,
+// to this registration, and to `added_via = 'FOLLOWED'`, so it can never remove
+// an entry this browser registered itself — that has its own delete flow — and
+// can never touch the registration, the race entry, or another browser's list.
+const unfollowRegistration = async (request: Request, env: Env): Promise<Response> => {
+  const parsed = await readPublicCommandBody(request, env);
+  if (parsed.error !== undefined) return parsed.error;
+
+  const { commandId, registrationId } = parsed.payload;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || typeof registrationId !== "string" || !isRegistrationId(registrationId)
+  ) {
+    return json({ error: "Invalid command or registration identifier." }, 400);
+  }
+
+  const rateLimit = await publicRateLimit(request, env, "unfollow");
+  if (!rateLimit.success) {
+    return json({ error: "Too many requests. Please wait and try again." }, 429);
+  }
+
+  // Replay is resolved before the collection is read, because a committed
+  // unfollow leaves no link to re-read. A retry of the same command is
+  // therefore answered from the command history alone.
+  const previous = await env.DB.prepare(
+    "SELECT command_type, result_id FROM race_commands WHERE id = ?",
+  ).bind(commandId).first<{ command_type: string; result_id: string | null }>();
+  if (previous !== null) {
+    return previous.command_type === "UNFOLLOW_REGISTRATION" && previous.result_id === registrationId
+      ? json({ unfollowed: true, replayed: true })
+      : json({ error: "Command identifier has already been used." }, 409);
+  }
+
+  const collection = await getBrowserCollection(request, env);
+  // A missing collection, an unrelated registration, and an entry this browser
+  // registered itself are one indistinguishable 404, so this never reports
+  // whether some other browser's registration exists.
+  if (collection === null) return json({ error: "That participant cannot be unfollowed." }, 404);
+
+  const target = await env.DB.prepare(
+    `SELECT 1 AS present
+       FROM browser_collection_registrations bcr
+      WHERE bcr.collection_id = ?
+        AND bcr.registration_id = ?
+        AND bcr.added_via = 'FOLLOWED'
+      LIMIT 1`,
+  ).bind(collection.id, registrationId).first<{ present: number }>();
+  if (target === null) return json({ error: "That participant cannot be unfollowed." }, 404);
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      // The guarded command insert is the authorization. It materializes only
+      // while this browser still holds a followed link, and the delete below is
+      // conditional on that row existing.
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at)
+         SELECT ?, r.event_id, 'UNFOLLOW_REGISTRATION', r.id, ?, ?
+           FROM registrations r
+           JOIN browser_collection_registrations bcr
+             ON bcr.registration_id = r.id
+            AND bcr.collection_id = ?
+            AND bcr.added_via = 'FOLLOWED'
+          WHERE r.id = ?`,
+      ).bind(commandId, now, now, collection.id, registrationId),
+      env.DB.prepare(
+        `DELETE FROM browser_collection_registrations
+          WHERE collection_id = ?
+            AND registration_id = ?
+            AND added_via = 'FOLLOWED'
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ?
+                 AND rc.command_type = 'UNFOLLOW_REGISTRATION'
+                 AND rc.result_id = ?
+            )`,
+      ).bind(collection.id, registrationId, commandId, registrationId),
+    ]);
+  } catch {
+    return json({ error: "That participant could not be unfollowed. Please try again." }, 409);
+  }
+
+  return await commandCommitted(env, commandId, "UNFOLLOW_REGISTRATION", registrationId)
+    ? json({ unfollowed: true, replayed: false })
+    : json({ error: "That participant cannot be unfollowed." }, 409);
+};
+
+// Naming a duck the participant registered on this device. Only a
+// 'REGISTRATION' link may name, and only once staff have paired a physical
+// duck to that entry. The name is stored on the race entry and read back only
+// by this browser's own collection projection.
+const nameMyDuck = async (request: Request, env: Env): Promise<Response> => {
+  const parsed = await readPublicCommandBody(request, env);
+  if (parsed.error !== undefined) return parsed.error;
+
+  const { commandId, registrationId, duckName } = parsed.payload;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || typeof registrationId !== "string" || !isRegistrationId(registrationId)
+    || typeof duckName !== "string"
+  ) {
+    return json({ error: "Invalid command, registration identifier, or name." }, 400);
+  }
+
+  const cleanedName = cleanDuckName(duckName);
+  if (cleanedName === null) {
+    return json({
+      error: "Duck name validation failed.",
+      fields: {
+        duckName: `Enter a name of 1 to ${DUCK_NAME_MAX_LENGTH} characters.`,
+      },
+    }, 422);
+  }
+
+  const rateLimit = await publicRateLimit(request, env, "duck-name");
+  if (!rateLimit.success) {
+    return json({ error: "Too many requests. Please wait and try again." }, 429);
+  }
+
+  // The command records a hash of the accepted name, never the name itself, so
+  // a retry with the same material replays and a reuse with different material
+  // conflicts without the command log carrying participant free text.
+  const fingerprint = await hashToken(cleanedName);
+  const previous = await env.DB.prepare(
+    "SELECT command_type, result_id, request_fingerprint FROM race_commands WHERE id = ?",
+  ).bind(commandId).first<{
+    command_type: string;
+    result_id: string | null;
+    request_fingerprint: string | null;
+  }>();
+  if (previous !== null) {
+    return previous.command_type === "NAME_DUCK"
+        && previous.result_id === registrationId
+        && previous.request_fingerprint === fingerprint
+      ? json({ named: true, duckName: cleanedName, replayed: true })
+      : json({ error: "Command identifier has already been used." }, 409);
+  }
+
+  const collection = await getBrowserCollection(request, env);
+  if (collection === null) return json({ error: "That duck cannot be named." }, 404);
+
+  // Preflight for a useful message only. The guarded command insert below
+  // re-checks the identical conditions and is what authorizes the write.
+  const target = await env.DB.prepare(
+    `SELECT EXISTS (
+              SELECT 1
+                FROM duck_assignments da
+               WHERE da.race_entry_id = re.id AND da.valid_to IS NULL
+            ) AS is_paired
+       FROM browser_collection_registrations bcr
+       JOIN registrations r ON r.id = bcr.registration_id
+       JOIN race_entries re ON re.registration_id = r.id
+       JOIN events e ON e.id = r.event_id
+      WHERE bcr.collection_id = ?
+        AND bcr.registration_id = ?
+        AND bcr.added_via = 'REGISTRATION'
+        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
+      LIMIT 1`,
+  ).bind(collection.id, registrationId).first<{ is_paired: number }>();
+  if (target === null) return json({ error: "That duck cannot be named." }, 404);
+  if (target.is_paired !== 1) {
+    return json({
+      error: "This participant is still waiting for a duck, so there is nothing to name yet.",
+    }, 409);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
+         SELECT ?, r.event_id, 'NAME_DUCK', r.id, ?, ?, ?
+           FROM registrations r
+           JOIN events e ON e.id = r.event_id
+           JOIN race_entries re ON re.registration_id = r.id
+           JOIN browser_collection_registrations bcr
+             ON bcr.registration_id = r.id
+            AND bcr.collection_id = ?
+          WHERE r.id = ?
+            AND ${nameableRaceEntrySql}`,
+      ).bind(commandId, now, now, fingerprint, collection.id, registrationId),
+      env.DB.prepare(
+        `UPDATE race_entries
+            SET duck_name = ?, updated_at = ?
+          WHERE registration_id = ?
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'NAME_DUCK' AND rc.result_id = ?
+            )`,
+      ).bind(cleanedName, now, registrationId, commandId, registrationId),
+      // The audit records that the field changed, never the free text itself.
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         SELECT ?, rc.event_id, rc.id, 'DUCK_NAME_SET', 'REGISTRATION', rc.result_id, 'PUBLIC', ?, ?
+           FROM race_commands rc
+          WHERE rc.id = ? AND rc.command_type = 'NAME_DUCK' AND rc.result_id = ?`,
+      ).bind(
+        crypto.randomUUID(),
+        now,
+        JSON.stringify({ changed_fields: ["duck_name"], named_via: "PUBLIC_COLLECTION" }),
+        commandId,
+        registrationId,
+      ),
+    ]);
+  } catch {
+    return json({ error: "That duck could not be named. Please try again." }, 409);
+  }
+
+  return await commandCommitted(env, commandId, "NAME_DUCK", registrationId)
+    ? json({ named: true, duckName: cleanedName, replayed: false })
+    : json({ error: "That duck cannot be named." }, 409);
+};
+
 const handleApiRequest = async (
   request: Request,
   env: Env,
@@ -883,6 +1263,14 @@ const handleApiRequest = async (
     return followRegistration(request, env);
   }
 
+  if (url.pathname === "/api/v1/registrations/mine/unfollow" && request.method === "POST") {
+    return unfollowRegistration(request, env);
+  }
+
+  if (url.pathname === "/api/v1/registrations/mine/duck-name" && request.method === "POST") {
+    return nameMyDuck(request, env);
+  }
+
   if (url.pathname === "/api/v1/registrations/mine/delete" && request.method === "POST") {
     return deleteMyRegistration(request, env);
   }
@@ -900,12 +1288,12 @@ const handleApiRequest = async (
   // exact shape and can never be reached with a visible duck number.
   const duckNumberMatch = url.pathname.match(/^\/api\/v1\/ducks\/number\/([0-9]{1,9})$/);
   if (duckNumberMatch !== null && request.method === "GET") {
-    return getDuckByNumber(duckNumberMatch[1], env);
+    return getDuckByNumber(request, duckNumberMatch[1], env);
   }
 
   const duckMatch = url.pathname.match(/^\/api\/v1\/ducks\/([A-Za-z0-9_-]+)$/);
   if (duckMatch !== null && request.method === "GET") {
-    return getDuck(duckMatch[1], env);
+    return getDuck(request, duckMatch[1], env);
   }
 
   return json({ error: "Not found." }, 404);

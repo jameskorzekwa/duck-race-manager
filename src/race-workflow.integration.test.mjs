@@ -101,6 +101,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0012_staff_role_assignments.sql",
     "0013_followed_collection_entries.sql",
     "0014_simplified_lifecycle_schema.sql",
+    "0015_participant_duck_names.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
