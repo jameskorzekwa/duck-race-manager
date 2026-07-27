@@ -1082,6 +1082,27 @@ metadata; after a successful takeover, the recovered URL remains only in the
 station's in-memory provisioning state and is not placed in DOM, browser history,
 or logs.
 
+### Console Inventory Sections
+
+The console's Inventory list groups the duck cards into labelled sections that
+are derived from the inventory projection itself, not from any new state:
+
+1. **In use** — the duck holds an unreleased event reservation, has an open
+   participant assignment, or its inventory status is `IN_USE`. Reservation and
+   pairing are checked first, so a reserved duck that is damaged or quarantined
+   is still reported as in use.
+2. **Ready to be reserved** — the duck is not reserved or paired and its
+   inventory status is `AVAILABLE`, which is exactly the state assignment and
+   scan-first pairing accept.
+3. **Not ready to reserve** — every remaining status (`NEW`, `QUARANTINED`,
+   `DAMAGED`, `MISSING`, `UNACCOUNTED_FOR`, `KEPT`, `RETIRED`) with no live
+   reservation or assignment.
+
+The first two sections are always rendered and state an explicit message when
+they are empty; the third appears only when it holds ducks. Cards keep the
+existing card grid, the sticky detail panel, selection and focus behaviour, the
+detail request versioning, and live refresh.
+
 ### Inventory Editing and Label Data
 
 Duck managers, race directors, and administrators can edit visible number, condition, storage location,
@@ -1244,6 +1265,22 @@ For each round-one and final heat, station staff perform:
 6. `Start heat`: changes `CALLING` to `RUNNING`.
 7. A result taker `Finish heat`: changes `RUNNING` to `AWAITING_RESULT`.
 8. A result taker enters and publishes the required result.
+
+### Console Roster Deep Links
+
+Each console roster entry shows its slot, participant name, duck number, and the
+race-entry identifier, plus up to two in-page navigation buttons. **Participant
+details** scrolls to the Participants section, loads that registration through
+the existing participant-selection path, and moves focus into the loaded detail
+panel. **Duck # in inventory** scrolls to the Inventory section and opens that
+duck through the existing duck-detail path, including its request versioning, so
+an overtaken link click never leaves a stale panel open.
+
+An entry with no assigned duck offers no duck link. Each link is offered only to
+an actor whose roles can open the target section — `REGISTRATION` or
+`RACE_DIRECTOR` for the participant link, `DUCK_MANAGER` or `RACE_DIRECTOR` for
+the duck link — and the target APIs enforce the same requirement regardless of
+the console. The announcer roster action still renders its own plain list.
 
 ### Focused Start-Line Station
 

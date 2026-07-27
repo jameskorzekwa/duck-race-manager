@@ -139,17 +139,23 @@ interface RosterRow {
   race_entry_id: string;
   slot_number: number;
   assignment_source: string;
+  registration_id: string;
   first_name: string;
   last_name: string;
   registration_status: string;
   duck_assignment_id: string | null;
+  duck_id: string | null;
   visible_number: number | null;
 }
 
+// The registration and duck identifiers are the console's existing selection
+// keys for the participant and inventory sections, so a roster entry can link
+// straight into them. They are internal identifiers, not participant contact
+// data, and the duck join already excludes closed assignments.
 const rosterSql = `SELECT he.id AS heat_entry_id, he.race_entry_id, he.slot_number,
-       he.assignment_source, r.first_name, r.last_name,
+       he.assignment_source, r.id AS registration_id, r.first_name, r.last_name,
        r.status AS registration_status, da.id AS duck_assignment_id,
-       d.visible_number
+       da.duck_id, d.visible_number
   FROM heat_entries he
   JOIN race_entries re ON re.id = he.race_entry_id
   JOIN registrations r ON r.id = re.registration_id
@@ -197,11 +203,14 @@ const rosterResponse = (row: RosterRow): Record<string, unknown> => ({
   slotNumber: row.slot_number,
   assignmentSource: row.assignment_source,
   participant: {
+    registrationId: row.registration_id,
     firstName: row.first_name,
     lastName: row.last_name,
     registrationStatus: row.registration_status,
   },
-  duck: row.visible_number === null ? null : { visibleNumber: row.visible_number },
+  duck: row.visible_number === null
+    ? null
+    : { id: row.duck_id, visibleNumber: row.visible_number },
 });
 
 const resultResponseRow = (row: PublishedResultRow): Record<string, unknown> => ({
