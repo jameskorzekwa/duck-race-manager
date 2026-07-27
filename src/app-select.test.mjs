@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { appSelectHelpersScript, appSelectScript } from "./client-scripts.ts";
+import { appSelectHelpersScript, appSelectScript, staffHomeScript } from "./client-scripts.ts";
 import { createWorker } from "./index.ts";
 import {
   renderInventoryIntake,
@@ -164,6 +164,21 @@ const enhance = (options, configure) => {
   if (configure) configure(select);
   const controller = createAppSelect(select, { documentObject: doc });
   return { doc, select, controller };
+};
+
+// A searchable select opts in with data-app-select-search, exactly like the
+// timezone field the staff console renders.
+const enhanceSearchable = (options, configure) => enhance(options, (select) => {
+  select.setAttribute("data-app-select-search", "true");
+  if (configure) configure(select);
+});
+
+const zoneOptions = (values) => values.map((value) => option(value, value));
+
+// Typing into the filter input: the browser updates .value before "input" fires.
+const typeIntoFilter = (controller, value) => {
+  controller.searchInput.value = value;
+  controller.searchInput.dispatch("input", {});
 };
 
 test("enhancement builds an ARIA combobox trigger and listbox panel around the hidden native select", () => {
@@ -403,6 +418,238 @@ test("type-ahead highlights matches and cycles repeated characters", () => {
   assert.equal(controller.isOpen(), true);
 });
 
+test("a searchable select puts a filter input in the panel and keeps combobox/listbox semantics", () => {
+  const { select, controller } = enhanceSearchable(
+    zoneOptions(["America/Denver", "America/New_York", "Europe/London"]),
+    (select) => select.setAttribute("aria-label", "Timezone"),
+  );
+  const { trigger, panel, listbox, searchInput } = controller;
+
+  assert.equal(controller.isSearchable(), true);
+  // The panel stops being the listbox so a searchbox never sits inside listbox
+  // semantics; the listbox moves to its own element and keeps the wiring.
+  assert.equal(panel.getAttribute("role"), null);
+  assert.equal(listbox.getAttribute("role"), "listbox");
+  assert.notEqual(listbox, panel);
+  assert.ok(panel.contains(listbox));
+  assert.ok(panel.contains(searchInput));
+  assert.equal(trigger.getAttribute("role"), "combobox");
+  assert.equal(trigger.getAttribute("aria-haspopup"), "listbox");
+  assert.equal(trigger.getAttribute("aria-controls"), listbox.id);
+  assert.equal(trigger.getAttribute("aria-label"), "Timezone");
+  // The filter input is the combobox that owns the list while it holds focus.
+  assert.equal(searchInput.type, "text");
+  assert.equal(searchInput.getAttribute("role"), "combobox");
+  assert.equal(searchInput.getAttribute("aria-autocomplete"), "list");
+  assert.equal(searchInput.getAttribute("aria-controls"), listbox.id);
+  assert.equal(searchInput.getAttribute("aria-expanded"), "false");
+  assert.equal(searchInput.getAttribute("aria-label"), "Filter Timezone");
+  assert.equal(searchInput.getAttribute("autocomplete"), "off");
+  assert.equal(panel.hidden, true);
+
+  // The control is still the native select underneath, never a text field.
+  assert.equal(select.tagName, "SELECT");
+  assert.equal(trigger.type, "button");
+
+  controller.open();
+  assert.equal(searchInput.getAttribute("aria-expanded"), "true");
+  assert.equal(trigger.getAttribute("aria-expanded"), "true");
+  // Focus moves into the filter so typing narrows instead of type-ahead jumping.
+  assert.equal(searchInput.focusCount, 1);
+  assert.equal(controller.optionElements().length, 3);
+});
+
+test("the filter narrows the list, folds separators, and reports an empty result", () => {
+  const { controller } = enhanceSearchable(
+    zoneOptions(["America/Denver", "America/New_York", "Europe/London", "Pacific/Auckland"]),
+  );
+  const visible = () => controller.optionElements().map((element) => element.textContent);
+
+  controller.open();
+  assert.deepEqual(visible(), ["America/Denver", "America/New_York", "Europe/London", "Pacific/Auckland"]);
+
+  typeIntoFilter(controller, "den");
+  assert.deepEqual(visible(), ["America/Denver"]);
+  assert.equal(controller.filterText(), "den");
+  assert.equal(controller.emptyMessage.hidden, true);
+
+  // Matching is case-insensitive and substring based, not prefix-only.
+  typeIntoFilter(controller, "LONDON");
+  assert.deepEqual(visible(), ["Europe/London"]);
+
+  // Underscores and slashes fold to spaces so "new york" finds America/New_York.
+  typeIntoFilter(controller, "new york");
+  assert.deepEqual(visible(), ["America/New_York"]);
+  typeIntoFilter(controller, "america new");
+  assert.deepEqual(visible(), ["America/New_York"]);
+
+  typeIntoFilter(controller, "atlantis");
+  assert.deepEqual(visible(), []);
+  assert.equal(controller.emptyMessage.hidden, false);
+  assert.match(controller.emptyMessage.textContent, /No match for/);
+  assert.match(controller.emptyMessage.textContent, /atlantis/);
+  assert.equal(controller.highlightedIndex(), -1);
+
+  // Clearing restores the full list.
+  typeIntoFilter(controller, "");
+  assert.deepEqual(visible(), ["America/Denver", "America/New_York", "Europe/London", "Pacific/Auckland"]);
+  assert.equal(controller.emptyMessage.hidden, true);
+});
+
+test("keyboard selection still works through the filter and fires exactly one change event", () => {
+  const { select, controller } = enhanceSearchable(
+    zoneOptions(["America/Denver", "America/New_York", "Europe/London", "Pacific/Auckland"]),
+  );
+  const { searchInput, trigger } = controller;
+  select.selectedPosition = 0;
+
+  trigger.dispatch("keydown", keyEvent("ArrowDown"));
+  assert.equal(controller.isOpen(), true);
+  // The selected option is highlighted and announced from the focused input.
+  assert.equal(controller.highlightedIndex(), 0);
+  assert.equal(searchInput.getAttribute("aria-activedescendant"), controller.optionElements()[0].id);
+  assert.equal(trigger.attributes.has("aria-activedescendant"), false);
+
+  typeIntoFilter(controller, "america");
+  assert.equal(controller.highlightedIndex(), 0);
+  searchInput.dispatch("keydown", keyEvent("ArrowDown"));
+  assert.equal(controller.highlightedIndex(), 1);
+  assert.equal(searchInput.getAttribute("aria-activedescendant"), controller.optionElements()[1].id);
+  // Arrows stay inside the filtered set instead of walking hidden options.
+  searchInput.dispatch("keydown", keyEvent("ArrowDown"));
+  assert.equal(controller.highlightedIndex(), 1);
+
+  searchInput.dispatch("keydown", keyEvent("Enter"));
+  assert.equal(select.value, "America/New_York");
+  assert.equal(select.selectedIndex, 1);
+  assert.equal(select.changeCount, 1);
+  assert.equal(controller.isOpen(), false);
+  assert.equal(trigger.children[0].textContent, "America/New_York");
+  assert.equal(trigger.focusCount, 1);
+  // Closing clears the filter and the activedescendant wiring on both hosts.
+  assert.equal(controller.filterText(), "");
+  assert.equal(searchInput.value, "");
+  assert.equal(searchInput.getAttribute("aria-expanded"), "false");
+  assert.equal(searchInput.attributes.has("aria-activedescendant"), false);
+  assert.equal(trigger.attributes.has("aria-activedescendant"), false);
+
+  // Reopening shows the whole list again, highlighting the new selection.
+  controller.open();
+  assert.equal(controller.optionElements().length, 4);
+  assert.equal(controller.highlightedIndex(), 1);
+
+  // Re-picking the same option must not fire a second change.
+  searchInput.dispatch("keydown", keyEvent("Enter"));
+  assert.equal(select.changeCount, 1);
+});
+
+test("pointer selection through a filtered panel updates the native select once", () => {
+  const { select, controller } = enhanceSearchable(
+    zoneOptions(["America/Denver", "Europe/London", "Pacific/Auckland"]),
+  );
+
+  controller.open();
+  typeIntoFilter(controller, "auck");
+  assert.equal(controller.optionElements().length, 1);
+  controller.optionElements()[0].dispatch("click");
+
+  assert.equal(select.value, "Pacific/Auckland");
+  assert.equal(select.selectedIndex, 2);
+  assert.equal(select.changeCount, 1);
+  assert.equal(controller.isOpen(), false);
+  assert.equal(controller.trigger.children[0].textContent, "Pacific/Auckland");
+});
+
+test("the filter input keeps text keys, while Escape and Tab keep combobox behaviour", () => {
+  const { select, controller } = enhanceSearchable(
+    zoneOptions(["America/Denver", "Europe/London", "Los Angeles/Test"]),
+  );
+  const { searchInput, trigger } = controller;
+  select.selectedPosition = 0;
+
+  controller.open();
+  // Space types a space instead of committing the highlighted option.
+  const space = keyEvent(" ");
+  searchInput.dispatch("keydown", space);
+  assert.equal(space.defaultPrevented, false);
+  assert.equal(controller.isOpen(), true);
+  assert.equal(select.changeCount, 0);
+  // Home/End belong to the caret inside a text field.
+  const home = keyEvent("Home");
+  searchInput.dispatch("keydown", home);
+  assert.equal(home.defaultPrevented, false);
+  assert.equal(controller.highlightedIndex(), 0);
+
+  // Escape closes without changing the value and returns focus to the trigger.
+  typeIntoFilter(controller, "london");
+  searchInput.dispatch("keydown", keyEvent("Escape"));
+  assert.equal(controller.isOpen(), false);
+  assert.equal(select.value, "America/Denver");
+  assert.equal(select.changeCount, 0);
+  assert.equal(trigger.focusCount, 1);
+  assert.equal(controller.filterText(), "");
+
+  // Tab closes without stealing focus back.
+  controller.open();
+  const tab = keyEvent("Tab");
+  searchInput.dispatch("keydown", tab);
+  assert.equal(controller.isOpen(), false);
+  assert.equal(tab.defaultPrevented, false);
+  assert.equal(trigger.focusCount, 1);
+});
+
+test("a printable key on a searchable trigger opens the panel and seeds the filter once", () => {
+  const { controller } = enhanceSearchable(
+    zoneOptions(["America/Denver", "Europe/London", "Europe/Lisbon"]),
+  );
+
+  const key = keyEvent("l");
+  controller.trigger.dispatch("keydown", key);
+
+  assert.equal(controller.isOpen(), true);
+  // The default action is suppressed so the character is not typed twice.
+  assert.equal(key.defaultPrevented, true);
+  assert.equal(controller.filterText(), "l");
+  assert.equal(controller.searchInput.value, "l");
+  assert.deepEqual(
+    controller.optionElements().map((element) => element.textContent),
+    ["Europe/London", "Europe/Lisbon"],
+  );
+});
+
+test("a select without the search flag keeps the original single-element listbox panel", () => {
+  const { controller } = enhance([option("ONE", "One"), option("TWO", "Two")]);
+
+  assert.equal(controller.isSearchable(), false);
+  assert.equal(controller.searchInput, null);
+  assert.equal(controller.emptyMessage, null);
+  assert.equal(controller.listbox, controller.panel);
+  assert.equal(controller.panel.getAttribute("role"), "listbox");
+  assert.equal(controller.trigger.getAttribute("aria-controls"), controller.panel.id);
+
+  // Single-keystroke type-ahead still owns typing on unsearchable selects.
+  controller.open();
+  controller.trigger.dispatch("keydown", keyEvent("t"));
+  assert.equal(controller.highlightedIndex(), 1);
+});
+
+test("options added after enhancement become filterable without re-enhancing", () => {
+  const before = FakeMutationObserver.instances.length;
+  const { select, controller } = enhanceSearchable([option("UTC", "UTC")]);
+  const observer = FakeMutationObserver.instances[before];
+
+  // The console replaces the bootstrap option with the full runtime zone list.
+  select.replaceChildren(...zoneOptions(["America/Denver", "Europe/London", "UTC"]));
+  select.value = "Europe/London";
+  observer.deliver();
+  assert.equal(controller.trigger.children[0].textContent, "Europe/London");
+
+  controller.open();
+  assert.equal(controller.optionElements().length, 3);
+  typeIntoFilter(controller, "utc");
+  assert.deepEqual(controller.optionElements().map((element) => element.textContent), ["UTC"]);
+});
+
 test("outside pointerdown closes the panel while inside interaction keeps it open", () => {
   const { doc, controller } = enhance([option("ONE", "One"), option("TWO", "Two")]);
 
@@ -430,6 +677,24 @@ test("enhancement scripts are valid JavaScript and avoid unsafe DOM sinks", () =
   assert.match(appSelectScript, /new Event\("change", \{ bubbles: true \}\)/);
   // Form resets re-sync the trigger label.
   assert.match(appSelectScript, /addEventListener\("reset"/);
+  // The filter is opt-in, so short lists keep the plain listbox panel.
+  assert.match(appSelectScript, /getAttribute\("data-app-select-search"\) === "true"/);
+  // Filter text reaches the DOM as text, never as markup.
+  assert.match(appSelectScript, /emptyMessage\.textContent =/);
+  assert.doesNotMatch(appSelectScript, /innerText/);
+});
+
+// The staff console loads app-select.js and staff-home.js as classic scripts,
+// so their top-level bindings share one global scope.
+test("the enhancement and the console client declare no colliding globals", () => {
+  const topLevel = (source) => new Set(
+    [...source.matchAll(/^(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/gm)].map((match) => match[1]),
+  );
+  const enhancement = topLevel(appSelectScript);
+  const console = topLevel(staffHomeScript);
+
+  assert.ok(enhancement.size > 5 && console.size > 5, "both scripts declare globals");
+  assert.deepEqual([...enhancement].filter((name) => console.has(name)), []);
 });
 
 test("every page with a select loads the shared enhancement script", () => {
@@ -472,6 +737,13 @@ test("app-select styling matches the chunky ink/cream/yellow design system and l
   // The native select stays form-associated but visually hidden.
   assert.match(markup, /select\.app-select-native \{ position:absolute; width:1px; height:1px;[^}]*clip-path:inset\(50%\); opacity:0;[^}]*pointer-events:none; \}/);
   assert.doesNotMatch(markup, /select\.app-select-native \{[^}]*display:none/);
+
+  // The filter row stays visible while the list scrolls, and matches the app's
+  // form controls: ink border, rounded, 44px touch target.
+  assert.match(markup, /\.app-select-search \{ position:sticky; z-index:1; top:0;[^}]*background:var\(--paper\); \}/);
+  assert.match(markup, /\.app-select-search-input \{[^}]*min-height:2\.75rem;[^}]*border:2px solid var\(--ink\); border-radius:\.5rem; background:#fff;/);
+  assert.match(markup, /\.app-select-search-input:focus-visible \{ outline:4px solid #83d8ec; outline-offset:1px; \}/);
+  assert.match(markup, /\.app-select-empty \{[^}]*color:var\(--muted\);[^}]*\}/);
 });
 
 test("the worker serves the enhancement asset uncached", async () => {

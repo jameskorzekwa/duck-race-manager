@@ -2923,6 +2923,124 @@ const eventSlugFromName = (name) => {
 };
 `;
 
+// Timezone options are built in the browser: the full IANA list is far too
+// large to server-render into every staff page, and the operator's own zone is
+// only knowable on the device. The server renders one valid option so the
+// select is never empty and the form stays valid before this runs.
+export const timezonePickerHelpersScript = String.raw`
+// Used only when Intl.supportedValuesOf is missing. Small on purpose: it is a
+// usable spread of zones, not a second copy of the tz database.
+const timezoneFallbackZones = [
+  "UTC",
+  "Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
+  "America/Anchorage", "America/Argentina/Buenos_Aires", "America/Bogota",
+  "America/Chicago", "America/Denver", "America/Halifax", "America/Lima",
+  "America/Los_Angeles", "America/Mexico_City", "America/New_York",
+  "America/Phoenix", "America/Puerto_Rico", "America/Sao_Paulo",
+  "America/St_Johns", "America/Toronto", "America/Vancouver",
+  "Asia/Bangkok", "Asia/Dubai", "Asia/Hong_Kong", "Asia/Jakarta",
+  "Asia/Jerusalem", "Asia/Karachi", "Asia/Kolkata",
+  "Asia/Manila", "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore",
+  "Asia/Taipei", "Asia/Tokyo",
+  "Atlantic/Reykjavik",
+  "Australia/Adelaide", "Australia/Brisbane", "Australia/Melbourne",
+  "Australia/Perth", "Australia/Sydney",
+  "Europe/Amsterdam", "Europe/Athens", "Europe/Berlin", "Europe/Brussels",
+  "Europe/Bucharest", "Europe/Dublin", "Europe/Helsinki", "Europe/Istanbul",
+  "Europe/Lisbon", "Europe/London", "Europe/Madrid", "Europe/Moscow",
+  "Europe/Oslo", "Europe/Paris", "Europe/Prague", "Europe/Rome",
+  "Europe/Stockholm", "Europe/Vienna", "Europe/Warsaw", "Europe/Zurich",
+  "Pacific/Auckland", "Pacific/Fiji", "Pacific/Honolulu",
+];
+
+const timezoneDetect = () => {
+  try {
+    const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (typeof detected === "string" && detected !== "") return detected;
+  } catch {}
+  return "UTC";
+};
+
+const timezoneSupportedZones = () => {
+  try {
+    if (typeof Intl.supportedValuesOf === "function") {
+      const zones = Intl.supportedValuesOf("timeZone");
+      if (Array.isArray(zones) && zones.length > 0) return zones.slice();
+    }
+  } catch {}
+  return timezoneFallbackZones.slice();
+};
+
+// The detected zone and any already-stored zone are always selectable, even
+// when the runtime list omits them (legacy aliases such as US/Mountain).
+const timezoneZoneList = (detected, current) => {
+  const zones = timezoneSupportedZones();
+  const seen = new Set(zones);
+  for (const extra of ["UTC", detected, current]) {
+    if (typeof extra === "string" && extra !== "" && !seen.has(extra)) {
+      seen.add(extra);
+      zones.push(extra);
+    }
+  }
+  return zones.sort((left, right) => left.localeCompare(right));
+};
+
+const timezoneOptionLabel = (zone, detected) => zone === detected ? zone + " (detected)" : zone;
+
+const timezoneBuildOption = (doc, zone, detected, selected) => {
+  const option = doc.createElement("option");
+  option.value = zone;
+  option.textContent = timezoneOptionLabel(zone, detected);
+  if (zone === detected) option.setAttribute("data-detected", "true");
+  option.selected = selected;
+  option.defaultSelected = selected;
+  return option;
+};
+
+const timezoneSelectDocument = (select, context) => context.documentObject
+  || select.ownerDocument
+  || document;
+
+// Applies a stored zone, adding it to the list first when the runtime does not
+// know it, so an existing event never loses or silently changes its timezone.
+const timezoneApplyValue = (select, value, context = {}) => {
+  if (!select) return "";
+  const zone = typeof value === "string" ? value.trim() : "";
+  if (zone === "") return select.value;
+  const options = Array.from(select.options || []);
+  if (!options.some((option) => option.value === zone)) {
+    const doc = timezoneSelectDocument(select, context);
+    const detected = context.detected
+      || (typeof select.getAttribute === "function" ? select.getAttribute("data-timezone-detected") : "")
+      || "";
+    const option = timezoneBuildOption(doc, zone, detected, false);
+    const before = options.find((existing) => existing.value.localeCompare(zone) > 0);
+    if (before && typeof select.insertBefore === "function") select.insertBefore(option, before);
+    else select.append(option);
+  }
+  select.value = zone;
+  return select.value;
+};
+
+// data-timezone-detect marks a field with no stored value yet (event creation),
+// where the detected zone is the default selection.
+const timezonePopulate = (select, context = {}) => {
+  const doc = timezoneSelectDocument(select, context);
+  const detected = context.detected || timezoneDetect();
+  const rendered = typeof select.value === "string" ? select.value : "";
+  const preferDetected = typeof select.getAttribute === "function"
+    && select.getAttribute("data-timezone-detect") === "true";
+  const desired = preferDetected || rendered === "" ? detected : rendered;
+  const zones = timezoneZoneList(detected, desired);
+  select.replaceChildren(
+    ...zones.map((zone) => timezoneBuildOption(doc, zone, detected, zone === desired)),
+  );
+  if (typeof select.setAttribute === "function") select.setAttribute("data-timezone-detected", detected);
+  select.value = desired;
+  return { detected, desired, zones };
+};
+`;
+
 export const inventoryDetailHelpersScript = String.raw`
 const createInventoryDetailController = ({ detail, list, closeButton, clear }) => {
   let returnTarget = null;
@@ -2966,7 +3084,7 @@ const createInventoryDetailController = ({ detail, list, closeButton, clear }) =
 };
 `;
 
-export const staffHomeScript = confirmationDialogScript + eventLifecycleHelpersScript + eventSlugHelpersScript + inventoryDetailHelpersScript + String.raw`
+export const staffHomeScript = confirmationDialogScript + eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + inventoryDetailHelpersScript + String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
 const assignedRoles = new Set((operationsRoot.dataset.roles || "").split(",").filter(Boolean));
@@ -3108,6 +3226,15 @@ const deleteDraftForm = document.querySelector("[data-delete-draft-form]");
 const forceDeleteCard = document.querySelector("[data-force-delete-card]");
 const forceDeleteForm = document.querySelector("[data-force-delete-form]");
 
+// The device zone is resolved once and every timezone select is filled from the
+// runtime zone list. The create form defaults to the detected zone; the config
+// form is overwritten with the stored zone when an event loads.
+const timezoneDetected = timezoneDetect();
+const timezoneContext = { documentObject: document, detected: timezoneDetected };
+for (const select of document.querySelectorAll("[data-timezone-select]")) {
+  timezonePopulate(select, timezoneContext);
+}
+
 const updateEventSlugPreview = (form, preview, persistedEvent = null) => {
   if (!form || !preview) return;
   const name = String(form.elements.name.value).trim().replace(/\s+/g, " ");
@@ -3222,7 +3349,7 @@ const renderEvent = (detail, readiness) => {
     eventConfigCard.hidden = currentEvent.status !== "DRAFT";
     eventConfigForm.elements.name.value = currentEvent.name;
     eventConfigForm.elements.eventDate.value = currentEvent.eventDate || "";
-    eventConfigForm.elements.timezone.value = currentEvent.timezone;
+    timezoneApplyValue(eventConfigForm.elements.timezone, currentEvent.timezone, timezoneContext);
     eventConfigForm.elements.registrationOpensAt.value = toLocalInput(currentEvent.registrationOpensAt);
     eventConfigForm.elements.registrationClosesAt.value = toLocalInput(currentEvent.registrationClosesAt);
     eventConfigForm.elements.emailRequired.checked = currentEvent.emailRequired;
@@ -3370,6 +3497,7 @@ if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) =>
       commandId: crypto.randomUUID(),
       name: String(values.get("name")),
       eventDate: String(values.get("eventDate")),
+      timezone: String(values.get("timezone")),
       roundOneHeatCapacity: Number(values.get("roundOneHeatCapacity")),
     }));
     form.reset();
@@ -4648,6 +4776,21 @@ const appSelectFieldLabelText = (select) => {
   return parts.join(" ").replace(/\s+/g, " ").trim();
 };
 
+// Filtering compares on a folded form so "new york" finds "America/New_York"
+// and "denver" finds "America/Denver". Matching is substring based because zone
+// identifiers are read from the middle as often as from the start.
+const appSelectFoldText = (value) => String(value)
+  .toLowerCase()
+  .replace(/[_/]+/g, " ")
+  .replace(/\s+/g, " ")
+  .trim();
+
+const appSelectMatchesFilter = (text, filter) => {
+  const needle = appSelectFoldText(filter);
+  if (needle === "") return true;
+  return appSelectFoldText(text).includes(needle);
+};
+
 const createAppSelect = (select, context = {}) => {
   const doc = context.documentObject || document;
   const nativeValue = appSelectPrototypeAccessor(select, "value");
@@ -4675,12 +4818,49 @@ const createAppSelect = (select, context = {}) => {
   trigger.append(valueText, arrow);
   const panel = doc.createElement("div");
   panel.className = "app-select-panel";
-  panel.id = baseId + "-listbox";
-  panel.setAttribute("role", "listbox");
   panel.hidden = true;
-  trigger.setAttribute("aria-controls", panel.id);
 
+  // Long lists opt in to a filter input inside the panel. The panel then stops
+  // being the listbox itself so the searchbox never sits inside listbox
+  // semantics; short lists keep the original single-element structure.
+  const searchable = typeof select.getAttribute === "function"
+    && select.getAttribute("data-app-select-search") === "true";
   const fieldLabel = appSelectFieldLabelText(select);
+  let searchInput = null;
+  let emptyMessage = null;
+  let listbox = panel;
+  if (searchable) {
+    panel.id = baseId + "-panel";
+    const searchRow = doc.createElement("div");
+    searchRow.className = "app-select-search";
+    searchInput = doc.createElement("input");
+    searchInput.type = "text";
+    searchInput.id = baseId + "-search";
+    searchInput.className = "app-select-search-input";
+    searchInput.value = "";
+    searchInput.setAttribute("role", "combobox");
+    searchInput.setAttribute("aria-autocomplete", "list");
+    searchInput.setAttribute("aria-expanded", "false");
+    searchInput.setAttribute("autocomplete", "off");
+    searchInput.setAttribute("autocapitalize", "none");
+    searchInput.setAttribute("autocorrect", "off");
+    searchInput.setAttribute("spellcheck", "false");
+    searchInput.setAttribute("placeholder", "Type to filter");
+    searchInput.setAttribute("aria-label", fieldLabel ? "Filter " + fieldLabel : "Filter options");
+    searchRow.append(searchInput);
+    listbox = doc.createElement("div");
+    listbox.className = "app-select-list";
+    emptyMessage = doc.createElement("p");
+    emptyMessage.className = "app-select-empty";
+    emptyMessage.setAttribute("role", "status");
+    emptyMessage.hidden = true;
+    panel.append(searchRow, listbox, emptyMessage);
+  }
+  listbox.id = baseId + "-listbox";
+  listbox.setAttribute("role", "listbox");
+  trigger.setAttribute("aria-controls", listbox.id);
+  if (searchInput !== null) searchInput.setAttribute("aria-controls", listbox.id);
+
   if (fieldLabel) trigger.setAttribute("aria-label", fieldLabel);
   if (typeof select.getAttribute === "function") {
     const labelledBy = select.getAttribute("aria-labelledby");
@@ -4703,6 +4883,10 @@ const createAppSelect = (select, context = {}) => {
   let highlighted = -1;
   let typeAheadBuffer = "";
   let typeAheadAt = 0;
+  let filterText = "";
+
+  // Whatever holds DOM focus while the panel is open owns aria-activedescendant.
+  const highlightHost = () => searchInput !== null ? searchInput : trigger;
 
   const selectedNativeIndex = () => {
     const options = appSelectOptionList(select);
@@ -4727,23 +4911,26 @@ const createAppSelect = (select, context = {}) => {
       if (entry.element.classList) entry.element.classList[active ? "add" : "remove"]("is-highlighted");
       if (active) activeElement = entry.element;
     }
-    if (activeElement === null) trigger.removeAttribute("aria-activedescendant");
+    const host = highlightHost();
+    if (activeElement === null) host.removeAttribute("aria-activedescendant");
     else {
-      trigger.setAttribute("aria-activedescendant", activeElement.id);
+      host.setAttribute("aria-activedescendant", activeElement.id);
       if (typeof activeElement.scrollIntoView === "function") activeElement.scrollIntoView({ block: "nearest" });
     }
   };
 
   const rebuildPanel = () => {
-    panel.replaceChildren();
+    listbox.replaceChildren();
     panelOptions = [];
     const current = selectedNativeIndex();
     appSelectOptionList(select).forEach((option, index) => {
+      const label = appSelectOptionText(option);
+      if (searchable && !appSelectMatchesFilter(label, filterText)) return;
       const item = doc.createElement("div");
       item.id = baseId + "-option-" + index;
       item.className = "app-select-option";
       item.setAttribute("role", "option");
-      item.textContent = appSelectOptionText(option);
+      item.textContent = label;
       const disabled = option.disabled === true;
       if (disabled) item.setAttribute("aria-disabled", "true");
       item.setAttribute("aria-selected", index === current ? "true" : "false");
@@ -4756,31 +4943,51 @@ const createAppSelect = (select, context = {}) => {
         commit(index);
         close(true);
       });
-      panel.append(item);
-      panelOptions.push({ element: item, index, disabled, text: appSelectOptionText(option) });
+      listbox.append(item);
+      panelOptions.push({ element: item, index, disabled, text: label });
     });
+    if (emptyMessage !== null) {
+      const nothingMatched = panelOptions.length === 0;
+      emptyMessage.hidden = !nothingMatched;
+      emptyMessage.textContent = nothingMatched ? "No match for “" + filterText + "”." : "";
+    }
   };
 
   const enabledEntries = () => panelOptions.filter((entry) => !entry.disabled);
 
   const highlightSelectedOrFirst = () => {
     const current = selectedNativeIndex();
-    const options = appSelectOptionList(select);
-    if (current >= 0 && options[current] && options[current].disabled !== true) {
-      applyHighlight(current);
+    const entries = enabledEntries();
+    const selectedEntry = entries.find((entry) => entry.index === current);
+    if (selectedEntry) {
+      applyHighlight(selectedEntry.index);
       return;
     }
-    const first = enabledEntries()[0];
-    applyHighlight(first ? first.index : -1);
+    applyHighlight(entries.length > 0 ? entries[0].index : -1);
+  };
+
+  const setFilter = (value) => {
+    if (!searchable) return;
+    filterText = String(value === undefined || value === null ? "" : value);
+    if (searchInput !== null && searchInput.value !== filterText) searchInput.value = filterText;
+    if (!openState) return;
+    rebuildPanel();
+    highlightSelectedOrFirst();
   };
 
   const open = () => {
     if (openState || select.disabled === true) return;
+    filterText = "";
+    if (searchInput !== null) {
+      searchInput.value = "";
+      searchInput.setAttribute("aria-expanded", "true");
+    }
     rebuildPanel();
     openState = true;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     highlightSelectedOrFirst();
+    if (searchInput !== null && typeof searchInput.focus === "function") searchInput.focus();
   };
 
   const close = (returnFocus) => {
@@ -4789,6 +4996,12 @@ const createAppSelect = (select, context = {}) => {
     panel.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
     trigger.removeAttribute("aria-activedescendant");
+    if (searchInput !== null) {
+      searchInput.removeAttribute("aria-activedescendant");
+      searchInput.setAttribute("aria-expanded", "false");
+      searchInput.value = "";
+    }
+    filterText = "";
     typeAheadBuffer = "";
     if (returnFocus && typeof trigger.focus === "function") trigger.focus();
   };
@@ -4834,7 +5047,10 @@ const createAppSelect = (select, context = {}) => {
     }
   };
 
-  const handleTriggerKeydown = (event) => {
+  // One handler serves the trigger and the filter input. Inside the filter
+  // input printable keys and Space belong to the text field, and Home/End move
+  // the caret, so those keys keep their native behaviour there.
+  const handleKeydown = (event, fromSearch) => {
     const key = event.key;
     const printable = typeof key === "string" && key.length === 1 && key !== " "
       && !event.ctrlKey && !event.metaKey && !event.altKey;
@@ -4844,19 +5060,24 @@ const createAppSelect = (select, context = {}) => {
         open();
       } else if (printable) {
         open();
-        typeAhead(key);
+        if (searchable) {
+          if (typeof event.preventDefault === "function") event.preventDefault();
+          setFilter(key);
+        } else {
+          typeAhead(key);
+        }
       }
       return;
     }
     if (key === "ArrowDown" || key === "ArrowUp") {
       if (typeof event.preventDefault === "function") event.preventDefault();
       moveHighlight(key === "ArrowDown" ? 1 : -1);
-    } else if (key === "Home" || key === "End") {
+    } else if ((key === "Home" || key === "End") && !fromSearch) {
       if (typeof event.preventDefault === "function") event.preventDefault();
       const entries = enabledEntries();
       const entry = key === "Home" ? entries[0] : entries[entries.length - 1];
       if (entry) applyHighlight(entry.index);
-    } else if (key === "Enter" || key === " ") {
+    } else if (key === "Enter" || (key === " " && !fromSearch)) {
       if (typeof event.preventDefault === "function") event.preventDefault();
       if (highlighted >= 0) commit(highlighted);
       close(true);
@@ -4865,10 +5086,13 @@ const createAppSelect = (select, context = {}) => {
       close(true);
     } else if (key === "Tab") {
       close(false);
-    } else if (printable) {
+    } else if (printable && !fromSearch) {
       typeAhead(key);
     }
   };
+
+  const handleTriggerKeydown = (event) => handleKeydown(event, false);
+  const handleSearchKeydown = (event) => handleKeydown(event, true);
 
   const handleDocumentPointerDown = (event) => {
     if (!openState) return;
@@ -4890,6 +5114,10 @@ const createAppSelect = (select, context = {}) => {
     if (openState) close(true);
     else open();
   });
+  if (searchInput !== null) {
+    searchInput.addEventListener("keydown", handleSearchKeydown);
+    searchInput.addEventListener("input", () => setFilter(searchInput.value));
+  }
   select.addEventListener("change", () => syncTrigger());
   select.addEventListener("focus", () => {
     if (typeof trigger.focus === "function") trigger.focus();
@@ -4918,13 +5146,20 @@ const createAppSelect = (select, context = {}) => {
     wrapper,
     trigger,
     panel,
+    listbox,
+    searchInput,
+    emptyMessage,
+    isSearchable: () => searchable,
     refresh,
     open,
     close: (returnFocus = true) => close(returnFocus),
     isOpen: () => openState,
     handleTriggerKeydown,
+    handleSearchKeydown,
     handleDocumentPointerDown,
     typeAhead,
+    setFilter,
+    filterText: () => filterText,
     highlightedIndex: () => highlighted,
     optionElements: () => panelOptions.map((entry) => entry.element),
     disconnect: () => { if (observer !== null) observer.disconnect(); },

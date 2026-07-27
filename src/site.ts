@@ -141,6 +141,10 @@ select.app-select-native { position:absolute; width:1px; height:1px; min-height:
 .app-select-arrow { flex:none; width:.8rem; height:.5rem; background:var(--ink); clip-path:polygon(0 0,100% 0,50% 100%); }
 .app-select-trigger[aria-expanded="true"] .app-select-arrow { transform:rotate(180deg); }
 .app-select-panel { position:absolute; z-index:60; top:calc(100% + .35rem); right:0; left:0; max-height:16rem; padding:.35rem; overflow:auto; overscroll-behavior:contain; border:3px solid var(--ink); border-radius:.8rem; background:var(--paper); box-shadow:4px 4px 0 var(--ink); }
+.app-select-search { position:sticky; z-index:1; top:0; margin:-.35rem -.35rem .25rem; padding:.35rem; background:var(--paper); }
+.app-select-search-input { display:block; width:100%; min-width:0; max-width:100%; min-height:2.75rem; margin:0; padding:.55rem .65rem; border:2px solid var(--ink); border-radius:.5rem; background:#fff; color:var(--ink); font:inherit; font-weight:750; }
+.app-select-search-input:focus-visible { outline:4px solid #83d8ec; outline-offset:1px; }
+.app-select-empty { margin:0; padding:.55rem .65rem; color:var(--muted); font-weight:750; overflow-wrap:anywhere; }
 .app-select-option { display:flex; min-height:2.75rem; align-items:center; padding:.55rem .65rem; border-radius:.5rem; font-weight:750; overflow-wrap:anywhere; cursor:pointer; }
 .app-select-option[aria-selected="true"] { background:var(--yellow); font-weight:900; }
 .app-select-option.is-highlighted { outline:3px solid var(--water-dark); outline-offset:-3px; }
@@ -873,6 +877,7 @@ export const renderStaffHome = (
             <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
             <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
             <label>Event date<input name="eventDate" type="date" required></label>
+            <label>Timezone<select name="timezone" data-timezone-select data-timezone-detect="true" data-app-select-search="true" required><option value="UTC">UTC</option></select><span>Detected from this device. Open the list and type to search every zone.</span></label>
             <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
             <button class="button" type="submit">Create draft event</button>
           </form>
@@ -889,7 +894,7 @@ export const renderStaffHome = (
             ${isSystemAdmin ? `<details class="operation-card" data-event-config-card hidden><summary>Configure draft</summary>
               <form data-event-config-form>
                 <div class="field-grid"><label>Event name<input name="name" maxlength="120" required></label><label>URL slug preview<input data-event-config-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Changes automatically when the event name changes.</span></label></div>
-                <div class="field-grid"><label>Event date<input name="eventDate" type="date"></label><label>Timezone<input name="timezone" maxlength="64" required placeholder="America/Denver"></label></div>
+                <div class="field-grid"><label>Event date<input name="eventDate" type="date"></label><label>Timezone<select name="timezone" data-timezone-select data-app-select-search="true" required><option value="UTC">UTC</option></select></label></div>
                 <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="datetime-local"></label><label>Registration closes<input name="registrationClosesAt" type="datetime-local"></label></div>
                 <label class="check"><input name="emailRequired" type="checkbox"><span class="label-text">Require participant email</span></label>
                 <div class="field-grid"><label>Heat assignment<select name="heatAssignmentMode"><option value="IMMEDIATE_FIXED">Assign during pairing</option><option value="POST_CLOSE_BALANCED">Balanced plan after close</option></select></label><label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label></div>

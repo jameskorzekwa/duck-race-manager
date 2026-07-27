@@ -405,9 +405,10 @@ test("event creation requires a hinted ducks-per-heat field wired into the creat
   assert.ok(configForm);
   assert.match(configForm, /Ducks per heat<input name="roundOneHeatCapacity"/);
 
+  // The create command now carries the detected timezone alongside the capacity.
   assert.match(
     staffHomeScript,
-    /eventDate: String\(values\.get\("eventDate"\)\),\s*roundOneHeatCapacity: Number\(values\.get\("roundOneHeatCapacity"\)\),\s*\}\)\);/,
+    /eventDate: String\(values\.get\("eventDate"\)\),\s*timezone: String\(values\.get\("timezone"\)\),\s*roundOneHeatCapacity: Number\(values\.get\("roundOneHeatCapacity"\)\),\s*\}\)\);/,
   );
   assert.ok(staffHomeScript.includes(
     "eventConfigForm.elements.roundOneHeatCapacity.value = currentEvent.roundOneHeatCapacity;",

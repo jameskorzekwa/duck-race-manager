@@ -193,13 +193,26 @@ const normalizedTimestamp = (value: unknown): string | null | undefined => {
   return new Date(value).toISOString();
 };
 
-const normalizedTimezone = (value: unknown): string | null => {
+// Shape of an IANA zone identifier: one to three slash-separated components,
+// each starting the identifier with a letter. This rejects offset forms such as
+// "+05:00" that the formatter would otherwise accept.
+const timezoneIdentifier = /^[A-Za-z][A-Za-z0-9_+-]*(?:\/[A-Za-z0-9_+-]+){0,2}$/;
+
+// The shape check alone still admits junk like "Foo/Bar", so the value is also
+// offered to the runtime's zone database. Legacy links (US/Mountain,
+// Asia/Calcutta) resolve there, so events stored before this check keep loading,
+// and the accepted identifier is stored exactly as submitted rather than
+// canonicalized, which keeps every stored value stable across deploys.
+export const normalizedTimezone = (value: unknown): string | null => {
   if (typeof value !== "string") return null;
   const timezone = value.trim();
-  return timezone.length <= 64
-      && /^(?:UTC|[A-Za-z_+-]+(?:\/[A-Za-z0-9_+-]+)*)$/.test(timezone)
-    ? timezone
-    : null;
+  if (timezone.length === 0 || timezone.length > 64 || !timezoneIdentifier.test(timezone)) return null;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+  } catch {
+    return null;
+  }
+  return timezone;
 };
 
 const canonicalFingerprint = (value: Record<string, unknown>): string => JSON.stringify(value);
@@ -231,8 +244,21 @@ const createEvent = async (
       error: "Command, event name, event date, and ducks per heat (a whole number from 1 to 10000) are required.",
     }, 400);
   }
+  // The console sends the operator's detected zone. An API caller that omits it
+  // still falls back to the retained organization default.
+  const timezone = payload.timezone === undefined ? null : normalizedTimezone(payload.timezone);
+  if (payload.timezone !== undefined && timezone === null) {
+    return json({ error: "Enter a valid IANA timezone." }, 400);
+  }
   const slug = eventSlugFromName(name);
-  const fingerprint = canonicalFingerprint({ operation: "CREATE_EVENT", slug, name, eventDate, ducksPerHeat });
+  const fingerprint = canonicalFingerprint({
+    operation: "CREATE_EVENT",
+    slug,
+    name,
+    eventDate,
+    timezone,
+    ducksPerHeat,
+  });
   const existingCommand = await findCommand(commandId, env);
   if (existingCommand !== null) {
     if (existingCommand.command_type !== "CREATE_EVENT" || existingCommand.request_fingerprint !== fingerprint) {
@@ -267,13 +293,13 @@ const createEvent = async (
            registration_opens_at, registration_closes_at, email_required,
            heat_assignment_mode, round_one_heat_capacity, final_heat_capacity,
            public_name_policy, revision, created_at, updated_at)
-         SELECT ?, ?, ?, ?, d.timezone, 'DRAFT', NULL, NULL, d.email_required,
+         SELECT ?, ?, ?, ?, COALESCE(?, d.timezone), 'DRAFT', NULL, NULL, d.email_required,
                 'IMMEDIATE_FIXED', ?,
                 d.final_heat_capacity, d.public_name_policy, 0, ?, ?
            FROM organization_event_defaults d
           WHERE d.singleton_id = 1
             AND NOT EXISTS (SELECT 1 FROM events)`,
-      ).bind(eventId, slug, name, eventDate, ducksPerHeat, now, now),
+      ).bind(eventId, slug, name, eventDate, timezone, ducksPerHeat, now, now),
       env.DB.prepare(
         `INSERT INTO race_commands
           (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
@@ -300,6 +326,7 @@ const createEvent = async (
           slug,
           name,
           event_date: eventDate,
+          timezone: timezone ?? defaults.timezone,
           round_one_heat_capacity: ducksPerHeat,
         }),
         commandId,
@@ -318,7 +345,7 @@ const createEvent = async (
     slug,
     name,
     event_date: eventDate,
-    timezone: defaults.timezone,
+    timezone: timezone ?? defaults.timezone,
     status: "DRAFT",
     registration_opens_at: null,
     registration_closes_at: null,
