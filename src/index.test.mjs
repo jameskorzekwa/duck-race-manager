@@ -696,6 +696,50 @@ test("routes authenticated tag scans to protected code and contact pairing searc
   assert.match(body, /data-registration-search/);
 });
 
+test("the QR decoder is served same-origin so browsers without native detection can scan", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/assets/qr-decoder.js"), env);
+  const body = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^text\/javascript/);
+  // Version-pinned content, so it can cache permanently on race-day devices.
+  assert.equal(response.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  // It must be the real decoder, exposed under the global the client expects.
+  assert.match(body, /jsQR/);
+  assert.ok(body.length > 10000, "decoder source must be complete");
+  // Serving it must not relax the camera policy on an asset response.
+  assert.match(response.headers.get("permissions-policy") ?? "", /(^|, )camera=\(\)/);
+});
+
+test("camera access is granted only to the authenticated duck-pairing page", async () => {
+  const token = "a".repeat(32);
+  const authenticated = createWorker(async () => ({
+    id: "staff_test",
+    cognitoSub: "staff-sub",
+    email: "staff@example.com",
+    displayName: "Registration Staff",
+    isSystemAdmin: false,
+    roles: ["REGISTRATION"],
+    authentication: "cookie",
+  }));
+  const pairing = await authenticated.fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
+
+  assert.equal(pairing.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
+
+  // Every other surface, signed in or not, keeps the camera denied.
+  const others = await Promise.all([
+    authenticated.fetch(new Request("https://quickducks.com/"), env),
+    authenticated.fetch(new Request("https://quickducks.com/register"), env),
+    authenticated.fetch(new Request("https://quickducks.com/staff"), env),
+    authenticated.fetch(new Request("https://quickducks.com/staff/finish-line"), env),
+    authenticated.fetch(new Request("https://quickducks.com/api/v1/events/current"), env),
+    authenticated.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env),
+  ]);
+  for (const response of others) {
+    assert.match(response.headers.get("permissions-policy") ?? "", /(^|, )camera=\(\)/);
+  }
+});
+
 test("starts hosted Cognito sign-in and renders safe callback failures", async () => {
   const start = await worker.fetch(
     new Request("https://quickducks.com/staff/login/start?returnTo=%2Fstaff"),

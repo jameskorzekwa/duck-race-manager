@@ -651,7 +651,9 @@ screen; deleting the event revalidates the server route immediately.
 
 **Operator step:** tell participants to bookmark the private link and separately
 save the short lookup code. The short code is not authorization for the private
-page and staff cannot regenerate its private token.
+page and staff cannot regenerate its private token. At the duck table,
+participants can simply show this screen: staff scan its QR code or type the
+code shown beside it.
 
 ### Public Name Search
 
@@ -788,10 +790,10 @@ offers pairing and inspection only; there is no disposition entry.
 **Implemented scan stations:** `/staff/finish-line` can read an NFC URL through
 Android Web NFC when `NDEFReader` is available. Its first-class
 manual field also accepts a pasted canonical tag URL or visible duck number.
-Both paths only select a roster entry; neither submits a result. Camera QR APIs,
-inventory tag provisioning, and camera scanning remain separate from the finish
-station.
-Response headers continue to disable browser camera access.
+Both paths only select a roster entry; neither submits a result. Inventory tag
+provisioning and participant QR scanning remain separate from the finish station.
+Response headers continue to disable browser camera access at the finish station;
+only the duck-pairing page enables the camera.
 
 `/staff/inventory-intake` is the dedicated Android station that provisions blank
 writable NDEF stickers. A duck manager, race director, or administrator selects
@@ -1361,12 +1363,22 @@ The normal pairing workflow is:
 1. The participant selects a physical duck.
 2. Logged-in staff open that duck's NFC/QR URL.
 3. QuickDucks verifies the tag and displays the exact duck.
-4. Staff search the current event by lookup code, name, phone, or email.
-5. Staff select an unpaired registration and review participant plus duck.
-6. Staff press the one confirmation button.
-7. QuickDucks atomically reserves the duck if needed, creates a current
+4. Staff identify the participant by one of three paths:
+   - **Scan QR:** scan the QR code on the participant's private status screen.
+   - **Exact code:** type the participant's full lookup code and search.
+   - **Search:** search by partial code, name, phone, or email, then select an
+     unpaired registration and review participant plus duck.
+5. A scan or an exact code pairs immediately, because each identifies exactly
+   one participant. A non-exact search always requires selecting a result and
+   pressing the one confirmation button.
+6. QuickDucks atomically reserves the duck if needed, creates a current
    assignment, changes registration to `ACTIVE`, changes inventory to `IN_USE`,
    writes audit history, and assigns an immediate-mode heat when applicable.
+
+Every path issues the identical guarded pairing command with a fresh command ID.
+Scanning and exact-code entry only supply the lookup code; they never bypass
+authentication, role checks, event scope, tag state, inventory state, or
+registration state, and every rejection is reported the same way.
 
 Pairing is allowed while the event is `REGISTRATION_OPEN` or
 `REGISTRATION_CLOSED`. The registration must be `SUBMITTED` and unpaired. The
@@ -1377,6 +1389,45 @@ Staff search accepts an exact normalized code or a case-insensitive name
 substring of at least two characters. It can show contact details, status, and
 an assigned duck. The UI disables already assigned results; the server also
 requires an unpaired `SUBMITTED` registration.
+
+The search response reports `exactMatch` only when the normalized query is a
+well-formed lookup code that equals a returned registration's code. The console
+pairs that match directly instead of rendering a single-row list. A code that is
+already paired is reported but not auto-paired, so the list explains which duck
+holds it rather than firing a command the server would reject.
+
+### Participant QR Codes
+
+The private status page renders the participant's existing eight-character
+lookup code both as readable text and as a QR code. The QR encodes only
+`QD1:<lookup code>` and is generated on the server as a self-contained SVG, so
+it carries no name, contact detail, private status token, event identifier, or
+external reference. Photographing it reveals exactly what photographing the
+printed code beside it would.
+
+The staff pairing page shows a **Scan QR code** button whenever the browser has
+a camera in a secure context. The scanner ignores any QR code that is not a
+`QD1:` participant payload and keeps looking, so unrelated codes never reach the
+pairing command. A failed pairing invites another scan or a manual search. The
+camera is released on success, cancellation, a hidden page, and page unload.
+
+Decoding uses the browser's native `BarcodeDetector` where it exists, which is
+Chrome on Android. Browsers without it, including **iOS Safari** and Firefox,
+load a bundled decoder from same-origin `/assets/qr-decoder.js` on first scan and
+work identically. Browsers with native detection never download it. Scanning
+therefore works on iPhone and Android alike; only a device with no camera, or a
+non-secure context, falls back to typing the code.
+
+The decoder is minified browser source of the pinned `jsqr` development
+dependency, generated into `src/qr-decoder-source.ts` by
+`npm run build:qr-decoder` and committed. It is served, never executed in the
+Worker, and never becomes a Worker runtime dependency. Tests regenerate it and
+fail on any drift from the pinned package, assert it makes no network or `eval`
+calls, and decode a rendered participant QR with the exact source that ships.
+
+Camera access is granted by `Permissions-Policy: camera=(self)` on the
+authenticated `/staff/ducks/:token` page only. Every other page, station, and API
+response keeps `camera=()`.
 
 The command uses the lowest-numbered unlocked round-one heat below the
 configured ducks-per-heat size or creates the next heat inside the same atomic

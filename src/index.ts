@@ -1,3 +1,4 @@
+import { qrDecoderSource } from "./qr-decoder-source.ts";
 import {
   findDuckNumberFollowState,
   findDuckNumberRaceStatus,
@@ -96,6 +97,17 @@ const html = (body: string, status = 200, noindex = false, formActionOrigin?: st
       ...(noindex ? { "x-robots-tag": "noindex, nofollow" } : {}),
     },
   });
+
+// Camera access stays denied for the whole site except the authenticated staff
+// duck-pairing page, which is the only surface that scans a participant QR
+// code. Public pages, APIs, and every other staff station keep `camera=()`.
+const withCameraAccess = (response: Response): Response => {
+  response.headers.set(
+    "permissions-policy",
+    securityHeaders["permissions-policy"].replace("camera=()", "camera=(self)"),
+  );
+  return response;
+};
 
 const withSecurityHeaders = (response: Response): Response => {
   for (const [name, value] of Object.entries(securityHeaders)) response.headers.set(name, value);
@@ -199,6 +211,21 @@ export const createWorker = (
           ...securityHeaders,
           "cache-control": "public, max-age=86400",
           "content-type": "application/manifest+json; charset=utf-8",
+        },
+      });
+    }
+
+    // Pure-JavaScript QR decoder for browsers without native `BarcodeDetector`,
+    // notably iOS Safari and Firefox. It is shipped as source text and never
+    // executed in the Worker. The staff pairing page loads it on demand only
+    // when native detection is missing, so browsers that have it never pay for
+    // the download. The content is version-pinned, so it caches immutably.
+    if (url.pathname === "/assets/qr-decoder.js") {
+      return new Response(qrDecoderSource, {
+        headers: {
+          ...securityHeaders,
+          "cache-control": "public, max-age=31536000, immutable",
+          "content-type": "text/javascript; charset=utf-8",
         },
       });
     }
@@ -433,12 +460,12 @@ export const createWorker = (
       if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"])) {
         return withSessionCookies(html(renderStaffAuthError("This account does not have permission to inspect staff duck records.", actor), 403, true));
       }
-      return withSessionCookies(staffHtml(renderStaffDuck(
+      return withSessionCookies(withCameraAccess(staffHtml(renderStaffDuck(
         staffDuckMatch[1],
         actor.displayName ?? actor.email,
         actor.isSystemAdmin,
         actor.roles,
-      )));
+      ))));
     }
 
     // Public duck detail by the number printed on the duck and shown on the

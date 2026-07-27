@@ -556,6 +556,62 @@ test("staff pairing search accepts code, name, email, or phone and returns prote
   assert.equal(db.statements[0].args.filter((value) => value === "%daisy@example.com%").length, 5);
 });
 
+const searchRow = (overrides = {}) => ({
+  registration_id: "registration_test",
+  race_entry_id: "entry_test",
+  first_name: "Daisy",
+  last_name: "Duck",
+  email: "daisy@example.com",
+  phone: "555-0100",
+  lookup_code: "DAASY234",
+  status: "SUBMITTED",
+  visible_number: null,
+  ...overrides,
+});
+
+const search = async (query, rows) => {
+  const db = makeDb(() => null, () => ({ results: rows }));
+  const response = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q=${encodeURIComponent(query)}`),
+    makeEnv(db),
+    actor,
+  );
+  return response.json();
+};
+
+test("an exactly typed lookup code reports one unambiguous match to pair directly", async () => {
+  const body = await search("DAASY234", [searchRow()]);
+
+  assert.equal(body.exactMatch.lookupCode, "DAASY234");
+  assert.equal(body.exactMatch.assignedDuckNumber, null);
+  assert.equal(body.registrations.length, 1);
+});
+
+test("exact-code matching tolerates the spacing and case staff actually type", async () => {
+  for (const typed of ["daasy234", " DAASY234 ", "daas-y234", "DAAS Y234"]) {
+    const body = await search(typed, [searchRow()]);
+    assert.equal(body.exactMatch?.lookupCode, "DAASY234", `"${typed}" must match exactly`);
+  }
+});
+
+test("a partial or non-code search never reports an exact match", async () => {
+  // A name search that happens to return one row still requires staff review.
+  assert.equal((await search("Daisy", [searchRow()])).exactMatch, null);
+  assert.equal((await search("DAASY23", [searchRow()])).exactMatch, null);
+  assert.equal((await search("daisy@example.com", [searchRow()])).exactMatch, null);
+  // A well-formed code with no matching registration reports nothing to pair.
+  assert.equal((await search("ZZZZ2345", [searchRow()])).exactMatch, null);
+});
+
+test("an exact code already paired to a duck is reported for review, not auto-pairing", async () => {
+  // The console falls through to the normal list, which names the duck holding
+  // the code, instead of firing a pairing command that would be rejected.
+  const body = await search("DAASY234", [searchRow({ visible_number: 128 })]);
+
+  assert.equal(body.exactMatch.assignedDuckNumber, 128);
+  assert.equal(body.registrations[0].assignedDuckNumber, 128);
+});
+
 test("staff inspection does not offer pairing for an ineligible duck", async () => {
   const db = makeDb(() => ({
     duck_id: "duck_test",
