@@ -566,19 +566,34 @@ jobs:
                 throw new Error(`Explicit release tag ${tag} no longer exists; refusing to recreate it.`);
               }
               let creationRejection;
+              let created;
               try {
-                await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
+                created = (await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha })).data;
               } catch (error) {
                 if (error.status !== 422) throw error;
                 creationRejection = error.message ?? 'unknown 422 rejection';
               }
-              taggedCommit = await resolveTagCommit();
-              if (taggedCommit !== sha) {
-                if (creationRejection !== undefined) {
+              if (created !== undefined) {
+                // Trust the authoritative creation response; immediate re-reads can lag replicas.
+                if (created.object?.type !== 'commit' || created.object?.sha !== sha) {
+                  throw new Error(`Automatic tag ${tag} was created but points at `
+                    + `${created.object?.sha ?? 'an unknown object'}, not validated source ${sha}.`);
+                }
+                taggedCommit = created.object.sha;
+              } else {
+                // A swallowed 422 is either "already exists" (a concurrent or rerun creation)
+                // or a rule/permission rejection; distinguish by re-reading with retries.
+                for (let attempt = 0; attempt < 5 && taggedCommit === undefined; attempt += 1) {
+                  await new Promise((resolve) => setTimeout(resolve, 2000 * (attempt + 1)));
+                  taggedCommit = await resolveTagCommit();
+                }
+                if (taggedCommit === undefined) {
                   throw new Error(`Automatic tag ${tag} creation was rejected: ${creationRejection}. `
                     + 'Deployment already succeeded; fix the tag rule or permissions, then rerun this job.');
                 }
-                throw new Error(`Automatic tag ${tag} was not created at validated source ${sha}.`);
+                if (taggedCommit !== sha) {
+                  throw new Error(`Tag ${tag} resolves to ${taggedCommit}, not validated source ${sha}.`);
+                }
               }
             }
 

@@ -316,7 +316,12 @@ test("release workflow publishes only the validated tag after deploy and smoke g
   assert.match(releaseWorkflow, /git\.createRef\(\{ owner, repo, ref: `refs\/tags\/\$\{tag\}`, sha \}\)/);
   assert.doesNotMatch(releaseWorkflow, /git\.createTag/);
   assert.match(releaseWorkflow, /if \(error\.status !== 422\) throw error;/);
-  assert.match(releaseWorkflow, /was not created at validated source/);
+  // The success path trusts the authoritative createRef response instead of an
+  // immediate re-read that can lag replicas; the swallowed-422 path retries the
+  // re-read and then surfaces the real rejection reason.
+  assert.match(releaseWorkflow, /created\.object\.sha/);
+  assert.match(releaseWorkflow, /creation was rejected: \$\{creationRejection\}/);
+  assert.match(releaseWorkflow, /fix the tag rule or permissions, then rerun this job/);
   assert.match(releaseWorkflow, /Explicit release tag .* refusing to recreate it/);
 
   const smokeIndex = releaseWorkflow.indexOf("Smoke-test apex and www redirect");
