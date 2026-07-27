@@ -2847,6 +2847,9 @@ const toLocalInput = (value) => {
 
 const fromLocalInput = (value) => value ? new Date(value).toISOString() : null;
 
+const eventDetailRegion = document.querySelector("[data-event-detail]");
+const eventEmptyState = document.querySelector("[data-event-empty]");
+const eventCreateCard = document.querySelector("[data-event-create-card]");
 const eventSummary = document.querySelector("[data-event-summary]");
 const readinessList = document.querySelector("[data-event-readiness]");
 const eventConfigCard = document.querySelector("[data-event-config-card]");
@@ -2990,6 +2993,8 @@ const renderEvent = (detail, readiness) => {
     forceDeleteCard.hidden = false;
     forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;
   }
+  if (eventEmptyState) eventEmptyState.hidden = true;
+  if (eventDetailRegion) eventDetailRegion.hidden = false;
   return true;
 };
 
@@ -3043,6 +3048,9 @@ const loadEvents = async (preferredId) => {
       forceDeleteForm.reset();
       forceDeleteCard.hidden = true;
     }
+    if (eventDetailRegion) eventDetailRegion.hidden = true;
+    if (eventEmptyState) eventEmptyState.hidden = false;
+    if (eventCreateCard) eventCreateCard.open = true;
     setMessage("No event dataset exists. An administrator can create one.");
     const loads = [];
     if (canInventory) loads.push(loadInventory());
@@ -3121,6 +3129,7 @@ if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) =>
     }));
     form.reset();
     updateEventSlugPreview(form, eventCreateSlugPreview);
+    if (eventCreateCard) eventCreateCard.open = false;
     await loadEvents(result.event.id);
   });
 });

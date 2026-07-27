@@ -201,6 +201,11 @@ form.operation-card > * + * { margin-top:0; }
 .section-tools { display:flex; flex-wrap:wrap; gap:.65rem; align-items:end; margin:1rem 0; }
 .section-tools > label { flex:1 1 15rem; min-width:0; max-width:100%; }
 .section-tools .button { flex:0 0 auto; }
+.event-create-card { border-color:var(--ink); background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
+.event-detail { min-width:0; max-width:100%; padding:clamp(.7rem,2.5vw,1rem); border:2px solid var(--water-dark); border-radius:.9rem; background:#f4fbfd; }
+.event-detail > * + * { margin-top:var(--space-md); }
+.event-detail > .compact-facts { margin:0; }
+.event-detail-title { margin:0; font-size:1.15rem; letter-spacing:.02em; overflow-wrap:anywhere; }
 .data-list { display:grid; gap:.7rem; margin-top:1rem; }
 .data-list:empty { display:none; }
 .inventory-layout { display:grid; gap:1rem; align-items:start; }
@@ -604,41 +609,45 @@ export const renderStaffHome = (
 
       <section class="console-section" id="events" aria-labelledby="events-title"${canUseConsole ? "" : " hidden"}>
         <p class="eyebrow">Event control</p><h2 id="events-title">Event</h2>
+        ${isSystemAdmin ? `<details class="operation-card event-create-card" data-event-create-card><summary>Create event</summary>
+          <form data-event-create-form>
+            <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
+            <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
+            <label>Event date<input name="eventDate" type="date" required></label>
+            <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
+            <button class="button" type="submit">Create draft event</button>
+          </form>
+        </details>` : ""}
         <div class="section-tools">
           <label>Working event<select data-event-select aria-label="Working event"><option value="">Loading events…</option></select></label>
           <button class="button secondary small" type="button" data-refresh-event>Refresh event</button>
         </div>
-        <dl class="facts compact-facts" data-event-summary></dl>
-        <div class="console-grid">
-          ${isSystemAdmin ? `<details class="operation-card" data-event-create-card><summary>Create event</summary>
-            <form data-event-create-form>
-              <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
-              <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
-              <label>Event date<input name="eventDate" type="date" required></label>
-              <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
-              <button class="button" type="submit">Create draft event</button>
-            </form>
-          </details>
-          <details class="operation-card" data-event-config-card hidden><summary>Configure draft</summary>
-            <form data-event-config-form>
-              <div class="field-grid"><label>Event name<input name="name" maxlength="120" required></label><label>URL slug preview<input data-event-config-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Changes automatically when the event name changes.</span></label></div>
-              <div class="field-grid"><label>Event date<input name="eventDate" type="date"></label><label>Timezone<input name="timezone" maxlength="64" required placeholder="America/Denver"></label></div>
-              <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="datetime-local"></label><label>Registration closes<input name="registrationClosesAt" type="datetime-local"></label></div>
-              <label class="check"><input name="emailRequired" type="checkbox"><span class="label-text">Require participant email</span></label>
-              <div class="field-grid"><label>Heat assignment<select name="heatAssignmentMode"><option value="IMMEDIATE_FIXED">Assign during pairing</option><option value="POST_CLOSE_BALANCED">Balanced plan after close</option></select></label><label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label></div>
-              <div class="field-grid"><label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" required></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
-              <button class="button" type="submit">Save draft configuration</button>
-            </form>
-          </details>` : ""}
-          <article class="operation-card"><h3>Readiness and lifecycle</h3><p class="muted">${canRaceRead ? "Every transition is checked again by the server." : "Use your assigned station section for operational work."}</p><div class="data-list" data-event-readiness></div></article>
-          ${isSystemAdmin ? `<details class="operation-card danger-zone" data-delete-draft-card hidden><summary>Delete empty draft</summary>
-            <p class="muted">Only a revision-matched draft with no race data or operational history can be deleted.</p>
-            <form data-delete-draft-form><label>Type the required confirmation<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Delete empty draft</button></form>
-          </details>
-          <details class="operation-card danger-zone" data-force-delete-card hidden><summary>Delete event</summary>
-            <p class="muted">Administrator-only. Permanently deletes this event and every record for it — registrations, ducks, tags, heats, results, returns, notifications, commands, and audit history — in any state. This cannot be undone.</p>
-            <form data-force-delete-form><label>Type the exact event name to confirm<input name="confirmName" maxlength="120" required autocomplete="off"></label><button class="button danger" type="submit">Delete event</button></form>
-          </details>` : ""}
+        <p class="empty-state" data-event-empty hidden>Create a draft event to begin.</p>
+        <div class="event-detail" role="region" aria-labelledby="event-detail-title" data-event-detail hidden>
+          <h3 class="event-detail-title" id="event-detail-title">Selected event details</h3>
+          <dl class="facts compact-facts" data-event-summary></dl>
+          <div class="console-grid">
+            ${isSystemAdmin ? `<details class="operation-card" data-event-config-card hidden><summary>Configure draft</summary>
+              <form data-event-config-form>
+                <div class="field-grid"><label>Event name<input name="name" maxlength="120" required></label><label>URL slug preview<input data-event-config-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Changes automatically when the event name changes.</span></label></div>
+                <div class="field-grid"><label>Event date<input name="eventDate" type="date"></label><label>Timezone<input name="timezone" maxlength="64" required placeholder="America/Denver"></label></div>
+                <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="datetime-local"></label><label>Registration closes<input name="registrationClosesAt" type="datetime-local"></label></div>
+                <label class="check"><input name="emailRequired" type="checkbox"><span class="label-text">Require participant email</span></label>
+                <div class="field-grid"><label>Heat assignment<select name="heatAssignmentMode"><option value="IMMEDIATE_FIXED">Assign during pairing</option><option value="POST_CLOSE_BALANCED">Balanced plan after close</option></select></label><label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label></div>
+                <div class="field-grid"><label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" required></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
+                <button class="button" type="submit">Save draft configuration</button>
+              </form>
+            </details>` : ""}
+            <article class="operation-card"><h3>Readiness and lifecycle</h3><p class="muted">${canRaceRead ? "Every transition is checked again by the server." : "Use your assigned station section for operational work."}</p><div class="data-list" data-event-readiness></div></article>
+            ${isSystemAdmin ? `<details class="operation-card danger-zone" data-delete-draft-card hidden><summary>Delete empty draft</summary>
+              <p class="muted">Only a revision-matched draft with no race data or operational history can be deleted.</p>
+              <form data-delete-draft-form><label>Type the required confirmation<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Delete empty draft</button></form>
+            </details>
+            <details class="operation-card danger-zone" data-force-delete-card hidden><summary>Delete event</summary>
+              <p class="muted">Administrator-only. Permanently deletes this event and every record for it — registrations, ducks, tags, heats, results, returns, notifications, commands, and audit history — in any state. This cannot be undone.</p>
+              <form data-force-delete-form><label>Type the exact event name to confirm<input name="confirmName" maxlength="120" required autocomplete="off"></label><button class="button danger" type="submit">Delete event</button></form>
+            </details>` : ""}
+          </div>
         </div>
       </section>
 
