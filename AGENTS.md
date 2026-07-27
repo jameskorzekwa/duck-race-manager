@@ -18,7 +18,7 @@ src/                 # Worker routing, APIs, rendered UI, browser scripts, tests
 db/migrations/       # Ordered D1 schema and database invariants
 docs/                # Current workflows, infrastructure runbooks, design history
 infra/aws/           # Cognito, SES, and IAM CloudFormation
-.github/workflows/   # Credential-free CI and version-tag production release
+.github/workflows/   # Credential-free CI and main/tag production CD
 wrangler.jsonc       # Production Worker, D1, queue, rate-limit, and domain bindings
 ```
 
@@ -94,11 +94,13 @@ tests, dependency audit, or migrations. CI also runs
   `replaceChildren` for API data rather than HTML injection.
 - Preserve exact D1 binding/resource names unless a coordinated infrastructure
   migration explicitly changes them.
-- Normal production releases use a reviewed semantic-version tag and the
-  protected GitHub `production` environment, not manual deploy commands.
+- Normal production releases follow required CI and a reviewed merge to `main`;
+  the release workflow validates again, deploys unattended, then creates the
+  automatic patch tag and release. Intentional major/minor releases use a
+  reviewed protected tag on a default-branch commit.
 - Workflow edits must preserve empty top-level permissions, job-scoped
   credentials, FIFO production concurrency, and the documented CloudFormation
-  -> D1 -> Worker -> smoke test -> GitHub release order.
+  -> D1 -> Worker -> smoke test -> automatic tag/GitHub release order.
 
 ## CURRENT LIMITS
 

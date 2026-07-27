@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
 
@@ -19,6 +21,7 @@ jobs:
     outputs:
       prerelease: ${{ steps.version.outputs.prerelease }}
       source-sha: ${{ steps.source.outputs.source-sha }}
+      tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
     permissions:
       contents: read
@@ -26,21 +29,35 @@ jobs:
       CI: "true"
       WRANGLER_SEND_METRICS: "false"
     steps:
-      - name: Check out tagged source
+      - name: Check out exact release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+          ref: ${{ github.sha }}
 
-      - name: Verify tagged commit is on the default branch
+      - name: Verify release source
         id: source
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$EVENT_NAME" != "push" ]]; then
+            printf 'Release source event must be push; received %s.\n' "$EVENT_NAME" >&2
+            exit 1
+          fi
           if [[ -z "$DEFAULT_BRANCH" ]]; then
             printf 'The repository default branch is unavailable.\n' >&2
+            exit 1
+          fi
+          if [[ ! "$EVENT_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            printf 'Release source SHA must be a full lowercase Git commit SHA.\n' >&2
             exit 1
           fi
           default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
@@ -48,12 +65,43 @@ jobs:
             printf 'Full checkout does not contain default branch %s.\n' "$DEFAULT_BRANCH" >&2
             exit 1
           fi
-          tagged_sha="$(git rev-parse HEAD)"
-          if ! git merge-base --is-ancestor "$tagged_sha" "$default_ref"; then
-            printf 'Tagged commit %s is not an ancestor of default branch %s.\n' "$tagged_sha" "$DEFAULT_BRANCH" >&2
+          head_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ "$head_sha" != "$EVENT_SHA" ]]; then
+            printf 'Checked-out commit %s does not match event source %s.\n' "$head_sha" "$EVENT_SHA" >&2
             exit 1
           fi
-          printf 'source-sha=%s\n' "$tagged_sha" >> "$GITHUB_OUTPUT"
+
+          if [[ "$REF_TYPE" == "branch" ]]; then
+            if [[ "$REF_NAME" != "$DEFAULT_BRANCH" ]]; then
+              printf 'Branch release ref %s is not the exact default branch %s.\n' "$REF_NAME" "$DEFAULT_BRANCH" >&2
+              exit 1
+            fi
+            default_sha="$(git rev-parse --verify "${default_ref}^{commit}")"
+            if [[ "$head_sha" != "$default_sha" ]]; then
+              printf 'Main source %s is not the fetched default-branch tip %s.\n' "$head_sha" "$default_sha" >&2
+              exit 1
+            fi
+          elif [[ "$REF_TYPE" == "tag" ]]; then
+            tag_ref="refs/tags/$REF_NAME"
+            if ! git show-ref --verify --quiet "$tag_ref"; then
+              printf 'Full checkout does not contain release tag %s.\n' "$REF_NAME" >&2
+              exit 1
+            fi
+            tagged_sha="$(git rev-parse --verify "${tag_ref}^{commit}")"
+            if [[ "$tagged_sha" != "$head_sha" ]]; then
+              printf 'Peeled tag commit %s does not match event source %s.\n' "$tagged_sha" "$head_sha" >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$tagged_sha" "$default_ref"; then
+              printf 'Tagged commit %s is not an ancestor of default branch %s.\n' "$tagged_sha" "$DEFAULT_BRANCH" >&2
+              exit 1
+            fi
+          else
+            printf 'Release ref type must be branch or tag; received %s.\n' "$REF_TYPE" >&2
+            exit 1
+          fi
+
+          printf 'source-sha=%s\n' "$head_sha" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -64,9 +112,23 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Validate version tag
+      - name: Select release version
         id: version
-        run: npm run release:validate-tag -- "$GITHUB_REF_NAME"
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SOURCE_SHA: ${{ steps.source.outputs.source-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REF_TYPE" == "branch" ]]; then
+            npm run release:validate-tag -- --automatic "$SOURCE_SHA"
+          elif [[ "$REF_TYPE" == "tag" ]]; then
+            npm run release:validate-tag -- "$REF_NAME"
+          else
+            printf 'Validated release ref type is unavailable.\n' >&2
+            exit 1
+          fi
 
       - name: Audit dependencies
         run: npm audit --audit-level=high
@@ -111,11 +173,25 @@ jobs:
       WRANGLER_SEND_METRICS: "false"
       WWW_URL: ${{ vars.WWW_URL }}
     steps:
-      - name: Check out tagged source
+      - name: Check out exact release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify validated deployment source
+        env:
+          SOURCE_SHA: ${{ needs.validate.outputs.source-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          deployed_sha="$(git rev-parse --verify 'HEAD^{commit}')"
+          if [[ ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ || "$deployed_sha" != "$SOURCE_SHA" ]]; then
+            printf 'Deployment checkout %s does not match validated source %s.\n' "$deployed_sha" "$SOURCE_SHA" >&2
+            exit 1
+          fi
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -421,12 +497,13 @@ jobs:
       - name: Create or update release
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
+          AUTOMATIC_RELEASE: ${{ github.ref_type == 'branch' }}
           AWS_REGION: ${{ vars.AWS_REGION }}
           AWS_STACK_NAME: ${{ vars.AWS_STACK_NAME }}
           DEPLOYED_AT: ${{ needs.deploy.outputs.deployed-at }}
           PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
           RELEASE_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
           SOURCE_SHA: ${{ needs.validate.outputs.source-sha }}
           WORKER_VERSION: ${{ needs.deploy.outputs.worker-version }}
@@ -436,6 +513,8 @@ jobs:
             const tag = process.env.RELEASE_TAG;
             const version = process.env.RELEASE_VERSION;
             const sha = process.env.SOURCE_SHA;
+            if (!/^v\S+$/.test(tag)) throw new Error('Validated release tag is unavailable.');
+            if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Validated release source SHA is unavailable.');
             if (!['true', 'false'].includes(process.env.RELEASE_PRERELEASE)) {
               throw new Error('Validated prerelease output is unavailable.');
             }
@@ -455,6 +534,47 @@ jobs:
               `- Workflow: [run ${context.runId}](https://github.com/${owner}/${repo}/actions/runs/${context.runId})`,
               markerEnd,
             ].join("\n");
+
+            const resolveTagCommit = async () => {
+              let object;
+              try {
+                object = (await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` })).data.object;
+              } catch (error) {
+                if (error.status === 404) return undefined;
+                throw error;
+              }
+              const seen = new Set();
+              while (object.type === 'tag') {
+                if (!/^[0-9a-f]{40}$/.test(object.sha) || seen.has(object.sha)) {
+                  throw new Error(`Tag ${tag} could not be safely peeled to a commit.`);
+                }
+                seen.add(object.sha);
+                object = (await github.rest.git.getTag({ owner, repo, tag_sha: object.sha })).data.object;
+              }
+              if (object.type !== 'commit' || !/^[0-9a-f]{40}$/.test(object.sha)) {
+                throw new Error(`Tag ${tag} does not resolve to a full commit SHA.`);
+              }
+              return object.sha;
+            };
+
+            let taggedCommit = await resolveTagCommit();
+            if (taggedCommit !== undefined && taggedCommit !== sha) {
+              throw new Error(`Tag ${tag} resolves to ${taggedCommit}, not validated source ${sha}.`);
+            }
+            if (taggedCommit === undefined) {
+              if (process.env.AUTOMATIC_RELEASE !== 'true') {
+                throw new Error(`Explicit release tag ${tag} no longer exists; refusing to recreate it.`);
+              }
+              try {
+                await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+              taggedCommit = await resolveTagCommit();
+              if (taggedCommit !== sha) {
+                throw new Error(`Automatic tag ${tag} was not created at validated source ${sha}.`);
+              }
+            }
 
             let existing;
             try {
