@@ -148,6 +148,7 @@ test("serves registration and staff pairing browser clients", async () => {
   const live = await worker.fetch(new Request("https://quickducks.com/assets/live.js"), env);
   const liveUi = await worker.fetch(new Request("https://quickducks.com/assets/live-ui.js"), env);
   const startLine = await worker.fetch(new Request("https://quickducks.com/assets/start-line.js"), env);
+  const announcer = await worker.fetch(new Request("https://quickducks.com/assets/announcer.js"), env);
   const finishLine = await worker.fetch(new Request("https://quickducks.com/assets/finish-line.js"), env);
   const inventoryIntake = await worker.fetch(new Request("https://quickducks.com/assets/inventory-intake.js"), env);
   const liveUiBody = await liveUi.text();
@@ -177,6 +178,8 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(liveUi.headers.get("cache-control"), "no-store");
   assert.match(await startLine.text(), /quickDucksLive\.subscribe/);
   assert.equal(startLine.headers.get("cache-control"), "no-store");
+  assert.match(await announcer.text(), /announcer-roster/);
+  assert.equal(announcer.headers.get("cache-control"), "no-store");
   assert.match(await finishLine.text(), /NDEFReader/);
   assert.equal(finishLine.headers.get("cache-control"), "no-store");
   assert.match(await inventoryIntake.text(), /intakeCreateProvisioningMachine/);
@@ -355,6 +358,18 @@ test("gates focused station pages by operational role", async () => {
   assert.equal(heatStart.status, 200);
   assert.match(await heatStart.text(), /Prepare the next heat/);
   assert.equal(heatFinish.status, 403);
+  // Each station role opens exactly its own station.
+  assert.equal((await page(actor(["HEAT_RUNNER"]), "/staff/announcer")).status, 403);
+
+  const announcerStation = await page(actor(["ANNOUNCER"]), "/staff/announcer");
+  assert.equal(announcerStation.status, 200);
+  assert.match(await announcerStation.text(), /Read this out loud/);
+  assert.equal((await page(actor(["ANNOUNCER"]), "/staff/start-line")).status, 403);
+  assert.equal((await page(actor(["ANNOUNCER"]), "/staff/finish-line")).status, 403);
+
+  const anonymousAnnouncer = await page(null, "/staff/announcer");
+  assert.equal(anonymousAnnouncer.status, 303);
+  assert.match(anonymousAnnouncer.headers.get("location") ?? "", /returnTo=%2Fstaff%2Fannouncer/);
 
   const resultStart = await page(actor(["RESULT_TAKER"]), "/staff/start-line");
   const resultFinish = await page(actor(["RESULT_TAKER"]), "/staff/finish-line");
@@ -365,10 +380,13 @@ test("gates focused station pages by operational role", async () => {
   assert.match(finishBody, /Tag URL or duck number/);
   assert.doesNotMatch(finishBody, /participant email|participant phone/i);
 
-  assert.equal((await page(actor(["RACE_DIRECTOR"]), "/staff/start-line")).status, 200);
-  assert.equal((await page(actor(["RACE_DIRECTOR"]), "/staff/finish-line")).status, 200);
-  assert.equal((await page(actor([], true), "/staff/start-line")).status, 200);
-  assert.equal((await page(actor([], true), "/staff/finish-line")).status, 200);
+  assert.equal((await page(actor(["RESULT_TAKER"]), "/staff/announcer")).status, 403);
+
+  // The race director and an administrator open every station.
+  for (const path of ["/staff/start-line", "/staff/announcer", "/staff/finish-line"]) {
+    assert.equal((await page(actor(["RACE_DIRECTOR"]), path)).status, 200, path);
+    assert.equal((await page(actor([], true), path)).status, 200, path);
+  }
 });
 
 // The staff duck page immediately fetches GET /api/v1/staff/ducks/:token, so a
@@ -941,8 +959,13 @@ test("renders protected staff pairing preview with code and contact lookup", asy
     new Request("https://quickducks.com/mock/staff/finish-line"),
     env,
   );
+  const announcerPreview = await worker.fetch(
+    new Request("https://quickducks.com/mock/staff/announcer"),
+    env,
+  );
   assert.match(await startLine.text(), /data-start-line/);
   assert.match(await finishLine.text(), /data-finish-line/);
+  assert.match(await announcerPreview.text(), /data-announcer/);
 
   const regularStaffHome = renderStaffHome("Regular Staff", false, ["DUCK_MANAGER"]);
   assert.doesNotMatch(regularStaffHome, /data-staff-access-form/);
@@ -966,13 +989,17 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.match(announcerHome, /<a href="#heats" data-event-scoped hidden>Heats<\/a>/);
   assert.match(announcerHome, /id="inventory"[^>]* hidden/);
   assert.match(announcerHome, /data-roles="ANNOUNCER"/);
+  assert.match(announcerHome, /href="\/staff\/announcer"/);
+  assert.doesNotMatch(announcerHome, /href="\/staff\/start-line"|href="\/staff\/finish-line"/);
 
   const heatRunnerHome = renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"]);
   assert.match(heatRunnerHome, /href="\/staff\/start-line"/);
   assert.doesNotMatch(heatRunnerHome, /href="\/staff\/finish-line"/);
+  assert.doesNotMatch(heatRunnerHome, /href="\/staff\/announcer"/);
   const resultTakerHome = renderStaffHome("Result Taker", false, ["RESULT_TAKER"]);
   assert.match(resultTakerHome, /href="\/staff\/finish-line"/);
   assert.doesNotMatch(resultTakerHome, /href="\/staff\/start-line"/);
+  assert.doesNotMatch(resultTakerHome, /href="\/staff\/announcer"/);
 
   const duckManagerHome = renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]);
   assert.match(duckManagerHome, /href="\/staff\/inventory-intake"/);

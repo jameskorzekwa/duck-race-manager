@@ -296,6 +296,21 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .station-counter strong { display:block; color:var(--ink); font-size:clamp(2rem,10vw,4rem); line-height:1; }
 .station-history { display:grid; gap:.55rem; padding:0; list-style:none; }
 .station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; overflow-wrap:anywhere; }
+.announcer-panel h2 { font-size:clamp(1.8rem,7vw,3.2rem); overflow-wrap:anywhere; }
+.announcer-section { margin:1.6rem 0; padding:1.1rem; border:3px solid var(--ink); border-radius:1rem; background:var(--paper); box-shadow:4px 4px 0 var(--ink); }
+.announcer-section > :last-child { margin-bottom:0; }
+.announcer-cue { margin:0 0 1rem; font-size:clamp(1.05rem,3.6vw,1.4rem); font-weight:900; overflow-wrap:anywhere; }
+.announcer-roster,.announcer-results { display:grid; gap:.65rem; margin:0; padding:0; list-style:none; }
+.announcer-roster li,.announcer-results li { display:grid; gap:.2rem; min-width:0; padding:1rem; border:3px solid var(--ink); border-radius:.7rem; overflow-wrap:anywhere; }
+.announcer-roster li { background:#eaf7fa; }
+.announcer-results li { background:var(--cream); }
+.announcer-results li.final-heat { background:var(--yellow); }
+.announcer-label { color:var(--water-dark); font-size:.78rem; font-weight:950; letter-spacing:.08em; text-transform:uppercase; }
+.announcer-name { min-width:0; font-size:clamp(1.5rem,6vw,2.4rem); line-height:1.05; letter-spacing:-.03em; overflow-wrap:anywhere; }
+.announcer-duck { font-size:clamp(1rem,3.4vw,1.25rem); font-weight:900; }
+.announcer-progress { margin:0 0 .9rem; font-weight:900; }
+.announcer-panel .podium { margin:0; padding:0; list-style:none; }
+.announcer-panel .podium-place { display:grid; gap:.2rem; min-width:0; font-size:clamp(1.1rem,4vw,1.5rem); overflow-wrap:anywhere; }
 .station-panel > h2,.station-panel > h3,[data-intake-controls] > h2 { margin-bottom:0; overflow-wrap:anywhere; }
 .station-panel > h2 + *,.station-panel > h3 + *,[data-intake-controls] > h2 + * { margin-top:var(--space-sm); }
 [data-intake-controls] > label,.station-panel > label { display:block; }
@@ -819,6 +834,7 @@ const staffNavLinks: readonly StaffNavLink[] = [
   { href: "/staff", label: "Console", access: "anyStaff" },
   { href: "/staff/access", label: "Access", access: { anyOf: [] } },
   { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
+  { href: "/staff/announcer", label: "Announcer", access: { anyOf: ["ANNOUNCER", "RACE_DIRECTOR"] } },
   { href: "/staff/finish-line", label: "Finish line", access: { anyOf: ["RESULT_TAKER", "RACE_DIRECTOR"] } },
   { href: "/staff/inventory-intake", label: "Inventory", access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"] } },
 ];
@@ -1047,6 +1063,47 @@ export const renderStartLine = (
     <div class="station-action" data-station-action></div>
     <p class="message-line muted" data-station-message aria-live="polite">This station can only ready, call, or start a heat.</p>
     ${interactive ? '<script src="/assets/start-line.js" defer></script>' : ""}
+  </section>`,
+});
+
+// The announcer holds a microphone, so this station is a script, not a console.
+// It reads three authoritative APIs and writes nothing: there is no form, no
+// button, and no command hook anywhere in this markup. Everything on it is
+// either the heat to read out now or a result the finish line already recorded.
+export const renderAnnouncer = (
+  displayName: string,
+  interactive = true,
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+): string => page({
+  title: "Announcer",
+  description: "Focused protected QuickDucks announcer station.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel station-panel announcer-panel" data-announcer${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Announcer</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+    ${staffNav(isSystemAdmin, roles, "/staff/announcer")}
+    <p class="eyebrow">Announcer station</p><h1 class="page-title">Read this out loud.</h1>
+    <p class="lede" data-station-event>Finding the active event.</p>
+    <section class="announcer-section" aria-labelledby="announcer-now-title">
+      <p class="eyebrow">On the microphone now</p>
+      <h2 id="announcer-now-title" data-announcer-heat>No heat is up yet</h2>
+      <p class="announcer-cue" data-announcer-cue>The racers to announce will appear here.</p>
+      <ol class="announcer-roster" data-announcer-roster><li>Waiting for the official roster.</li></ol>
+    </section>
+    <section class="announcer-section" aria-labelledby="announcer-podium-title" data-announcer-podium hidden>
+      <p class="eyebrow">Official podium</p>
+      <h2 id="announcer-podium-title">The final is decided</h2>
+      <ol class="podium" data-announcer-podium-list></ol>
+    </section>
+    <section class="announcer-section" aria-labelledby="announcer-decided-title">
+      <p class="eyebrow">Already decided</p>
+      <h2 id="announcer-decided-title">Recorded winners</h2>
+      <p class="announcer-progress" data-announcer-progress>Waiting for the first official result.</p>
+      <ol class="announcer-results" data-announcer-results></ol>
+      <p class="empty-state" data-announcer-results-empty>No winner has been recorded yet. Each one appears here the moment the finish line records it.</p>
+    </section>
+    <p class="message-line muted" data-station-message aria-live="polite">This station only reads. It never changes the race.</p>
+    ${interactive ? '<script src="/assets/announcer.js" defer></script>' : ""}
   </section>`,
 });
 

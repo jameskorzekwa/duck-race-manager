@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  announcerScript,
   confirmationDialogScript,
   duckDetailHelpersScript,
   eventSlugHelpersScript,
@@ -69,6 +70,7 @@ test("the public pages' classic scripts share one global scope without collision
     "staff access": staffAccessScript,
     "staff duck": staffDuckScript,
     "start line": startLineScript,
+    announcer: announcerScript,
     "finish line": finishLineScript,
     "inventory intake": inventoryIntakeScript,
   };
@@ -89,6 +91,7 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotThrow(() => new Function(staffAccessScript));
   assert.doesNotThrow(() => new Function(liveScript));
   assert.doesNotThrow(() => new Function(startLineScript));
+  assert.doesNotThrow(() => new Function(announcerScript));
   assert.doesNotThrow(() => new Function(finishLineScript));
   assert.doesNotThrow(() => new Function(inventoryIntakeScript));
   assert.doesNotThrow(() => new Function(liveUiScript));
@@ -465,9 +468,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
     staffDuckScript,
     staffHomeScript,
     startLineScript,
+    announcerScript,
     finishLineScript,
     inventoryIntakeScript,
-    liveScript,
   ]) assert.doesNotMatch(script, /const appConfirm = |appConfirmationQueue/);
 
   let mutations = 0;
@@ -491,9 +494,16 @@ test("browser clients contain no native confirmation calls", () => {
     liveScript,
     liveUiScript,
     startLineScript,
+    announcerScript,
     finishLineScript,
     inventoryIntakeScript,
   ]) assert.doesNotMatch(script, /\b(?:window\.)?confirm\s*\(/);
+});
+
+// The announcer is read-only, so it must never grow a confirmation prompt: a
+// prompt would mean it had acquired something to confirm.
+test("the announcer client has no confirmation dialog because it has nothing to confirm", () => {
+  assert.doesNotMatch(announcerScript, /\bappConfirm\(/);
 });
 
 const registrationHandoffHelpers = () => new Function(
@@ -1120,6 +1130,7 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
     participantScript,
     liveScript,
     startLineScript,
+    announcerScript,
     finishLineScript,
     inventoryIntakeScript,
     staffHomeScript,
@@ -1128,10 +1139,10 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
     assert.match(script, /quickDucksLive\.subscribe/);
   }
-  for (const script of [liveUiScript, participantScript, liveScript, startLineScript, finishLineScript]) {
+  for (const script of [liveUiScript, participantScript, liveScript, startLineScript, announcerScript, finishLineScript]) {
     assert.doesNotMatch(script, /setInterval/);
   }
-  for (const script of [participantScript, liveScript, startLineScript, finishLineScript]) {
+  for (const script of [participantScript, liveScript, startLineScript, announcerScript, finishLineScript]) {
     assert.doesNotMatch(script, /new WebSocket\(|liveCreatePollScheduler\(/);
   }
   assert.match(liveUiScript, /new WebSocketClass/);
@@ -1155,6 +1166,10 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
   assert.match(startLineScript, /LOADING: \["ready"/);
   assert.match(startLineScript, /CALLING: \["start"/);
   assert.doesNotMatch(startLineScript, /\/results\/finalize|\["finish"/);
+  // The announcer only ever reads: the roster to call up and the results the
+  // finish line has already published.
+  assert.match(announcerScript, /announcer-roster/);
+  assert.doesNotMatch(announcerScript, /\/results\/finalize|\/lock|\/ready|\/call|\/start\b|\/finish\b/);
   assert.match(finishLineScript, /NDEFReader/);
   assert.match(finishLineScript, /That duck is already selected/);
   assert.match(finishLineScript, /That duck is not in the selected heat/);
@@ -1179,6 +1194,7 @@ const liveScripts = [
   liveScript,
   participantScript,
   startLineScript,
+  announcerScript,
   finishLineScript,
   inventoryIntakeScript,
   staffHomeScript,
@@ -1195,7 +1211,7 @@ test("no browser client renders ambient freshness or connection-status chatter",
   }
   // The shared hub no longer fans a connection status out to subscribers.
   assert.doesNotMatch(liveUiScript, /setStatus|subscriber\.status/);
-  for (const script of [liveScript, participantScript, startLineScript, finishLineScript]) {
+  for (const script of [liveScript, participantScript, startLineScript, announcerScript, finishLineScript]) {
     assert.doesNotMatch(script, /status:\s*\(status\)/);
   }
 });

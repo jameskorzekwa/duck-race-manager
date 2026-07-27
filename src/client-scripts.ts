@@ -1625,6 +1625,215 @@ if (startRoot) {
 }
 `;
 
+// Pure wording and selection helpers for the announcer station, split out so the
+// shipped decisions are exercised directly rather than through a copy of them.
+export const announcerHelpersScript = String.raw`
+// The announcer follows the race itself, so this station reads the event that is
+// actually racing. A completed race still needs its podium read out, so it is
+// the fallback rather than nothing.
+const announcerPickEvent = (events) => (Array.isArray(events) ? events : []).find(
+  (item) => item.status === "ROUND_ONE" || item.status === "FINAL",
+) || (Array.isArray(events) ? events : []).find((item) => item.status === "COMPLETED") || null;
+const announcerHeatLabel = (heat) => heat.round === "FINAL" ? "The final" : "Round one · Heat " + heat.number;
+// One plain sentence telling the person holding the microphone what to do now.
+const announcerCues = {
+  PLANNED: "Coming up next. Read these racers out now.",
+  LOADING: "Ducks are going in. Read these racers out now.",
+  READY: "Ready to race. Read these racers out now.",
+  CALLING: "Being called to the water. Read these racers out now.",
+  RUNNING: "Racing now. Call the race.",
+  AWAITING_RESULT: "Finished. Hold for the official result from the finish line.",
+};
+const announcerCue = (status) => Object.prototype.hasOwnProperty.call(announcerCues, status)
+  ? announcerCues[status]
+  : "Waiting for this heat to be confirmed.";
+const announcerPlaceLabel = (place) => place === 1 ? "First place"
+  : place === 2 ? "Second place"
+  : place === 3 ? "Third place"
+  : "Place " + place;
+const announcerDuckLine = (duckNumber) => typeof duckNumber === "number" && duckNumber > 0
+  ? "Duck #" + duckNumber
+  : "Duck not assigned";
+// Announcers say the whole name, so both parts are always read out together.
+const announcerFullName = (participant) => participant
+  ? (String(participant.firstName || "") + " " + String(participant.lastName || "")).trim()
+  : "";
+`;
+
+// The announcer holds a microphone, so this station is a read-only script. Every
+// request it makes is a GET and it never sends a command, a revision, or a
+// command ID: the start line and the finish line own every transition.
+export const announcerScript = stationStateHelpersScript + announcerHelpersScript + String.raw`
+const announcerRoot = document.querySelector("[data-announcer]");
+const announcerEventLine = document.querySelector("[data-station-event]");
+const announcerHeatTitle = document.querySelector("[data-announcer-heat]");
+const announcerCueLine = document.querySelector("[data-announcer-cue]");
+const announcerRosterList = document.querySelector("[data-announcer-roster]");
+const announcerPodium = document.querySelector("[data-announcer-podium]");
+const announcerPodiumList = document.querySelector("[data-announcer-podium-list]");
+const announcerProgress = document.querySelector("[data-announcer-progress]");
+const announcerResultsList = document.querySelector("[data-announcer-results]");
+const announcerResultsEmpty = document.querySelector("[data-announcer-results-empty]");
+const announcerMessage = document.querySelector("[data-station-message]");
+// A finalized heat only changes when a race director corrects it, which bumps
+// the heat revision. Keying this cache on the revision and the published count
+// means each decided heat is read once, a correction is picked up immediately,
+// and a live signal never refetches the whole race.
+const announcerResultCache = new Map();
+let announcerRenderKey = null;
+
+const announcerText = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value == null ? "" : String(value);
+  if (className) element.className = className;
+  return element;
+};
+const announcerHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+const announcerApi = async (url) => {
+  const response = await fetch(url, { headers: { accept: "application/json" }, cache: "no-store" });
+  if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
+    location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
+    throw new Error("signed-out");
+  }
+  let body = null;
+  try { body = await response.json(); } catch {}
+  if (!response.ok) throw new Error(body && body.error ? body.error : "The race could not be refreshed.");
+  return body;
+};
+const announcerLine = (label, name, duckNumber, className) => {
+  const item = document.createElement("li");
+  if (className) item.className = className;
+  item.append(
+    announcerText("span", label, "announcer-label"),
+    announcerText("strong", name, "announcer-name"),
+    announcerText("span", announcerDuckLine(duckNumber), "announcer-duck"),
+  );
+  return item;
+};
+const announcerRenderCurrent = (event, current) => {
+  if (!current) {
+    announcerHeatTitle.textContent = "No heat is up right now";
+    announcerCueLine.textContent = event.status === "COMPLETED"
+      ? "Every heat has been decided. Read the official podium below."
+      : "Nothing to read out yet. The next heat appears here on its own.";
+    announcerRosterList.replaceChildren(announcerText("li", "The racers to announce will appear here."));
+    return;
+  }
+  announcerHeatTitle.textContent = announcerHeatLabel(current.heat);
+  announcerCueLine.textContent = announcerCue(current.heat.status);
+  announcerRosterList.replaceChildren();
+  for (const entry of current.roster) {
+    announcerRosterList.append(announcerLine("Slot " + entry.slotNumber, entry.displayName, entry.duckNumber));
+  }
+  if (current.roster.length === 0) {
+    announcerRosterList.append(announcerText("li", "This heat has no racers on its roster yet."));
+  }
+};
+const announcerRenderDecided = (decided) => {
+  announcerResultsList.replaceChildren();
+  announcerPodiumList.replaceChildren();
+  let podium = false;
+  for (const entry of decided) {
+    const winner = entry.results.find((row) => row.place === 1);
+    const heatLabel = announcerHeatLabel(entry.heat);
+    announcerResultsList.append(winner
+      ? announcerLine(
+        heatLabel,
+        "Winner: " + announcerFullName(winner.participant),
+        winner.duck ? winner.duck.visibleNumber : null,
+        entry.heat.round === "FINAL" ? "final-heat" : "",
+      )
+      : announcerText("li", heatLabel + " · Winner not recorded yet"));
+    // The final is announced as a full podium, not just its winner.
+    if (entry.heat.round !== "FINAL" || entry.results.length === 0) continue;
+    for (const row of entry.results) {
+      announcerPodiumList.append(announcerLine(
+        announcerPlaceLabel(row.place),
+        announcerFullName(row.participant),
+        row.duck ? row.duck.visibleNumber : null,
+        "podium-place",
+      ));
+    }
+    podium = true;
+  }
+  announcerPodium.hidden = !podium;
+  announcerResultsEmpty.hidden = decided.length > 0;
+};
+const announcerRender = (event, heats, current, decided) => {
+  const renderKey = JSON.stringify([event.id, event.name, event.status, current, decided]);
+  if (renderKey === announcerRenderKey) return;
+  announcerRenderKey = renderKey;
+  announcerEventLine.textContent = event.name + " · " + announcerHumanize(event.status);
+  announcerRenderCurrent(event, current);
+  announcerRenderDecided(decided);
+  const raceable = heats.filter((heat) => heat.status !== "CANCELLED").length;
+  announcerProgress.textContent = decided.length === 0
+    ? "No heat has an official result yet."
+    : decided.length + " of " + raceable + " heat" + (raceable === 1 ? "" : "s") + " decided.";
+};
+const announcerEmpty = (message) => {
+  announcerRenderKey = null;
+  announcerEventLine.textContent = message;
+  announcerHeatTitle.textContent = "No heat is up yet";
+  announcerCueLine.textContent = "The racers to announce will appear here.";
+  announcerRosterList.replaceChildren(announcerText("li", "Waiting for the official roster."));
+  announcerPodium.hidden = true;
+  announcerPodiumList.replaceChildren();
+  announcerResultsList.replaceChildren();
+  announcerResultsEmpty.hidden = false;
+  announcerProgress.textContent = "Waiting for the first official result.";
+};
+const announcerLoadWork = async () => {
+  try {
+    const events = await announcerApi("/api/v1/staff/events");
+    if (document.hidden) return;
+    const event = announcerPickEvent(events.events);
+    if (!event) {
+      announcerEmpty("No race is on the water right now.");
+      return;
+    }
+    const eventPath = "/api/v1/staff/events/" + encodeURIComponent(event.id);
+    const listed = await announcerApi(eventPath + "/heats");
+    if (document.hidden) return;
+    const upcoming = startPickHeat(listed.heats, event.status === "FINAL" ? "FINAL" : "ROUND_ONE");
+    // The announcer roster projection is exactly slot, full name, and duck
+    // number, which is exactly what gets said out loud and nothing more.
+    const current = upcoming === null
+      ? null
+      : await announcerApi(eventPath + "/heats/" + encodeURIComponent(upcoming.id) + "/announcer-roster");
+    if (document.hidden) return;
+    const decided = [];
+    for (const heat of listed.heats) {
+      if (!(heat.publishedResultCount > 0)) continue;
+      const key = heat.revision + ":" + heat.publishedResultCount;
+      const cached = announcerResultCache.get(heat.id);
+      if (cached && cached.key === key) {
+        decided.push({ heat, results: cached.results });
+        continue;
+      }
+      const detail = await announcerApi(eventPath + "/heats/" + encodeURIComponent(heat.id));
+      const results = Array.isArray(detail.results) ? detail.results : [];
+      announcerResultCache.set(heat.id, { key, results });
+      decided.push({ heat, results });
+    }
+    if (document.hidden) return;
+    announcerRender(event, listed.heats, current, decided);
+    announcerMessage.textContent = "This station only reads. It never changes the race.";
+  } catch (error) {
+    // The station message line remains the actionable operational error surface.
+    if (error.message !== "signed-out") announcerMessage.textContent = error.message;
+  }
+};
+if (announcerRoot) {
+  globalThis.quickDucksLive.subscribe({
+    domains: ["event", "participants", "ducks", "heats"],
+    root: announcerRoot,
+    refresh: announcerLoadWork,
+  });
+}
+`;
+
 export const finishSelectionValidationScript = String.raw`
 const finishSelectionProblem = (selected, roster, raceEntryId) => {
   if (selected.some((item) => item.raceEntryId === raceEntryId)) return "duplicate";
