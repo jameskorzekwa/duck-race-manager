@@ -1,4 +1,5 @@
 import { operationalRoles, type OperationalRole } from "./authorization.ts";
+import { localPreviewTurnstileToken } from "./local-preview.ts";
 import { renderParticipantQrSvg } from "./participant-qr.ts";
 import {
   homePhaseCta,
@@ -15,11 +16,12 @@ import {
 import {
   publicHeatStatusLabel,
   publicOfficialResult,
+  type PublicFollowState,
   type PublicRaceStatus,
 } from "./race-status.ts";
 import type { RegistrationStatusRecord } from "./types.ts";
 
-const escapeHtml = (value: string): string =>
+export const escapeHtml = (value: string): string =>
   value.replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;",
     "<": "&lt;",
@@ -210,6 +212,11 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .duck-number-link { color:var(--water-dark); font-weight:950; text-decoration:underline; text-underline-offset:.2em; }
 .duck-number-link:hover { text-decoration-thickness:.18em; }
 .duck-number-link:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
+.duck-number-note { display:block; margin-top:.2rem; color:var(--muted); font-size:.8rem; font-weight:800; letter-spacing:.04em; }
+.duck-name-note { color:var(--water-dark); font-weight:850; }
+.duck-name-form { gap:.6rem; margin-top:.9rem; padding-top:.9rem; border-top:2px dashed #b8c6c9; }
+.duck-name-form .message-line { margin:0; }
+.page-panel > .actions[data-duck-follow] { margin:1.2rem 0; }
 .privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
 .privacy strong { flex:none; }
 .page-panel > .privacy + .actions { margin-top:1rem; }
@@ -249,6 +256,10 @@ form.operation-card > * + * { margin-top:0; }
 .inventory-card-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr)); grid-auto-rows:minmax(3.75rem,1fr); align-content:start; align-items:stretch; margin-top:0; }
 .inventory-card-grid .result-button { height:100%; min-height:3.75rem; }
 .inventory-card-grid .result-button[aria-expanded="true"] { background:var(--cream); outline:3px solid var(--water-dark); outline-offset:1px; }
+.inventory-group { grid-column:1/-1; display:grid; gap:.5rem; }
+.inventory-group-title { margin:0; font-size:1.05rem; overflow-wrap:anywhere; }
+.inventory-group > .muted { margin:0; }
+.inventory-group > .inventory-card-grid { margin-top:0; }
 .inventory-detail-panel { min-width:0; max-height:none; overflow:visible; }
 .inventory-detail-heading { display:flex; align-items:start; justify-content:space-between; gap:1rem; }
 .inventory-detail-heading .button { flex:none; }
@@ -274,6 +285,11 @@ details.operation-card > summary { cursor:pointer; font-size:1.05rem; font-weigh
 details.operation-card[open] > summary { margin-bottom:0; }
 .roster-list { display:grid; gap:.45rem; padding:0; list-style:none; }
 .roster-list li { padding:.65rem; border-left:.35rem solid var(--water); background:#eaf7fa; }
+.roster-entry { display:grid; gap:.4rem; }
+.roster-entry p { margin:0; overflow-wrap:anywhere; }
+.roster-entry-line { font-weight:800; }
+.roster-entry-id { font-size:.78rem; color:var(--muted); }
+.roster-entry .actions { gap:.5rem; }
 .private-result { overflow-wrap:anywhere; }
 .page-title.message-title { max-width:26ch; font-size:clamp(1.9rem,5vw,3.2rem); line-height:1.05; letter-spacing:-.04em; }
 .my-ducks-flow { display:flex; flex-direction:column; }
@@ -305,6 +321,21 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .station-counter strong { display:block; color:var(--ink); font-size:clamp(2rem,10vw,4rem); line-height:1; }
 .station-history { display:grid; gap:.55rem; padding:0; list-style:none; }
 .station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; overflow-wrap:anywhere; }
+.announcer-panel h2 { font-size:clamp(1.8rem,7vw,3.2rem); overflow-wrap:anywhere; }
+.announcer-section { margin:1.6rem 0; padding:1.1rem; border:3px solid var(--ink); border-radius:1rem; background:var(--paper); box-shadow:4px 4px 0 var(--ink); }
+.announcer-section > :last-child { margin-bottom:0; }
+.announcer-cue { margin:0 0 1rem; font-size:clamp(1.05rem,3.6vw,1.4rem); font-weight:900; overflow-wrap:anywhere; }
+.announcer-roster,.announcer-results { display:grid; gap:.65rem; margin:0; padding:0; list-style:none; }
+.announcer-roster li,.announcer-results li { display:grid; gap:.2rem; min-width:0; padding:1rem; border:3px solid var(--ink); border-radius:.7rem; overflow-wrap:anywhere; }
+.announcer-roster li { background:#eaf7fa; }
+.announcer-results li { background:var(--cream); }
+.announcer-results li.final-heat { background:var(--yellow); }
+.announcer-label { color:var(--water-dark); font-size:.78rem; font-weight:950; letter-spacing:.08em; text-transform:uppercase; }
+.announcer-name { min-width:0; font-size:clamp(1.5rem,6vw,2.4rem); line-height:1.05; letter-spacing:-.03em; overflow-wrap:anywhere; }
+.announcer-duck { font-size:clamp(1rem,3.4vw,1.25rem); font-weight:900; }
+.announcer-progress { margin:0 0 .9rem; font-weight:900; }
+.announcer-panel .podium { margin:0; padding:0; list-style:none; }
+.announcer-panel .podium-place { display:grid; gap:.2rem; min-width:0; font-size:clamp(1.1rem,4vw,1.5rem); overflow-wrap:anywhere; }
 .station-panel > h2,.station-panel > h3,[data-intake-controls] > h2 { margin-bottom:0; overflow-wrap:anywhere; }
 .station-panel > h2 + *,.station-panel > h3 + *,[data-intake-controls] > h2 + * { margin-top:var(--space-sm); }
 [data-intake-controls] > label,.station-panel > label { display:block; }
@@ -499,7 +530,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
       ${duck()}
       <p class="eyebrow">Saved on this device</p>
       <h1 class="page-title">My Ducks</h1>
-      <p class="lede">Swipe through every participant registered in this browser and follow each duck from pairing to finish.</p>
+      <p class="lede">Participants you registered on this device keep their full details and staff lookup code. Ducks you followed show public race status only.</p>
       <div class="privacy"><strong>Private by design.</strong><span>Email and phone never appear here. Immediately after registration, this tab can show the one-time private status link so you can bookmark it; saved collection responses never include that link.</span></div>
       <div class="notice" data-registration-success aria-live="polite" hidden></div>
       <p class="message-line muted" data-my-ducks-error role="alert" hidden></p>
@@ -515,7 +546,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
             <button class="button secondary small" type="button" data-carousel-next aria-controls="awaiting-participants">Next</button>
           </div>
         </div>
-        <p class="muted">Registrations waiting for staff to pair a physical duck.</p>
+        <p class="muted">Participants you registered on this device, waiting for staff to pair a physical duck. Their staff lookup code stays on this device.</p>
         <div class="participant-track" id="awaiting-participants" data-participant-track tabindex="0" aria-label="Awaiting participant registrations" hidden></div>
       </section>
 
@@ -527,8 +558,20 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
             <button class="button secondary small" type="button" data-carousel-next aria-controls="paired-participants">Next</button>
           </div>
         </div>
-        <p class="muted">Participants already paired with their race duck.</p>
+        <p class="muted">Participants you registered on this device, already paired with their race duck. Give the duck a name to see it here instead of its number.</p>
         <div class="participant-track" id="paired-participants" data-participant-track tabindex="0" aria-label="Paired participant registrations" hidden></div>
+      </section>
+
+      <section class="participant-section" data-participant-section="followed" aria-labelledby="followed-participants-title" hidden>
+        <div class="participant-section-head">
+          <h2 id="followed-participants-title">Ducks I’m Following</h2>
+          <div class="carousel-controls" data-carousel-controls hidden>
+            <button class="button secondary small" type="button" data-carousel-previous aria-controls="followed-participants">Previous</button>
+            <button class="button secondary small" type="button" data-carousel-next aria-controls="followed-participants">Next</button>
+          </div>
+        </div>
+        <p class="muted">Participants you followed from a duck tag, a duck page, or the search below. These are someone else’s registration, so they show public race status only — no staff lookup code and no duck name.</p>
+        <div class="participant-track" id="followed-participants" data-participant-track tabindex="0" aria-label="Followed participants" hidden></div>
       </section>
 ${phaseAllowsRegistration(phase) ? '\n      <div class="actions"><a class="button" href="/register">Register another participant</a></div>\n' : ""}      </div>
 ${nameSearchSection()}
@@ -540,6 +583,7 @@ ${nameSearchSection()}
 export const renderRegistration = (
   turnstileSiteKey?: string,
   phase: PublicPhase = "PREPARING",
+  localPreviewWithoutProtection = false,
 ): string => {
   if (phase === "PREPARING") {
     return page({
@@ -580,7 +624,7 @@ export const renderRegistration = (
       <p class="lede" data-event-date>Registration takes about one minute.</p>
       <div class="privacy"><strong>Private by design.</strong><span>Your email and phone number are visible only to logged-in authorized race staff. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
       <div class="notice"><strong>Registering more than one participant?</strong> Finish this form once for each person. You can use the same phone, email, or browser, and QuickDucks will keep their codes together on this device.</div>
-      <form method="post" action="/api/v1/registrations" data-registration-form data-protection-ready="${turnstileSiteKey === undefined ? "false" : "true"}">
+      <form method="post" action="/api/v1/registrations" data-registration-form data-protection-ready="${turnstileSiteKey === undefined && !localPreviewWithoutProtection ? "false" : "true"}">
         <div class="field-grid">
           <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"><span class="field-error" data-field-error="first_name"></span></label>
           <label>Last name<input name="last_name" autocomplete="family-name" maxlength="80" required placeholder="Rivera"><span class="field-error" data-field-error="last_name"></span></label>
@@ -590,9 +634,11 @@ export const renderRegistration = (
           <label><span class="label-text" data-email-label>Email (optional)</span><input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>Used only for operational race updates.</span><span class="field-error" data-field-error="email"></span></label>
           <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="32" placeholder="(555) 010-2040"><span class="field-error" data-field-error="phone"></span></label>
         </div>
-        ${turnstileSiteKey === undefined
-          ? '<div class="turnstile-mock">Registration protection is still being configured.</div>'
-          : `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-size="flexible"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`}
+        ${turnstileSiteKey !== undefined
+          ? `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-size="flexible"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
+          : localPreviewWithoutProtection
+            ? `<div class="turnstile-mock">Local preview — registration protection is bypassed.</div><input type="hidden" name="cf-turnstile-response" value="${escapeHtml(localPreviewTurnstileToken)}">`
+            : '<div class="turnstile-mock">Registration protection is still being configured.</div>'}
         <p class="muted" data-form-message aria-live="polite">Loading registration availability…</p>
         <button class="button" type="submit" disabled>Register participant</button>
       </form>
@@ -665,6 +711,7 @@ const mockRaceStatus: PublicRaceStatus = {
   },
   participantDisplayName: "Jamie R.",
   duck: { visibleNumber: 128 },
+  duckName: "Sir Quacks-a-Lot",
   assignedHeat: {
     roundOne: { number: 7, status: "PLANNED" },
     final: null,
@@ -677,10 +724,18 @@ const roundLabel = (round: string): string => round === "FINAL" ? "Final" : "Rou
 const outcomeLabel = (outcome: string): string =>
   outcome.replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
 
+// The canonical duck number always leads, because it is what is printed on the
+// duck in the water. A participant-chosen name follows it when there is one that
+// the read-time filter allows, so the two never disagree and a suppressed or
+// cleared name simply leaves "Duck #N".
+const duckIdentity = (status: PublicRaceStatus): string => {
+  if (status.duck === null) return "Waiting for duck assignment";
+  const number = `Duck #${status.duck.visibleNumber}`;
+  return status.duckName === null ? number : `${number} · ${status.duckName}`;
+};
+
 const publicStatusFacts = (status: PublicRaceStatus, showParticipant = true): string => {
-  const assignment = status.duck === null
-    ? "Waiting for duck assignment"
-    : `Duck #${status.duck.visibleNumber}`;
+  const assignment = escapeHtml(duckIdentity(status));
   const heat = status.assignedHeat.final ?? status.assignedHeat.roundOne;
   const heatLabel = heat === null
     ? "Heat not assigned yet"
@@ -694,9 +749,26 @@ const publicStatusFacts = (status: PublicRaceStatus, showParticipant = true): st
   return `<dl class="facts">${participant}<div class="fact"><dt>Duck</dt><dd>${assignment}</dd></div><div class="fact"><dt>Assigned heat</dt><dd>${heatLabel}</dd></div><div class="fact"><dt>Currently running</dt><dd>${running}</dd></div><div class="fact"><dt>Race status</dt><dd>${outcomeLabel(status.outcome)}</dd></div></dl>`;
 };
 
+// Server-rendered Follow control for the two public duck pages. It appears only
+// when the request resolved a genuinely followable participant, so a page that
+// renders no control means "cannot be followed", never "not followed yet". The
+// already-added state is a plain tag with no action, exactly like a search
+// result that is already in the collection.
+//
+// `live.js` re-renders this block from the authoritative duck response, so the
+// server paint and every later refetch agree.
+const followPanel = (follow: PublicFollowState | null): string => follow === null ? "" : `
+      <div class="actions" data-duck-follow data-follow-id="${escapeHtml(follow.followId)}">${
+  follow.inMyDucks
+    ? '<span class="success-tag" data-follow-added>In My Ducks</span><a class="button secondary small" href="/my-ducks">Open My Ducks</a>'
+    : '<button class="button" type="button" data-follow-button>Follow this duck</button>'
+}</div>
+      <p class="message-line muted" data-follow-message role="status" hidden></p>`;
+
 export const renderDuck = (
   status: PublicRaceStatus = mockRaceStatus,
   phase: PublicPhase = "PREPARING",
+  follow: PublicFollowState | null = null,
 ): string => page({
   title: status.duck === null ? "Race status" : `Duck #${status.duck.visibleNumber}`,
   description: "Public QuickDucks NFC duck race status.",
@@ -709,7 +781,7 @@ export const renderDuck = (
       <p class="eyebrow">Public race status</p>
       <h1 class="page-title">${status.duck === null ? "Waiting for a duck" : `Duck #${status.duck.visibleNumber}`}</h1>
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
-      <div data-live-personal="duck">${publicStatusFacts(status)}</div>
+      <div data-live-personal="duck">${publicStatusFacts(status)}</div>${followPanel(follow)}
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, or private links.</span></div>
       <div class="actions"><a class="button secondary" href="/">Visit QuickDucks</a></div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
@@ -731,7 +803,7 @@ const duckDetailFacts = (status: PublicRaceStatus): string => {
   const officialResult = publicOfficialResult(status.outcome);
   const facts = [
     ["Participant", status.participantDisplayName],
-    ["Duck", status.duck === null ? "Waiting for duck assignment" : `Duck #${status.duck.visibleNumber}`],
+    ["Duck", duckIdentity(status)],
     ["Round one heat", heatFact(status.assignedHeat.roundOne, "Not assigned yet")],
     ["Final heat", heatFact(status.assignedHeat.final, "Not in the final")],
     ["Currently running", status.currentHeat === null
@@ -748,6 +820,7 @@ const duckDetailFacts = (status: PublicRaceStatus): string => {
 export const renderPublicDuck = (
   status: PublicRaceStatus = mockRaceStatus,
   phase: PublicPhase = "PREPARING",
+  follow: PublicFollowState | null = null,
 ): string => {
   const heading = status.duck === null ? "This duck" : `Duck #${status.duck.visibleNumber}`;
   return page({
@@ -762,7 +835,7 @@ export const renderPublicDuck = (
       <p class="eyebrow">Public duck detail</p>
       <h1 class="page-title">${escapeHtml(heading)}</h1>
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
-      <div data-live-personal="number">${duckDetailFacts(status)}</div>
+      <div data-live-personal="number">${duckDetailFacts(status)}</div>${followPanel(follow)}
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, private links, or the duck’s tag.</span></div>
       <div class="actions">${boardLink(phase, "secondary")}</div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
@@ -831,6 +904,7 @@ const staffNavLinks: readonly StaffNavLink[] = [
   { href: "/staff", label: "Console", access: "anyStaff" },
   { href: "/staff/access", label: "Access", access: { anyOf: [] } },
   { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
+  { href: "/staff/announcer", label: "Announcer", access: { anyOf: ["ANNOUNCER", "RACE_DIRECTOR"] } },
   { href: "/staff/finish-line", label: "Finish line", access: { anyOf: ["RESULT_TAKER", "RACE_DIRECTOR"] } },
   { href: "/staff/inventory-intake", label: "Inventory", access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"] } },
 ];
@@ -862,7 +936,6 @@ export const renderStaffHome = (
     || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
   const canStartLine = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
   const canFinishLine = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
-  const canDirectRace = hasRole("RACE_DIRECTOR");
   return page({
   title: "Staff tools",
   description: "Protected QuickDucks staff race operations.",
@@ -890,7 +963,7 @@ export const renderStaffHome = (
             <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
             <label>Event date<input name="eventDate" type="date" required></label>
             <label>Timezone<select name="timezone" data-timezone-select data-timezone-detect="true" data-app-select-search="true" required><option value="UTC">UTC</option></select><span>Detected from this device. Open the list and type to search every zone.</span></label>
-            <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
+            <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="3" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat, at least 3. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
             <button class="button" type="submit">Create draft event</button>
           </form>
         </details>` : ""}
@@ -909,8 +982,8 @@ export const renderStaffHome = (
                 <div class="field-grid"><label>Event date<input name="eventDate" type="date"></label><label>Timezone<select name="timezone" data-timezone-select data-app-select-search="true" required><option value="UTC">UTC</option></select></label></div>
                 <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="datetime-local"></label><label>Registration closes<input name="registrationClosesAt" type="datetime-local"></label></div>
                 <label class="check"><input name="emailRequired" type="checkbox"><span class="label-text">Require participant email</span></label>
-                <div class="field-grid"><label>Heat assignment<select name="heatAssignmentMode"><option value="IMMEDIATE_FIXED">Assign during pairing</option><option value="POST_CLOSE_BALANCED">Balanced plan after close</option></select></label><label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label></div>
-                <div class="field-grid"><label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" required></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
+                <label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label>
+                <div class="field-grid"><label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="3" max="10000" required><span>At least 3, so every heat is a real race.</span></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
                 <button class="button" type="submit">Save draft configuration</button>
               </form>
             </details>` : ""}
@@ -943,7 +1016,7 @@ export const renderStaffHome = (
               <button class="button" type="submit">Create walk-up</button>
             </form><p class="private-result muted" data-walkup-result aria-live="polite"></p>
           </details><div class="data-list" data-participant-list></div></div>
-          <article class="operation-card" data-participant-detail hidden>
+          <article class="operation-card" tabindex="-1" data-participant-detail hidden>
             <h3 data-participant-name>Participant detail</h3><dl class="facts compact-facts" data-participant-facts></dl>
             <form data-participant-edit-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
@@ -991,7 +1064,6 @@ export const renderStaffHome = (
       <section class="console-section" id="heats" aria-labelledby="heats-title" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
         <p class="eyebrow">Race control</p><h2 id="heats-title">Heats and results</h2>
         <div class="console-grid">
-          <article class="operation-card"${canDirectRace ? "" : " hidden"}><h3>Balanced round-one plan</h3><p class="muted">For post-close balanced events, preview the exact roster before committing it.</p><div class="actions"><button class="button secondary small" type="button" data-plan-preview>Preview plan</button><button class="button small" type="button" data-plan-commit disabled>Commit preview</button></div><div class="data-list" data-plan-result></div></article>
           <article class="operation-card"><h3>Finalists</h3><button class="button secondary small" type="button" data-refresh-finalists>Verify finalists</button><div class="data-list" data-finalist-list></div></article>
         </div>
         <div class="section-tools"><button class="button secondary small" type="button" data-refresh-heats>Refresh heats</button></div>
@@ -1059,8 +1131,49 @@ export const renderStartLine = (
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
     <h3>Roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
     <div class="station-action" data-station-action></div>
-    <p class="message-line muted" data-station-message aria-live="polite">This station can only lock, ready, call, or start a heat.</p>
+    <p class="message-line muted" data-station-message aria-live="polite">This station can only ready, call, or start a heat.</p>
     ${interactive ? '<script src="/assets/start-line.js" defer></script>' : ""}
+  </section>`,
+});
+
+// The announcer holds a microphone, so this station is a script, not a console.
+// It reads three authoritative APIs and writes nothing: there is no form, no
+// button, and no command hook anywhere in this markup. Everything on it is
+// either the heat to read out now or a result the finish line already recorded.
+export const renderAnnouncer = (
+  displayName: string,
+  interactive = true,
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+): string => page({
+  title: "Announcer",
+  description: "Focused protected QuickDucks announcer station.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel station-panel announcer-panel" data-announcer${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Announcer</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+    ${staffNav(isSystemAdmin, roles, "/staff/announcer")}
+    <p class="eyebrow">Announcer station</p><h1 class="page-title">Read this out loud.</h1>
+    <p class="lede" data-station-event>Finding the active event.</p>
+    <section class="announcer-section" aria-labelledby="announcer-now-title">
+      <p class="eyebrow">On the microphone now</p>
+      <h2 id="announcer-now-title" data-announcer-heat>No heat is up yet</h2>
+      <p class="announcer-cue" data-announcer-cue>The racers to announce will appear here.</p>
+      <ol class="announcer-roster" data-announcer-roster><li>Waiting for the official roster.</li></ol>
+    </section>
+    <section class="announcer-section" aria-labelledby="announcer-podium-title" data-announcer-podium hidden>
+      <p class="eyebrow">Official podium</p>
+      <h2 id="announcer-podium-title">The final is decided</h2>
+      <ol class="podium" data-announcer-podium-list></ol>
+    </section>
+    <section class="announcer-section" aria-labelledby="announcer-decided-title">
+      <p class="eyebrow">Already decided</p>
+      <h2 id="announcer-decided-title">Recorded winners</h2>
+      <p class="announcer-progress" data-announcer-progress>Waiting for the first official result.</p>
+      <ol class="announcer-results" data-announcer-results></ol>
+      <p class="empty-state" data-announcer-results-empty>No winner has been recorded yet. Each one appears here the moment the finish line records it.</p>
+    </section>
+    <p class="message-line muted" data-station-message aria-live="polite">This station only reads. It never changes the race.</p>
+    ${interactive ? '<script src="/assets/announcer.js" defer></script>' : ""}
   </section>`,
 });
 
@@ -1237,7 +1350,12 @@ const createText = (tag, text, className) => {
 const describeStatus = (status) => {
   if (!status) return "Race status is not currently public.";
   const parts = [];
-  if (status.duck) parts.push("Duck #" + status.duck.visibleNumber);
+  // The canonical number leads and the chosen name follows it, exactly as on
+  // the duck pages and the race board.
+  if (status.duck) {
+    parts.push("Duck #" + status.duck.visibleNumber
+      + (typeof status.duckName === "string" && status.duckName.length > 0 ? " · " + status.duckName : ""));
+  }
   if (status.assignedHeat.roundOne) parts.push("Heat " + status.assignedHeat.roundOne.number);
   else if (status.duck) parts.push("Heat assignment pending");
   parts.push(status.outcome.replaceAll("_", " ").toLowerCase());

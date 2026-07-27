@@ -5,8 +5,14 @@
 > batches, the `RETURN_STEWARD` role, and the `RETURN_PROCESSING`/`ARCHIVED`
 > statuses no longer exist. The lifecycle is `DRAFT -> REGISTRATION_OPEN ->
 > REGISTRATION_CLOSED -> ROUND_ONE -> FINAL -> COMPLETED`, and the
-> administrator "Delete event" action is the only cleanup path. See
-> `docs/WORKFLOWS.md` for implemented behavior.
+> administrator "Delete event" action is the only cleanup path.
+>
+> It also predates the removal of the post-close balanced heat planner.
+> There is no longer a choice of heat assignment mode: heats are filled as
+> participants are paired with ducks, a heat needs at least three ducks, and
+> closing registration folds a shorter final heat into the heat before it.
+> Rosters lock automatically when a round starts, so there is no manual
+> lock-roster action. See `docs/WORKFLOWS.md` for implemented behavior.
 
 ## Purpose
 

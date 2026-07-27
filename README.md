@@ -55,7 +55,7 @@ delivery phases, and acceptance criteria.
 - Host the PWA, API, and database on Cloudflare's free developer platform.
 - Push privacy-safe finite-domain invalidations through one hibernatable Durable
   Object while keeping D1-backed APIs authoritative on every device.
-- Support immediate fixed-size or post-registration balanced heat assignment.
+- Fill fixed-size heats (at least three ducks) as participants are paired.
 - Send upcoming-heat email notifications to participants who provide email.
 - Provide a read-only duck inspection workflow for misplaced ducks.
 - Preserve a participant's heat and race status when replacing a lost duck.
@@ -81,8 +81,23 @@ delivery phases, and acceptance criteria.
 - Public heat results and final podium
 - Administrative correction and audit tools
 
+## Running it locally
+
+The whole site runs on one machine with no network access, and seeds itself with
+a race at any lifecycle state:
+
+```sh
+npm ci
+npm run dev:local                          # http://localhost:8787
+npm run seed:local -- --state=round-one    # in a second terminal
+```
+
+See [local development](docs/LOCAL_DEVELOPMENT.md) for the seed states, the
+offline sign-in accounts, and what is deliberately still not local.
+
 ## Documentation
 
+- [Local development](docs/LOCAL_DEVELOPMENT.md)
 - [Project plan](docs/PROJECT_PLAN.md)
 - [Domain and hosting setup](docs/DOMAIN_SETUP.md)
 - [Heat assignment, notifications, and duck inspection](docs/HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md)

@@ -1,5 +1,6 @@
 import type { StaffActor } from "./auth.ts";
 import { requireAnyRole } from "./authorization.ts";
+import { publicDuckName } from "./duck-name-filter.ts";
 import {
   DELETABLE_EVENT_STATUSES,
   hashToken,
@@ -74,6 +75,7 @@ interface RegistrationRow {
   updated_at: string;
   registration_revision: number;
   race_entry_revision: number;
+  duck_name: string | null;
   assignment_id: string | null;
   assignment_valid_from: string | null;
   duck_id: string | null;
@@ -89,7 +91,7 @@ const registrationSelect = `
          r.email_notifications_enabled, r.created_via, r.staff_notes,
          r.submitted_at, r.status_changed_at, r.updated_at,
          r.revision AS registration_revision,
-         re.revision AS race_entry_revision,
+         re.revision AS race_entry_revision, re.duck_name,
          da.id AS assignment_id, da.valid_from AS assignment_valid_from,
          d.id AS duck_id, d.visible_number AS duck_visible_number
     FROM registrations r
@@ -117,6 +119,12 @@ const registrationJson = (row: RegistrationRow): Record<string, unknown> => ({
   updatedAt: row.updated_at,
   revision: row.registration_revision,
   raceEntryRevision: row.race_entry_revision,
+  // Staff moderate this name, so they see exactly what is stored, plus whether
+  // the read-time filter is already hiding it from the public surfaces. Both
+  // fields require the same REGISTRATION/RACE_DIRECTOR access as the rest of
+  // this projection, which already carries participant contact details.
+  duckName: row.duck_name,
+  duckNamePubliclyHidden: row.duck_name !== null && publicDuckName(row.duck_name) === null,
   assignment: row.assignment_id === null ? null : {
     id: row.assignment_id,
     assignedAt: row.assignment_valid_from,
@@ -827,6 +835,97 @@ const deleteRegistration = async (
     : json({ error: "Registration deletion conflicted with another update. Refresh and try again." }, 409);
 };
 
+// Staff moderation of a participant-chosen duck name. No filter is perfect and
+// the name is shown publicly at a community event, so staff must be able to
+// remove one that should never have been on the board.
+//
+// It is deliberately not a rename: staff clear the name and the duck falls back
+// to the canonical "Duck #N" on every surface. The participant may name it again
+// afterwards, and the write-time filter applies to that attempt as it always
+// does.
+//
+// No expected revision is required. Clearing is idempotent and always safe, and
+// a moderation action must not fail because the owner renamed the duck a second
+// earlier; the command identifier is what makes a retry a replay.
+const clearDuckName = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  registrationId: string,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  if (payload === null) return json({ error: "A valid JSON request is required." }, 400);
+  const commandId = payload.commandId;
+  if (typeof commandId !== "string" || !isCommandId(commandId)) {
+    return json({ error: "A valid command is required." }, 400);
+  }
+
+  const previous = await findCommand(env, commandId);
+  if (previous !== null) {
+    if (previous.command_type !== "CLEAR_DUCK_NAME" || previous.result_id !== registrationId) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const replay = await getRegistration(env, registrationId);
+    return replay === null
+      ? json({ error: "Registration not found." }, 404)
+      : registrationResult(replay, true);
+  }
+
+  const current = await getRegistration(env, registrationId);
+  if (current === null) return json({ error: "Registration not found." }, 404);
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+         SELECT ?, r.event_id, 'CLEAR_DUCK_NAME', r.id, ?, ?, ?
+           FROM registrations r
+           JOIN race_entries re ON re.registration_id = r.id
+          WHERE r.id = ?`,
+      ).bind(commandId, now, now, actor.id, registrationId),
+      env.DB.prepare(
+        `UPDATE race_entries
+            SET duck_name = NULL, updated_at = ?
+          WHERE registration_id = ?
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'CLEAR_DUCK_NAME' AND rc.result_id = ?
+            )`,
+      ).bind(now, registrationId, commandId, registrationId),
+      // The audit records that a name was cleared and by whom. It never records
+      // the offending text, and neither does the command row.
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         SELECT ?, rc.event_id, rc.id, 'DUCK_NAME_CLEARED', 'REGISTRATION', rc.result_id, 'STAFF', ?, ?
+           FROM race_commands rc
+          WHERE rc.id = ? AND rc.command_type = 'CLEAR_DUCK_NAME' AND rc.result_id = ?`,
+      ).bind(
+        crypto.randomUUID(),
+        now,
+        JSON.stringify({
+          staff_profile_id: actor.id,
+          changed_fields: ["duck_name"],
+          cleared_via: "STAFF_MODERATION",
+          had_name: current.duck_name !== null,
+        }),
+        commandId,
+        registrationId,
+      ),
+    ]);
+  } catch {
+    return json({ error: "The duck name could not be cleared. Refresh and try again." }, 409);
+  }
+
+  const updated = await getRegistration(env, registrationId);
+  return updated === null
+    ? json({ error: "The saved registration could not be loaded." }, 500)
+    : registrationResult(updated, false);
+};
+
 export const handleParticipantOperations = async (
   request: Request,
   env: Env,
@@ -848,7 +947,7 @@ export const handleParticipantOperations = async (
   }
 
   const registrationMatch = url.pathname.match(
-    /^\/api\/v1\/staff\/registrations\/([^/]{1,128})(?:\/(withdraw|reactivate|disqualify))?$/,
+    /^\/api\/v1\/staff\/registrations\/([^/]{1,128})(?:\/(withdraw|reactivate|disqualify|clear-duck-name))?$/,
   );
   if (registrationMatch === null) return null;
   const [, registrationId, operation] = registrationMatch;
@@ -863,6 +962,12 @@ export const handleParticipantOperations = async (
   }
   if (operation === undefined && request.method === "DELETE") {
     return deleteRegistration(request, env, actor, registrationId);
+  }
+  // Clearing a duck name is moderation of published text, so it is available to
+  // the same registration and race-director roles (and administrators) that own
+  // the rest of this participant surface.
+  if (operation === "clear-duck-name" && request.method === "POST") {
+    return clearDuckName(request, env, actor, registrationId);
   }
   if (operation !== undefined && request.method === "POST") {
     return changeRegistrationStatus(request, env, actor, registrationId, operation as StatusOperation);

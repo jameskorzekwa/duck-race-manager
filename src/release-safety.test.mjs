@@ -445,3 +445,14 @@ test("Worker secret preflight requires names without inspecting values", () => {
     /AWS_ACCESS_KEY_ID/,
   );
 });
+
+// The local development harness gates every offline stand-in on `APP_ORIGIN`
+// being an http loopback origin. That gate is only as good as the deployed
+// configuration, so the release invariants are the right place to hold it.
+test("the deployed Worker configuration cannot reach the local development harness", () => {
+  const production = JSON.parse(readRepositoryFile("wrangler.jsonc").replaceAll(/^\s*\/\/.*$/gm, ""));
+
+  assert.equal(production.main, "src/index.ts");
+  assert.equal(production.vars.APP_ORIGIN, "https://quickducks.com");
+  assert.equal(new URL(production.vars.APP_ORIGIN).protocol, "https:");
+});

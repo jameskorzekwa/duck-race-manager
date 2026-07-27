@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  announcerScript,
   confirmationDialogScript,
   duckDetailHelpersScript,
   eventSlugHelpersScript,
@@ -255,6 +256,7 @@ test("the public pages' classic scripts share one global scope without collision
     "staff access": staffAccessScript,
     "staff duck": staffDuckScript,
     "start line": startLineScript,
+    announcer: announcerScript,
     "finish line": finishLineScript,
     "inventory intake": inventoryIntakeScript,
   };
@@ -275,6 +277,7 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotThrow(() => new Function(staffAccessScript));
   assert.doesNotThrow(() => new Function(liveScript));
   assert.doesNotThrow(() => new Function(startLineScript));
+  assert.doesNotThrow(() => new Function(announcerScript));
   assert.doesNotThrow(() => new Function(finishLineScript));
   assert.doesNotThrow(() => new Function(inventoryIntakeScript));
   assert.doesNotThrow(() => new Function(liveUiScript));
@@ -301,6 +304,13 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(staffDuckScript, /\/api\/v1\/staff\/registrations\/search/);
   assert.match(staffDuckScript, /registration\.email/);
   assert.match(staffDuckScript, /registration\.phone/);
+  // Scanning the duck someone is complaining about reaches the same moderation
+  // endpoint the participant console uses, with a command identifier.
+  assert.match(staffDuckScript, /\/clear-duck-name/);
+  assert.match(staffDuckScript, /commandId: crypto\.randomUUID\(\)/);
+  // The control is drawn only when the response carried the participant
+  // projection, which the API sends only to the roles that may clear a name.
+  assert.match(staffDuckScript, /if \(typeof participant\.registrationId !== "string"\) return;/);
   assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   // Returns tracking is gone from every browser client.
   assert.doesNotMatch(staffDuckScript, /\/dispositions|disposition/);
@@ -616,9 +626,17 @@ const confirmationCallsites = [
   [staffHomeScript, 'if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;'],
   [staffHomeScript, 'if (!await appConfirm(confirmation)) return;'],
   [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Commit this exact balanced plan? Rosters become operational race data.")) return;'],
   [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Permanently delete the registration for " + registration.firstName + " " + registration.lastName + "? This removes the participant and their race entry. This cannot be undone.", { danger: true })) return;'],
+  [staffHomeScript, `if (!await appConfirm(
+    "Clear the duck name chosen by " + registration.firstName + " " + registration.lastName
+    + "? The duck goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;`],
+  [staffDuckScript, `if (!await appConfirm(
+    "Clear this duck's chosen name? It goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;`],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
   [participantScript, `  const confirmed = await appConfirm(
     "Delete the registration for " + participantDisplayName(registration)
@@ -635,10 +653,13 @@ test("every confirmation callsite preserves its warning and returns before mutat
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((inventoryIntakeScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // 19 minus the four retired returns/purge confirmations, plus participant
-  // deletion.
+  // 19 minus the four retired returns/purge confirmations, minus the retired
+  // balanced-plan commit, plus participant deletion, plus clearing a duck name.
   assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 16);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  // The staff duck scan has exactly one destructive action of its own:
+  // moderating away a duck name. Pairing confirms through its own review step.
+  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // My Ducks has exactly one destructive action: self-service deletion.
   assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The dialog is defined once, by the one bundle every page loads first, so
@@ -652,9 +673,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
     staffDuckScript,
     staffHomeScript,
     startLineScript,
+    announcerScript,
     finishLineScript,
     inventoryIntakeScript,
-    liveScript,
   ]) assert.doesNotMatch(script, /const appConfirm = |appConfirmationQueue/);
 
   let mutations = 0;
@@ -678,9 +699,16 @@ test("browser clients contain no native confirmation calls", () => {
     liveScript,
     liveUiScript,
     startLineScript,
+    announcerScript,
     finishLineScript,
     inventoryIntakeScript,
   ]) assert.doesNotMatch(script, /\b(?:window\.)?confirm\s*\(/);
+});
+
+// The announcer is read-only, so it must never grow a confirmation prompt: a
+// prompt would mean it had acquired something to confirm.
+test("the announcer client has no confirmation dialog because it has nothing to confirm", () => {
+  assert.doesNotMatch(announcerScript, /\bappConfirm\(/);
 });
 
 const registrationHandoffHelpers = () => new Function(
@@ -1307,6 +1335,7 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
     participantScript,
     liveScript,
     startLineScript,
+    announcerScript,
     finishLineScript,
     inventoryIntakeScript,
     staffHomeScript,
@@ -1315,10 +1344,10 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
     assert.match(script, /quickDucksLive\.subscribe/);
   }
-  for (const script of [liveUiScript, participantScript, liveScript, startLineScript, finishLineScript]) {
+  for (const script of [liveUiScript, participantScript, liveScript, startLineScript, announcerScript, finishLineScript]) {
     assert.doesNotMatch(script, /setInterval/);
   }
-  for (const script of [participantScript, liveScript, startLineScript, finishLineScript]) {
+  for (const script of [participantScript, liveScript, startLineScript, announcerScript, finishLineScript]) {
     assert.doesNotMatch(script, /new WebSocket\(|liveCreatePollScheduler\(/);
   }
   assert.match(liveUiScript, /new WebSocketClass/);
@@ -1336,9 +1365,16 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
   assert.match(participantScript, /ArrowLeft/);
   assert.match(participantScript, /replaceChildren/);
   assert.match(participantScript, /textContent/);
-  assert.match(startLineScript, /PLANNED: \["lock"/);
+  // Rosters lock when the round starts, so the station offers no lock action
+  // and a planned heat is only ever a waiting state here.
+  assert.doesNotMatch(startLineScript, /"lock"/);
+  assert.match(startLineScript, /LOADING: \["ready"/);
   assert.match(startLineScript, /CALLING: \["start"/);
   assert.doesNotMatch(startLineScript, /\/results\/finalize|\["finish"/);
+  // The announcer only ever reads: the roster to call up and the results the
+  // finish line has already published.
+  assert.match(announcerScript, /announcer-roster/);
+  assert.doesNotMatch(announcerScript, /\/results\/finalize|\/lock|\/ready|\/call|\/start\b|\/finish\b/);
   assert.match(finishLineScript, /NDEFReader/);
   assert.match(finishLineScript, /That duck is already selected/);
   assert.match(finishLineScript, /That duck is not in the selected heat/);
@@ -1363,6 +1399,7 @@ const liveScripts = [
   liveScript,
   participantScript,
   startLineScript,
+  announcerScript,
   finishLineScript,
   inventoryIntakeScript,
   staffHomeScript,
@@ -1379,7 +1416,7 @@ test("no browser client renders ambient freshness or connection-status chatter",
   }
   // The shared hub no longer fans a connection status out to subscribers.
   assert.doesNotMatch(liveUiScript, /setStatus|subscriber\.status/);
-  for (const script of [liveScript, participantScript, startLineScript, finishLineScript]) {
+  for (const script of [liveScript, participantScript, startLineScript, announcerScript, finishLineScript]) {
     assert.doesNotMatch(script, /status:\s*\(status\)/);
   }
 });
@@ -1635,6 +1672,41 @@ test("a failed add restores the action and reports the failure on that result", 
   assert.equal(harness.navigation.hidden, true);
 });
 
+test("a search result shows the chosen duck name beside the duck number", async () => {
+  const named = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    return Response.json({
+      results: [searchResult({
+        duck: { visibleNumber: 12 },
+        duckName: "Sir Quacks-a-Lot",
+        assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
+        outcome: "NOT_RACED",
+      })],
+    });
+  });
+  await named.form.dispatch("submit");
+  assert.equal(
+    named.results.children[0].children[1].textContent,
+    "Duck #12 · Sir Quacks-a-Lot · Heat 3 · not raced",
+  );
+
+  // No name, or one the server's read-time filter suppressed, leaves the number
+  // exactly as it was.
+  const plain = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    return Response.json({
+      results: [searchResult({
+        duck: { visibleNumber: 12 },
+        duckName: null,
+        assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
+        outcome: "NOT_RACED",
+      })],
+    });
+  });
+  await plain.form.dispatch("submit");
+  assert.equal(plain.results.children[0].children[1].textContent, "Duck #12 · Heat 3 · not raced");
+});
+
 test("a search result without a follow identifier renders no add action", async () => {
   const harness = homeHarness((url) => {
     if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
@@ -1683,7 +1755,8 @@ const myDucksHarness = (route, search = "", confirmResult = true) => {
   empty.hidden = true;
   const awaiting = participantSection(document, "awaiting");
   const paired = participantSection(document, "paired");
-  page.append(error, success, empty, awaiting.section, paired.section);
+  const followed = participantSection(document, "followed");
+  page.append(error, success, empty, awaiting.section, paired.section, followed.section);
   document.append(navigation, page);
 
   const requests = [];
@@ -1696,6 +1769,7 @@ const myDucksHarness = (route, search = "", confirmResult = true) => {
   // client receives it from the shared global scope rather than defining it.
   const confirmations = [];
   const busy = [];
+  const cleaned = [];
   const appConfirm = async (message, options) => {
     confirmations.push({ message, options });
     return confirmResult;
@@ -1704,7 +1778,9 @@ const myDucksHarness = (route, search = "", confirmResult = true) => {
   new Function(
     "document", "location", "window", "globalThis", "requestAnimationFrame", "history", "fetch",
     "appConfirm",
-    participantScript,
+    // `duckDetailLink` ships in live-ui.js, which every page loads first, so the
+    // page client receives it from the shared classic scope.
+    [duckDetailHelpersScript, participantScript].join("\n"),
   )(
     document,
     { search, pathname: "/my-ducks", hash: "", origin: "https://quickducks.com" },
@@ -1715,6 +1791,7 @@ const myDucksHarness = (route, search = "", confirmResult = true) => {
           busy.push("begin");
           return () => busy.push("end");
         },
+        markClean(root) { cleaned.push(root); },
         subscribe(subscriber) { subscriptions.push(subscriber); },
       },
     },
@@ -1727,10 +1804,12 @@ const myDucksHarness = (route, search = "", confirmResult = true) => {
   return {
     awaiting,
     busy,
+    cleaned,
     confirmations,
     document,
     empty,
     error,
+    followed,
     navigation,
     paired,
     requests,
@@ -1748,9 +1827,42 @@ const collected = (registrationId, paired, overrides = {}) => ({
   followed: false,
   registrationStatus: "SUBMITTED",
   paired,
+  duckName: null,
+  nameable: false,
   raceStatus: null,
   ...overrides,
 });
+
+// The exact shape the server projects for a followed link: no first or last
+// name, no lookup code, no duck name, and never a naming or delete permission.
+const followedEntry = (registrationId, overrides = {}) => collected(registrationId, false, {
+  firstName: null,
+  lastName: null,
+  displayName: "Donald M.",
+  lookupCode: null,
+  duckName: null,
+  nameable: false,
+  followed: true,
+  ...overrides,
+});
+
+const pairedStatus = (visibleNumber = 12) => ({
+  event: { id: "event-1", slug: "race", name: "Race", eventDate: null, status: "ROUND_ONE" },
+  participantDisplayName: "Daisy D.",
+  duck: { visibleNumber },
+  assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
+  currentHeat: null,
+  outcome: "NOT_RACED",
+});
+
+const unfollowButton = (card) => card.descendants()
+  .find((node) => node.tagName === "BUTTON" && node.dataset.unfollowRegistration !== undefined) ?? null;
+
+const nameForm = (card) => card.descendants()
+  .find((node) => node.tagName === "FORM" && node.dataset.duckNameForm !== undefined) ?? null;
+
+const duckFact = (card) => card.descendants()
+  .find((node) => node.className === "fact" && node.children[0]?.textContent === "Duck") ?? null;
 
 const renderMyDucks = async (registrations) => {
   const harness = myDucksHarness(() => Response.json({ registrations }));
@@ -1827,16 +1939,13 @@ test("a live regroup moves a newly paired participant between the two sections",
 test("a followed card shows the policy display name and never a lookup code", async () => {
   const harness = await renderMyDucks([
     collected("11111111-1111-4111-8111-111111111111", false),
-    collected("22222222-2222-4222-8222-222222222222", false, {
-      firstName: null,
-      lastName: null,
-      displayName: "Donald M.",
-      lookupCode: null,
-      followed: true,
-    }),
+    followedEntry("22222222-2222-4222-8222-222222222222"),
   ]);
 
-  const [owned, followed] = harness.awaiting.track.children;
+  // Registered-on-this-device and followed are different things, so they live
+  // in different sections rather than being mixed by pairing state alone.
+  const [owned] = harness.awaiting.track.children;
+  const [followed] = harness.followed.track.children;
   assert.match(owned.text(), /Daisy Duck/);
   assert.match(owned.text(), /Staff lookup code: DAISY123/);
   assert.match(followed.text(), /Donald M\./);
@@ -1852,28 +1961,23 @@ test("the delete action appears only on an own removable entry, never on a follo
     // Own and unpaired, but the server did not mark it removable.
     collected("22222222-2222-4222-8222-222222222222", false, { deletable: false }),
     // Followed entries never carry a delete, even if `deletable` were wrong.
-    collected("33333333-3333-4333-8333-333333333333", false, {
-      firstName: null,
-      lastName: null,
-      displayName: "Donald M.",
-      lookupCode: null,
-      followed: true,
-      deletable: true,
-    }),
+    followedEntry("33333333-3333-4333-8333-333333333333", { deletable: true }),
     // Paired entries live in the other section and are never removable.
     collected("44444444-4444-4444-8444-444444444444", true, { deletable: false }),
   ]);
 
-  const [removable, notRemovable, followed] = harness.awaiting.track.children;
+  const [removable, notRemovable] = harness.awaiting.track.children;
   const [paired] = harness.paired.track.children;
+  const [followed] = harness.followed.track.children;
   assert.ok(deleteButton(removable), "an own removable entry offers deletion");
   assert.equal(deleteButton(removable).className, "button danger small");
   assert.equal(deleteButton(removable).textContent, "Delete registration");
   assert.equal(deleteButton(notRemovable), null);
   assert.equal(deleteButton(followed), null, "a followed entry is someone else's registration");
   assert.equal(deleteButton(paired), null);
-  // No delete action is silently repurposed into an unfollow.
-  assert.doesNotMatch(followed.text(), /Delete|Remove|Unfollow/);
+  // Removing a followed entry is a separate, non-destructive action: it never
+  // reuses or renames the registration delete.
+  assert.doesNotMatch(followed.text(), /Delete registration/);
   assert.equal(harness.confirmations.length, 0);
 });
 
@@ -1973,6 +2077,388 @@ test("the just-registered highlight survives the section-visibility change", asy
   assert.equal(card.getAttribute("aria-current"), "true");
   assert.equal(card.focusCalls, 1);
   assert.equal(card.scrollCalls, 1);
+});
+
+test("My Ducks separates own unpaired, own paired, and followed participants", async () => {
+  const harness = await renderMyDucks([
+    collected("11111111-1111-4111-8111-111111111111", false),
+    collected("22222222-2222-4222-8222-222222222222", true, { nameable: true, raceStatus: pairedStatus() }),
+    // A followed entry stays in the followed section whether or not its
+    // participant has been paired with a duck.
+    followedEntry("33333333-3333-4333-8333-333333333333", { paired: true, raceStatus: pairedStatus(88) }),
+  ]);
+
+  assert.equal(harness.awaiting.track.children.length, 1);
+  assert.equal(harness.paired.track.children.length, 1);
+  assert.equal(harness.followed.track.children.length, 1);
+  for (const section of [harness.awaiting, harness.paired, harness.followed]) {
+    assert.equal(section.section.hidden, false);
+    assert.equal(section.controls.hidden, false);
+  }
+  assert.equal(harness.empty.hidden, true);
+
+  // Own entries carry their full detail; the followed one carries only the
+  // public projection.
+  const [ownUnpaired] = harness.awaiting.track.children;
+  const [ownPaired] = harness.paired.track.children;
+  const [followed] = harness.followed.track.children;
+  assert.match(ownUnpaired.text(), /Staff lookup code: DAISY123/);
+  assert.match(ownPaired.text(), /Staff lookup code: DAISY123/);
+  assert.doesNotMatch(followed.text(), /DAISY123|lookup code:/i);
+
+  // Only the owner's paired card offers naming, and only the followed card
+  // offers unfollowing.
+  assert.equal(nameForm(ownUnpaired), null, "there is no duck to name yet");
+  assert.ok(nameForm(ownPaired), "a paired own entry can be named");
+  assert.equal(nameForm(followed), null, "a followed duck belongs to someone else");
+  assert.equal(unfollowButton(ownUnpaired), null);
+  assert.equal(unfollowButton(ownPaired), null);
+  assert.ok(unfollowButton(followed), "a followed entry can be removed from this list");
+  assert.equal(unfollowButton(followed).className, "button secondary small");
+  assert.equal(unfollowButton(followed).textContent, "Stop following");
+
+  // An empty followed group hides its own section like the other two.
+  const ownOnly = await renderMyDucks([collected("11111111-1111-4111-8111-111111111111", false)]);
+  assert.equal(ownOnly.followed.section.hidden, true);
+  assert.equal(ownOnly.followed.track.children.length, 0);
+});
+
+test("the owner's card shows the chosen duck name and keeps the number beside it", async () => {
+  const harness = await renderMyDucks([
+    collected("22222222-2222-4222-8222-222222222222", true, {
+      nameable: true,
+      duckName: "Sir Quacks-a-Lot",
+      raceStatus: pairedStatus(12),
+    }),
+  ]);
+
+  const [card] = harness.paired.track.children;
+  const fact = duckFact(card);
+  const value = fact.children[1];
+  const link = value.children[0];
+  assert.equal(link.tagName, "A");
+  assert.equal(link.className, "duck-number-link");
+  assert.equal(link.textContent, "Sir Quacks-a-Lot", "the chosen name replaces Duck #12");
+  assert.equal(link.href, "/duck/12", "the link still points at the public duck page");
+  // The number stays visible so the card matches the physical duck.
+  assert.equal(value.children[1].textContent, "Duck #12");
+  assert.equal(value.children[1].className, "duck-number-note");
+  // The naming form is pre-filled for renaming, and now says plainly that the
+  // name is public and that staff can remove it.
+  const form = nameForm(card);
+  assert.match(form.text(), /Rename this duck/);
+  assert.match(form.text(), /shown publicly beside this duck’s number/);
+  assert.match(form.text(), /race staff can remove a name that is not/);
+});
+
+test("a followed entry never renders a duck name even if one is sent", async () => {
+  const harness = await renderMyDucks([
+    followedEntry("33333333-3333-4333-8333-333333333333", {
+      paired: true,
+      duckName: "Not Mine To Name",
+      nameable: true,
+      raceStatus: pairedStatus(88),
+    }),
+  ]);
+
+  const [card] = harness.followed.track.children;
+  assert.doesNotMatch(card.text(), /Not Mine To Name/);
+  assert.equal(duckFact(card).children[1].children[0].textContent, "Duck #88");
+  assert.equal(nameForm(card), null);
+});
+
+test("naming posts the trimmed value once and rerenders from the collection", async () => {
+  const registrationId = "22222222-2222-4222-8222-222222222222";
+  let duckName = null;
+  const harness = myDucksHarness((url) => url.endsWith("/mine/duck-name")
+    ? Response.json({ named: true, duckName: "Bubbles", replayed: false })
+    : Response.json({
+      registrations: [collected(registrationId, true, {
+        nameable: true,
+        duckName,
+        raceStatus: pairedStatus(12),
+      })],
+    }));
+  await harness.subscriptions[0].refresh();
+
+  const form = nameForm(harness.paired.track.children[0]);
+  const input = form.descendants().find((node) => node.tagName === "INPUT");
+  assert.equal(input.maxLength, 40);
+  input.value = "  Bubbles   the   Third  ";
+  duckName = "Bubbles the Third";
+  await form.dispatch("submit");
+
+  const request = harness.requests.find((item) => item.url.endsWith("/mine/duck-name"));
+  assert.ok(request, "the name must reach the public endpoint");
+  assert.equal(request.options.method, "POST");
+  assert.equal(request.options.headers["content-type"], "application/json");
+  const payload = JSON.parse(request.options.body);
+  assert.deepEqual(Object.keys(payload).sort(), ["commandId", "duckName", "registrationId"]);
+  assert.equal(payload.registrationId, registrationId);
+  assert.equal(payload.duckName, "Bubbles the Third", "the client trims and collapses before sending");
+  assert.match(payload.commandId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+
+  // The card is repainted from the authoritative collection, not the response,
+  // and the edited field is marked clean so live refreshes resume.
+  assert.equal(harness.requests.at(-1).url, "/api/v1/registrations/mine");
+  assert.equal(harness.cleaned.at(-1), form);
+  assert.deepEqual(harness.busy, ["begin", "end"]);
+  const link = duckFact(harness.paired.track.children[0]).children[1].children[0];
+  assert.equal(link.textContent, "Bubbles the Third");
+});
+
+test("a blank or overlong duck name never reaches the endpoint", async () => {
+  const registrationId = "22222222-2222-4222-8222-222222222222";
+  const harness = myDucksHarness(() => Response.json({
+    registrations: [collected(registrationId, true, { nameable: true, raceStatus: pairedStatus() })],
+  }));
+  await harness.subscriptions[0].refresh();
+
+  const form = nameForm(harness.paired.track.children[0]);
+  const input = form.descendants().find((node) => node.tagName === "INPUT");
+  const feedback = form.children.at(-1);
+
+  for (const value of ["", "   ", "a".repeat(41)]) {
+    input.value = value;
+    await form.dispatch("submit");
+    assert.equal(feedback.hidden, false, JSON.stringify(value));
+    assert.match(feedback.textContent, /1 to 40 characters/);
+    assert.equal(harness.requests.some((item) => item.url.includes("duck-name")), false);
+    assert.deepEqual(harness.busy, [], "a rejected value never starts a mutation");
+  }
+});
+
+test("a failed name save restores the action and reports it on that card", async () => {
+  const registrationId = "22222222-2222-4222-8222-222222222222";
+  const harness = myDucksHarness((url) => url.endsWith("/mine/duck-name")
+    ? Response.json({ error: "conflict" }, { status: 409 })
+    : Response.json({
+      registrations: [collected(registrationId, true, { nameable: true, raceStatus: pairedStatus() })],
+    }));
+  await harness.subscriptions[0].refresh();
+
+  const form = nameForm(harness.paired.track.children[0]);
+  const input = form.descendants().find((node) => node.tagName === "INPUT");
+  const button = form.descendants().find((node) => node.tagName === "BUTTON");
+  input.value = "Bubbles";
+  await form.dispatch("submit");
+
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Save name");
+  const feedback = form.children.at(-1);
+  assert.equal(feedback.hidden, false);
+  assert.match(feedback.textContent, /could not be saved/);
+  assert.deepEqual(harness.busy, ["begin", "end"]);
+});
+
+test("unfollowing posts the guarded command and refetches the collection", async () => {
+  const registrationId = "33333333-3333-4333-8333-333333333333";
+  let registrations = [followedEntry(registrationId)];
+  const harness = myDucksHarness((url) => url.endsWith("/mine/unfollow")
+    ? Response.json({ unfollowed: true, replayed: false })
+    : Response.json({ registrations }));
+  await harness.subscriptions[0].refresh();
+
+  const button = unfollowButton(harness.followed.track.children[0]);
+  registrations = [];
+  await button.dispatch("click");
+
+  // Unfollowing is reversible, so it asks for no destructive confirmation.
+  assert.equal(harness.confirmations.length, 0);
+  const request = harness.requests.find((item) => item.url.endsWith("/mine/unfollow"));
+  assert.ok(request, "the unfollow must reach its own endpoint");
+  assert.equal(request.options.method, "POST");
+  assert.equal(request.options.headers["content-type"], "application/json");
+  const payload = JSON.parse(request.options.body);
+  assert.deepEqual(Object.keys(payload).sort(), ["commandId", "registrationId"]);
+  assert.equal(payload.registrationId, registrationId);
+  assert.match(payload.commandId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  // The delete endpoint is never involved.
+  assert.equal(harness.requests.some((item) => item.url.includes("/mine/delete")), false);
+
+  assert.equal(harness.requests.at(-1).url, "/api/v1/registrations/mine");
+  assert.equal(harness.followed.track.children.length, 0);
+  assert.equal(harness.followed.section.hidden, true);
+  assert.equal(harness.empty.hidden, false);
+  assert.deepEqual(harness.busy, ["begin", "end"]);
+});
+
+test("a failed unfollow keeps the card and reports the failure on it", async () => {
+  const registrationId = "33333333-3333-4333-8333-333333333333";
+  const harness = myDucksHarness((url) => url.endsWith("/mine/unfollow")
+    ? Response.json({ error: "Not found." }, { status: 404 })
+    : Response.json({ registrations: [followedEntry(registrationId)] }));
+  await harness.subscriptions[0].refresh();
+
+  const card = harness.followed.track.children[0];
+  const button = unfollowButton(card);
+  await button.dispatch("click");
+
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Stop following");
+  const feedback = card.children.at(-1);
+  assert.equal(feedback.hidden, false);
+  assert.match(feedback.textContent, /could not be removed from My Ducks/);
+  assert.equal(harness.followed.track.children.length, 1);
+});
+
+// The public duck pages ship the follow control in participant.js, the
+// browser-collection client, so a duck scan can add the participant without the
+// board client ever touching a collection endpoint.
+const duckPageHarness = (route, pathname, inMyDucks = false) => {
+  const document = new QuickDocument("#document");
+  const navigation = document.createElement("a");
+  navigation.dataset.myDucksNav = "";
+  navigation.hidden = true;
+  const follow = document.createElement("div");
+  follow.dataset.duckFollow = "";
+  follow.dataset.followId = "11111111-1111-4111-8111-111111111111";
+  const message = document.createElement("p");
+  message.dataset.followMessage = "";
+  message.hidden = true;
+  const button = document.createElement("button");
+  button.dataset.followButton = "";
+  button.textContent = "Follow this duck";
+  const added = document.createElement("span");
+  added.dataset.followAdded = "";
+  added.textContent = "In My Ducks";
+  follow.append(inMyDucks ? added : button);
+  document.append(navigation, follow, message);
+
+  const requests = [];
+  const subscriptions = [];
+  const busy = [];
+  new Function(
+    "document", "location", "window", "globalThis", "requestAnimationFrame", "history", "fetch",
+    "appConfirm",
+    // `duckDetailLink` ships in live-ui.js, which every page loads first, so the
+    // page client receives it from the shared classic scope.
+    [duckDetailHelpersScript, participantScript].join("\n"),
+  )(
+    document,
+    { search: "", pathname, hash: "", origin: "https://quickducks.com" },
+    { addEventListener() {} },
+    {
+      quickDucksLive: {
+        beginBusy() {
+          busy.push("begin");
+          return () => busy.push("end");
+        },
+        markClean() {},
+        subscribe(subscriber) { subscriptions.push(subscriber); },
+      },
+    },
+    (callback) => callback(),
+    { replaceState() {}, state: null },
+    async (url, options = {}) => {
+      requests.push({ url: String(url), options });
+      return route(String(url), options);
+    },
+    async () => true,
+  );
+  return { busy, button, document, follow, message, navigation, requests, subscriptions };
+};
+
+const followResponse = (overrides = {}) => Response.json({
+  destination: "RACE_STATUS",
+  raceStatus: {
+    ...pairedStatus(12),
+    followId: "11111111-1111-4111-8111-111111111111",
+    inMyDucks: false,
+    ...overrides,
+  },
+});
+
+test("a tag scan offers one follow action that adds the duck and reveals the nav", async () => {
+  const harness = duckPageHarness((url) => url.startsWith("/api/v1/registrations/mine/follow")
+    ? Response.json({ followed: true, alreadyInCollection: false })
+    : url.startsWith("/api/v1/ducks/") ? followResponse() : Response.json({ hasRegistrations: false }), "/t/tag-token-value");
+
+  assert.equal(harness.navigation.hidden, true);
+  await harness.button.dispatch("click");
+
+  const request = harness.requests.find((item) => item.url.endsWith("/mine/follow"));
+  assert.ok(request, "the follow must reach the existing follow endpoint");
+  assert.equal(request.options.method, "POST");
+  assert.deepEqual(JSON.parse(request.options.body), {
+    followId: "11111111-1111-4111-8111-111111111111",
+  });
+  // The confirmed state is a plain tag plus a way into the saved list.
+  assert.equal(harness.follow.children[0].textContent, "In My Ducks");
+  assert.equal(harness.follow.children[0].className, "success-tag");
+  assert.equal(harness.follow.children[1].href, "/my-ducks");
+  assert.equal(harness.navigation.hidden, false);
+  assert.equal(harness.navigation.dataset.hasRegistrations, "true");
+  assert.deepEqual(harness.busy, ["begin", "end"]);
+});
+
+test("the duck page follow control repaints from the authoritative duck response", async () => {
+  const states = [
+    ["/t/tag-token-value", "/api/v1/ducks/tag-token-value"],
+    ["/duck/12", "/api/v1/ducks/number/12"],
+  ];
+  for (const [pathname, expectedUrl] of states) {
+    let inMyDucks = false;
+    const harness = duckPageHarness(
+      (url) => url.startsWith("/api/v1/ducks/") ? followResponse({ inMyDucks }) : Response.json({ hasRegistrations: false }),
+      pathname,
+    );
+    // The presence probe and the follow control each subscribe or fetch once.
+    const followSubscription = harness.subscriptions.at(-1);
+    await followSubscription.refresh();
+    assert.equal(harness.requests.some((item) => item.url === expectedUrl), true, expectedUrl);
+    assert.equal(harness.follow.children[0].dataset.followButton, "");
+    assert.equal(harness.follow.children[0].textContent, "Follow this duck");
+
+    inMyDucks = true;
+    await followSubscription.refresh();
+    assert.equal(harness.follow.children[0].textContent, "In My Ducks");
+    assert.equal(harness.follow.hidden, false);
+
+    // A participant who stops being followable loses the control entirely
+    // rather than keeping a dead button.
+    const gone = duckPageHarness(
+      (url) => url.startsWith("/api/v1/ducks/")
+        ? Response.json({ destination: "RACE_STATUS", raceStatus: pairedStatus(12) })
+        : Response.json({ hasRegistrations: false }),
+      pathname,
+    );
+    await gone.subscriptions.at(-1).refresh();
+    assert.equal(gone.follow.hidden, true);
+    assert.equal(gone.follow.children.length, 0);
+  }
+});
+
+test("a page without a follow container holds no follow subscription at all", async () => {
+  const document = new QuickDocument("#document");
+  const navigation = document.createElement("a");
+  navigation.dataset.myDucksNav = "";
+  document.append(navigation);
+  const requests = [];
+  const subscriptions = [];
+  new Function(
+    "document", "location", "window", "globalThis", "requestAnimationFrame", "history", "fetch",
+    "appConfirm",
+    // `duckDetailLink` ships in live-ui.js, which every page loads first, so the
+    // page client receives it from the shared classic scope.
+    [duckDetailHelpersScript, participantScript].join("\n"),
+  )(
+    document,
+    { search: "", pathname: "/", hash: "", origin: "https://quickducks.com" },
+    { addEventListener() {} },
+    { quickDucksLive: { beginBusy: () => () => {}, markClean() {}, subscribe(s) { subscriptions.push(s); } } },
+    (callback) => callback(),
+    { replaceState() {}, state: null },
+    async (url) => {
+      requests.push(String(url));
+      return Response.json({ hasRegistrations: false });
+    },
+    async () => true,
+  );
+  await Promise.resolve();
+
+  assert.deepEqual(subscriptions, []);
+  assert.deepEqual(requests, ["/api/v1/registrations/mine/presence"]);
 });
 
 const liveBoardStageHelpers = () => new Function(
@@ -2748,6 +3234,91 @@ test("live board entries link a visible duck number and stay plain text when una
   assert.equal(pending.children.length, 0);
   assert.equal(nodeText(pending), "Duck number pending");
   assert.equal(pending.children.some((child) => child.tagName === "A"), false);
+});
+
+test("a board entry shows the chosen duck name beside the number it never replaces", () => {
+  const { api } = liveDuckPage();
+
+  const named = api.liveBoardDuckCell({
+    participantDisplayName: "Jamie R.",
+    duckNumber: 128,
+    duckName: "Sir Quacks-a-Lot",
+    place: null,
+  });
+  // The link text is still the canonical number; the name rides beside it.
+  assert.equal(named.children[0].tagName, "A");
+  assert.equal(named.children[0].textContent, "Duck #128");
+  assert.equal(named.children[0].href, "/duck/128");
+  assert.equal(nodeText(named), "Duck #128 · Sir Quacks-a-Lot");
+
+  // A placed entry keeps number, name, and place in that order.
+  assert.equal(
+    nodeText(api.liveBoardDuckCell({
+      participantDisplayName: "Jamie R.",
+      duckNumber: 4,
+      duckName: "Bubbles",
+      place: 1,
+    })),
+    "Duck #4 · Bubbles · 1st place",
+  );
+
+  // A suppressed, cleared, or absent name simply leaves the number.
+  for (const duckName of [null, undefined, ""]) {
+    assert.equal(
+      nodeText(api.liveBoardDuckCell({
+        participantDisplayName: "Jamie R.",
+        duckNumber: 7,
+        duckName,
+        place: null,
+      })),
+      "Duck #7",
+      String(duckName),
+    );
+  }
+
+  // An entry with no duck number carries no name either.
+  assert.equal(
+    nodeText(api.liveBoardDuckCell({
+      participantDisplayName: "Jamie R.",
+      duckNumber: null,
+      duckName: "Bubbles",
+      place: null,
+    })),
+    "Duck number pending",
+  );
+
+  // The name is a text node built by the shared helper, never markup.
+  const hostile = api.liveBoardDuckCell({
+    participantDisplayName: "Jamie R.",
+    duckNumber: 9,
+    duckName: "<img src=x onerror=alert(1)>",
+    place: null,
+  });
+  assert.equal(nodeText(hostile), "Duck #9 · <img src=x onerror=alert(1)>");
+  assert.equal(hostile.children.some((child) => child.tagName === "IMG"), false);
+});
+
+test("the public duck detail page shows the chosen name beside the number", async () => {
+  const page = liveDuckPage({
+    raceStatus: {
+      participantDisplayName: "Jamie R.",
+      duck: { visibleNumber: 128 },
+      duckName: "Sir Quacks-a-Lot",
+      assignedHeat: { roundOne: null, final: null },
+      currentHeat: null,
+      outcome: "HEAT_ASSIGNMENT_PENDING",
+    },
+  });
+
+  await page.api.liveRefreshWork();
+
+  // The live repaint mirrors the server-rendered fact exactly.
+  assert.deepEqual(
+    page.personal.children[0].children
+      .map((fact) => fact.children.map((part) => part.textContent))
+      .find(([label]) => label === "Duck"),
+    ["Duck", "Duck #128 · Sir Quacks-a-Lot"],
+  );
 });
 
 const participantCards = () => {

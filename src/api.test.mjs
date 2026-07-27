@@ -969,6 +969,7 @@ const duckNumberRow = {
   registration_status: "ACTIVE",
   race_entry_id: "entry_test",
   visible_number: 128,
+  duck_name: "Sir Quacks-a-Lot",
   round_one_heat_number: 7,
   round_one_heat_status: "FINALIZED",
   round_one_place: 1,
@@ -1023,12 +1024,19 @@ test("resolves a public duck number to the shared public projection only", async
       },
       participantDisplayName: "Daisy D.",
       duck: { visibleNumber: 128 },
+      // The participant-chosen name is public, and it always travels beside the
+      // canonical duck number rather than replacing it.
+      duckName: "Sir Quacks-a-Lot",
       assignedHeat: {
         roundOne: { number: 7, status: "FINALIZED" },
         final: null,
       },
       currentHeat: { round: "ROUND_ONE", number: 5, status: "RUNNING" },
       outcome: "ROUND_ONE_WINNER",
+      // The follow signals ride on the same object the public name search
+      // already puts them on, and carry nothing else.
+      followId: "entry_test",
+      inMyDucks: false,
     },
   });
   assert.equal(response.headers.get("cache-control"), "no-store");
@@ -1046,10 +1054,21 @@ test("the public duck number projection exposes no contact, code, token, or staf
     "email", "phone", "lookupCode", "lookup_code", "privateToken", "privateTokenHash",
     "private_token_hash", "token", "tagToken", "tag_token", "privateStatusPath",
     "inventoryLocation", "inventory_location", "notes", "staffNotes", "staff_notes",
-    "auditEvents", "firstName", "lastName", "registrationId", "followId",
+    "auditEvents", "firstName", "lastName", "registrationId", "duck_name",
   ]) {
     assert.equal(keys.includes(forbidden), false, `key ${forbidden} must not be projected`);
   }
+  // The duck name is now deliberately public, mapped to camelCase like every
+  // other projected field, and it never replaces the duck number.
+  assert.equal(keys.includes("duckName"), true);
+  assert.equal(values.includes("Sir Quacks-a-Lot"), true);
+  // `followId` is the one added identifier, and it is the same inert race entry
+  // identifier the public name search already returns for the same entries. It
+  // unlocks nothing but the follow endpoint, which revalidates it.
+  assert.deepEqual(
+    keys.filter((key) => key === "followId" || key === "inMyDucks").sort(),
+    ["followId", "inMyDucks"],
+  );
   for (const forbidden of [
     "daisy@example.com", "555-0100", "DUCK8234", "hash-value",
     "tag-token-value", "Shed B", "Ask about the cracked bill.",

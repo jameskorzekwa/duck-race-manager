@@ -139,17 +139,23 @@ interface RosterRow {
   race_entry_id: string;
   slot_number: number;
   assignment_source: string;
+  registration_id: string;
   first_name: string;
   last_name: string;
   registration_status: string;
   duck_assignment_id: string | null;
+  duck_id: string | null;
   visible_number: number | null;
 }
 
+// The registration and duck identifiers are the console's existing selection
+// keys for the participant and inventory sections, so a roster entry can link
+// straight into them. They are internal identifiers, not participant contact
+// data, and the duck join already excludes closed assignments.
 const rosterSql = `SELECT he.id AS heat_entry_id, he.race_entry_id, he.slot_number,
-       he.assignment_source, r.first_name, r.last_name,
+       he.assignment_source, r.id AS registration_id, r.first_name, r.last_name,
        r.status AS registration_status, da.id AS duck_assignment_id,
-       d.visible_number
+       da.duck_id, d.visible_number
   FROM heat_entries he
   JOIN race_entries re ON re.id = he.race_entry_id
   JOIN registrations r ON r.id = re.registration_id
@@ -197,11 +203,14 @@ const rosterResponse = (row: RosterRow): Record<string, unknown> => ({
   slotNumber: row.slot_number,
   assignmentSource: row.assignment_source,
   participant: {
+    registrationId: row.registration_id,
     firstName: row.first_name,
     lastName: row.last_name,
     registrationStatus: row.registration_status,
   },
-  duck: row.visible_number === null ? null : { visibleNumber: row.visible_number },
+  duck: row.visible_number === null
+    ? null
+    : { id: row.duck_id, visibleNumber: row.visible_number },
 });
 
 const resultResponseRow = (row: PublishedResultRow): Record<string, unknown> => ({
@@ -228,6 +237,21 @@ const getHeatDetail = async (env: Env, eventId: string, heatId: string): Promise
   });
 };
 
+// The announcer projection is deliberately slot, participant name, and duck
+// number, and it deliberately does NOT carry the participant-chosen duck name
+// even though that name is now public everywhere else.
+//
+// This station is a script for someone holding a live microphone. Reading a name
+// out loud is the one place where a name that slipped past the filter stops
+// being text a visitor can look away from and becomes a public-address
+// announcement to a family event, with no undo and no moderation step in
+// between. The board, the duck pages, and the search results are all filtered
+// text that staff can clear in seconds; a spoken word cannot be cleared at all.
+//
+// The number is also what the announcer actually needs: the roster is read out
+// to line racers up against the duck in the water, and a chosen name is one more
+// ambiguous token to get wrong at volume. Nothing is lost by leaving it out —
+// the announcer can see it on the participant console if they ever need it.
 const announcerRoster = async (env: Env, eventId: string, heatId: string): Promise<Response> => {
   const heat = await getHeatSummary(env, eventId, heatId);
   if (heat === null) return json({ error: "Heat not found." }, 404);
@@ -340,242 +364,28 @@ const finishScan = async (url: URL, env: Env, eventId: string, heatId: string): 
     : json({ error: "That duck is not in the selected heat." }, 422);
 };
 
-interface PlanEntryRow {
-  race_entry_id: string;
-  duck_assignment_id: string;
-  first_name: string;
-  last_name: string;
-  visible_number: number;
-}
-
-interface PlannedHeat {
-  number: number;
-  entries: PlanEntryRow[];
-}
-
-interface RoundOnePlan {
-  eventId: string;
-  capacity: number;
-  fingerprint: string;
-  heats: PlannedHeat[];
-}
-
-const createRoundOnePlan = async (env: Env, eventId: string): Promise<RoundOnePlan | Response> => {
-  const event = await env.DB.prepare(
-    `SELECT id, status, heat_assignment_mode, round_one_heat_capacity,
-            final_heat_capacity
-       FROM events WHERE id = ?`,
-  ).bind(eventId).first<{
-    id: string;
-    status: string;
-    heat_assignment_mode: string;
-    round_one_heat_capacity: number;
-    final_heat_capacity: number;
-  }>();
-  if (event === null) return json({ error: "Event not found." }, 404);
-  if (event.status !== "REGISTRATION_CLOSED") {
-    return json({ error: "Round-one planning requires closed registration." }, 409);
-  }
-  if (event.heat_assignment_mode !== "POST_CLOSE_BALANCED") {
-    return json({ error: "This event assigns heats during duck pairing." }, 409);
-  }
-  const existing = await env.DB.prepare(
-    "SELECT id FROM heats WHERE event_id = ? AND round = 'ROUND_ONE' LIMIT 1",
-  ).bind(eventId).first<{ id: string }>();
-  if (existing !== null) return json({ error: "Round-one heats are already committed." }, 409);
-
-  const entries = await env.DB.prepare(
-    `SELECT re.id AS race_entry_id, da.id AS duck_assignment_id,
-            r.first_name, r.last_name, d.visible_number
-       FROM race_entries re
-       JOIN registrations r ON r.id = re.registration_id
-       JOIN duck_assignments da
-         ON da.race_entry_id = re.id AND da.event_id = re.event_id AND da.valid_to IS NULL
-       JOIN ducks d ON d.id = da.duck_id
-      WHERE re.event_id = ? AND r.status = 'ACTIVE'
-      ORDER BY d.visible_number, re.id`,
-  ).bind(eventId).all<PlanEntryRow>();
-  if (entries.results.length === 0) {
-    return json({ error: "No active paired participants are available for round one." }, 409);
-  }
-
-  const heatCount = Math.ceil(entries.results.length / event.round_one_heat_capacity);
-  if (heatCount > event.final_heat_capacity) {
-    return json({
-      error: `Round one requires ${heatCount} heats, which exceeds the final capacity of ${event.final_heat_capacity}.`,
-    }, 409);
-  }
-  const baseSize = Math.floor(entries.results.length / heatCount);
-  const largerHeatCount = entries.results.length % heatCount;
-  const heats: PlannedHeat[] = [];
-  let offset = 0;
-  for (let index = 0; index < heatCount; index += 1) {
-    const size = baseSize + (index < largerHeatCount ? 1 : 0);
-    heats.push({ number: index + 1, entries: entries.results.slice(offset, offset + size) });
-    offset += size;
-  }
-  const planFingerprint = await fingerprint({
-    eventId,
-    capacity: event.round_one_heat_capacity,
-    entries: entries.results.map((entry) => [entry.race_entry_id, entry.duck_assignment_id]),
-  });
-  return { eventId, capacity: event.round_one_heat_capacity, fingerprint: planFingerprint, heats };
+// Rosters are editable in the window before their round starts, which is the
+// only window in which they are still unlocked plans: starting a round locks
+// every planned heat of that round to LOADING in the same batch as the status
+// change, so a heat that is PLANNED and unlocked and whose event has already
+// reached that round cannot exist. Round-one rosters are therefore replaceable
+// while registration is closed, and the final's roster while round one runs,
+// which is exactly where the readiness blockers send an operator to remove a
+// withdrawn racer or repair an undersized heat.
+const rosterEditableEventStatus: Record<Round, string> = {
+  ROUND_ONE: "REGISTRATION_CLOSED",
+  FINAL: "ROUND_ONE",
 };
 
-const planResponse = (plan: RoundOnePlan, committed: boolean, replayed = false): Response => json({
-  eventId: plan.eventId,
-  round: "ROUND_ONE",
-  capacity: plan.capacity,
-  fingerprint: plan.fingerprint,
-  balanced: Math.max(...plan.heats.map((heat) => heat.entries.length))
-    - Math.min(...plan.heats.map((heat) => heat.entries.length)) <= 1,
-  committed,
-  replayed,
-  heats: plan.heats.map((heat) => ({
-    number: heat.number,
-    size: heat.entries.length,
-    entries: heat.entries.map((entry, index) => ({
-      slotNumber: index + 1,
-      raceEntryId: entry.race_entry_id,
-      participant: { firstName: entry.first_name, lastName: entry.last_name },
-      duck: { visibleNumber: entry.visible_number },
-    })),
-  })),
-}, committed && !replayed ? 201 : 200);
+const rosterCommandCommitted = `EXISTS (
+    SELECT 1 FROM race_commands rc
+     WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = 'REPLACE_HEAT_ROSTER'
+       AND rc.result_id = ?
+  )`;
 
-const previewRoundOnePlan = async (env: Env, eventId: string): Promise<Response> => {
-  const plan = await createRoundOnePlan(env, eventId);
-  return plan instanceof Response ? plan : planResponse(plan, false);
-};
-
-const committedPlan = async (env: Env, eventId: string): Promise<RoundOnePlan | null> => {
-  const event = await env.DB.prepare(
-    "SELECT round_one_heat_capacity FROM events WHERE id = ?",
-  ).bind(eventId).first<{ round_one_heat_capacity: number }>();
-  if (event === null) return null;
-  const rows = await env.DB.prepare(
-    `SELECT h.heat_number, he.slot_number, re.id AS race_entry_id,
-            da.id AS duck_assignment_id, r.first_name, r.last_name, d.visible_number
-       FROM heats h
-       JOIN heat_entries he ON he.heat_id = h.id
-       JOIN race_entries re ON re.id = he.race_entry_id
-       JOIN registrations r ON r.id = re.registration_id
-       JOIN duck_assignments da ON da.id = (
-         SELECT da2.id FROM duck_assignments da2
-          WHERE da2.event_id = he.event_id AND da2.race_entry_id = he.race_entry_id
-          ORDER BY da2.valid_from DESC LIMIT 1
-       )
-       JOIN ducks d ON d.id = da.duck_id
-      WHERE h.event_id = ? AND h.round = 'ROUND_ONE'
-      ORDER BY h.heat_number, he.slot_number`,
-  ).bind(eventId).all<PlanEntryRow & { heat_number: number; slot_number: number }>();
-  if (rows.results.length === 0) return null;
-  const heats = new Map<number, PlanEntryRow[]>();
-  for (const row of rows.results) {
-    const entries = heats.get(row.heat_number) ?? [];
-    entries.push(row);
-    heats.set(row.heat_number, entries);
-  }
-  const planFingerprint = await fingerprint({
-    eventId,
-    capacity: event.round_one_heat_capacity,
-    entries: rows.results
-      .slice()
-      .sort((a, b) => a.visible_number - b.visible_number || a.race_entry_id.localeCompare(b.race_entry_id))
-      .map((entry) => [entry.race_entry_id, entry.duck_assignment_id]),
-  });
-  return {
-    eventId,
-    capacity: event.round_one_heat_capacity,
-    fingerprint: planFingerprint,
-    heats: [...heats].map(([number, entries]) => ({ number, entries })),
-  };
-};
-
-const commitRoundOnePlan = async (
-  request: Request,
-  env: Env,
-  actor: StaffActor,
-  eventId: string,
-): Promise<Response> => {
-  const payload = await readJson(request);
-  const commandId = payload?.commandId;
-  const expectedFingerprint = payload?.fingerprint;
-  if (typeof commandId !== "string" || !isCommandId(commandId) || typeof expectedFingerprint !== "string") {
-    return json({ error: "Command identifier and preview fingerprint are required." }, 400);
-  }
-  const requestFingerprint = await fingerprint({ eventId, expectedFingerprint });
-  const previous = await findCommand(env, commandId);
-  if (previous !== null) {
-    if (!commandMatches(previous, eventId, eventId, "COMMIT_ROUND_ONE_PLAN", requestFingerprint)) {
-      return json({ error: "This command identifier was already used for another operation." }, 409);
-    }
-    const replay = await committedPlan(env, eventId);
-    return replay === null
-      ? json({ error: "The committed heat plan is no longer available." }, 409)
-      : planResponse(replay, true, true);
-  }
-
-  const plan = await createRoundOnePlan(env, eventId);
-  if (plan instanceof Response) return plan;
-  if (plan.fingerprint !== expectedFingerprint) {
-    return json({ error: "The participant roster changed. Preview the heat plan again." }, 409);
-  }
-
-  const now = new Date().toISOString();
-  const statements: D1PreparedStatement[] = [env.DB.prepare(
-    `INSERT INTO race_commands
-      (id, event_id, command_type, result_id, requested_at, completed_at,
-       actor_staff_profile_id, request_fingerprint)
-     SELECT ?, ?, 'COMMIT_ROUND_ONE_PLAN', ?, ?, ?, ?, ?
-       FROM events e
-      WHERE e.id = ? AND e.status = 'REGISTRATION_CLOSED'
-        AND e.heat_assignment_mode = 'POST_CLOSE_BALANCED'
-        AND NOT EXISTS (
-          SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
-        )`,
-  ).bind(commandId, eventId, eventId, now, now, actor.id, requestFingerprint, eventId)];
-  for (const heat of plan.heats) {
-    const heatId = crypto.randomUUID();
-    statements.push(env.DB.prepare(
-      `INSERT INTO heats
-        (id, event_id, round, heat_number, status, target_size, source_command_id)
-       VALUES (?, ?, 'ROUND_ONE', ?, 'PLANNED', ?, ?)`,
-    ).bind(heatId, eventId, heat.number, heat.entries.length, commandId));
-    for (const [index, entry] of heat.entries.entries()) {
-      statements.push(env.DB.prepare(
-        `INSERT INTO heat_entries
-          (id, event_id, heat_id, race_entry_id, round, slot_number,
-           assignment_source, assigned_at, source_command_id)
-         VALUES (?, ?, ?, ?, 'ROUND_ONE', ?, 'BALANCED_DRAW', ?, ?)`,
-      ).bind(crypto.randomUUID(), eventId, heatId, entry.race_entry_id, index + 1, now, commandId));
-    }
-  }
-  statements.push(
-    env.DB.prepare(
-      `INSERT INTO audit_events
-        (id, event_id, command_id, action, subject_type, subject_id,
-         actor_type, occurred_at, details_json)
-       VALUES (?, ?, ?, 'ROUND_ONE_PLAN_COMMITTED', 'EVENT', ?, 'STAFF', ?, ?)`,
-    ).bind(
-      crypto.randomUUID(),
-      eventId,
-      commandId,
-      eventId,
-      now,
-      JSON.stringify({
-        staff_profile_id: actor.id,
-        fingerprint: plan.fingerprint,
-        heat_sizes: plan.heats.map((heat) => heat.entries.length),
-      }),
-    ),
-  );
-  try {
-    await env.DB.batch(statements);
-  } catch {
-    return json({ error: "The heat plan conflicted with another update. Preview it again." }, 409);
-  }
-  return planResponse(plan, true);
+const rosterWindowError: Record<Round, string> = {
+  ROUND_ONE: "A round-one roster can be replaced only while registration is closed and round one has not started.",
+  FINAL: "The final roster can be replaced only during round one, before the final starts.",
 };
 
 const updateRoster = async (
@@ -613,6 +423,12 @@ const updateRoster = async (
   if (heat === null) return json({ error: "Heat not found." }, 404);
   if (heat.status !== "PLANNED" || heat.roster_locked_at !== null) {
     return json({ error: "A heat roster can be edited only before it is locked." }, 409);
+  }
+  const event = await env.DB.prepare("SELECT status FROM events WHERE id = ?")
+    .bind(eventId).first<{ status: string }>();
+  if (event === null) return json({ error: "Event not found." }, 404);
+  if (event.status !== rosterEditableEventStatus[heat.round]) {
+    return json({ error: rosterWindowError[heat.round] }, 409);
   }
   if (heat.revision !== revision) return json({ error: "The heat changed. Refresh and try again." }, 409);
 
@@ -654,10 +470,19 @@ const updateRoster = async (
         FROM heats h JOIN events e ON e.id = h.event_id
         WHERE h.id = ? AND h.event_id = ? AND h.status = 'PLANNED'
           AND h.roster_locked_at IS NULL AND h.revision = ?
-          AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
-            OR (h.round = 'FINAL' AND e.status = 'FINAL'))`,
+          AND ((h.round = 'ROUND_ONE' AND e.status = 'REGISTRATION_CLOSED')
+            OR (h.round = 'FINAL' AND e.status = 'ROUND_ONE'))`,
     ).bind(commandId, eventId, heatId, now, now, actor.id, requestFingerprint, heatId, eventId, revision),
-    env.DB.prepare("DELETE FROM heat_entries WHERE event_id = ? AND heat_id = ?").bind(eventId, heatId),
+    // The command row above is the sentinel for the rest of the batch: when its
+    // guard rejected the write, this delete matches nothing and the whole
+    // replacement is a no-op instead of depending on a later foreign key to
+    // fail. The inserts below still carry `source_command_id`, so both layers
+    // agree on the same committed command.
+    env.DB.prepare(
+      `DELETE FROM heat_entries
+        WHERE event_id = ? AND heat_id = ?
+          AND ${rosterCommandCommitted}`,
+    ).bind(eventId, heatId, commandId, eventId, heatId),
   ];
   for (const [index, raceEntryId] of ids.entries()) {
     statements.push(env.DB.prepare(
@@ -682,8 +507,9 @@ const updateRoster = async (
       `UPDATE heats SET target_size = ?, revision = revision + 1,
               source_command_id = ?, updated_at = ?
         WHERE id = ? AND event_id = ? AND status = 'PLANNED'
-          AND roster_locked_at IS NULL AND revision = ?`,
-    ).bind(ids.length, commandId, now, heatId, eventId, revision),
+          AND roster_locked_at IS NULL AND revision = ?
+          AND ${rosterCommandCommitted}`,
+    ).bind(ids.length, commandId, now, heatId, eventId, revision, commandId, eventId, heatId),
     env.DB.prepare(
       `INSERT INTO audit_events
         (id, event_id, command_id, action, subject_type, subject_id,
@@ -1546,15 +1372,6 @@ export const handleHeatOperations = async (
   if (suffix === "/heats" && request.method === "GET") {
     const denied = requireAnyRole(actor, raceReadRoles);
     return denied ?? listHeats(env, eventId);
-  }
-  if (suffix === "/heats/round-one/plan-preview" && request.method === "POST") {
-    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
-    return denied ?? previewRoundOnePlan(env, eventId);
-  }
-  if (suffix === "/heats/round-one/plan-commit" && request.method === "POST") {
-    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
-    if (denied !== null) return denied;
-    return commitRoundOnePlan(request, env, actor, eventId);
   }
   if (suffix === "/finalists" && request.method === "GET") {
     const denied = requireAnyRole(actor, raceReadRoles);

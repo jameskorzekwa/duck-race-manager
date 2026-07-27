@@ -1,5 +1,6 @@
 import { publicPhaseByStatus } from "./public-phase.ts";
 import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
+import { DUCK_NAME_MAX_LENGTH } from "./registration.ts";
 
 export const confirmationDialogScript = String.raw`
 const appConfirmationQueue = [];
@@ -440,10 +441,23 @@ const participantAddFact = (container, label, value) => {
   container.append(fact);
 };
 
+// A participant-chosen duck name is owner-only. The server sends it for
+// 'REGISTRATION' links and never for a followed one, and this guard repeats
+// that rule so the name can only ever be drawn on its owner's own card.
+const participantDuckName = (registration) => {
+  if (!registration || registration.followed === true) return null;
+  const name = typeof registration.duckName === "string" ? registration.duckName.trim() : "";
+  return name.length === 0 ? null : name;
+};
+
 // A paired card links its duck number to the public duck detail view. An
-// awaiting card has no duck number, so it keeps plain text and no link.
-const participantAddDuckFact = (facts, status) => {
-  const link = duckDetailLink(document, status.duck ? status.duck.visibleNumber : null);
+// awaiting card has no duck number, so it keeps plain text and no link. When
+// the owner named this duck, the name replaces "Duck #N" as the link text and
+// the number stays beside it, quietly, so the card still matches the physical
+// duck.
+const participantAddDuckFact = (facts, status, registration) => {
+  const duckName = participantDuckName(registration);
+  const link = duckDetailLink(document, status.duck ? status.duck.visibleNumber : null, duckName);
   if (link === null) {
     participantAddFact(facts, "Duck", "Waiting for duck assignment");
     return;
@@ -451,17 +465,20 @@ const participantAddDuckFact = (facts, status) => {
   const fact = participantText("div", "", "fact");
   const value = participantText("dd", "");
   value.append(link);
+  if (duckName !== null) {
+    value.append(participantText("span", "Duck #" + status.duck.visibleNumber, "duck-number-note"));
+  }
   fact.append(participantText("dt", "Duck"), value);
   facts.append(fact);
 };
 
-const participantAddRaceFacts = (card, status) => {
+const participantAddRaceFacts = (card, status, registration) => {
   if (!status) {
     card.append(participantText("p", "Race status is not currently public.", "muted"));
     return;
   }
   const facts = participantText("dl", "", "facts");
-  participantAddDuckFact(facts, status);
+  participantAddDuckFact(facts, status, registration);
   const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
   participantAddFact(facts, "Assigned heat", assigned
     ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
@@ -553,6 +570,158 @@ const participantDeleteControls = (registration) => {
   return [actions, feedback];
 };
 
+// Unfollowing is offered only for a followed link, and it removes only that
+// link. The endpoint is separate from deletion on purpose: it can never reach
+// the registration itself, which belongs to whoever created it.
+const participantCanUnfollow = (registration) => registration.followed === true;
+
+const participantUnfollow = async (registration, button, feedback) => {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Removing…";
+  feedback.textContent = "";
+  feedback.hidden = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    let removed = false;
+    try {
+      const response = await fetch("/api/v1/registrations/mine/unfollow", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          registrationId: registration.registrationId,
+        }),
+      });
+      removed = response.ok;
+    } catch {
+      removed = false;
+    }
+    if (!removed) {
+      button.disabled = false;
+      button.textContent = label;
+      feedback.textContent = "That participant could not be removed from My Ducks. Please try again.";
+      feedback.hidden = false;
+      return;
+    }
+    // The card disappears only when the authoritative collection says so.
+    participantVersion = null;
+    await participantRefreshWork();
+  } finally {
+    endBusy();
+  }
+};
+
+const participantUnfollowControls = (registration) => {
+  const actions = participantText("div", "", "actions");
+  const feedback = participantText("p", "", "message-line muted");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
+  const button = participantText("button", "Stop following", "button secondary small");
+  button.type = "button";
+  button.dataset.unfollowRegistration = registration.registrationId;
+  button.addEventListener("click", () => participantUnfollow(registration, button, feedback));
+  actions.append(button);
+  return [actions, feedback];
+};
+
+// Naming is offered only for a registration this browser created and that the
+// server still reports as nameable, which means a duck is currently paired to
+// it. The server recomputes both conditions inside its guarded write, so this
+// flag is presentation only.
+const participantCanName = (registration) =>
+  registration.followed !== true && registration.nameable === true;
+
+const participantNameLimit = ${JSON.stringify(DUCK_NAME_MAX_LENGTH)};
+
+const participantCleanName = (value) =>
+  String(value == null ? "" : value).trim().replace(/\s+/g, " ");
+
+const participantSaveName = async (registration, form, input, button, feedback) => {
+  const duckName = participantCleanName(input.value);
+  // The same bound the server and the schema enforce, checked here only so a
+  // participant sees the problem without a round trip.
+  if (duckName.length === 0 || duckName.length > participantNameLimit) {
+    feedback.textContent = "Enter a duck name of 1 to " + participantNameLimit + " characters.";
+    feedback.hidden = false;
+    return;
+  }
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Saving…";
+  feedback.textContent = "";
+  feedback.hidden = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    let saved = false;
+    // A 422 is the server refusing this particular name, not a failure to
+    // reach it, so it gets its own message and no "try again". The rejected
+    // text is never echoed by the server and is never repeated here.
+    let refused = false;
+    try {
+      const response = await fetch("/api/v1/registrations/mine/duck-name", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          registrationId: registration.registrationId,
+          duckName,
+        }),
+      });
+      saved = response.ok;
+      refused = response.status === 422;
+    } catch {
+      saved = false;
+    }
+    if (!saved) {
+      button.disabled = false;
+      button.textContent = label;
+      feedback.textContent = refused
+        ? "That name can’t be used on the public race board. Please choose another one."
+        : "That duck name could not be saved. Please try again.";
+      feedback.hidden = false;
+      return;
+    }
+    // The saved name is read back from the authoritative collection, never from
+    // this response, and the field is clean again so live refreshes resume.
+    globalThis.quickDucksLive.markClean(form);
+    participantVersion = null;
+    await participantRefreshWork();
+  } finally {
+    endBusy();
+  }
+};
+
+const participantNameControls = (registration) => {
+  const named = participantDuckName(registration) !== null;
+  const form = participantText("form", "", "duck-name-form");
+  form.dataset.duckNameForm = registration.registrationId;
+  const label = participantText("label", named ? "Rename this duck" : "Give this duck a name");
+  const input = document.createElement("input");
+  input.name = "duckName";
+  input.type = "text";
+  input.maxLength = participantNameLimit;
+  input.value = named ? participantDuckName(registration) : "";
+  input.placeholder = "Sir Quacks-a-Lot";
+  label.append(input);
+  const button = participantText("button", named ? "Save new name" : "Save name", "button small");
+  button.type = "submit";
+  const feedback = participantText("p", "", "message-line muted");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
+  form.append(
+    label,
+    button,
+    participantText("p", "The name you choose is shown publicly beside this duck’s number, on the race board and its duck page. Keep it friendly: race staff can remove a name that is not.", "muted"),
+    feedback,
+  );
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    return participantSaveName(registration, form, input, button, feedback);
+  });
+  return form;
+};
+
 const participantCard = (registration) => {
   const current = registration.registrationId === participantCurrentId;
   const card = participantText("article", "", "duck-card participant-card" + (current ? " is-current" : ""));
@@ -566,11 +735,13 @@ const participantCard = (registration) => {
   }
   card.append(participantText("h3", participantDisplayName(registration)));
   card.append(registration.followed
-    ? participantText("p", "Added from the public race status search. Followed participants have no staff lookup code here.", "muted")
+    ? participantText("p", "Followed from a duck tag, a duck page, or the race status search. Followed participants have no staff lookup code here.", "muted")
     : participantText("p", "Staff lookup code: " + registration.lookupCode));
   card.append(participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"));
-  participantAddRaceFacts(card, registration.raceStatus);
+  participantAddRaceFacts(card, registration.raceStatus, registration);
   if (participantCanDelete(registration)) card.append(...participantDeleteControls(registration));
+  if (participantCanUnfollow(registration)) card.append(...participantUnfollowControls(registration));
+  if (participantCanName(registration)) card.append(participantNameControls(registration));
   return card;
 };
 
@@ -625,6 +796,7 @@ window.addEventListener("resize", () => {
 // successful full collection response, so nothing flashes before data loads.
 const participantRenderSection = (kind, registrations) => {
   const section = participantSections.find((item) => item.dataset.participantSection === kind);
+  if (!section) return;
   const track = section.querySelector("[data-participant-track]");
   const controls = section.querySelector("[data-carousel-controls]");
   track.replaceChildren(...registrations.map(participantCard));
@@ -660,8 +832,17 @@ const participantRender = (registrations) => {
   }
   if (version !== participantVersion || justRegistered) {
     participantVersion = version;
-    participantRenderSection("awaiting", registrations.filter((registration) => !registration.paired));
-    participantRenderSection("paired", registrations.filter((registration) => registration.paired));
+    // Three groups, one rule: a participant registered on this device is
+    // "mine" and keeps its full detail, and everything else is a followed
+    // duck with the public projection only. The awaiting/paired split stays
+    // exactly as it was for the registrations this device owns.
+    const owned = registrations.filter((registration) => registration.followed !== true);
+    participantRenderSection("awaiting", owned.filter((registration) => !registration.paired));
+    participantRenderSection("paired", owned.filter((registration) => registration.paired));
+    participantRenderSection(
+      "followed",
+      registrations.filter((registration) => registration.followed === true),
+    );
     // Both sections can be hidden, so keep one guidance message instead of an
     // otherwise blank page.
     if (participantEmpty) participantEmpty.hidden = registrations.length > 0;
@@ -687,6 +868,116 @@ const participantRender = (registrations) => {
     participantCleanRegisteredQuery();
   });
   else participantCleanRegisteredQuery();
+};
+
+// ---------------------------------------------------------------------------
+// Duck-page follow control
+//
+// The two public duck pages (/t/<tag> and /duck/<number>) carry one optional
+// control: adding the participant this duck belongs to into this browser's My
+// Ducks list. It lives in this client, not in the board client, because this is
+// the browser-collection client: it already owns the collection endpoints and
+// the My Ducks nav presence rule.
+//
+// The server paints the control's state, and the authoritative duck response
+// repaints it, so a control is offered only while the follow endpoint would
+// actually accept it.
+// ---------------------------------------------------------------------------
+const participantFollowRoot = document.querySelector("[data-duck-follow]");
+const participantFollowMessage = document.querySelector("[data-follow-message]");
+let participantFollowBusy = false;
+
+// The duck page addresses itself by tag token or by visible number, and the
+// follow signals come from that same public endpoint.
+const participantDuckStatusPath = () => {
+  const parts = location.pathname.split("/");
+  if (parts.length !== 3 || parts[2].length === 0) return null;
+  if (parts[1] === "t") return "/api/v1/ducks/" + encodeURIComponent(parts[2]);
+  if (parts[1] === "duck") return "/api/v1/ducks/number/" + encodeURIComponent(parts[2]);
+  return null;
+};
+
+const participantShowFollowMessage = (message) => {
+  if (!participantFollowMessage) return;
+  participantFollowMessage.textContent = message === null ? "" : message;
+  participantFollowMessage.hidden = message === null;
+};
+
+const participantFollowAdded = () => {
+  const tag = participantText("span", "In My Ducks", "success-tag");
+  tag.dataset.followAdded = "";
+  const link = participantText("a", "Open My Ducks", "button secondary small");
+  link.href = "/my-ducks";
+  return [tag, link];
+};
+
+const participantFollow = async (followId, button) => {
+  participantFollowBusy = true;
+  button.disabled = true;
+  button.textContent = "Adding…";
+  participantShowFollowMessage(null);
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    let followed = false;
+    try {
+      const response = await fetch("/api/v1/registrations/mine/follow", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ followId }),
+      });
+      followed = response.ok;
+    } catch {
+      followed = false;
+    }
+    if (!followed) {
+      button.disabled = false;
+      button.textContent = "Follow this duck";
+      participantShowFollowMessage("That participant could not be added to My Ducks. Please try again.");
+      return;
+    }
+    participantFollowRoot.replaceChildren(...participantFollowAdded());
+    // This device now holds a saved entry, so record the presence half of the
+    // My Ducks nav rule and reveal the link immediately.
+    participantSetNavPresence(true);
+  } finally {
+    participantFollowBusy = false;
+    endBusy();
+  }
+};
+
+// A followId is present only while this participant is genuinely followable, so
+// its absence removes the control instead of rendering a dead button.
+const participantRenderFollow = (status) => {
+  if (!participantFollowRoot || participantFollowBusy) return;
+  if (!status || typeof status.followId !== "string") {
+    participantFollowRoot.replaceChildren();
+    participantFollowRoot.hidden = true;
+    participantShowFollowMessage(null);
+    return;
+  }
+  participantFollowRoot.hidden = false;
+  participantFollowRoot.dataset.followId = status.followId;
+  if (status.inMyDucks === true) {
+    participantFollowRoot.replaceChildren(...participantFollowAdded());
+    return;
+  }
+  const button = participantText("button", "Follow this duck", "button");
+  button.type = "button";
+  button.dataset.followButton = "";
+  button.addEventListener("click", () => participantFollow(status.followId, button));
+  participantFollowRoot.replaceChildren(button);
+};
+
+const participantRefreshFollow = async () => {
+  const path = participantDuckStatusPath();
+  if (path === null) return;
+  const response = await fetch(path, { headers: { accept: "application/json" }, cache: "no-store" });
+  // A duck that stopped being public is handled by the board client's own
+  // reload path; this control simply keeps whatever the server painted.
+  if (!response.ok) return;
+  const body = await response.json();
+  if (document.hidden) return;
+  participantRenderFollow(body.raceStatus);
 };
 
 const participantFetch = async () => {
@@ -730,6 +1021,30 @@ if (participantRoot) {
   });
 } else {
   participantFetch().catch(() => {});
+}
+
+// The server-rendered button is wired immediately so the control works before
+// any refetch, and the duck page then keeps it in step with the authoritative
+// duck response. Every other page has no follow container and subscribes
+// nothing here, so it still holds no live connection of its own.
+if (participantFollowRoot) {
+  const participantServerFollow = participantFollowRoot.querySelector("[data-follow-button]");
+  if (participantServerFollow) {
+    participantServerFollow.addEventListener("click", () => participantFollow(
+      participantFollowRoot.dataset.followId,
+      participantServerFollow,
+    ));
+  }
+  globalThis.quickDucksLive.subscribe({
+    domains: ["event", "participants", "ducks"],
+    root: participantFollowRoot,
+    refresh: async () => {
+      try {
+        await participantRefreshFollow();
+      } catch {}
+    },
+    isBlocked: () => participantFollowBusy,
+  });
 }
 `;
 
@@ -1030,12 +1345,15 @@ const duckDetailPath = (duckNumber) => "/duck/" + encodeURIComponent(String(duck
 // Returns null unless a real duck number is assigned, so an unpaired entry
 // renders plain text and never an empty or misleading link. The node is built
 // with safe DOM APIs and is a plain navigation with no script behaviour.
-const duckDetailLink = (documentObject, duckNumber) => {
+// The optional label replaces only the visible text, never the destination, and
+// only one surface passes it: the owner's own My Ducks card, where a
+// participant-chosen duck name stands in for "Duck #N".
+const duckDetailLink = (documentObject, duckNumber, label) => {
   if (typeof duckNumber !== "number" || !Number.isInteger(duckNumber) || duckNumber <= 0) return null;
   const link = documentObject.createElement("a");
   link.className = "duck-number-link";
   link.href = duckDetailPath(duckNumber);
-  link.textContent = "Duck #" + duckNumber;
+  link.textContent = typeof label === "string" && label.length > 0 ? label : "Duck #" + duckNumber;
   return link;
 };
 `;
@@ -1230,6 +1548,16 @@ const liveAddFact = (container, label, value) => {
   container.append(fact);
 };
 
+// Mirrors the server's duck identity exactly: the canonical number first, then
+// the participant-chosen name when the server's read-time filter allowed one.
+const liveDuckIdentity = (status) => {
+  if (!status.duck) return "Waiting for duck assignment";
+  const number = "Duck #" + status.duck.visibleNumber;
+  return typeof status.duckName === "string" && status.duckName.length > 0
+    ? number + " · " + status.duckName
+    : number;
+};
+
 const liveRaceFacts = (container, status, includeParticipant) => {
   if (!status) {
     container.append(liveText("p", "Race status is not currently public.", "muted"));
@@ -1237,7 +1565,7 @@ const liveRaceFacts = (container, status, includeParticipant) => {
   }
   const facts = liveText("dl", "", "facts");
   if (includeParticipant) liveAddFact(facts, "Participant", status.participantDisplayName);
-  liveAddFact(facts, "Duck", status.duck ? "Duck #" + status.duck.visibleNumber : "Waiting for duck assignment");
+  liveAddFact(facts, "Duck", liveDuckIdentity(status));
   const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
   liveAddFact(facts, "Assigned heat", assigned
     ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
@@ -1251,11 +1579,22 @@ const liveRaceFacts = (container, status, includeParticipant) => {
 
 // A board entry links to the public duck detail view whenever it actually shows
 // a duck number. Entries still waiting for a duck keep plain pending text.
+//
+// The link text stays the canonical "Duck #N" so the board always matches the
+// duck in the water; a participant-chosen name is appended beside it as a plain
+// text node, like every other value here.
+const liveBoardDuckName = (entry) =>
+  typeof entry.duckName === "string" && entry.duckName.length > 0 ? entry.duckName : null;
+
 const liveBoardDuckCell = (entry) => {
   const cell = liveText("span", "");
   const link = duckDetailLink(document, entry.duckNumber);
   if (link === null) cell.textContent = "Duck number pending";
   else cell.append(link);
+  const duckName = liveBoardDuckName(entry);
+  if (link !== null && duckName !== null) {
+    cell.append(liveText("span", " · " + duckName, "duck-name-note"));
+  }
   if (entry.place !== null) {
     cell.append(liveText("span", " · " + livePlaceLabel(entry.place) + " place"));
   }
@@ -1271,7 +1610,7 @@ const liveDuckDetailFacts = (container, status) => {
   }
   const facts = liveText("dl", "", "facts");
   liveAddFact(facts, "Participant", status.participantDisplayName);
-  liveAddFact(facts, "Duck", status.duck ? "Duck #" + status.duck.visibleNumber : "Waiting for duck assignment");
+  liveAddFact(facts, "Duck", liveDuckIdentity(status));
   liveAddFact(facts, "Round one heat", status.assignedHeat.roundOne
     ? "Heat " + status.assignedHeat.roundOne.number + " · " + duckHeatStatusLabel(status.assignedHeat.roundOne.status)
     : "Not assigned yet");
@@ -1348,6 +1687,10 @@ const liveRenderBoard = (board) => {
       const place = liveText("p", livePlaceLabel(entry.place) + " · " + entry.participantDisplayName, "podium-place");
       const link = duckDetailLink(document, entry.duckNumber);
       if (link !== null) place.append(liveText("span", " · "), link);
+      const duckName = liveBoardDuckName(entry);
+      if (link !== null && duckName !== null) {
+        place.append(liveText("span", " · " + duckName, "duck-name-note"));
+      }
       places.append(place);
     }
     podium.append(places);
@@ -1434,8 +1777,9 @@ const liveRefreshPersonal = async () => {
     const body = await liveFetchJson("/api/v1/ducks/" + encodeURIComponent(token));
     if (document.hidden) return;
     personal.replaceChildren();
-    if (body.destination === "RACE_STATUS") liveRaceFacts(personal, body.raceStatus, true);
-    else {
+    if (body.destination === "RACE_STATUS") {
+      liveRaceFacts(personal, body.raceStatus, true);
+    } else {
       document.querySelector("main")?.replaceChildren();
       location.replace("/");
     }
@@ -1539,14 +1883,17 @@ const startRender = (event, detail) => {
   }
   if (detail.roster.length === 0) startRoster.append(startText("li", "This heat has no roster entries."));
   startAction.replaceChildren();
+  // Rosters lock automatically when the round starts, so this station never
+  // offers a lock action and a still-planned heat is simply waiting.
   const transition = {
-    PLANNED: ["lock", "Lock roster"],
     LOADING: ["ready", "Mark heat ready"],
     READY: ["call", "Call this heat"],
     CALLING: ["start", "Start this heat"],
   }[detail.heat.status];
   if (!transition) {
-    startMessage.textContent = detail.heat.status === "AWAITING_RESULT"
+    startMessage.textContent = detail.heat.status === "PLANNED"
+      ? "This roster locks by itself when the race director starts the round."
+      : detail.heat.status === "AWAITING_RESULT"
       ? "This heat is awaiting its official result. No other heat may start until the finish line publishes it."
       : detail.heat.status === "RUNNING"
       ? "This heat is running. The finish line must mark it finished."
@@ -1618,6 +1965,215 @@ if (startRoot) {
     root: startRoot,
     refresh: startLoadWork,
     isBlocked: () => startCommandBusy,
+  });
+}
+`;
+
+// Pure wording and selection helpers for the announcer station, split out so the
+// shipped decisions are exercised directly rather than through a copy of them.
+export const announcerHelpersScript = String.raw`
+// The announcer follows the race itself, so this station reads the event that is
+// actually racing. A completed race still needs its podium read out, so it is
+// the fallback rather than nothing.
+const announcerPickEvent = (events) => (Array.isArray(events) ? events : []).find(
+  (item) => item.status === "ROUND_ONE" || item.status === "FINAL",
+) || (Array.isArray(events) ? events : []).find((item) => item.status === "COMPLETED") || null;
+const announcerHeatLabel = (heat) => heat.round === "FINAL" ? "The final" : "Round one · Heat " + heat.number;
+// One plain sentence telling the person holding the microphone what to do now.
+const announcerCues = {
+  PLANNED: "Coming up next. Read these racers out now.",
+  LOADING: "Ducks are going in. Read these racers out now.",
+  READY: "Ready to race. Read these racers out now.",
+  CALLING: "Being called to the water. Read these racers out now.",
+  RUNNING: "Racing now. Call the race.",
+  AWAITING_RESULT: "Finished. Hold for the official result from the finish line.",
+};
+const announcerCue = (status) => Object.prototype.hasOwnProperty.call(announcerCues, status)
+  ? announcerCues[status]
+  : "Waiting for this heat to be confirmed.";
+const announcerPlaceLabel = (place) => place === 1 ? "First place"
+  : place === 2 ? "Second place"
+  : place === 3 ? "Third place"
+  : "Place " + place;
+const announcerDuckLine = (duckNumber) => typeof duckNumber === "number" && duckNumber > 0
+  ? "Duck #" + duckNumber
+  : "Duck not assigned";
+// Announcers say the whole name, so both parts are always read out together.
+const announcerFullName = (participant) => participant
+  ? (String(participant.firstName || "") + " " + String(participant.lastName || "")).trim()
+  : "";
+`;
+
+// The announcer holds a microphone, so this station is a read-only script. Every
+// request it makes is a GET and it never sends a command, a revision, or a
+// command ID: the start line and the finish line own every transition.
+export const announcerScript = stationStateHelpersScript + announcerHelpersScript + String.raw`
+const announcerRoot = document.querySelector("[data-announcer]");
+const announcerEventLine = document.querySelector("[data-station-event]");
+const announcerHeatTitle = document.querySelector("[data-announcer-heat]");
+const announcerCueLine = document.querySelector("[data-announcer-cue]");
+const announcerRosterList = document.querySelector("[data-announcer-roster]");
+const announcerPodium = document.querySelector("[data-announcer-podium]");
+const announcerPodiumList = document.querySelector("[data-announcer-podium-list]");
+const announcerProgress = document.querySelector("[data-announcer-progress]");
+const announcerResultsList = document.querySelector("[data-announcer-results]");
+const announcerResultsEmpty = document.querySelector("[data-announcer-results-empty]");
+const announcerMessage = document.querySelector("[data-station-message]");
+// A finalized heat only changes when a race director corrects it, which bumps
+// the heat revision. Keying this cache on the revision and the published count
+// means each decided heat is read once, a correction is picked up immediately,
+// and a live signal never refetches the whole race.
+const announcerResultCache = new Map();
+let announcerRenderKey = null;
+
+const announcerText = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value == null ? "" : String(value);
+  if (className) element.className = className;
+  return element;
+};
+const announcerHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+const announcerApi = async (url) => {
+  const response = await fetch(url, { headers: { accept: "application/json" }, cache: "no-store" });
+  if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
+    location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
+    throw new Error("signed-out");
+  }
+  let body = null;
+  try { body = await response.json(); } catch {}
+  if (!response.ok) throw new Error(body && body.error ? body.error : "The race could not be refreshed.");
+  return body;
+};
+const announcerLine = (label, name, duckNumber, className) => {
+  const item = document.createElement("li");
+  if (className) item.className = className;
+  item.append(
+    announcerText("span", label, "announcer-label"),
+    announcerText("strong", name, "announcer-name"),
+    announcerText("span", announcerDuckLine(duckNumber), "announcer-duck"),
+  );
+  return item;
+};
+const announcerRenderCurrent = (event, current) => {
+  if (!current) {
+    announcerHeatTitle.textContent = "No heat is up right now";
+    announcerCueLine.textContent = event.status === "COMPLETED"
+      ? "Every heat has been decided. Read the official podium below."
+      : "Nothing to read out yet. The next heat appears here on its own.";
+    announcerRosterList.replaceChildren(announcerText("li", "The racers to announce will appear here."));
+    return;
+  }
+  announcerHeatTitle.textContent = announcerHeatLabel(current.heat);
+  announcerCueLine.textContent = announcerCue(current.heat.status);
+  announcerRosterList.replaceChildren();
+  for (const entry of current.roster) {
+    announcerRosterList.append(announcerLine("Slot " + entry.slotNumber, entry.displayName, entry.duckNumber));
+  }
+  if (current.roster.length === 0) {
+    announcerRosterList.append(announcerText("li", "This heat has no racers on its roster yet."));
+  }
+};
+const announcerRenderDecided = (decided) => {
+  announcerResultsList.replaceChildren();
+  announcerPodiumList.replaceChildren();
+  let podium = false;
+  for (const entry of decided) {
+    const winner = entry.results.find((row) => row.place === 1);
+    const heatLabel = announcerHeatLabel(entry.heat);
+    announcerResultsList.append(winner
+      ? announcerLine(
+        heatLabel,
+        "Winner: " + announcerFullName(winner.participant),
+        winner.duck ? winner.duck.visibleNumber : null,
+        entry.heat.round === "FINAL" ? "final-heat" : "",
+      )
+      : announcerText("li", heatLabel + " · Winner not recorded yet"));
+    // The final is announced as a full podium, not just its winner.
+    if (entry.heat.round !== "FINAL" || entry.results.length === 0) continue;
+    for (const row of entry.results) {
+      announcerPodiumList.append(announcerLine(
+        announcerPlaceLabel(row.place),
+        announcerFullName(row.participant),
+        row.duck ? row.duck.visibleNumber : null,
+        "podium-place",
+      ));
+    }
+    podium = true;
+  }
+  announcerPodium.hidden = !podium;
+  announcerResultsEmpty.hidden = decided.length > 0;
+};
+const announcerRender = (event, heats, current, decided) => {
+  const renderKey = JSON.stringify([event.id, event.name, event.status, current, decided]);
+  if (renderKey === announcerRenderKey) return;
+  announcerRenderKey = renderKey;
+  announcerEventLine.textContent = event.name + " · " + announcerHumanize(event.status);
+  announcerRenderCurrent(event, current);
+  announcerRenderDecided(decided);
+  const raceable = heats.filter((heat) => heat.status !== "CANCELLED").length;
+  announcerProgress.textContent = decided.length === 0
+    ? "No heat has an official result yet."
+    : decided.length + " of " + raceable + " heat" + (raceable === 1 ? "" : "s") + " decided.";
+};
+const announcerEmpty = (message) => {
+  announcerRenderKey = null;
+  announcerEventLine.textContent = message;
+  announcerHeatTitle.textContent = "No heat is up yet";
+  announcerCueLine.textContent = "The racers to announce will appear here.";
+  announcerRosterList.replaceChildren(announcerText("li", "Waiting for the official roster."));
+  announcerPodium.hidden = true;
+  announcerPodiumList.replaceChildren();
+  announcerResultsList.replaceChildren();
+  announcerResultsEmpty.hidden = false;
+  announcerProgress.textContent = "Waiting for the first official result.";
+};
+const announcerLoadWork = async () => {
+  try {
+    const events = await announcerApi("/api/v1/staff/events");
+    if (document.hidden) return;
+    const event = announcerPickEvent(events.events);
+    if (!event) {
+      announcerEmpty("No race is on the water right now.");
+      return;
+    }
+    const eventPath = "/api/v1/staff/events/" + encodeURIComponent(event.id);
+    const listed = await announcerApi(eventPath + "/heats");
+    if (document.hidden) return;
+    const upcoming = startPickHeat(listed.heats, event.status === "FINAL" ? "FINAL" : "ROUND_ONE");
+    // The announcer roster projection is exactly slot, full name, and duck
+    // number, which is exactly what gets said out loud and nothing more.
+    const current = upcoming === null
+      ? null
+      : await announcerApi(eventPath + "/heats/" + encodeURIComponent(upcoming.id) + "/announcer-roster");
+    if (document.hidden) return;
+    const decided = [];
+    for (const heat of listed.heats) {
+      if (!(heat.publishedResultCount > 0)) continue;
+      const key = heat.revision + ":" + heat.publishedResultCount;
+      const cached = announcerResultCache.get(heat.id);
+      if (cached && cached.key === key) {
+        decided.push({ heat, results: cached.results });
+        continue;
+      }
+      const detail = await announcerApi(eventPath + "/heats/" + encodeURIComponent(heat.id));
+      const results = Array.isArray(detail.results) ? detail.results : [];
+      announcerResultCache.set(heat.id, { key, results });
+      decided.push({ heat, results });
+    }
+    if (document.hidden) return;
+    announcerRender(event, listed.heats, current, decided);
+    announcerMessage.textContent = "This station only reads. It never changes the race.";
+  } catch (error) {
+    // The station message line remains the actionable operational error surface.
+    if (error.message !== "signed-out") announcerMessage.textContent = error.message;
+  }
+};
+if (announcerRoot) {
+  globalThis.quickDucksLive.subscribe({
+    domains: ["event", "participants", "ducks", "heats"],
+    root: announcerRoot,
+    refresh: announcerLoadWork,
   });
 }
 `;
@@ -3162,7 +3718,117 @@ const createInventoryDetailController = ({ detail, list, closeButton, clear }) =
 };
 `;
 
-export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + inventoryDetailHelpersScript + String.raw`
+// Inventory sectioning. The grouping is derived from the states the inventory
+// API already reports for every duck — its `inventoryStatus`, its most recent
+// event reservation, and its open participant assignment — so the console never
+// invents an inventory state of its own.
+//
+// A duck is "in use" when it is committed to a race: it holds an unreleased
+// reservation, it is paired with a participant, or its status is already
+// IN_USE. It is "ready to be reserved" when it is not committed and its status
+// is AVAILABLE, which is exactly the state the assign and pairing paths accept.
+// Everything else (NEW mid-provisioning, QUARANTINED, DAMAGED, RETIRED,
+// MISSING, UNACCOUNTED_FOR, KEPT) cannot be reserved and is kept visible in a
+// third group rather than dropped from the list.
+export const inventoryGroupHelpersScript = String.raw`
+const inventoryGroupDefinitions = [
+  {
+    key: "IN_USE",
+    title: "In use",
+    description: "Reserved to a race, paired with a participant, or racing now.",
+    emptyMessage: "No ducks are reserved or paired yet.",
+    alwaysRender: true,
+  },
+  {
+    key: "READY",
+    title: "Ready to be reserved",
+    description: "Available ducks with no live reservation. Assigning one reserves it automatically.",
+    emptyMessage: "No ducks are ready to be reserved.",
+    alwaysRender: true,
+  },
+  {
+    key: "UNAVAILABLE",
+    title: "Not ready to reserve",
+    description: "Ducks that cannot be reserved until their inventory state changes.",
+    emptyMessage: "No ducks are held out of the race.",
+    alwaysRender: false,
+  },
+];
+
+const inventoryDuckReserved = (duck) => Boolean(duck && duck.reservation && !duck.reservation.releasedAt);
+const inventoryDuckPaired = (duck) => Boolean(duck && (duck.assignment || duck.participant));
+
+const inventoryDuckGroupKey = (duck) => {
+  if (inventoryDuckReserved(duck) || inventoryDuckPaired(duck)) return "IN_USE";
+  if (duck && duck.inventoryStatus === "IN_USE") return "IN_USE";
+  return duck && duck.inventoryStatus === "AVAILABLE" ? "READY" : "UNAVAILABLE";
+};
+
+// Groups keep the server's visible-number ordering. The two primary groups are
+// always rendered, with an explicit empty message instead of a blank area; the
+// exception bucket is rendered only when it actually holds ducks.
+const groupInventoryDucks = (ducks) => inventoryGroupDefinitions
+  .map((group) => ({
+    key: group.key,
+    title: group.title,
+    description: group.description,
+    emptyMessage: group.emptyMessage,
+    alwaysRender: group.alwaysRender,
+    ducks: (ducks || []).filter((duck) => inventoryDuckGroupKey(duck) === group.key),
+  }))
+  .filter((group) => group.alwaysRender || group.ducks.length > 0);
+`;
+
+// Heat roster deep links. A roster entry names the racer, shows the race-entry
+// UUID that identifies it everywhere else in the console, and offers the two
+// in-page navigations the actor's roles allow. The caller passes the element
+// factory and the already role-checked actions, so this helper never decides
+// permissions and never touches the network itself.
+export const heatRosterHelpersScript = String.raw`
+const heatRosterParticipantName = (entry) => entry.participant.firstName + " " + entry.participant.lastName;
+
+const heatRosterLinkButton = (text, label, action) => {
+  const button = text("button", label, "button secondary small");
+  button.type = "button";
+  button.addEventListener("click", action);
+  return button;
+};
+
+const createHeatRosterEntry = ({ entry, text, openParticipant, openDuck }) => {
+  const participantName = heatRosterParticipantName(entry);
+  const item = text("li", "", "roster-entry");
+  item.append(text(
+    "p",
+    "Slot " + entry.slotNumber + " · " + participantName
+      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · No duck"),
+    "roster-entry-line",
+  ));
+  item.append(text("p", "Race entry " + entry.raceEntryId, "roster-entry-id"));
+  const actions = text("div", "", "actions");
+  let linkCount = 0;
+  if (openParticipant) {
+    const button = heatRosterLinkButton(text, "Participant details · " + participantName, openParticipant);
+    button.dataset.rosterParticipantLink = entry.raceEntryId;
+    actions.append(button);
+    linkCount += 1;
+  }
+  // A roster entry with no assigned duck offers no duck link at all.
+  if (openDuck && entry.duck) {
+    const button = heatRosterLinkButton(
+      text,
+      "Duck #" + entry.duck.visibleNumber + " in inventory",
+      openDuck,
+    );
+    button.dataset.rosterDuckLink = entry.duck.id;
+    actions.append(button);
+    linkCount += 1;
+  }
+  if (linkCount > 0) item.append(actions);
+  return item;
+};
+`;
+
+export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + inventoryDetailHelpersScript + inventoryGroupHelpersScript + heatRosterHelpersScript + String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
 const assignedRoles = new Set((operationsRoot.dataset.roles || "").split(",").filter(Boolean));
@@ -3180,7 +3846,6 @@ let currentEventDetail = null;
 let selectedRegistration = null;
 let selectedDuck = null;
 let selectedHeat = null;
-let pendingHeatPlan = null;
 let staffCommandCount = 0;
 let staffLiveSubscription = null;
 
@@ -3431,7 +4096,6 @@ const renderEvent = (detail, readiness) => {
     eventConfigForm.elements.registrationOpensAt.value = toLocalInput(currentEvent.registrationOpensAt);
     eventConfigForm.elements.registrationClosesAt.value = toLocalInput(currentEvent.registrationClosesAt);
     eventConfigForm.elements.emailRequired.checked = currentEvent.emailRequired;
-    eventConfigForm.elements.heatAssignmentMode.value = currentEvent.heatAssignmentMode;
     eventConfigForm.elements.roundOneHeatCapacity.value = currentEvent.roundOneHeatCapacity;
     eventConfigForm.elements.finalHeatCapacity.value = currentEvent.finalHeatCapacity;
     eventConfigForm.elements.publicNamePolicy.value = currentEvent.publicNamePolicy;
@@ -3468,7 +4132,6 @@ const loadEvents = async (preferredId) => {
     selectedRegistration = null;
     selectedDuck = null;
     selectedHeat = null;
-    pendingHeatPlan = null;
     eventSummary.replaceChildren(empty("Create a draft event to begin."));
     readinessList.replaceChildren(empty("No lifecycle is available."));
     for (const selector of [
@@ -3602,7 +4265,6 @@ if (eventConfigForm) eventConfigForm.addEventListener("submit", async (event) =>
         registrationOpensAt: fromLocalInput(String(values.get("registrationOpensAt"))),
         registrationClosesAt: fromLocalInput(String(values.get("registrationClosesAt"))),
         emailRequired: values.get("emailRequired") === "on",
-        heatAssignmentMode: String(values.get("heatAssignmentMode")),
         roundOneHeatCapacity: Number(values.get("roundOneHeatCapacity")),
         finalHeatCapacity: Number(values.get("finalHeatCapacity")),
         publicNamePolicy: String(values.get("publicNamePolicy")),
@@ -3727,6 +4389,37 @@ const deleteParticipant = async (button) => {
   });
 };
 
+// The duck name is participant-written text that is shown publicly, so staff
+// see exactly what is stored and whether the read-time filter is already hiding
+// it. It is rendered through the shared safe text helper, so a hostile name can
+// only ever be text on this page.
+const participantDuckNameFact = (registration) => {
+  if (typeof registration.duckName !== "string" || registration.duckName.length === 0) {
+    return "Not named";
+  }
+  return registration.duckNamePubliclyHidden === true
+    ? registration.duckName + " (already hidden from public surfaces)"
+    : registration.duckName;
+};
+
+const clearParticipantDuckName = async (button) => {
+  const registration = selectedRegistration;
+  if (!await appConfirm(
+    "Clear the duck name chosen by " + registration.firstName + " " + registration.lastName
+    + "? The duck goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;
+  await perform(button, "Clearing duck name…", async () => {
+    const result = await api(
+      "/api/v1/staff/registrations/" + encodeURIComponent(registration.registrationId) + "/clear-duck-name",
+      commandOptions("POST", { commandId: crypto.randomUUID() }),
+    );
+    selectedRegistration = result.registration;
+    renderParticipantDetail(selectedRegistration);
+    await loadParticipants();
+  });
+};
+
 const renderParticipantDetail = (registration) => {
   selectedRegistration = registration;
   participantDetail.hidden = false;
@@ -3738,6 +4431,7 @@ const renderParticipantDetail = (registration) => {
     ["Phone", registration.phone || "Not provided"],
     ["Created via", humanize(registration.createdVia)],
     ["Duck", registration.assignment ? "#" + registration.assignment.duck.visibleNumber : "Unassigned"],
+    ["Duck name", participantDuckNameFact(registration)],
     ["Race entry", registration.raceEntryId],
     ["Revision", registration.revision],
   ]);
@@ -3747,6 +4441,14 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.phone.value = registration.phone || "";
   participantEditForm.elements.notes.value = registration.notes || "";
   participantActions.replaceChildren();
+  // Offered only when there is a name to clear. The server enforces the role.
+  if (canRegistration && typeof registration.duckName === "string" && registration.duckName.length > 0) {
+    addParticipantAction(
+      "Clear duck name",
+      "button danger small",
+      (event) => clearParticipantDuckName(event.currentTarget),
+    );
+  }
   if (canInventory) {
     addParticipantAction("Use for duck assignment", "button secondary small", () => {
       document.querySelector("[data-inventory-assign-form]").elements.raceEntryId.value = registration.raceEntryId;
@@ -3873,21 +4575,52 @@ const inventoryDetailController = createInventoryDetailController({
   clear: clearInventoryDetail,
 });
 
+const inventoryCard = (duck) => {
+  const eventLabel = duck.reservation && !duck.reservation.releasedAt ? " · " + duck.reservation.event.name : "";
+  const button = text("button", "Duck #" + duck.visibleNumber + " · " + humanize(duck.inventoryStatus) + eventLabel, "result-button");
+  button.type = "button";
+  button.dataset.duckId = duck.id;
+  button.setAttribute("aria-controls", "inventory-detail-panel");
+  button.setAttribute("aria-expanded", "false");
+  button.addEventListener("click", () => loadDuckDetail(duck.id, button, true)
+    .catch((error) => setMessage(error.message, true)));
+  return button;
+};
+
+// The cards stay one grid of the same buttons; each group is a labelled band
+// across that grid so the detail controller still finds every [data-duck-id]
+// card and selection, focus, and live refresh behave exactly as before.
+const inventoryGroupSection = (group) => {
+  const section = text("section", "", "inventory-group");
+  section.dataset.inventoryGroup = group.key;
+  const heading = text("h3", group.title, "inventory-group-title");
+  heading.id = "inventory-group-" + group.key.toLowerCase().replaceAll("_", "-");
+  section.setAttribute("aria-labelledby", heading.id);
+  section.append(heading);
+  if (group.ducks.length === 0) {
+    section.append(empty(group.emptyMessage));
+    return section;
+  }
+  section.append(text(
+    "p",
+    group.ducks.length + (group.ducks.length === 1 ? " duck · " : " ducks · ") + group.description,
+    "muted",
+  ));
+  const cards = text("div", "", "data-list inventory-card-grid");
+  for (const duck of group.ducks) cards.append(inventoryCard(duck));
+  section.append(cards);
+  return section;
+};
+
 const loadInventory = async () => {
   const body = await api("/api/v1/staff/inventory/ducks");
   inventoryList.replaceChildren();
-  if (body.ducks.length === 0) inventoryList.append(empty("No ducks are in inventory."));
-  for (const duck of body.ducks) {
-    const eventLabel = duck.reservation && !duck.reservation.releasedAt ? " · " + duck.reservation.event.name : "";
-    const button = text("button", "Duck #" + duck.visibleNumber + " · " + humanize(duck.inventoryStatus) + eventLabel, "result-button");
-    button.type = "button";
-    button.dataset.duckId = duck.id;
-    button.setAttribute("aria-controls", "inventory-detail-panel");
-    button.setAttribute("aria-expanded", "false");
-    button.addEventListener("click", () => loadDuckDetail(duck.id, button, true)
-      .catch((error) => setMessage(error.message, true)));
-    inventoryList.append(button);
+  if (body.ducks.length === 0) {
+    inventoryList.append(empty("No ducks are in inventory."));
+    inventoryDetailController.syncButtons();
+    return;
   }
+  for (const group of groupInventoryDucks(body.ducks)) inventoryList.append(inventoryGroupSection(group));
   inventoryDetailController.syncButtons();
 };
 
@@ -4086,6 +4819,28 @@ releaseReservationForm.addEventListener("submit", async (event) => {
   });
 });
 
+// The console is one page of anchored sections, so a roster deep link is an
+// in-page navigation: bring the target section into view, then run the same
+// selection code path the section's own list buttons run.
+const revealConsoleSection = (selector) => {
+  const section = document.querySelector(selector);
+  if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+  return section;
+};
+
+const openRosterParticipant = async (registrationId) => {
+  revealConsoleSection("#participants");
+  await loadParticipantDetail(registrationId);
+  participantDetail.focus();
+};
+
+// loadDuckDetail owns the detail request versioning, so a link click that is
+// overtaken by another selection resolves without opening a stale panel.
+const openRosterDuck = async (duckId) => {
+  revealConsoleSection("#inventory");
+  await loadDuckDetail(duckId, null, true);
+};
+
 const heatList = document.querySelector("[data-heat-list]");
 const heatDetail = document.querySelector("[data-heat-detail]");
 const heatFacts = document.querySelector("[data-heat-facts]");
@@ -4093,8 +4848,6 @@ const heatRoster = document.querySelector("[data-heat-roster]");
 const heatResults = document.querySelector("[data-heat-results]");
 const heatControls = document.querySelector("[data-heat-controls]");
 const finalistList = document.querySelector("[data-finalist-list]");
-const planResult = document.querySelector("[data-plan-result]");
-const planCommitButton = document.querySelector("[data-plan-commit]");
 
 const loadHeats = async () => {
   if (!currentEvent) return;
@@ -4116,9 +4869,18 @@ const loadHeats = async () => {
   await loadHeatDetail(selectedId);
 };
 
+// The roster editor is offered in exactly the window PUT /heats/:id/roster
+// accepts: an unlocked planned heat whose round has not started yet, which is
+// registration-closed for a round-one heat and round one for the final. Outside
+// that window every submission would 409, so the form is not rendered at all.
+const rosterEditableEventStatus = { ROUND_ONE: "REGISTRATION_CLOSED", FINAL: "ROUND_ONE" };
+
+const rosterFormAllowed = (heat, event) => Boolean(canDirectRace)
+  && heat.status === "PLANNED" && !heat.rosterLocked
+  && Boolean(event) && event.status === rosterEditableEventStatus[heat.round];
+
 const addRosterForm = (body) => {
-  if (!canDirectRace) return;
-  if (body.heat.status !== "PLANNED" || body.heat.rosterLocked) return;
+  if (!rosterFormAllowed(body.heat, currentEvent)) return;
   const details = text("details", "", "operation-card");
   details.append(text("summary", "Replace unlocked roster"));
   const form = document.createElement("form");
@@ -4208,8 +4970,10 @@ const resultForm = (body, mode) => {
 
 const renderHeatControls = (body) => {
   heatControls.replaceChildren();
+  // No lock control: starting the round locks every roster in one guarded
+  // command, so PLANNED offers nothing for an operator to press here.
   const transition = {
-    PLANNED: ["lock", "Lock roster"], LOADING: ["ready", "Mark ready"], READY: ["call", "Call heat"],
+    LOADING: ["ready", "Mark ready"], READY: ["call", "Call heat"],
     CALLING: ["start", "Start heat"], RUNNING: ["finish", "Finish heat"],
   }[body.heat.status];
   const canTransition = transition && (transition[0] === "finish" ? canTakeResults : canRunHeat);
@@ -4233,18 +4997,6 @@ const renderHeatControls = (body) => {
     });
     heatControls.append(button);
   }
-  const announcerButton = text("button", "Load announcer roster", "button secondary small");
-  announcerButton.type = "button";
-  announcerButton.addEventListener("click", async () => {
-    await perform(announcerButton, "Loading announcer roster…", async () => {
-      const result = await api(
-        "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/" + encodeURIComponent(selectedHeat.id) + "/announcer-roster",
-      );
-      heatRoster.replaceChildren();
-      for (const entry of result.roster) heatRoster.append(text("li", "Slot " + entry.slotNumber + " · " + entry.displayName + " · Duck #" + entry.duckNumber));
-    });
-  });
-  heatControls.append(announcerButton);
   addRosterForm(body);
   if (canTakeResults && body.heat.status === "AWAITING_RESULT") heatControls.append(resultForm(body, "finalize"));
   if (canDirectRace && body.heat.status === "FINALIZED" && body.results.length > 0) {
@@ -4281,7 +5033,21 @@ const loadHeatDetail = async (heatId) => {
   document.querySelector("[data-heat-name]").textContent = humanize(body.heat.round) + " · Heat " + body.heat.number;
   showFacts(heatFacts, [["Status", humanize(body.heat.status)], ["Roster", body.heat.rosterSize], ["Published results", body.heat.publishedResultCount], ["Revision", body.heat.revision]]);
   heatRoster.replaceChildren();
-  for (const entry of body.roster) heatRoster.append(text("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · No duck")));
+  // Each link is offered only to an actor whose roles can open that section,
+  // which is the same gating the target APIs enforce.
+  for (const entry of body.roster) {
+    heatRoster.append(createHeatRosterEntry({
+      entry,
+      text,
+      openParticipant: canRegistration && entry.participant.registrationId
+        ? () => openRosterParticipant(entry.participant.registrationId)
+          .catch((error) => setMessage(error.message, true))
+        : null,
+      openDuck: canInventory && entry.duck && entry.duck.id
+        ? () => openRosterDuck(entry.duck.id).catch((error) => setMessage(error.message, true))
+        : null,
+    }));
+  }
   if (body.roster.length === 0) heatRoster.append(empty("This heat has no roster entries."));
   heatResults.replaceChildren();
   for (const result of body.results) heatResults.append(historyCard("Place " + result.place + " · Duck #" + result.duck.visibleNumber, result.participant.firstName + " " + result.participant.lastName));
@@ -4290,33 +5056,6 @@ const loadHeatDetail = async (heatId) => {
 };
 
 document.querySelector("[data-refresh-heats]").addEventListener("click", () => loadHeats().catch((error) => setMessage(error.message, true)));
-
-document.querySelector("[data-plan-preview]").addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  await perform(button, "Building balanced heat preview…", async () => {
-    pendingHeatPlan = await api(
-      "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/round-one/plan-preview",
-      { method: "POST", headers: { accept: "application/json" } },
-    );
-    planResult.replaceChildren();
-    for (const heat of pendingHeatPlan.heats) planResult.append(historyCard("Heat " + heat.number + " · " + heat.size + " ducks", heat.entries.map((entry) => "#" + entry.duck.visibleNumber + " " + entry.participant.firstName + " " + entry.participant.lastName).join(" · ")));
-    planCommitButton.disabled = false;
-  });
-});
-
-planCommitButton.addEventListener("click", async () => {
-  if (!pendingHeatPlan) return;
-  if (!await appConfirm("Commit this exact balanced plan? Rosters become operational race data.")) return;
-  await perform(planCommitButton, "Committing balanced heat plan…", async () => {
-    await api(
-      "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/round-one/plan-commit",
-      commandOptions("POST", { commandId: crypto.randomUUID(), fingerprint: pendingHeatPlan.fingerprint }),
-    );
-    pendingHeatPlan = null;
-    planCommitButton.disabled = true;
-    await loadEvents(currentEvent.id);
-  });
-});
 
 const loadFinalists = async () => {
   if (!currentEvent) return;
@@ -4796,6 +5535,55 @@ const addFact = (label, value) => {
   summary.append(fact);
 };
 
+// Scanning the duck someone is complaining about is the fastest way for staff
+// to reach its record, so the moderation control lives here as well as in the
+// participant console. The control is rendered only when the response carried
+// the participant projection, which the API sends only to the roles the clear
+// endpoint itself accepts.
+const clearScannedDuckName = async (registrationId, button) => {
+  if (!await appConfirm(
+    "Clear this duck's chosen name? It goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;
+  button.disabled = true;
+  message.textContent = "Clearing duck name…";
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    await fetchJson("/api/v1/staff/registrations/" + encodeURIComponent(registrationId) + "/clear-duck-name", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId: crypto.randomUUID() }),
+    });
+    await load();
+    message.textContent = "Duck name cleared. This duck now shows its number only.";
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      button.disabled = false;
+      message.textContent = error.message;
+    }
+  } finally {
+    staffDuckBusy -= 1;
+    endBusy();
+    staffDuckSubscription?.resume();
+  }
+};
+
+const showDuckNameModeration = (participant) => {
+  if (typeof participant.duckName !== "string" || participant.duckName.length === 0) return;
+  addFact("Duck name", participant.duckNamePubliclyHidden === true
+    ? participant.duckName + " (already hidden from public surfaces)"
+    : participant.duckName);
+  if (typeof participant.registrationId !== "string") return;
+  const actions = text("div", "", "actions");
+  const button = text("button", "Clear duck name", "button danger small");
+  button.type = "button";
+  button.dataset.clearDuckName = participant.registrationId;
+  button.addEventListener("click", () => clearScannedDuckName(participant.registrationId, button));
+  actions.append(button);
+  summary.append(actions);
+};
+
 const showInspection = (data) => {
   const participant = data.assignment.participant || {};
   // A live refresh arrives immediately after pairing, because pairing itself
@@ -4816,6 +5604,7 @@ const showInspection = (data) => {
   if (!data.assignment.active) addFact("Assignment", "closed");
   if (participant.email) addFact("Email", participant.email);
   if (participant.phone) addFact("Phone", participant.phone);
+  showDuckNameModeration(participant);
 };
 
 const renderSelection = (registration) => {

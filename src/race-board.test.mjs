@@ -136,6 +136,22 @@ test("public board stays ordered, current, and privacy-filtered through the race
   assert.equal(completed.event.status, "COMPLETED");
   assert.equal(completed.event.currentHeat, null);
   assert.deepEqual(completed.event.podium.map((entry) => [entry.place, entry.duckNumber]), [[1, 22], [2, 11]]);
+
+  // Participant-chosen duck names ride beside the number on the roster and the
+  // podium, and the read-time filter decides which of them a visitor sees.
+  database.exec(`
+    UPDATE race_entries SET duck_name = 'Bubbles' WHERE id = 'entry-2';
+    UPDATE race_entries SET duck_name = 'Bastard Duck' WHERE id = 'entry-1';
+  `);
+  const named = await responseBoard(database);
+  assert.deepEqual(
+    named.event.podium.map((entry) => [entry.place, entry.duckNumber, entry.duckName]),
+    [[1, 22, "Bubbles"], [2, 11, null]],
+  );
+  assert.equal(named.event.finalHeats[0].roster.find((entry) => entry.duckNumber === 22).duckName, "Bubbles");
+  // The suppressed one never reaches the board at all, and its number stays.
+  assert.equal(JSON.stringify(named).includes("Bastard"), false);
+  assert.equal(named.event.finalHeats[0].roster.find((entry) => entry.duckNumber === 11).duckName, null);
   assert.doesNotMatch(
     JSON.stringify(completed),
     /email|phone|lookup|private|token|staff|note|inventory|audit|registrationId|raceEntry|assignmentId/i,
@@ -185,6 +201,13 @@ test("public board does not revive a closed pre-race duck assignment", async (co
   const board = await responseBoard(database);
   assert.equal(board.event.roundOneHeats[0].roster[0].participantDisplayName, "Daisy D.");
   assert.equal(board.event.roundOneHeats[0].roster[0].duckNumber, null);
+
+  // An entry with no current duck carries no duck name either, even when one is
+  // stored: the name only means something next to the duck it belongs to.
+  database.prepare("UPDATE race_entries SET duck_name = 'Bubbles' WHERE id = 'entry'").run();
+  const unassigned = await responseBoard(database);
+  assert.equal(unassigned.event.roundOneHeats[0].roster[0].duckName, null);
+  assert.equal(JSON.stringify(unassigned).includes("Bubbles"), false);
 
   // The stage wording on the public board is driven by this one public field.
   assert.equal(board.event.status, "REGISTRATION_CLOSED");

@@ -302,7 +302,9 @@ test("an administrator creates one immediate-mode draft with a required ducks-pe
 });
 
 test("event creation validates the ducks-per-heat bounds before touching the database", async () => {
-  for (const roundOneHeatCapacity of [undefined, null, 0, -3, 2.5, 10_001, "8"]) {
+  // A heat is only a race with at least three ducks, so 1 and 2 join the
+  // already-rejected shapes below.
+  for (const roundOneHeatCapacity of [undefined, null, 0, -3, 1, 2, 2.5, 10_001, "8"]) {
     const db = makeDb(() => null);
     const response = await handleEventOperations(
       jsonRequest("/api/v1/staff/events", "POST", {
@@ -320,6 +322,49 @@ test("event creation validates the ducks-per-heat bounds before touching the dat
     assert.equal(db.statements.length, 0);
     assert.equal(db.batches.length, 0);
   }
+});
+
+test("draft configuration enforces the minimum heat size and rejects the retired heat mode", async () => {
+  const configured = { ...draftEvent, heat_assignment_mode: "IMMEDIATE_FIXED" };
+  const attempt = async (patch) => {
+    const db = makeDb((sql) => (sql.includes("FROM race_commands") ? null : configured));
+    const response = await handleEventOperations(
+      jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
+        commandId: crypto.randomUUID(),
+        revision: 0,
+        ...patch,
+      }),
+      makeEnv(db),
+      admin,
+    );
+    return { response, body: await response.json(), db };
+  };
+
+  for (const roundOneHeatCapacity of [0, 1, 2, -1, 2.5, 10_001, "5"]) {
+    const { response, body, db } = await attempt({ roundOneHeatCapacity });
+    assert.equal(response.status, 400, `capacity ${String(roundOneHeatCapacity)} must be rejected`);
+    assert.equal(body.error, "roundOneHeatCapacity must be an integer between 3 and 10000.");
+    assert.equal(db.batches.length, 0, "a rejected capacity never reaches the database");
+  }
+
+  // The exact minimum is accepted, and the final capacity keeps its own floor
+  // of one because it counts round-one heats rather than ducks in a heat.
+  const accepted = await attempt({ roundOneHeatCapacity: 3 });
+  assert.equal(accepted.response.status, 200);
+  const finalFloor = await attempt({ finalHeatCapacity: 0 });
+  assert.equal(finalFloor.response.status, 400);
+  assert.equal(finalFloor.body.error, "finalHeatCapacity must be an integer between 1 and 10000.");
+  assert.equal((await attempt({ finalHeatCapacity: 1 })).response.status, 200);
+
+  // The retired balanced mode is refused rather than silently ignored.
+  const retired = await attempt({ heatAssignmentMode: "POST_CLOSE_BALANCED" });
+  assert.equal(retired.response.status, 400);
+  assert.equal(
+    retired.body.error,
+    "Heats are assigned during duck pairing; there is no other heat assignment mode.",
+  );
+  assert.equal(retired.db.batches.length, 0);
+  assert.equal((await attempt({ heatAssignmentMode: "IMMEDIATE_FIXED" })).response.status, 200);
 });
 
 // The console detects the operator's zone and sends it with the create command,
@@ -849,39 +894,45 @@ test("atomic round-one start rejects provisioning begun after readiness prefligh
     INSERT INTO events
       (id, slug, name, timezone, status, final_heat_capacity)
     VALUES ('event_test', 'test-race', 'Test Race', 'America/Denver', 'REGISTRATION_CLOSED', 2);
-    INSERT INTO registrations
-      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
-       submitted_at, status_changed_at)
-    VALUES
-      ('registration', 'event_test', 'Daisy', 'Duck', 'ACTIVE', 'DAISY123', 'private-hash',
-       '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
-    INSERT INTO race_entries (id, event_id, registration_id)
-    VALUES ('entry', 'event_test', 'registration');
-    INSERT INTO race_commands
-      (id, event_id, command_type, result_id, requested_at, completed_at)
-    VALUES
-      ('pair-command', 'event_test', 'PAIR_DUCK', 'assignment',
-       '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
-    INSERT INTO ducks
-      (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
-    VALUES ('duck', 1, 'IN_USE', '2026-07-26T00:00:00Z', 'GOOD');
-    INSERT INTO event_ducks
-      (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
-    VALUES ('event-duck', 'event_test', 'duck', '2026-07-26T00:00:00Z', 'staff_test');
-    INSERT INTO duck_assignments
-      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
-       assigned_by_staff_profile_id, source_command_id)
-    VALUES
-      ('assignment', 'event_test', 'entry', 'event-duck', 'duck',
-       '2026-07-26T00:00:00Z', 'staff_test', 'pair-command');
     INSERT INTO heats (id, event_id, round, heat_number, status)
     VALUES ('heat', 'event_test', 'ROUND_ONE', 1, 'PLANNED');
-    INSERT INTO heat_entries
-      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
-    VALUES
-      ('heat-entry', 'event_test', 'heat', 'entry', 'ROUND_ONE', 1,
-       'BALANCED_DRAW', '2026-07-26T00:00:00Z');
   `);
+  // A heat is raceable only at the minimum heat size, so this fixture seeds a
+  // full three-duck heat and keeps testing the provisioning race it is named for.
+  for (const slot of [1, 2, 3]) {
+    database.exec(`
+      INSERT INTO registrations
+        (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+         submitted_at, status_changed_at)
+      VALUES
+        ('registration-${slot}', 'event_test', 'Daisy', 'Duck', 'ACTIVE', 'DAISY12${slot}',
+         'private-hash-${slot}', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+      INSERT INTO race_entries (id, event_id, registration_id)
+      VALUES ('entry-${slot}', 'event_test', 'registration-${slot}');
+      INSERT INTO race_commands
+        (id, event_id, command_type, result_id, requested_at, completed_at)
+      VALUES
+        ('pair-command-${slot}', 'event_test', 'PAIR_DUCK', 'assignment-${slot}',
+         '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+      INSERT INTO ducks
+        (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+      VALUES ('duck-${slot}', ${10 + slot}, 'IN_USE', '2026-07-26T00:00:00Z', 'GOOD');
+      INSERT INTO event_ducks
+        (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+      VALUES ('event-duck-${slot}', 'event_test', 'duck-${slot}', '2026-07-26T00:00:00Z', 'staff_test');
+      INSERT INTO duck_assignments
+        (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+         assigned_by_staff_profile_id, source_command_id)
+      VALUES
+        ('assignment-${slot}', 'event_test', 'entry-${slot}', 'event-duck-${slot}', 'duck-${slot}',
+         '2026-07-26T00:00:00Z', 'staff_test', 'pair-command-${slot}');
+      INSERT INTO heat_entries
+        (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+      VALUES
+        ('heat-entry-${slot}', 'event_test', 'heat', 'entry-${slot}', 'ROUND_ONE', ${slot},
+         'PAIRING', '2026-07-26T00:00:00Z');
+    `);
+  }
 
   let insertedPending = false;
   const env = makeEnv(sqliteD1(database, () => {

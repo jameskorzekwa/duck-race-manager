@@ -29,6 +29,7 @@ scan-first pairing.
 | Worker/pages/assets | `index.ts`, `site.ts`, `client-scripts.ts` |
 | Public site phase | `public-phase.ts` |
 | Public registration/status | `api.ts`, `registration.ts`, `browser-collection.ts`, `race-status.ts` |
+| Public duck-name filtering | `duck-name-filter.ts` |
 | Public live board/signaling | `race-board.ts`, `live-updates.ts` |
 | Cognito/session/access | `auth.ts`, `staff-session.ts`, `staff-access.ts` |
 | Staff roles/lifecycle | `authorization.ts`, `staff-lifecycle-operations.ts` |
@@ -37,6 +38,20 @@ scan-first pairing.
 | Inventory/tags/assignments | `duck-operations.ts`, `staff-api.ts` |
 | Heats/results | `heat-operations.ts` |
 | Support diagnostics | `support-operations.ts` |
+| Local development entry | `local-dev.ts`, `local-preview.ts` |
+
+## LOCAL DEVELOPMENT
+
+`local-dev.ts` is the entry point for `wrangler.local.jsonc` only. It is never
+imported by a deployed module and never bundled by `wrangler.jsonc`. It stands in
+for the Cognito hosted UI and token endpoints so the whole site, including staff
+surfaces, runs offline; see `docs/LOCAL_DEVELOPMENT.md`.
+
+Any behaviour that must differ locally is gated on `isLocalPreviewOrigin` from
+`local-preview.ts`, which is true only for an http loopback `APP_ORIGIN`.
+Production configures an https origin, so those branches are unreachable there.
+Never widen that predicate, and never gate a local affordance on anything else —
+an environment variable or a build flag can be set by mistake in production.
 
 ## CODING CONVENTIONS
 
@@ -54,6 +69,10 @@ scan-first pairing.
   are authoritative.
 - Audit safe identifiers and changed field names, never participant PII or raw
   credentials/tokens.
+- Participant free text that is published — currently only `race_entries.duck_name`
+  — passes `duck-name-filter.ts` both when it is written and wherever it is
+  projected, so a row stored earlier or a later wordlist change cannot leak one.
+  A rejected value is never echoed to the caller, logged, or audited.
 - An administrator implicitly passes role checks. Regular actors must have
   explicit validated roles; do not add a broad missing-role fallback.
 - `RaceUpdates` accepts same-origin WebSockets and broadcasts only finite-domain

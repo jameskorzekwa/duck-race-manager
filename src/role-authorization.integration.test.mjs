@@ -274,6 +274,8 @@ test("station roles enforce the complete operational matrix with live D1 actors"
 
   const duckOneToken = "a".repeat(32);
   const duckTwoToken = "b".repeat(32);
+  // A heat needs at least three ducks before round one can start.
+  const fillerTokens = ["d".repeat(32), "e".repeat(32)];
   const intake = async (number, tagToken) => json(await post(
     actors.ducks,
     "/api/v1/staff/inventory/ducks",
@@ -284,6 +286,7 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   ), 201, `duck manager intakes duck ${number}`);
   await intake(101, duckOneToken);
   await intake(102, duckTwoToken);
+  for (const [index, token] of fillerTokens.entries()) await intake(200 + index, token);
   assert.equal((await api(actors.registration, "/api/v1/staff/inventory/ducks")).status, 403);
 
   const walkUp = await json(await post(
@@ -308,9 +311,47 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   await json(await post(actors.registration, `/api/v1/staff/ducks/${duckOneToken}/assignments`, {
     commandId: command(), eventId, lookupCode,
   }), 201, "registration pairs scanned duck");
+  // Two more paired racers bring the single heat up to the minimum heat size.
+  for (const [index, token] of fillerTokens.entries()) {
+    const filler = await json(await post(
+      actors.registration,
+      `/api/v1/staff/events/${eventId}/registrations`,
+      {
+        commandId: command(), privateToken: String.fromCharCode(102 + index).repeat(43),
+        firstName: `Filler${index}`, lastName: "Duck", email: null, phone: null,
+        emailNotificationsEnabled: false, notes: null,
+      },
+    ), 201, `registration creates filler ${index}`);
+    await json(await post(actors.registration, `/api/v1/staff/ducks/${token}/assignments`, {
+      commandId: command(), eventId, lookupCode: filler.registration.lookupCode,
+    }), 201, `registration pairs filler ${index}`);
+  }
   const inventory = await json(await api(actors.ducks, "/api/v1/staff/inventory/ducks"), 200, "duck manager inspects inventory");
   assert.equal(JSON.stringify(inventory).includes("daisy@example.com"), false);
   assert.equal(JSON.stringify(inventory).includes("Daisy"), false);
+
+  // Moderating a participant-chosen duck name is registration work. Every other
+  // operational role, including the duck manager who may hold the duck, is
+  // refused it.
+  for (const [label, actor] of [
+    ["duck manager", actors.ducks],
+    ["announcer", actors.announcer],
+    ["heat runner", actors.heats],
+    ["result taker", actors.results],
+  ]) {
+    assert.equal(
+      (await post(actor, `/api/v1/staff/registrations/${registrationId}/clear-duck-name`, {
+        commandId: command(),
+      })).status,
+      403,
+      `${label} cannot clear a duck name`,
+    );
+  }
+  await json(await post(
+    actors.registration,
+    `/api/v1/staff/registrations/${registrationId}/clear-duck-name`,
+    { commandId: command() },
+  ), 200, "registration clears a duck name");
 
   const heats = await json(await api(actors.announcer, `/api/v1/staff/events/${eventId}/heats`), 200, "announcer lists heats");
   const roundOneHeatId = heats.heats[0].id;
@@ -342,8 +383,15 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     commandId: command(),
   }), 201, "race director starts round one");
 
-  let revision = 0;
-  for (const transition of ["lock", "ready", "call", "start"]) {
+  // Starting the round locked the roster, so the heat runner picks up at
+  // LOADING with no lock step of its own.
+  const lockedHeat = await json(await api(
+    actors.heats, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}`,
+  ), 200, "heat runner reads the locked heat");
+  assert.equal(lockedHeat.heat.status, "LOADING");
+  assert.equal(lockedHeat.heat.rosterLocked, true);
+  let revision = lockedHeat.heat.revision;
+  for (const transition of ["ready", "call", "start"]) {
     const result = await json(await post(
       actors.heats,
       `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/${transition}`,
@@ -387,9 +435,13 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     commandId: command(),
   }), 201, "race director starts final");
   const finalList = await json(await api(actors.announcer, `/api/v1/staff/events/${eventId}/heats`), 200, "announcer reads final state");
-  const finalHeatId = finalList.heats.find((heat) => heat.round === "FINAL").id;
-  revision = 0;
-  for (const transition of ["lock", "ready", "call", "start"]) {
+  const finalHeat = finalList.heats.find((heat) => heat.round === "FINAL");
+  const finalHeatId = finalHeat.id;
+  // Starting the final locked its roster too.
+  assert.equal(finalHeat.status, "LOADING");
+  assert.equal(finalHeat.rosterLocked, true);
+  revision = finalHeat.revision;
+  for (const transition of ["ready", "call", "start"]) {
     const result = await json(await post(
       actors.heats,
       `/api/v1/staff/events/${eventId}/heats/${finalHeatId}/${transition}`,
