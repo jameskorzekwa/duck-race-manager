@@ -70,7 +70,7 @@ const migrationNames = [
   "0012_staff_role_assignments.sql",
 ];
 
-const sqliteD1 = (database) => ({
+const sqliteD1 = (database, beforeBatch = () => {}) => ({
   prepare(sql) {
     return {
       sql,
@@ -88,6 +88,7 @@ const sqliteD1 = (database) => ({
     };
   },
   async batch(items) {
+    beforeBatch();
     database.exec("BEGIN");
     try {
       const results = items.map((item) => {
@@ -1142,4 +1143,170 @@ test("final purge executes against the complete migrated schema", async () => {
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM event_purge_claims").get().count, 0);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
+});
+
+const seedImmediatePairingEvent = (database, { ducksPerHeat, finalHeatCapacity }) => {
+  database.exec("PRAGMA foreign_keys = ON");
+  for (const name of migrationNames) {
+    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
+  }
+  database.exec(`
+    INSERT INTO staff_profiles
+      (id, cognito_sub, email, display_name, is_system_admin, is_active)
+    VALUES
+      ('staff_test', 'staff-sub', 'staff@example.com', 'Staff Member', 0, 1);
+    INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+    VALUES ('staff-registration', 'staff_test', 'REGISTRATION', '2026-07-26T00:00:00Z');
+    INSERT INTO events
+      (id, slug, name, event_date, timezone, status, heat_assignment_mode,
+       round_one_heat_capacity, final_heat_capacity)
+    VALUES
+      ('event_test', 'test-race', 'Test Duck Race', '2026-08-30', 'UTC',
+       'REGISTRATION_OPEN', 'IMMEDIATE_FIXED', ${ducksPerHeat}, ${finalHeatCapacity});
+  `);
+  const participants = [];
+  for (const index of [1, 2, 3]) {
+    const lookupCode = `DDDDDDD${index + 1}`;
+    const token = String(index).repeat(32);
+    database.exec(`
+      INSERT INTO registrations
+        (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+         submitted_at, status_changed_at)
+      VALUES
+        ('registration-${index}', 'event_test', 'Racer', 'Number${index}', 'SUBMITTED',
+         '${lookupCode}', 'private-hash-${index}', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+      INSERT INTO race_entries (id, event_id, registration_id)
+      VALUES ('entry-${index}', 'event_test', 'registration-${index}');
+      INSERT INTO ducks
+        (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+      VALUES ('duck-${index}', ${index}, 'AVAILABLE', '2026-07-26T00:00:00Z', 'GOOD');
+      INSERT INTO duck_tags (id, duck_id, token, status)
+      VALUES ('tag-${index}', 'duck-${index}', '${token}', 'ACTIVE');
+    `);
+    participants.push({ lookupCode, token, raceEntryId: `entry-${index}` });
+  }
+  return participants;
+};
+
+const pairRequest = (token, lookupCode) => new Request(
+  `https://quickducks.com/api/v1/staff/ducks/${token}/assignments`,
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commandId: crypto.randomUUID(), eventId: "event_test", lookupCode }),
+  },
+);
+
+test("immediate pairing fills heat one and atomically creates heat two in migrated SQLite", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  const participants = seedImmediatePairingEvent(database, { ducksPerHeat: 2, finalHeatCapacity: 10 });
+  const env = makeEnv(sqliteD1(database));
+
+  const heatNumbers = [];
+  for (const participant of participants) {
+    const response = await handleStaffApi(pairRequest(participant.token, participant.lookupCode), env, actor);
+    const body = await response.json();
+    assert.equal(response.status, 201);
+    assert.equal(body.heatAssignmentPending, false);
+    heatNumbers.push(body.heat.number);
+  }
+  assert.deepEqual(heatNumbers, [1, 1, 2]);
+
+  const heats = database.prepare(
+    `SELECT heat_number, status, target_size, source_command_id,
+            (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = heats.id) AS entry_count
+       FROM heats WHERE event_id = 'event_test' AND round = 'ROUND_ONE'
+      ORDER BY heat_number`,
+  ).all();
+  assert.deepEqual(heats.map((heat) => ({ ...heat, source_command_id: heat.source_command_id !== null })), [
+    { heat_number: 1, status: "PLANNED", target_size: 2, source_command_id: true, entry_count: 2 },
+    { heat_number: 2, status: "PLANNED", target_size: 2, source_command_id: true, entry_count: 1 },
+  ]);
+  const entries = database.prepare(
+    `SELECT he.race_entry_id, h.heat_number, he.slot_number, he.assignment_source
+       FROM heat_entries he JOIN heats h ON h.id = he.heat_id
+      WHERE he.event_id = 'event_test' AND he.round = 'ROUND_ONE'
+      ORDER BY h.heat_number, he.slot_number`,
+  ).all().map((row) => ({ ...row }));
+  assert.deepEqual(entries, [
+    { race_entry_id: "entry-1", heat_number: 1, slot_number: 1, assignment_source: "PAIRING" },
+    { race_entry_id: "entry-2", heat_number: 1, slot_number: 2, assignment_source: "PAIRING" },
+    { race_entry_id: "entry-3", heat_number: 2, slot_number: 1, assignment_source: "PAIRING" },
+  ]);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM registrations WHERE event_id = 'event_test' AND status = 'ACTIVE'",
+  ).get().count, 3);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("guarded pairing SQL rejects a concurrent overfill at the heat boundary and the retry opens heat two", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  const participants = seedImmediatePairingEvent(database, { ducksPerHeat: 2, finalHeatCapacity: 10 });
+
+  const first = await handleStaffApi(
+    pairRequest(participants[0].token, participants[0].lookupCode),
+    makeEnv(sqliteD1(database)),
+    actor,
+  );
+  assert.equal(first.status, 201);
+  const heatOneId = database.prepare(
+    "SELECT id FROM heats WHERE event_id = 'event_test' AND round = 'ROUND_ONE' AND heat_number = 1",
+  ).get().id;
+
+  // Simulate a concurrent pairing that takes the last open slot after this
+  // request's preflight read but before its atomic batch commits.
+  let raced = false;
+  const racingEnv = makeEnv(sqliteD1(database, () => {
+    if (raced) return;
+    raced = true;
+    database.prepare(
+      `INSERT INTO heat_entries
+        (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+       VALUES ('concurrent-entry', 'event_test', ?, 'entry-2', 'ROUND_ONE', 2, 'PAIRING', '2026-07-26T00:00:01Z')`,
+    ).run(heatOneId);
+  }));
+  const overfillAttempt = await handleStaffApi(
+    pairRequest(participants[2].token, participants[2].lookupCode),
+    racingEnv,
+    actor,
+  );
+  assert.equal(overfillAttempt.status, 409);
+  assert.match((await overfillAttempt.json()).error, /conflicted with another update/i);
+
+  // The whole pairing command rolled back: no overfilled slot, no assignment,
+  // and the participant remains SUBMITTED for a clean retry.
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_entries WHERE heat_id = ?",
+  ).get(heatOneId).count, 2);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heats WHERE event_id = 'event_test' AND round = 'ROUND_ONE'",
+  ).get().count, 1);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM duck_assignments WHERE race_entry_id = 'entry-3'",
+  ).get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT status FROM registrations WHERE id = 'registration-3'",
+  ).get().status, "SUBMITTED");
+
+  const retry = await handleStaffApi(
+    pairRequest(participants[2].token, participants[2].lookupCode),
+    makeEnv(sqliteD1(database)),
+    actor,
+  );
+  const retryBody = await retry.json();
+  assert.equal(retry.status, 201);
+  assert.deepEqual(retryBody.heat, { round: "ROUND_ONE", number: 2 });
+  const capacities = database.prepare(
+    `SELECT h.heat_number,
+            (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) AS entry_count
+       FROM heats h WHERE h.event_id = 'event_test' AND h.round = 'ROUND_ONE'
+      ORDER BY h.heat_number`,
+  ).all().map((row) => ({ ...row }));
+  assert.deepEqual(capacities, [
+    { heat_number: 1, entry_count: 2 },
+    { heat_number: 2, entry_count: 1 },
+  ]);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });

@@ -116,13 +116,18 @@ the dependency rules described below.
 
 The supported complete sequence is:
 
-1. A system administrator creates and configures the only event as a draft.
+1. A system administrator creates the only event as a draft, choosing how many
+   ducks race in each round-one heat, and configures it before registration.
 2. A race director opens registration.
 3. Participants self-register, or registration staff create walk-ups.
 4. Duck managers intake physical ducks and active tag tokens for the event.
 5. Registration staff pair each eligible participant with one eligible duck.
+   In the default assign-during-pairing mode, each pairing also places the duck
+   into the lowest-numbered round-one heat with an open slot, creating the next
+   heat automatically when every existing heat is full.
 6. A race director closes registration.
-7. For balanced mode, a race director previews and commits the round-one plan.
+7. Only for an event explicitly configured for legacy post-close balanced mode,
+   a race director previews and commits the round-one plan.
 8. Registration staff and the race director resolve every still-submitted
    participant and check readiness.
 9. The race director starts round one; heat runners run heats; result takers
@@ -515,8 +520,13 @@ and system administrators.
 ### Create and Configure
 
 **System administrator only:** create one event when no event row exists. Event
-creation requires a name and date, then copies the retained organization
-defaults into a `DRAFT` event. The server derives the URL slug from the name as
+creation requires a name, a date, and how many ducks race in each round-one
+heat (a whole number from 1 through 10,000). The heat size is chosen at
+creation because heats are set up before registration opens: ducks are assigned
+to heats as they are paired with participants. A new event is always created in
+`IMMEDIATE_FIXED` (assign during pairing) mode; the remaining settings copy the
+retained organization defaults into a `DRAFT` event. The server derives the URL
+slug from the name as
 lowercase ASCII letters, numbers, and hyphens; the staff form shows the same
 read-only preview as the name changes. Diacritics are removed where possible,
 unsafe-character runs become one hyphen, and names without safe characters use
@@ -527,8 +537,9 @@ Only a draft can be configured. Configuration includes:
 - Name, automatically derived slug preview, date, and IANA-style timezone.
 - Optional registration-open and registration-close timestamps.
 - Optional or required email.
-- `IMMEDIATE_FIXED` or `POST_CLOSE_BALANCED` heat assignment.
-- Round-one and final capacities from 1 through 10,000.
+- `IMMEDIATE_FIXED` (assign during pairing, the default for new events) or
+  legacy `POST_CLOSE_BALANCED` heat assignment.
+- Ducks per round-one heat and final capacity from 1 through 10,000.
 - Public name policy.
 
 Saving configuration also updates the retained organization defaults used by
@@ -545,9 +556,12 @@ remain available.
 
 ### Open and Close Registration
 
-A race director or system administrator can open a dated draft. Opening does
-not check other setup, inventory, or staffing readiness. The same authority can
-manually close an open event.
+A race director or system administrator can open a dated draft whose
+ducks-per-heat (round-one heat size) configuration is present. Any legacy event
+row lacking that value is blocked with a clear readiness reason; creation now
+requires the field, so every new event satisfies this automatically. Opening
+does not check other setup, inventory, or staffing readiness. The same
+authority can manually close an open event.
 
 A system administrator can reopen registration only while the event is closed
 and no heat has been created. Immediate-mode pairing creates heats, so a closed
@@ -806,11 +820,13 @@ substring of at least two characters. It can show contact details, status, and
 an assigned duck. The UI disables already assigned results; the server also
 requires an unpaired `SUBMITTED` registration.
 
-In `IMMEDIATE_FIXED` mode, the command uses the lowest-numbered unlocked
-round-one heat below configured capacity or creates the next heat. It returns
-the heat number. Pairing rejects before creating a new heat when the existing
-round-one heat count has reached final capacity. In `POST_CLOSE_BALANCED` mode,
-pairing returns heat assignment pending.
+In `IMMEDIATE_FIXED` mode — the default for newly created events — the command
+uses the lowest-numbered unlocked round-one heat below the configured
+ducks-per-heat size or creates the next heat inside the same atomic batch. It
+returns the heat number. Pairing rejects before creating a new heat when the
+existing round-one heat count has reached final capacity, and the atomic
+command re-checks both the open slot and that capacity with guarded SQL. In
+legacy `POST_CLOSE_BALANCED` mode, pairing returns heat assignment pending.
 
 **Operator step:** physically place immediate-mode ducks in a bag labeled with
 the returned heat number. QuickDucks records no bag placement or expected
@@ -844,17 +860,27 @@ workflow. Heat entries remain attached to the stable race entry.
 
 ### Immediate Fixed Mode
 
-Pairing builds round-one heats in staff pairing order. Each new participant
-uses the first eligible heat with fewer entries than
-`round_one_heat_capacity`; otherwise QuickDucks creates the next heat. The final
-partially filled heat is not automatically rebalanced.
+This is the default and standard mode for newly created events; the
+ducks-per-heat size is chosen when the event is created. Pairing builds
+round-one heats in staff pairing order. Each new participant uses the
+lowest-numbered eligible heat with fewer entries than
+`round_one_heat_capacity`; otherwise QuickDucks creates the next heat in the
+same atomic pairing command, so heats exist and fill progressively from the
+moment pairing begins. The final partially filled heat is not automatically
+rebalanced.
 
 Closing registration does not automatically lock heat rosters. Operators still
 start round one and run every heat through the normal lock/readiness sequence.
-Concurrent attempts that select the same slot are protected by uniqueness and
-atomic batches; one may receive a conflict and must refresh/retry.
+Round-one start readiness counts the heats created through pairing. Concurrent
+attempts that select the same slot are protected by guarded SQL inside the
+atomic batch — the slot is recomputed in the database and a full heat aborts
+the whole command — plus uniqueness constraints; one attempt may receive a
+conflict and must refresh/retry, which then lands in the next open heat.
 
 ### Post-Close Balanced Mode
+
+This legacy mode remains supported for backward compatibility when an
+administrator explicitly configures a draft to `POST_CLOSE_BALANCED`.
 
 After registration is closed, a race director or administrator can preview a balanced
 plan when no round-one heat exists. QuickDucks:

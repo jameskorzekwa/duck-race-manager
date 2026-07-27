@@ -204,6 +204,11 @@ const normalizedTimezone = (value: unknown): string | null => {
 
 const canonicalFingerprint = (value: Record<string, unknown>): string => JSON.stringify(value);
 
+const normalizedHeatCapacity = (value: unknown): number | null =>
+  Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 10_000
+    ? value as number
+    : null;
+
 const createEvent = async (
   request: Request,
   env: Env,
@@ -216,14 +221,18 @@ const createEvent = async (
   const commandId = payload.commandId;
   const name = normalizedName(payload.name);
   const eventDate = normalizedDate(payload.eventDate, false);
+  const ducksPerHeat = normalizedHeatCapacity(payload.roundOneHeatCapacity);
   if (
     typeof commandId !== "string" || !isCommandId(commandId)
     || name === null || eventDate === undefined || eventDate === null
+    || ducksPerHeat === null
   ) {
-    return json({ error: "Command, event name, and event date are required." }, 400);
+    return json({
+      error: "Command, event name, event date, and ducks per heat (a whole number from 1 to 10000) are required.",
+    }, 400);
   }
   const slug = eventSlugFromName(name);
-  const fingerprint = canonicalFingerprint({ operation: "CREATE_EVENT", slug, name, eventDate });
+  const fingerprint = canonicalFingerprint({ operation: "CREATE_EVENT", slug, name, eventDate, ducksPerHeat });
   const existingCommand = await findCommand(commandId, env);
   if (existingCommand !== null) {
     if (existingCommand.command_type !== "CREATE_EVENT" || existingCommand.request_fingerprint !== fingerprint) {
@@ -259,12 +268,12 @@ const createEvent = async (
            heat_assignment_mode, round_one_heat_capacity, final_heat_capacity,
            public_name_policy, revision, created_at, updated_at)
          SELECT ?, ?, ?, ?, d.timezone, 'DRAFT', NULL, NULL, d.email_required,
-                d.heat_assignment_mode, d.round_one_heat_capacity,
+                'IMMEDIATE_FIXED', ?,
                 d.final_heat_capacity, d.public_name_policy, 0, ?, ?
            FROM organization_event_defaults d
           WHERE d.singleton_id = 1
             AND NOT EXISTS (SELECT 1 FROM events)`,
-      ).bind(eventId, slug, name, eventDate, now, now),
+      ).bind(eventId, slug, name, eventDate, ducksPerHeat, now, now),
       env.DB.prepare(
         `INSERT INTO race_commands
           (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
@@ -285,7 +294,14 @@ const createEvent = async (
         commandId,
         eventId,
         now,
-        JSON.stringify({ staff_profile_id: actor.id, command_id: commandId, slug, name, event_date: eventDate }),
+        JSON.stringify({
+          staff_profile_id: actor.id,
+          command_id: commandId,
+          slug,
+          name,
+          event_date: eventDate,
+          round_one_heat_capacity: ducksPerHeat,
+        }),
         commandId,
         eventId,
       ),
@@ -307,8 +323,8 @@ const createEvent = async (
     registration_opens_at: null,
     registration_closes_at: null,
     email_required: defaults.email_required,
-    heat_assignment_mode: defaults.heat_assignment_mode,
-    round_one_heat_capacity: defaults.round_one_heat_capacity,
+    heat_assignment_mode: "IMMEDIATE_FIXED",
+    round_one_heat_capacity: ducksPerHeat,
     final_heat_capacity: defaults.final_heat_capacity,
     public_name_policy: defaults.public_name_policy,
     revision: 0,
@@ -710,7 +726,8 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
       (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
      SELECT ?, e.id, 'OPEN_REGISTRATION', e.id, ?, ?, ?
        FROM events e
-      WHERE e.id = ? AND e.status = 'DRAFT' AND e.event_date IS NOT NULL`,
+      WHERE e.id = ? AND e.status = 'DRAFT' AND e.event_date IS NOT NULL
+        AND e.round_one_heat_capacity >= 1`,
     updateSql: `UPDATE events SET status = 'REGISTRATION_OPEN', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'DRAFT'
         AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'OPEN_REGISTRATION')`,
@@ -991,6 +1008,9 @@ const readinessFor = (
   switch (definition.action) {
     case "open-registration":
       if (event.event_date === null) blockers.push("Set the event date before opening registration.");
+      if (!Number.isInteger(event.round_one_heat_capacity) || event.round_one_heat_capacity < 1) {
+        blockers.push("Set how many ducks race in each heat before opening registration, so ducks can be assigned to heats as they are paired.");
+      }
       break;
     case "reopen-registration":
       if (stats.any_heat_count > 0) blockers.push("Registration cannot reopen after heats have been created.");

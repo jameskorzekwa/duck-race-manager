@@ -215,6 +215,7 @@ test("station roles enforce the complete operational matrix with live D1 actors"
 
   const created = await json(await post(actors.admin, "/api/v1/staff/events", {
     commandId: command(), slug: "role-race", name: "Role Race", eventDate: "2026-08-30",
+    roundOneHeatCapacity: 10,
   }), 201, "administrator creates draft");
   const eventId = created.event.id;
   await json(await api(actors.admin, `/api/v1/staff/events/${eventId}/configuration`, {

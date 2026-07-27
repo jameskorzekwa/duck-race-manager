@@ -3118,6 +3118,7 @@ if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) =>
       commandId: crypto.randomUUID(),
       name: String(values.get("name")),
       eventDate: String(values.get("eventDate")),
+      roundOneHeatCapacity: Number(values.get("roundOneHeatCapacity")),
     }));
     form.reset();
     updateEventSlugPreview(form, eventCreateSlugPreview);

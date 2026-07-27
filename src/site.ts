@@ -595,6 +595,7 @@ export const renderStaffHome = (
               <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
               <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
               <label>Event date<input name="eventDate" type="date" required></label>
+              <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
               <button class="button" type="submit">Create draft event</button>
             </form>
           </details>
@@ -605,7 +606,7 @@ export const renderStaffHome = (
               <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="datetime-local"></label><label>Registration closes<input name="registrationClosesAt" type="datetime-local"></label></div>
               <label class="check"><input name="emailRequired" type="checkbox"><span class="label-text">Require participant email</span></label>
               <div class="field-grid"><label>Heat assignment<select name="heatAssignmentMode"><option value="IMMEDIATE_FIXED">Assign during pairing</option><option value="POST_CLOSE_BALANCED">Balanced plan after close</option></select></label><label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label></div>
-              <div class="field-grid"><label>Round-one capacity<input name="roundOneHeatCapacity" type="number" min="1" max="10000" required></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
+              <div class="field-grid"><label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" required></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
               <button class="button" type="submit">Save draft configuration</button>
             </form>
           </details>` : ""}
