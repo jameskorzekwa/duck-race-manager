@@ -170,6 +170,35 @@ test("administrator event forms render automatic read-only slug previews", () =>
   assert.doesNotMatch(markup, /name="slug"/);
 });
 
+test("event creation requires a hinted ducks-per-heat field wired into the create command", () => {
+  const adminMarkup = renderStaffHome("Administrator", true, []);
+  const directorMarkup = renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]);
+
+  assert.match(
+    adminMarkup,
+    /Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" step="1" required/,
+  );
+  assert.match(adminMarkup, /How many ducks race together in each round-one heat\./);
+  assert.match(adminMarkup, /this can change only while the event is still a draft/);
+  const createForm = adminMarkup.match(/<form data-event-create-form>[^]*?<\/form>/)?.[0];
+  assert.ok(createForm);
+  assert.match(createForm, /name="roundOneHeatCapacity"/);
+  assert.doesNotMatch(directorMarkup, /data-event-create-form/);
+
+  // The config form keeps the draft-only editable value with the same field name.
+  const configForm = adminMarkup.match(/<form data-event-config-form>[^]*?<\/form>/)?.[0];
+  assert.ok(configForm);
+  assert.match(configForm, /Ducks per heat<input name="roundOneHeatCapacity"/);
+
+  assert.match(
+    staffHomeScript,
+    /eventDate: String\(values\.get\("eventDate"\)\),\s*roundOneHeatCapacity: Number\(values\.get\("roundOneHeatCapacity"\)\),\s*\}\)\);/,
+  );
+  assert.ok(staffHomeScript.includes(
+    "eventConfigForm.elements.roundOneHeatCapacity.value = currentEvent.roundOneHeatCapacity;",
+  ));
+});
+
 test("lifecycle controls retain command IDs across response-loss retries and reject stale refreshes", () => {
   const { lifecycleCreateAttempt, lifecycleShouldRenderEvent } = new Function(
     `${eventLifecycleHelpersScript}; return { lifecycleCreateAttempt, lifecycleShouldRenderEvent };`,

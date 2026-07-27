@@ -191,15 +191,28 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   });
   assert.equal(regularCreate.status, 403);
 
+  const missingHeatSize = await post("/api/v1/staff/events", {
+    commandId: crypto.randomUUID(),
+    slug: "annual-race",
+    name: "Annual Duck Race",
+    eventDate: "2026-08-30",
+  }, adminToken);
+  assert.equal(missingHeatSize.status, 400);
+
   const created = await jsonBody(await post("/api/v1/staff/events", {
     commandId: crypto.randomUUID(),
     slug: "annual-race",
     name: "Annual Duck Race",
     eventDate: "2026-08-30",
+    roundOneHeatCapacity: 4,
   }, adminToken), 201, "create event");
   const eventId = created.event.id;
   assert.equal(created.event.status, "DRAFT");
+  // New events default to assigning heats while pairing, sized at creation.
+  assert.equal(created.event.heatAssignmentMode, "IMMEDIATE_FIXED");
+  assert.equal(created.event.roundOneHeatCapacity, 4);
 
+  // The legacy balanced mode remains available through draft configuration.
   const configured = await jsonBody(await api(`/api/v1/staff/events/${eventId}/configuration`, {
     method: "PATCH",
     token: adminToken,

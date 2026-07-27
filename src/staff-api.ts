@@ -815,11 +815,18 @@ const pairDuck = async (
         slot: 1,
         isNew: true,
       };
+      // Guarded creation: no row is inserted once round-one heats reach final
+      // capacity, and the dependent heat-entry insert then fails its foreign
+      // key, rolling the whole pairing batch back.
       statements.push(env.DB.prepare(
         `INSERT INTO heats
-          (id, event_id, round, heat_number, status, target_size)
-         VALUES (?, ?, 'ROUND_ONE', ?, 'PLANNED', ?)`,
-      ).bind(heat.id, eventId, heat.number, context.round_one_heat_capacity));
+          (id, event_id, round, heat_number, status, target_size, source_command_id)
+         SELECT ?, e.id, 'ROUND_ONE', ?, 'PLANNED', e.round_one_heat_capacity, ?
+           FROM events e
+          WHERE e.id = ?
+            AND (SELECT COUNT(*) FROM heats h
+                  WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') < e.final_heat_capacity`,
+      ).bind(heat.id, heat.number, commandId, eventId));
     } else {
       heat = {
         id: existingHeat.id,
@@ -828,11 +835,31 @@ const pairDuck = async (
         isNew: false,
       };
     }
+    // Guarded slot: the slot number is recomputed inside the atomic batch and
+    // becomes NULL when the heat is already full, so the NOT NULL constraint
+    // aborts the transaction instead of overfilling a heat that a concurrent
+    // pairing filled after this request's preflight read.
     statements.push(env.DB.prepare(
       `INSERT INTO heat_entries
-        (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
-       VALUES (?, ?, ?, ?, 'ROUND_ONE', ?, 'PAIRING', ?)`,
-    ).bind(crypto.randomUUID(), eventId, heat.id, context.race_entry_id, heat.slot, now));
+        (id, event_id, heat_id, race_entry_id, round, slot_number,
+         assignment_source, assigned_at, source_command_id)
+       SELECT ?, e.id, ?, ?, 'ROUND_ONE',
+              CASE WHEN (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = ?) < e.round_one_heat_capacity
+                   THEN (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = ?) + 1
+                   END,
+              'PAIRING', ?, ?
+         FROM events e
+        WHERE e.id = ?`,
+    ).bind(
+      crypto.randomUUID(),
+      heat.id,
+      context.race_entry_id,
+      heat.id,
+      heat.id,
+      now,
+      commandId,
+      eventId,
+    ));
   }
 
   statements.push(env.DB.prepare(

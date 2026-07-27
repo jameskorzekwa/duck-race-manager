@@ -202,11 +202,11 @@ test("only an administrator can create an event", async () => {
   assert.equal(db.statements.length, 0);
 });
 
-test("an administrator creates one draft from retained organization defaults", async () => {
+test("an administrator creates one immediate-mode draft with a required ducks-per-heat size", async () => {
   const defaults = {
     timezone: "America/Denver",
     email_required: 1,
-    heat_assignment_mode: "IMMEDIATE_FIXED",
+    heat_assignment_mode: "POST_CLOSE_BALANCED",
     round_one_heat_capacity: 8,
     final_heat_capacity: 16,
     public_name_policy: "FIRST_NAME_ONLY",
@@ -224,6 +224,7 @@ test("an administrator creates one draft from retained organization defaults", a
       slug: "../../CLIENT-CONTROLLED",
       name: "Ànnual Duck Race!!!",
       eventDate: "2026-09-01",
+      roundOneHeatCapacity: 6,
     }),
     makeEnv(db),
     admin,
@@ -235,13 +236,38 @@ test("an administrator creates one draft from retained organization defaults", a
   assert.equal(body.event.slug, "annual-duck-race");
   assert.equal(body.event.timezone, defaults.timezone);
   assert.equal(body.event.emailRequired, true);
+  assert.equal(body.event.heatAssignmentMode, "IMMEDIATE_FIXED");
+  assert.equal(body.event.roundOneHeatCapacity, 6);
   const sql = db.batches[0].map((statement) => statement.sql).join("\n");
   assert.match(sql, /FROM organization_event_defaults/);
+  assert.match(sql, /'IMMEDIATE_FIXED'/);
   assert.match(sql, /'CREATE_EVENT'/);
   assert.match(sql, /'EVENT_CREATED'/);
   assert.equal(sql.includes("Annual Duck Race"), false);
   assert.ok(db.batches[0].every((statement) => statement.args.length > 0));
   assert.equal(db.batches[0][0].args[1], "annual-duck-race");
+  assert.equal(db.batches[0][0].args[4], 6);
+});
+
+test("event creation validates the ducks-per-heat bounds before touching the database", async () => {
+  for (const roundOneHeatCapacity of [undefined, null, 0, -3, 2.5, 10_001, "8"]) {
+    const db = makeDb(() => null);
+    const response = await handleEventOperations(
+      jsonRequest("/api/v1/staff/events", "POST", {
+        commandId: crypto.randomUUID(),
+        name: "Bounded Race",
+        eventDate: "2026-09-01",
+        roundOneHeatCapacity,
+      }),
+      makeEnv(db),
+      admin,
+    );
+
+    assert.equal(response.status, 400, `capacity ${String(roundOneHeatCapacity)} must be rejected`);
+    assert.match((await response.json()).error, /ducks per heat/i);
+    assert.equal(db.statements.length, 0);
+    assert.equal(db.batches.length, 0);
+  }
 });
 
 test("event creation refuses to create a second race dataset", async () => {
@@ -255,6 +281,7 @@ test("event creation refuses to create a second race dataset", async () => {
       commandId: crypto.randomUUID(),
       name: "Second Race",
       eventDate: "2027-09-01",
+      roundOneHeatCapacity: 10,
     }),
     makeEnv(db),
     admin,
@@ -373,6 +400,40 @@ test("readiness reports actionable blockers without changing the event", async (
   assert.equal(db.batches.length, 0);
 });
 
+test("opening registration is blocked for a legacy event without a ducks-per-heat size", async () => {
+  const legacyEvent = { ...draftEvent, round_one_heat_capacity: null };
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands") && sql.includes("request_fingerprint")) return null;
+    if (sql.includes("submitted_registration_count")) {
+      return { ...readyStats, round_one_heat_count: 0, any_heat_count: 0 };
+    }
+    return legacyEvent;
+  });
+  const readiness = await handleEventOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test/readiness"),
+    makeEnv(db),
+    staff,
+  );
+  const readinessBody = await readiness.json();
+
+  assert.equal(readinessBody.readiness["open-registration"].allowed, false);
+  assert.match(
+    readinessBody.readiness["open-registration"].blockers.join(" "),
+    /ducks race in each heat/i,
+  );
+
+  const transition = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/open-registration", "POST", {
+      commandId: crypto.randomUUID(),
+    }),
+    makeEnv(db),
+    staff,
+  );
+  assert.equal(transition.status, 409);
+  assert.match((await transition.json()).readiness.blockers.join(" "), /ducks race in each heat/i);
+  assert.equal(db.batches.length, 0);
+});
+
 test("round-one readiness and transition reject more heats than final capacity", async () => {
   const db = makeDb((sql) => {
     if (sql.includes("FROM race_commands") && sql.includes("request_fingerprint")) return null;
@@ -434,6 +495,9 @@ for (const [action, fromStatus, toStatus, commandType] of lifecycleCases) {
     const command = db.batches[0][0];
     const update = db.batches[0][1];
     assert.match(command.sql, new RegExp(`'${commandType}'`));
+    if (action === "open-registration") {
+      assert.match(command.sql, /e\.round_one_heat_capacity >= 1/);
+    }
     if (action === "start-round-one") {
       assert.match(command.sql, /COUNT\(\*\).*ROUND_ONE.*<= e\.final_heat_capacity/s);
       assert.match(command.sql, /START_DUCK_PROVISIONING/);
