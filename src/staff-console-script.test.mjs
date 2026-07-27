@@ -160,6 +160,172 @@ test("inventory cards and detail panel have isolated responsive layout semantics
   assert.doesNotMatch(inventoryDetailHelpersScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
 });
 
+const eventSection = (markup) => {
+  const match = markup.match(/<section class="console-section" id="events"[^]*?<\/section>/);
+  assert.ok(match, "the staff console renders an event section");
+  return match[0];
+};
+
+const orderedIndexes = (markup, hooks) => hooks.map((hook) => {
+  const index = markup.indexOf(hook);
+  assert.ok(index >= 0, `missing markup hook ${hook}`);
+  return index;
+});
+
+test("the event section leads with create event, then the picker, then the selected-event region", () => {
+  const adminSection = eventSection(renderStaffHome("Administrator", true, []));
+  const directorSection = eventSection(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]));
+
+  // 1. heading, 2. create event, 3. working-event picker, 4. selected-event detail region.
+  const [heading, createCard, picker, refresh, emptyState, detailRegion] = orderedIndexes(adminSection, [
+    '<h2 id="events-title">Event</h2>',
+    "data-event-create-card",
+    "data-event-select",
+    "data-refresh-event",
+    "data-event-empty",
+    "data-event-detail",
+  ]);
+  assert.ok(heading < createCard, "create event sits directly under the section heading");
+  assert.ok(createCard < picker, "the create card is rendered before the working-event select");
+  assert.ok(picker < refresh && refresh < emptyState, "the picker and its refresh button follow the create card");
+  assert.ok(emptyState < detailRegion, "the no-event guidance precedes the selected-event region");
+
+  // The create card stays a collapsed administrator-only <details> outside the selected-event region.
+  assert.match(
+    adminSection,
+    /<details class="operation-card event-create-card" data-event-create-card><summary>Create event<\/summary>/,
+  );
+  assert.doesNotMatch(adminSection, /data-event-create-card[^>]*\bopen\b/);
+  assert.doesNotMatch(directorSection, /data-event-create-card|data-event-create-form/);
+
+  // The detail region is a labelled region that is hidden until an event is selected.
+  for (const section of [adminSection, directorSection]) {
+    assert.match(
+      section,
+      /<div class="event-detail" role="region" aria-labelledby="event-detail-title" data-event-detail hidden>/,
+    );
+    assert.match(section, /<h3 class="event-detail-title" id="event-detail-title">Selected event details<\/h3>/);
+    assert.match(section, /<p class="empty-state" data-event-empty hidden>Create a draft event to begin\.<\/p>/);
+  }
+
+  // 5. every selected-event card lives inside that region, in the required order, after the select.
+  const region = adminSection.slice(adminSection.indexOf('<div class="event-detail"'));
+  const [summary, config, readiness, deleteDraft, forceDelete] = orderedIndexes(region, [
+    "data-event-summary",
+    "data-event-config-card",
+    "data-event-readiness",
+    "data-delete-draft-card",
+    "data-force-delete-card",
+  ]);
+  assert.ok(summary < config, "the summary facts open the detail region");
+  assert.ok(config < readiness, "configure draft precedes readiness and lifecycle");
+  assert.ok(readiness < deleteDraft && deleteDraft < forceDelete, "the danger cards close the detail region");
+  assert.ok(!region.includes("data-event-create-card"), "create event stays outside the selected-event region");
+  assert.ok(!region.includes("data-event-select"), "the picker stays above the selected-event region");
+  assert.ok(region.includes('<div class="console-grid">'), "the detail cards keep the console grid");
+
+  // The non-administrator region keeps only readiness, with its unchanged canRaceRead wording.
+  const directorRegion = directorSection.slice(directorSection.indexOf('<div class="event-detail"'));
+  assert.match(directorRegion, /<h3>Readiness and lifecycle<\/h3><p class="muted">Every transition is checked again by the server\./);
+  const stewardRegion = eventSection(renderStaffHome("Return Steward", false, ["RETURN_STEWARD"]));
+  assert.match(stewardRegion, /Use your assigned station section for operational work\./);
+  assert.ok(!directorRegion.includes("data-event-config-card"));
+  assert.ok(!directorRegion.includes("data-delete-draft-card"));
+});
+
+test("the console script reveals the selected-event region and restores the no-event guidance", () => {
+  assert.ok(staffHomeScript.includes('const eventDetailRegion = document.querySelector("[data-event-detail]");'));
+  assert.ok(staffHomeScript.includes('const eventEmptyState = document.querySelector("[data-event-empty]");'));
+  assert.ok(staffHomeScript.includes('const eventCreateCard = document.querySelector("[data-event-create-card]");'));
+
+  // renderEvent reveals the region alongside the still-working force-delete reveal.
+  const populate = staffHomeScript.indexOf("eventConfigForm.elements.name.value");
+  const revealForceDelete = staffHomeScript.indexOf("forceDeleteCard.hidden = false;");
+  const revealRegion = staffHomeScript.indexOf("if (eventDetailRegion) eventDetailRegion.hidden = false;");
+  const hideEmptyState = staffHomeScript.indexOf("if (eventEmptyState) eventEmptyState.hidden = true;");
+  assert.ok(populate > 0 && revealForceDelete > populate);
+  assert.ok(revealRegion > revealForceDelete, "the detail region is revealed with the delete-event card");
+  assert.ok(hideEmptyState > revealForceDelete && hideEmptyState < revealRegion);
+  assert.ok(staffHomeScript.indexOf("return true;", revealRegion) > revealRegion);
+
+  // The no-events branch of loadEvents hides the region, shows the guidance, and opens the create card.
+  const noEventsBranch = staffHomeScript.indexOf('eventSelect.append(new Option("No event exists", ""));');
+  const noEventsMessage = staffHomeScript.indexOf('setMessage("No event dataset exists. An administrator can create one.");');
+  const hideRegion = staffHomeScript.indexOf("if (eventDetailRegion) eventDetailRegion.hidden = true;");
+  const showEmptyState = staffHomeScript.indexOf("if (eventEmptyState) eventEmptyState.hidden = false;");
+  const openCreateCard = staffHomeScript.indexOf("if (eventCreateCard) eventCreateCard.open = true;");
+  assert.ok(noEventsBranch > 0 && noEventsMessage > noEventsBranch);
+  for (const index of [hideRegion, showEmptyState, openCreateCard]) {
+    assert.ok(index > noEventsBranch && index < noEventsMessage, "no-event cleanup stays in the no-events branch");
+  }
+  // The existing empty-state message and the other no-event resets are unchanged.
+  assert.ok(staffHomeScript.includes('eventSummary.replaceChildren(empty("Create a draft event to begin."));'));
+  assert.ok(staffHomeScript.includes('readinessList.replaceChildren(empty("No lifecycle is available."));'));
+  assert.ok(staffHomeScript.includes("forceDeleteCard.hidden = true;"));
+  assert.ok(staffHomeScript.includes("deleteDraftCard.hidden = true;"));
+  assert.ok(staffHomeScript.includes('eventConfigCard.hidden = currentEvent.status !== "DRAFT";'));
+  assert.ok(staffHomeScript.includes('deleteDraftCard.hidden = currentEvent.status !== "DRAFT";'));
+  // Creating an event collapses the primary action again.
+  assert.ok(staffHomeScript.includes("if (eventCreateCard) eventCreateCard.open = false;"));
+});
+
+test("the selected-event region ships hidden and the generated script toggles it both ways", () => {
+  // The server markup hides the region for every console user until an event is selected.
+  for (const roles of [[true, []], [false, ["RACE_DIRECTOR"]], [false, ["REGISTRATION"]]]) {
+    const section = eventSection(renderStaffHome("Console User", roles[0], roles[1]));
+    assert.match(section, /data-event-detail hidden>/);
+    assert.match(section, /data-event-empty hidden>/);
+  }
+
+  const sliceBetween = (start, end) => {
+    const from = staffHomeScript.indexOf(start);
+    const to = staffHomeScript.indexOf(end, from);
+    assert.ok(from >= 0 && to > from, `cannot slice generated script between ${start} and ${end}`);
+    return staffHomeScript.slice(from, to);
+  };
+  const region = { hidden: true };
+  const emptyState = { hidden: true };
+  const createCard = { open: false };
+
+  // renderEvent's tail reveals the server-hidden region and retires the no-event guidance.
+  new Function(
+    "eventDetailRegion",
+    "eventEmptyState",
+    sliceBetween("if (eventEmptyState) eventEmptyState.hidden = true;", "return true;"),
+  )(region, emptyState);
+  assert.equal(region.hidden, false);
+  assert.equal(emptyState.hidden, true);
+
+  // The no-events branch hides it again, restores the guidance, and opens the create card.
+  new Function(
+    "eventDetailRegion",
+    "eventEmptyState",
+    "eventCreateCard",
+    sliceBetween(
+      "if (eventDetailRegion) eventDetailRegion.hidden = true;",
+      'setMessage("No event dataset exists. An administrator can create one.");',
+    ),
+  )(region, emptyState, createCard);
+  assert.equal(region.hidden, true);
+  assert.equal(emptyState.hidden, false);
+  assert.equal(createCard.open, true);
+});
+
+test("the reworked event layout keeps the create card intentional and the detail cards responsive", () => {
+  const markup = renderStaffHome("Administrator", true, []);
+  const css = markup.match(/<style>([\s\S]+)<\/style>/)?.[1];
+  assert.ok(css);
+
+  assert.match(css, /\.event-create-card \{ border-color:var\(--ink\); background:var\(--cream\); box-shadow:3px 3px 0 var\(--ink\); \}/);
+  assert.match(css, /\.event-detail \{ min-width:0; max-width:100%; padding:clamp\(\.7rem,2\.5vw,1rem\);/);
+  assert.match(css, /\.event-detail > \* \+ \* \{ margin-top:var\(--space-md\); \}/);
+  assert.match(css, /\.event-detail > \.compact-facts \{ margin:0; \}/);
+  assert.match(css, /\.event-detail-title \{ margin:0;[^}]*overflow-wrap:anywhere; \}/);
+  assert.match(css, /\[hidden\] \{ display:none !important; \}/);
+  // The selected-event cards keep the shared two-column console grid above 44rem.
+  assert.match(css, /@media \(min-width:44rem\)[^{]*\{[^]*\.console-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
+});
+
 test("administrator event forms render automatic read-only slug previews", () => {
   const markup = renderStaffHome("Administrator", true, []);
 

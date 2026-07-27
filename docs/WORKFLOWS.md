@@ -517,6 +517,23 @@ staff console. Event readiness and heat, announcer-roster, result, and finalist
 reads are limited to announcers, heat runners, result takers, race directors,
 and system administrators.
 
+### Console Event Layout
+
+The console's Event section is ordered setup-first. A system administrator sees
+the collapsed **Create event** card directly under the section heading; other
+roles see no create card. The **Working event** picker and its refresh button
+follow. Everything about the chosen event then appears in one labelled
+"Selected event details" region below the picker, in this order: the summary
+facts, **Configure draft**, **Readiness and lifecycle**, **Delete empty draft**,
+and **Delete event**. Administrator-only cards remain administrator-only, and
+the configure and delete-draft cards still appear only while the event is a
+draft.
+
+That region is hidden in the served markup and is revealed once an event is
+selected or defaulted. While no event row exists the console hides the region,
+shows `Create a draft event to begin.` under the picker, and opens the create
+card so the primary action is obvious.
+
 ### Create and Configure
 
 **System administrator only:** create one event when no event row exists. Event
