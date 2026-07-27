@@ -118,6 +118,13 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(staffDuckScript, /\/api\/v1\/staff\/registrations\/search/);
   assert.match(staffDuckScript, /registration\.email/);
   assert.match(staffDuckScript, /registration\.phone/);
+  // Scanning the duck someone is complaining about reaches the same moderation
+  // endpoint the participant console uses, with a command identifier.
+  assert.match(staffDuckScript, /\/clear-duck-name/);
+  assert.match(staffDuckScript, /commandId: crypto\.randomUUID\(\)/);
+  // The control is drawn only when the response carried the participant
+  // projection, which the API sends only to the roles that may clear a name.
+  assert.match(staffDuckScript, /if \(typeof participant\.registrationId !== "string"\) return;/);
   assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   // Returns tracking is gone from every browser client.
   assert.doesNotMatch(staffDuckScript, /\/dispositions|disposition/);
@@ -435,6 +442,15 @@ const confirmationCallsites = [
   [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Permanently delete the registration for " + registration.firstName + " " + registration.lastName + "? This removes the participant and their race entry. This cannot be undone.", { danger: true })) return;'],
+  [staffHomeScript, `if (!await appConfirm(
+    "Clear the duck name chosen by " + registration.firstName + " " + registration.lastName
+    + "? The duck goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;`],
+  [staffDuckScript, `if (!await appConfirm(
+    "Clear this duck's chosen name? It goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;`],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
   [participantScript, `  const confirmed = await appConfirm(
     "Delete the registration for " + participantDisplayName(registration)
@@ -452,9 +468,12 @@ test("every confirmation callsite preserves its warning and returns before mutat
   assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((inventoryIntakeScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // 19 minus the four retired returns/purge confirmations, minus the retired
-  // balanced-plan commit, plus participant deletion.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 15);
+  // balanced-plan commit, plus participant deletion, plus clearing a duck name.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 16);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  // The staff duck scan has exactly one destructive action of its own:
+  // moderating away a duck name. Pairing confirms through its own review step.
+  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // My Ducks has exactly one destructive action: self-service deletion.
   assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The dialog is defined once, by the one bundle every page loads first, so
@@ -1467,6 +1486,41 @@ test("a failed add restores the action and reports the failure on that result", 
   assert.equal(harness.navigation.hidden, true);
 });
 
+test("a search result shows the chosen duck name beside the duck number", async () => {
+  const named = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    return Response.json({
+      results: [searchResult({
+        duck: { visibleNumber: 12 },
+        duckName: "Sir Quacks-a-Lot",
+        assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
+        outcome: "NOT_RACED",
+      })],
+    });
+  });
+  await named.form.dispatch("submit");
+  assert.equal(
+    named.results.children[0].children[1].textContent,
+    "Duck #12 · Sir Quacks-a-Lot · Heat 3 · not raced",
+  );
+
+  // No name, or one the server's read-time filter suppressed, leaves the number
+  // exactly as it was.
+  const plain = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    return Response.json({
+      results: [searchResult({
+        duck: { visibleNumber: 12 },
+        duckName: null,
+        assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
+        outcome: "NOT_RACED",
+      })],
+    });
+  });
+  await plain.form.dispatch("submit");
+  assert.equal(plain.results.children[0].children[1].textContent, "Duck #12 · Heat 3 · not raced");
+});
+
 test("a search result without a follow identifier renders no add action", async () => {
   const harness = homeHarness((url) => {
     if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
@@ -1903,10 +1957,12 @@ test("the owner's card shows the chosen duck name and keeps the number beside it
   // The number stays visible so the card matches the physical duck.
   assert.equal(value.children[1].textContent, "Duck #12");
   assert.equal(value.children[1].className, "duck-number-note");
-  // The naming form is pre-filled for renaming.
+  // The naming form is pre-filled for renaming, and now says plainly that the
+  // name is public and that staff can remove it.
   const form = nameForm(card);
   assert.match(form.text(), /Rename this duck/);
-  assert.match(form.text(), /Race staff and the public race board always show the duck number/);
+  assert.match(form.text(), /shown publicly beside this duck’s number/);
+  assert.match(form.text(), /race staff can remove a name that is not/);
 });
 
 test("a followed entry never renders a duck name even if one is sent", async () => {
@@ -2992,6 +3048,91 @@ test("live board entries link a visible duck number and stay plain text when una
   assert.equal(pending.children.length, 0);
   assert.equal(nodeText(pending), "Duck number pending");
   assert.equal(pending.children.some((child) => child.tagName === "A"), false);
+});
+
+test("a board entry shows the chosen duck name beside the number it never replaces", () => {
+  const { api } = liveDuckPage();
+
+  const named = api.liveBoardDuckCell({
+    participantDisplayName: "Jamie R.",
+    duckNumber: 128,
+    duckName: "Sir Quacks-a-Lot",
+    place: null,
+  });
+  // The link text is still the canonical number; the name rides beside it.
+  assert.equal(named.children[0].tagName, "A");
+  assert.equal(named.children[0].textContent, "Duck #128");
+  assert.equal(named.children[0].href, "/duck/128");
+  assert.equal(nodeText(named), "Duck #128 · Sir Quacks-a-Lot");
+
+  // A placed entry keeps number, name, and place in that order.
+  assert.equal(
+    nodeText(api.liveBoardDuckCell({
+      participantDisplayName: "Jamie R.",
+      duckNumber: 4,
+      duckName: "Bubbles",
+      place: 1,
+    })),
+    "Duck #4 · Bubbles · 1st place",
+  );
+
+  // A suppressed, cleared, or absent name simply leaves the number.
+  for (const duckName of [null, undefined, ""]) {
+    assert.equal(
+      nodeText(api.liveBoardDuckCell({
+        participantDisplayName: "Jamie R.",
+        duckNumber: 7,
+        duckName,
+        place: null,
+      })),
+      "Duck #7",
+      String(duckName),
+    );
+  }
+
+  // An entry with no duck number carries no name either.
+  assert.equal(
+    nodeText(api.liveBoardDuckCell({
+      participantDisplayName: "Jamie R.",
+      duckNumber: null,
+      duckName: "Bubbles",
+      place: null,
+    })),
+    "Duck number pending",
+  );
+
+  // The name is a text node built by the shared helper, never markup.
+  const hostile = api.liveBoardDuckCell({
+    participantDisplayName: "Jamie R.",
+    duckNumber: 9,
+    duckName: "<img src=x onerror=alert(1)>",
+    place: null,
+  });
+  assert.equal(nodeText(hostile), "Duck #9 · <img src=x onerror=alert(1)>");
+  assert.equal(hostile.children.some((child) => child.tagName === "IMG"), false);
+});
+
+test("the public duck detail page shows the chosen name beside the number", async () => {
+  const page = liveDuckPage({
+    raceStatus: {
+      participantDisplayName: "Jamie R.",
+      duck: { visibleNumber: 128 },
+      duckName: "Sir Quacks-a-Lot",
+      assignedHeat: { roundOne: null, final: null },
+      currentHeat: null,
+      outcome: "HEAT_ASSIGNMENT_PENDING",
+    },
+  });
+
+  await page.api.liveRefreshWork();
+
+  // The live repaint mirrors the server-rendered fact exactly.
+  assert.deepEqual(
+    page.personal.children[0].children
+      .map((fact) => fact.children.map((part) => part.textContent))
+      .find(([label]) => label === "Duck"),
+    ["Duck", "Duck #128 · Sir Quacks-a-Lot"],
+  );
 });
 
 const participantCards = () => {

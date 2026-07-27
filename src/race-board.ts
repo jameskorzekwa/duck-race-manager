@@ -1,3 +1,4 @@
+import { publicDuckName } from "./duck-name-filter.ts";
 import type { Env } from "./types.ts";
 
 type BoardRound = "ROUND_ONE" | "FINAL";
@@ -26,12 +27,16 @@ interface BoardRow {
   first_name: string | null;
   last_name: string | null;
   visible_number: number | null;
+  duck_name: string | null;
   place: number | null;
 }
 
 export interface PublicRaceBoardEntry {
   participantDisplayName: string;
   duckNumber: number | null;
+  // The participant-chosen name, filtered at read time, or null. The board
+  // always keeps `duckNumber` beside it.
+  duckName: string | null;
   place: number | null;
 }
 
@@ -98,6 +103,7 @@ export const getPublicRaceBoard = async (env: Env): Promise<PublicRaceBoard> => 
   const rows = await env.DB.prepare(
     `SELECT h.id AS heat_id, h.round, h.heat_number, h.status AS heat_status,
             he.slot_number, r.first_name, r.last_name, d.visible_number,
+            re.duck_name,
             CASE WHEN h.status = 'FINALIZED' THEN hr.place ELSE NULL END AS place
        FROM heats h
        LEFT JOIN heat_entries he ON he.heat_id = h.id AND he.event_id = h.event_id
@@ -133,6 +139,9 @@ export const getPublicRaceBoard = async (env: Env): Promise<PublicRaceBoard> => 
       heat.roster.push({
         participantDisplayName: publicDisplayName(event.public_name_policy, row.first_name, row.last_name),
         duckNumber: row.visible_number,
+        // A roster entry with no duck number yet carries no name either: the
+        // name only means something next to the duck it belongs to.
+        duckName: row.visible_number === null ? null : publicDuckName(row.duck_name),
         place: row.place,
       });
     }

@@ -204,6 +204,7 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .duck-number-link:hover { text-decoration-thickness:.18em; }
 .duck-number-link:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
 .duck-number-note { display:block; margin-top:.2rem; color:var(--muted); font-size:.8rem; font-weight:800; letter-spacing:.04em; }
+.duck-name-note { color:var(--water-dark); font-weight:850; }
 .duck-name-form { gap:.6rem; margin-top:.9rem; padding-top:.9rem; border-top:2px dashed #b8c6c9; }
 .duck-name-form .message-line { margin:0; }
 .page-panel > .actions[data-duck-follow] { margin:1.2rem 0; }
@@ -698,6 +699,7 @@ const mockRaceStatus: PublicRaceStatus = {
   },
   participantDisplayName: "Jamie R.",
   duck: { visibleNumber: 128 },
+  duckName: "Sir Quacks-a-Lot",
   assignedHeat: {
     roundOne: { number: 7, status: "PLANNED" },
     final: null,
@@ -710,10 +712,18 @@ const roundLabel = (round: string): string => round === "FINAL" ? "Final" : "Rou
 const outcomeLabel = (outcome: string): string =>
   outcome.replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
 
+// The canonical duck number always leads, because it is what is printed on the
+// duck in the water. A participant-chosen name follows it when there is one that
+// the read-time filter allows, so the two never disagree and a suppressed or
+// cleared name simply leaves "Duck #N".
+const duckIdentity = (status: PublicRaceStatus): string => {
+  if (status.duck === null) return "Waiting for duck assignment";
+  const number = `Duck #${status.duck.visibleNumber}`;
+  return status.duckName === null ? number : `${number} · ${status.duckName}`;
+};
+
 const publicStatusFacts = (status: PublicRaceStatus, showParticipant = true): string => {
-  const assignment = status.duck === null
-    ? "Waiting for duck assignment"
-    : `Duck #${status.duck.visibleNumber}`;
+  const assignment = escapeHtml(duckIdentity(status));
   const heat = status.assignedHeat.final ?? status.assignedHeat.roundOne;
   const heatLabel = heat === null
     ? "Heat not assigned yet"
@@ -781,7 +791,7 @@ const duckDetailFacts = (status: PublicRaceStatus): string => {
   const officialResult = publicOfficialResult(status.outcome);
   const facts = [
     ["Participant", status.participantDisplayName],
-    ["Duck", status.duck === null ? "Waiting for duck assignment" : `Duck #${status.duck.visibleNumber}`],
+    ["Duck", duckIdentity(status)],
     ["Round one heat", heatFact(status.assignedHeat.roundOne, "Not assigned yet")],
     ["Final heat", heatFact(status.assignedHeat.final, "Not in the final")],
     ["Currently running", status.currentHeat === null
@@ -1322,7 +1332,12 @@ const createText = (tag, text, className) => {
 const describeStatus = (status) => {
   if (!status) return "Race status is not currently public.";
   const parts = [];
-  if (status.duck) parts.push("Duck #" + status.duck.visibleNumber);
+  // The canonical number leads and the chosen name follows it, exactly as on
+  // the duck pages and the race board.
+  if (status.duck) {
+    parts.push("Duck #" + status.duck.visibleNumber
+      + (typeof status.duckName === "string" && status.duckName.length > 0 ? " · " + status.duckName : ""));
+  }
   if (status.assignedHeat.roundOne) parts.push("Heat " + status.assignedHeat.roundOne.number);
   else if (status.duck) parts.push("Heat assignment pending");
   parts.push(status.outcome.replaceAll("_", " ").toLowerCase());

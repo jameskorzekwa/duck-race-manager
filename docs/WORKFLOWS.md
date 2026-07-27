@@ -369,8 +369,9 @@ for each collected registration:
   when public race status is available.
 - A `deletable` flag, which is `true` only for an entry this browser created and
   that can still be removed. See **Deleting Your Own Registration**.
-- `duckName` and a `nameable` flag, both owner-only. See **Naming Your Own
-  Duck**.
+- `duckName` and a `nameable` flag. The card's own editable name is sent only for
+  an entry this browser registered; a followed card reads the duck's public name
+  from its race status like any other visitor. See **Naming Your Own Duck**.
 
 Cards are grouped into three horizontally swipeable sections with keyboard and
 previous/next controls: **Awaiting Participants** and paired **My Ducks** hold
@@ -504,7 +505,8 @@ entry.
 The value is trimmed, internally whitespace-collapsed, and must be 1 to 40
 characters; blank-after-trim, overlong, and control or format characters are
 rejected with `422` before any database access, and the migration's `CHECK`
-repeats the same bound. Transport rules match the other public collection
+repeats the same bound. Characters outside the supported alphabet described
+under *Filtering a Duck Name* are refused with their own `422` message. Transport rules match the other public collection
 mutations exactly, including the exact `Origin` and the shared rate limiter.
 Retrying the same command with the same name replays; reusing that identifier
 with a different name returns `409`. The command row stores only a hash of the
@@ -516,13 +518,119 @@ to that entry. A followed link, an unrelated registration, and a missing cookie
 are one indistinguishable `404`; an owned entry with no duck yet returns `409`.
 The My Ducks projection reports the same permission in advance as `nameable`.
 
-**Deliberate scope:** the chosen name is shown only in the owner's own My Ducks
-view on the device that wrote it. It replaces "Duck #N" on that card, with the
-number kept beside it so the card still matches the physical duck. It is
-unmoderated free text for a public community event, so it never appears on the
-public race board, the public duck pages, the tag scan pages, another browser's
-followed card, or any staff-facing race operation: all of those keep the
-canonical duck number.
+**The name is public.** It appears beside the canonical duck number — never
+instead of it — on the live race board rosters and podium, `/duck/<number>`,
+`/t/<tag-token>`, and public race-status search results, rendered as
+`Duck #12 · Sir Quacks-a-Lot`. Page headings and board links keep the bare
+number, so a duck on a screen always matches the duck in the water. The owner's
+own My Ducks card is unchanged: the name replaces "Duck #N" as the link text with
+the number quietly beside it.
+
+The **announcer station deliberately does not receive it**. Its roster
+projection stays slot, participant name, and duck number. A name that slips past
+the filter can be cleared from a screen in seconds but cannot be unsaid over a
+public-address system, and the announcer needs the number to line racers up
+anyway.
+
+### Filtering a Duck Name
+
+**Implemented:** `src/duck-name-filter.ts` is a pure, dependency-free filter with
+no external moderation service, so naming adds no latency, no cost, no
+third-party dependency, and never sends participant text off-platform.
+
+**The alphabet comes first.** A name may contain Unicode letters, the combining
+marks that belong to them, decimal digits, spaces, and a short punctuation list
+(`'`, `’`, `‘`, `-`, `‐`, `–`, `—`, `.`, `,`, `!`, `?`, `¡`, `¿`, `#`, `&`).
+Symbols, emoji, private-use characters, box drawing, and every other category are
+refused outright, because a duck name has no use for them and each block is an
+open-ended supply of new letter-lookalikes that no wordlist could keep up with.
+This is a character-category rule and never an ASCII one: `Señor Pato`, `Björn`,
+`Πάπια`, and `アヒル` all pass. It is reported separately from the wordlists, so a
+participant who pastes an emoji is told to use letters, numbers, spaces, and
+simple punctuation rather than being told their name reads as profanity.
+
+It then normalizes before matching: control and format characters are dropped,
+NFKD plus combining-mark stripping folds accents and compatibility forms, text is
+casefolded, and a table folds leetspeak and confusables — Cyrillic, Greek, Latin
+small capitals, and hooked or turned Latin letters that NFKD leaves alone such as
+`ƒ` (U+0192) and `ı`.
+
+The name is then read several ways, and a hit in **any** reading rejects. `1`,
+`!`, `|`, and `¡` are ambiguous, so it is read once as `i` and once as `l`. On
+top of that sit four substitution families — `v`→`u`, `z`→`s`, `k`→`c`, `q`→`g`
+— applied to the whole text or not at all, once for every subset, which is what
+catches `fvck`, `azz hole`, `kunt`, and `niqqer`. These are alternative readings
+and never a collapse of two letters into one: the plain reading is always
+evaluated too, so `Spike`, `Duck`, and `Kayak` are untouched. `k`→`c` is read
+word-initially only, because mid-word it would turn every `spik` into `spic`.
+
+Matching runs against a separator-preserving form, that form with runs of single
+letters merged, and a separator-stripped form, so `f u c k`, `f.u.c.k`, `fu-ck`,
+and `azz hole` are all caught. Repeated letters are handled in the pattern rather
+than by collapsing the text, so `fuuuck` matches while `Cookie` and `Class` are
+untouched.
+
+Matching is tiered to control false positives, which are the real failure mode.
+Severe slurs match anywhere, including inside a word, and additionally match a
+vowel-elided spelling such as `niggr`. That elision is tier-1 only and guarded —
+the dropped vowel must follow a doubled consonant, five letters and a vowel must
+survive — because unguarded it turns `gook` into `gk` and rejects `ringlet`,
+`banner`, and `Tenggerese`. General profanity carries a per-term mode: a
+distinctive sequence matches anywhere, and a sequence that also occurs inside
+ordinary words matches only as a whole word. A short whole-word term may also
+carry an explicit compound list, so `badass`, `asshat`, and `dickwad` are caught
+while `class`, `grass`, `bass`, `assassin`, and `Massachusetts` are not.
+
+An explicit allowlist of innocent words — `assassin`, `class`, `grass`, `bass`,
+`cocktail`, `Hancock`, `Cockburn`, `Scunthorpe`, `shiitake`, `shitake`,
+`analysis`, `therapist`, `spice`, `Penistone`, and the rest — is removed from the
+text before any matching. A token is scrubbed when either its plain or its
+substituted spelling is allowlisted, so `spick` survives the `k`→`c` reading. The
+wordlists sit in one clearly marked block at the top of the module with
+instructions for extending them.
+
+Every change to those lists is audited against `/usr/share/dict/words`, because
+the failure that reaches a real person is a rejected ordinary name rather than a
+slur that slipped through. That audit currently rejects 538 of 235,976 words
+(0.23%), nearly all archaic entries.
+
+A rejected name returns `422` with a message that never quotes the offending
+word back, nothing is written, and the attempted value is never logged. The
+filter reports only a decision and never which term matched, nor even whether it
+was the alphabet rule or a wordlist that refused.
+
+**Read-time safety net.** Every projection of a stored name runs it through the
+same filter again. This matters for rows stored before the name became public and
+for names that only become disallowed later when the wordlists are extended. A
+suppressed name is projected as `null` and the surface falls back to "Duck #N".
+Names are at most 40 characters, so the recheck is cheap.
+
+### Clearing a Duck Name (Staff Moderation)
+
+**Implemented:** no filter is perfect, so staff can remove a name outright with
+`POST /api/v1/staff/registrations/<registration-id>/clear-duck-name`. It requires
+the `REGISTRATION` or `RACE_DIRECTOR` role, which administrators pass implicitly,
+and a cookie-authenticated call requires the exact application `Origin` like
+every other staff mutation.
+
+The body is one RFC 4122 v4 `commandId` and nothing else. There is no expected
+revision: clearing is always safe and idempotent, and moderation must not fail
+because the owner renamed the duck a second earlier. A retry with the same
+identifier replays; reusing it for another registration returns `409`.
+
+The write is one guarded batch: a `CLEAR_DUCK_NAME` command row, an `UPDATE`
+conditional on that row, and a redacted `DUCK_NAME_CLEARED` audit event recording
+the staff profile, the changed field, and whether a name was present — never the
+offending text. Clearing sets the column back to `NULL`, so the duck shows as
+"Duck #N" everywhere, and the participant may name it again afterwards, subject
+to the same filter.
+
+Two staff surfaces expose it: the participant detail panel in the console shows a
+**Duck name** fact and a **Clear duck name** action, and the staff duck scan page
+`/staff/ducks/<tag-token>` offers the same action, which is the fast path when
+someone is complaining about a duck in the water. Both show the stored text so
+staff can judge it, marked when the read-time filter is already hiding it, and
+both send those fields only to the roles the endpoint itself accepts.
 
 ### Private Status Link
 
@@ -559,9 +667,9 @@ client network key.
 Only `SUBMITTED` and `ACTIVE` registrations in events from
 `REGISTRATION_OPEN` through `COMPLETED` are searchable. Display names follow the
 event policy: first name, first name plus last initial, or full name. Search can
-show pairing pending, assigned duck, heat, current heat, and race outcome. It
-never returns contact details, lookup codes, private links, staff notes,
-inventory state, location, or audit data.
+show pairing pending, assigned duck and its filtered public duck name, heat,
+current heat, and race outcome. It never returns contact details, lookup codes,
+private links, staff notes, inventory state, location, or audit data.
 
 Each result also carries an opaque `followId` and an `inMyDucks` flag. The flag
 is a read-only probe of the caller's own collection cookie; a search never
@@ -607,7 +715,8 @@ outside the current public event, carries neither signal and its page renders no
 control. The membership check is a read-only probe of the caller's own collection
 cookie, so a tag GET stays read-only and issues no cookie. Nothing else about
 these responses changed: they still carry no contact details, lookup code,
-private link, duck name, or staff data.
+private link, or staff data. They do carry the duck's filtered public
+`duckName`, always alongside its visible number.
 
 ### Public Duck Detail View
 
@@ -618,11 +727,12 @@ needs no tag, no token, and no cookie.
 The number is resolved against the same event the public race board renders, and
 only while that event is between `REGISTRATION_OPEN` and `COMPLETED`. The page
 reuses the shared public status projection, so it can show the event, the
-policy-filtered participant name, the visible duck number, the round-one heat,
-the final heat, the heat currently running, the race outcome, and an official
-finishing place once a heat is finalized. It never shows contact details, lookup
-codes, private links, raw tag tokens, inventory location, staff notes, or audit
-history.
+policy-filtered participant name, the visible duck number with the
+participant-chosen duck name beside it when there is one the filter allows, the
+round-one heat, the final heat, the heat currently running, the race outcome, and
+an official finishing place once a heat is finalized. It never shows contact
+details, lookup codes, private links, raw tag tokens, inventory location, staff
+notes, or audit history.
 
 `GET /api/v1/ducks/number/<visible-number>` returns the same projection as
 `{ "raceStatus": ... }`. Only canonical positive integers resolve; a
@@ -1503,6 +1613,12 @@ Announcers say the whole name, so this projection is deliberately the full
 registered name rather than the public name policy used on the race board; it
 carries no contact data, lookup code, or inventory detail.
 
+It also deliberately carries no participant-chosen duck name, even though that
+name is public everywhere else. Reading a name aloud is the one place where one
+that slipped past the filter becomes a public-address announcement with no undo,
+while every written surface can be moderated in seconds; and the announcer needs
+the duck number, not a second ambiguous label, to line racers up.
+
 Every heat that already has a published result appears under **Recorded
 winners** with its round, heat number, winner's full name, and duck number, so
 the announcer can call the winner out as soon as the finish-line staffer records
@@ -1642,12 +1758,16 @@ page must not carry the `/register` call to action. The board includes:
   instead of raw enum text.
 - Ordered round-one and final heats.
 - Safe heat status, including calling, running, and awaiting-result emphasis.
-- Policy-filtered participant display names and visible duck numbers.
-- Finalized round-one winners and an ordered final podium.
+- Policy-filtered participant display names and visible duck numbers, with the
+  participant-chosen duck name beside the number when there is one the read-time
+  filter allows. The link text stays the bare number; the name never replaces it.
+- Finalized round-one winners and an ordered final podium, which carry the duck
+  name on the same terms.
 
 Visible duck numbers come only from a current assignment with `valid_to IS
 NULL`; a historical assignment closed by pre-race unassignment is never revived
-on the board.
+on the board. A roster entry with no current duck number carries no duck name
+either.
 
 The board returns no event, heat, race-entry, registration, assignment, or
 result IDs; no contacts, lookup/private/tag tokens, staff data, notes, inventory,
@@ -1659,7 +1779,8 @@ Participant-level race status remains available through an assigned active duck
 tag, exact public name search, and browser collection cards. It exposes:
 
 - Policy-filtered participant display name.
-- Visible duck number when currently assigned.
+- Visible duck number when currently assigned, and the filtered participant-
+  chosen duck name beside it.
 - Round-one and final heat numbers and statuses.
 - The event's one currently calling, running, or awaiting-result heat.
 - Pairing pending, heat assignment pending, not raced, running, awaiting result,
@@ -1934,6 +2055,11 @@ clears on the next success.
   hashes; lookup codes are staff search values, not private-page credentials.
 - Public status never returns email, phone, lookup code, private link, staff
   notes, inventory location, or audit details.
+- A participant-chosen duck name is the one piece of participant free text that
+  is published. It passes an in-Worker profanity filter at write time and again
+  on every read, it never replaces the canonical duck number, it is never sent to
+  the announcer station, it is never written to a command row, an audit event, or
+  a log, and staff with the registration or race-director role can clear it.
 - Exact public name search is rate-limited and event-scoped, but it is still
   public status, not identity verification.
 - Adding a search result to My Ducks is rate-limited, same-origin, and revalidated

@@ -330,6 +330,29 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   assert.equal(JSON.stringify(inventory).includes("daisy@example.com"), false);
   assert.equal(JSON.stringify(inventory).includes("Daisy"), false);
 
+  // Moderating a participant-chosen duck name is registration work. Every other
+  // operational role, including the duck manager who may hold the duck, is
+  // refused it.
+  for (const [label, actor] of [
+    ["duck manager", actors.ducks],
+    ["announcer", actors.announcer],
+    ["heat runner", actors.heats],
+    ["result taker", actors.results],
+  ]) {
+    assert.equal(
+      (await post(actor, `/api/v1/staff/registrations/${registrationId}/clear-duck-name`, {
+        commandId: command(),
+      })).status,
+      403,
+      `${label} cannot clear a duck name`,
+    );
+  }
+  await json(await post(
+    actors.registration,
+    `/api/v1/staff/registrations/${registrationId}/clear-duck-name`,
+    { commandId: command() },
+  ), 200, "registration clears a duck name");
+
   const heats = await json(await api(actors.announcer, `/api/v1/staff/events/${eventId}/heats`), 200, "announcer lists heats");
   const roundOneHeatId = heats.heats[0].id;
   const announcerDetail = await json(await api(

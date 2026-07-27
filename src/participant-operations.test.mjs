@@ -1,21 +1,18 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { handleParticipantOperations } from "./participant-operations.ts";
 
-const migrationNames = [
-  "0001_staff_identity.sql",
-  "0002_registration_foundation.sql",
-  "0003_assignment_and_heat_status.sql",
-  "0004_pairing_status_and_purge.sql",
-  "0005_staff_access_management.sql",
-  "0006_participant_operations.sql",
-  "0007_duck_inventory_operations.sql",
-  "0008_event_operations.sql",
-  "0009_heat_result_operations.sql",
-];
+// The full ordered migration set, so this file exercises the participant
+// operations against the same schema production runs. It stopped at 0009 while
+// the schema kept moving, which hid later columns — `race_entries.duck_name`
+// among them — from every assertion here.
+const migrationsUrl = new URL("../db/migrations/", import.meta.url);
+const migrationNames = readdirSync(migrationsUrl)
+  .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+  .sort();
 
 const staffActor = {
   id: "staff",
@@ -41,7 +38,7 @@ const createDatabase = () => {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
   for (const name of migrationNames) {
-    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
+    database.exec(readFileSync(new URL(name, migrationsUrl), "utf8"));
   }
   return database;
 };

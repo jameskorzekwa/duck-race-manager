@@ -14,6 +14,11 @@ import {
 } from "./registration.ts";
 import { authenticateStaff } from "./auth.ts";
 import {
+  hasSupportedDuckNameCharacters,
+  isAllowedDuckName,
+  publicDuckName,
+} from "./duck-name-filter.ts";
+import {
   browserCollectionCookie,
   clearBrowserCollectionCookie,
   collectionStatements,
@@ -620,10 +625,12 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
       registrationStatus: row.status,
       paired: row.is_paired === 1,
       deletable: !followed && row.is_deletable === 1,
-      // The duck's chosen name is owner-only free text. It is projected here,
-      // to the one browser that wrote it, and nowhere else: not to a follower,
-      // not to the board, not to staff.
-      duckName: followed ? null : row.duck_name,
+      // The owner's own card shows the name it wrote, and a followed card shows
+      // nothing: the name belongs to the participant's own duck card here, while
+      // the public surfaces identify it by number first. The read-time filter
+      // runs even for the owner, so a name that staff cleared or that the
+      // wordlist now rejects disappears from the card and its rename form too.
+      duckName: followed ? null : publicDuckName(row.duck_name),
       nameable: !followed && row.is_nameable === 1,
       raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),
     };
@@ -1092,6 +1099,31 @@ const nameMyDuck = async (request: Request, env: Env): Promise<Response> => {
       error: "Duck name validation failed.",
       fields: {
         duckName: `Enter a name of 1 to ${DUCK_NAME_MAX_LENGTH} characters.`,
+      },
+    }, 422);
+  }
+
+  // The alphabet rule is reported on its own terms. `isAllowedDuckName` covers
+  // it too, but telling someone their emoji "can’t be used on the public race
+  // board" reads as an accusation rather than as the mechanical rule it is.
+  if (!hasSupportedDuckNameCharacters(cleanedName)) {
+    return json({
+      error: "Duck name validation failed.",
+      fields: {
+        duckName: "Use letters, numbers, spaces, and simple punctuation only.",
+      },
+    }, 422);
+  }
+
+  // The name is public, so it is filtered before it can be stored. This is a
+  // semantic rejection of a well-formed value, so it is a 422 like every other
+  // failed name rule. The message never quotes the rejected text back, and the
+  // attempted value is never logged: it is refused and forgotten.
+  if (!isAllowedDuckName(cleanedName)) {
+    return json({
+      error: "Duck name validation failed.",
+      fields: {
+        duckName: "That name can’t be used on the public race board. Please choose another one.",
       },
     }, 422);
   }
