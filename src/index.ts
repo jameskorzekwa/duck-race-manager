@@ -1,3 +1,4 @@
+import { qrDecoderSource } from "./qr-decoder-source.ts";
 import {
   findDuckNumberRaceStatus,
   findDuckRaceStatus,
@@ -174,6 +175,21 @@ export const createWorker = (
           ...securityHeaders,
           "cache-control": "public, max-age=86400",
           "content-type": "application/manifest+json; charset=utf-8",
+        },
+      });
+    }
+
+    // Pure-JavaScript QR decoder for browsers without native `BarcodeDetector`,
+    // notably iOS Safari and Firefox. It is shipped as source text and never
+    // executed in the Worker. The staff pairing page loads it on demand only
+    // when native detection is missing, so browsers that have it never pay for
+    // the download. The content is version-pinned, so it caches immutably.
+    if (url.pathname === "/assets/qr-decoder.js") {
+      return new Response(qrDecoderSource, {
+        headers: {
+          ...securityHeaders,
+          "cache-control": "public, max-age=31536000, immutable",
+          "content-type": "text/javascript; charset=utf-8",
         },
       });
     }

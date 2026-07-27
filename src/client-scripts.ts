@@ -4638,16 +4638,53 @@ const qrParseParticipantPayload = (value) => {
   return qrLookupCodePattern.test(code) ? code : null;
 };
 
-// Camera scanning needs a secure context, a camera, and native QR detection.
-// When any of those is missing the console hides the scan button entirely and
-// staff use the code field, which now pairs an exact code immediately.
+// Camera scanning needs a secure context and a camera. Decoding does not need
+// native support: browsers without BarcodeDetector, notably iOS Safari and
+// Firefox, load the bundled decoder instead. Only a device with no camera or a
+// non-secure context falls back to typing the code.
 const qrScannerSupported = (scope) => {
   const target = scope || globalThis;
   const mediaDevices = target.navigator && target.navigator.mediaDevices;
   return target.isSecureContext === true
-    && typeof target.BarcodeDetector === "function"
     && !!mediaDevices
     && typeof mediaDevices.getUserMedia === "function";
+};
+
+// Native detection is the fast path where it exists; it runs off the main
+// thread and needs no download.
+const qrNativeDetection = async (scope) => {
+  const target = scope || globalThis;
+  if (typeof target.BarcodeDetector !== "function") return null;
+  try {
+    const formats = await target.BarcodeDetector.getSupportedFormats();
+    if (!formats.includes("qr_code")) return null;
+    const detector = new target.BarcodeDetector({ formats: ["qr_code"] });
+    return (frame) => detector.detect(frame);
+  } catch {
+    return null;
+  }
+};
+
+// Decode a centred square crop, downscaled, which is what the participant
+// actually points the camera at and keeps each frame cheap enough to run
+// between paints.
+const qrCropFrame = (video, context, target) => {
+  const side = Math.min(video.videoWidth, video.videoHeight);
+  const size = Math.min(target, side);
+  context.canvas.width = size;
+  context.canvas.height = size;
+  context.drawImage(
+    video,
+    (video.videoWidth - side) / 2,
+    (video.videoHeight - side) / 2,
+    side,
+    side,
+    0,
+    0,
+    size,
+    size,
+  );
+  return context.getImageData(0, 0, size, size);
 };
 
 const qrCameraProblem = (error) => {
@@ -4661,11 +4698,45 @@ const qrCameraProblem = (error) => {
   if (name === "NotReadableError" || name === "AbortError") {
     return "The camera is being used by another app. Close it and scan again, or cancel and search manually.";
   }
+  if (name === "decoder-unavailable" || (error && error.message === "decoder-unavailable")) {
+    return "The QR reader could not be loaded. Check the connection and scan again, or cancel and search manually.";
+  }
   return "The camera could not be started. Scan again, or cancel and search manually.";
 };
 `;
 
-export const staffDuckScript = finishHandoffHelpersScript + participantQrHelpersScript + String.raw`
+// Loader for the bundled decoder, kept separate so the scan flow can be tested
+// without a DOM. The script is same-origin, so it needs no CSP change, and it
+// downloads only when a browser lacks native detection and staff start a scan.
+export const participantQrDecoderScript = String.raw`
+let qrDecoderLoad = null;
+
+const qrLoadDecoder = (documentRef, scope) => {
+  const target = scope || globalThis;
+  if (typeof target.jsQR === "function") return Promise.resolve(target.jsQR);
+  if (qrDecoderLoad === null) {
+    qrDecoderLoad = new Promise((resolve, reject) => {
+      const element = documentRef.createElement("script");
+      element.src = "/assets/qr-decoder.js";
+      element.addEventListener("load", () => {
+        if (typeof target.jsQR === "function") resolve(target.jsQR);
+        else reject(new Error("decoder-unavailable"));
+      });
+      element.addEventListener("error", () => reject(new Error("decoder-unavailable")));
+      documentRef.head.append(element);
+    }).catch((error) => {
+      qrDecoderLoad = null;
+      throw error;
+    });
+  }
+  return qrDecoderLoad;
+};
+`;
+
+export const staffDuckScript = finishHandoffHelpersScript
+  + participantQrHelpersScript
+  + participantQrDecoderScript
+  + String.raw`
 const finishStationStorageKey = "quickducks.finishStation";
 const finishStationTagMatch = location.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]{22,128})$/);
 let finishStationHandoff = false;
@@ -4694,6 +4765,7 @@ let currentEvent = null;
 let selectedRegistration = null;
 let staffDuckBusy = 0;
 let staffDuckSubscription = null;
+let justPairedCode = null;
 
 const text = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -4726,8 +4798,16 @@ const addFact = (label, value) => {
 
 const showInspection = (data) => {
   const participant = data.assignment.participant || {};
-  pageTitle.textContent = "Inspect Duck #" + data.duck.visibleNumber;
-  message.textContent = "This duck is already paired. Review the assignment below.";
+  // A live refresh arrives immediately after pairing, because pairing itself
+  // publishes the signal. Keep confirming the staff member's own action rather
+  // than silently replacing it with a generic inspection view.
+  const confirmed = justPairedCode !== null && participant.lookupCode === justPairedCode;
+  pageTitle.textContent = confirmed
+    ? "Duck #" + data.duck.visibleNumber + " paired"
+    : "Inspect Duck #" + data.duck.visibleNumber;
+  message.textContent = confirmed
+    ? "Duck paired successfully."
+    : "This duck is already paired. Review the assignment below.";
   addFact("Duck", "#" + data.duck.visibleNumber);
   addFact("Inventory", data.duck.inventoryStatus.replaceAll("_", " ").toLowerCase());
   if (participant.firstName) addFact("Participant", participant.firstName + " " + participant.lastName);
@@ -4778,6 +4858,7 @@ const pairWithLookupCode = async (lookupCode) => {
     pageTitle.textContent = "Duck #" + result.duck.visibleNumber + " paired";
     message.textContent = result.replayed ? "This pairing was already saved." : "Duck paired successfully.";
     selectedRegistration = null;
+    justPairedCode = result.participant.lookupCode;
     globalThis.quickDucksLive.markClean(root);
     return { ok: true };
   } catch (error) {
@@ -4820,11 +4901,26 @@ const qrStop = () => {
   qrLaunch.hidden = !qrSupported;
 };
 
+// Native detection where the browser has it, otherwise the bundled decoder
+// over a downscaled centre crop. Both return the same shape, so the scan loop
+// does not care which one is running.
+const qrCreateDetector = async () => {
+  const native = await qrNativeDetection(globalThis);
+  if (native !== null) return native;
+  const decode = await qrLoadDecoder(document, globalThis);
+  const context = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+  return (video) => {
+    const frame = qrCropFrame(video, context, 400);
+    const found = decode(frame.data, frame.width, frame.height, { inversionAttempts: "dontInvert" });
+    return found ? [{ rawValue: found.data }] : [];
+  };
+};
+
 const qrTick = async () => {
   if (!qrScanning) return;
   try {
     if (qrVideo.readyState >= 2 && qrVideo.videoWidth > 0) {
-      const codes = await qrDetector.detect(qrVideo);
+      const codes = await qrDetector(qrVideo);
       for (const code of codes) {
         const lookupCode = qrParseParticipantPayload(code.rawValue);
         if (lookupCode !== null) {
@@ -4855,12 +4951,7 @@ const qrStart = async () => {
   qrPanel.hidden = false;
   qrMessage.textContent = "Starting the camera…";
   try {
-    const formats = await globalThis.BarcodeDetector.getSupportedFormats();
-    if (!formats.includes("qr_code")) {
-      qrMessage.textContent = "This browser cannot scan QR codes. Cancel and search manually.";
-      return;
-    }
-    qrDetector = new globalThis.BarcodeDetector({ formats: ["qr_code"] });
+    qrDetector = await qrCreateDetector();
     qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
     // The page can be refreshed or cancelled while the permission prompt is
     // open, so drop a stream that arrives after scanning was called off.

@@ -1160,18 +1160,29 @@ it carries no name, contact detail, private status token, event identifier, or
 external reference. Photographing it reveals exactly what photographing the
 printed code beside it would.
 
-The staff pairing page shows a **Scan QR code** button only when the browser
-reports a secure context, a camera, and native QR detection. The scanner ignores
-any QR code that is not a `QD1:` participant payload and keeps looking, so
-unrelated codes never reach the pairing command. A failed pairing invites another
-scan or a manual search. The camera is released on success, cancellation, a
-hidden page, and page unload.
+The staff pairing page shows a **Scan QR code** button whenever the browser has
+a camera in a secure context. The scanner ignores any QR code that is not a
+`QD1:` participant payload and keeps looking, so unrelated codes never reach the
+pairing command. A failed pairing invites another scan or a manual search. The
+camera is released on success, cancellation, a hidden page, and page unload.
+
+Decoding uses the browser's native `BarcodeDetector` where it exists, which is
+Chrome on Android. Browsers without it, including **iOS Safari** and Firefox,
+load a bundled decoder from same-origin `/assets/qr-decoder.js` on first scan and
+work identically. Browsers with native detection never download it. Scanning
+therefore works on iPhone and Android alike; only a device with no camera, or a
+non-secure context, falls back to typing the code.
+
+The decoder is minified browser source of the pinned `jsqr` development
+dependency, generated into `src/qr-decoder-source.ts` by
+`npm run build:qr-decoder` and committed. It is served, never executed in the
+Worker, and never becomes a Worker runtime dependency. Tests regenerate it and
+fail on any drift from the pinned package, assert it makes no network or `eval`
+calls, and decode a rendered participant QR with the exact source that ships.
 
 Camera access is granted by `Permissions-Policy: camera=(self)` on the
 authenticated `/staff/ducks/:token` page only. Every other page, station, and API
-response keeps `camera=()`. Devices without native QR detection, including
-browsers where it is unavailable, simply use the code field, which now pairs an
-exact code immediately.
+response keeps `camera=()`.
 
 In `IMMEDIATE_FIXED` mode — the default for newly created events — the command
 uses the lowest-numbered unlocked round-one heat below the configured

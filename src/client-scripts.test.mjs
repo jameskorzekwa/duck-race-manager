@@ -17,6 +17,7 @@ import {
   liveRuntimeHelpersScript,
   liveUiScript,
   participantHandoffHelpersScript,
+  participantQrDecoderScript,
   participantQrHelpersScript,
   participantScript,
   registrationHandoffHelpersScript,
@@ -35,7 +36,7 @@ const eventSlugHelpers = () => new Function(
 )();
 
 const participantQrHelpers = () => new Function(
-  `${participantQrHelpersScript}; return { qrParseParticipantPayload, qrScannerSupported, qrCameraProblem };`,
+  `${participantQrHelpersScript}; return { qrParseParticipantPayload, qrScannerSupported, qrNativeDetection, qrCameraProblem, qrCropFrame };`,
 )();
 
 test("the scanner only accepts QuickDucks participant payloads", async () => {
@@ -55,7 +56,7 @@ test("the scanner only accepts QuickDucks participant payloads", async () => {
   assert.equal(qrParseParticipantPayload(undefined), null);
 });
 
-test("camera scanning is offered only where the browser can actually do it", () => {
+test("camera scanning is offered wherever there is a camera and a secure context", () => {
   const { qrScannerSupported } = participantQrHelpers();
   const supported = {
     isSecureContext: true,
@@ -64,10 +65,75 @@ test("camera scanning is offered only where the browser can actually do it", () 
   };
 
   assert.equal(qrScannerSupported(supported), true);
+  // iOS Safari and Firefox have no BarcodeDetector but do have a camera, and
+  // must still be offered scanning through the bundled decoder.
+  assert.equal(qrScannerSupported({ ...supported, BarcodeDetector: undefined }), true);
+  // Only a missing camera or an insecure context removes the option.
   assert.equal(qrScannerSupported({ ...supported, isSecureContext: false }), false);
-  assert.equal(qrScannerSupported({ ...supported, BarcodeDetector: undefined }), false);
   assert.equal(qrScannerSupported({ ...supported, navigator: {} }), false);
   assert.equal(qrScannerSupported({ ...supported, navigator: { mediaDevices: {} } }), false);
+});
+
+test("native QR detection is used when usable and declined otherwise", async () => {
+  const { qrNativeDetection } = participantQrHelpers();
+  const detector = (formats, detect = async () => [{ rawValue: "QD1:DAASY234" }]) => ({
+    BarcodeDetector: Object.assign(
+      function BarcodeDetector() { return { detect }; },
+      { getSupportedFormats: async () => formats },
+    ),
+  });
+
+  const native = await qrNativeDetection(detector(["qr_code", "ean_13"]));
+  assert.equal(typeof native, "function");
+  assert.deepEqual(await native({}), [{ rawValue: "QD1:DAASY234" }]);
+
+  // A browser without the API, without QR support, or that throws while
+  // probing must fall through to the bundled decoder instead of failing.
+  assert.equal(await qrNativeDetection({}), null);
+  assert.equal(await qrNativeDetection(detector(["ean_13"])), null);
+  assert.equal(await qrNativeDetection({
+    BarcodeDetector: Object.assign(function BarcodeDetector() {}, {
+      getSupportedFormats: async () => { throw new Error("blocked"); },
+    }),
+  }), null);
+});
+
+test("the bundled decoder loads once, on demand, from a same-origin script", async () => {
+  const load = () => {
+    const listeners = {};
+    const element = {
+      addEventListener: (name, handler) => { listeners[name] = handler; },
+    };
+    const appended = [];
+    const scope = {};
+    const documentRef = {
+      createElement: () => element,
+      head: { append: (node) => appended.push(node) },
+    };
+    const helpers = new Function(
+      `${participantQrHelpersScript}${participantQrDecoderScript}; return { qrLoadDecoder };`,
+    )();
+    return { helpers, element, listeners, appended, scope, documentRef };
+  };
+
+  const first = load();
+  const pending = first.helpers.qrLoadDecoder(first.documentRef, first.scope);
+  assert.equal(first.appended.length, 1);
+  assert.equal(first.element.src, "/assets/qr-decoder.js");
+  first.scope.jsQR = () => null;
+  first.listeners.load();
+  assert.equal(await pending, first.scope.jsQR);
+  // A second request must reuse the loaded decoder, not inject another tag.
+  await first.helpers.qrLoadDecoder(first.documentRef, first.scope);
+  assert.equal(first.appended.length, 1);
+
+  // A failed download rejects and is retryable rather than caching failure.
+  const second = load();
+  const failing = second.helpers.qrLoadDecoder(second.documentRef, second.scope);
+  second.listeners.error();
+  await assert.rejects(failing, /decoder-unavailable/);
+  second.helpers.qrLoadDecoder(second.documentRef, second.scope);
+  assert.equal(second.appended.length, 2);
 });
 
 test("staff pairing pairs from a scan or an exact code and always keeps a manual path", () => {
@@ -91,6 +157,22 @@ test("staff pairing pairs from a scan or an exact code and always keeps a manual
   assert.match(staffDuckScript, /Scan again, or search for the participant manually/);
   assert.match(staffDuckScript, /data-qr-cancel/);
 
+  // Native detection is preferred, with the bundled decoder as the fallback so
+  // iOS Safari and Firefox can scan too.
+  assert.match(staffDuckScript, /const native = await qrNativeDetection\(globalThis\)/);
+  assert.match(staffDuckScript, /if \(native !== null\) return native/);
+  assert.match(staffDuckScript, /await qrLoadDecoder\(document, globalThis\)/);
+  assert.match(staffDuckScript, /willReadFrequently: true/);
+  // The scan loop must not care which decoder is running.
+  assert.match(staffDuckScript, /const codes = await qrDetector\(qrVideo\)/);
+
+  // Pairing publishes a live signal, so the refresh it triggers must keep
+  // confirming the staff member's own action instead of replacing it with a
+  // generic inspection view.
+  assert.match(staffDuckScript, /justPairedCode = result\.participant\.lookupCode/);
+  assert.match(staffDuckScript, /participant\.lookupCode === justPairedCode/);
+  assert.match(staffDuckScript, /confirmed\s*\n?\s*\? "Duck #" \+ data\.duck\.visibleNumber \+ " paired"/);
+
   // The camera must be released on every exit path, not just on success.
   assert.match(staffDuckScript, /for \(const track of qrStream\.getTracks\(\)\) track\.stop\(\)/);
   assert.match(staffDuckScript, /addEventListener\("pagehide", qrReleaseCamera\)/);
@@ -100,6 +182,27 @@ test("staff pairing pairs from a scan or an exact code and always keeps a manual
 
   // Scanning is a convenience over the code, never a new source of truth.
   assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+});
+
+test("fallback decoding reads a centred, downscaled crop of the camera frame", () => {
+  const { qrCropFrame } = participantQrHelpers();
+  const calls = [];
+  const context = {
+    canvas: { width: 0, height: 0 },
+    drawImage: (...args) => calls.push(args),
+    getImageData: (x, y, width, height) => ({ data: new Uint8ClampedArray(width * height * 4), width, height }),
+  };
+
+  // A landscape frame crops to a centred square, then downscales to the target.
+  const frame = qrCropFrame({ videoWidth: 1280, videoHeight: 720 }, context, 400);
+  assert.deepEqual(calls[0].slice(1), [280, 0, 720, 720, 0, 0, 400, 400]);
+  assert.equal(frame.width, 400);
+  assert.equal(frame.height, 400);
+  assert.equal(context.canvas.width, 400);
+
+  // A frame smaller than the target is never upscaled into wasted work.
+  qrCropFrame({ videoWidth: 320, videoHeight: 240 }, context, 400);
+  assert.deepEqual(calls[1].slice(1), [40, 0, 240, 240, 0, 0, 240, 240]);
 });
 
 test("camera failures explain the fix and always keep manual search available", () => {

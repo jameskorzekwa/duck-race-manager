@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build:qr-decoder": "node scripts/build-qr-decoder.mjs",
     "check": "npm run typecheck && npm run wrangler:validate",
-    "deploy": "wrangler deploy",
-    "dev": "wrangler dev",
     "db:migrate:local": "wrangler d1 migrations apply quickducks-prod --local",
     "db:migrate:remote": "wrangler d1 migrations apply quickducks-prod --remote",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
     "release:validate-tag": "node scripts/release-version.mjs",
     "test": "node --test src/*.test.mjs",
     "typecheck": "tsc --noEmit",
@@ -16,6 +17,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
+    "jsqr": "1.4.0",
     "semver": "^7.8.5",
     "typescript": "latest",
     "wrangler": "latest",
