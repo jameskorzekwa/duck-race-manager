@@ -347,9 +347,10 @@ collection link exists. It never selects or returns names, lookup codes, race
 entries, status details, contact fields, or private paths.
 
 A collection link records how it was created. A link created by registering in
-that browser is `REGISTRATION`; a link added from the public name search is
-`FOLLOWED`. Registering always claims the link as `REGISTRATION`, so following a
-participant first can never suppress that browser's own registration data.
+that browser is `REGISTRATION`; a link added from the public name search, a duck
+tag scan, or a public duck page is `FOLLOWED`. Registering always claims the link
+as `REGISTRATION`, so following a participant first can never suppress that
+browser's own registration data.
 
 The dedicated noindex `/my-ducks` page loads the full safe collection. It shows,
 for each collected registration:
@@ -365,16 +366,22 @@ for each collected registration:
   when public race status is available.
 - A `deletable` flag, which is `true` only for an entry this browser created and
   that can still be removed. See **Deleting Your Own Registration**.
+- `duckName` and a `nameable` flag, both owner-only. See **Naming Your Own
+  Duck**.
 
-Cards are grouped into separate horizontally swipeable **Awaiting Participants**
-and paired **My Ducks** sections with keyboard and previous/next controls. A live
-or polling refresh immediately regroups a card when staff pair or unpair its
-participant. A group with no participants hides its entire section, including
-its heading and controls, rather than rendering an empty state; when both groups
-are empty the page keeps one guidance message so it is never blank. Both
-sections stay hidden until the first successful full collection response, so a
-failed initial request shows only the error-only line and keeps checking rather
-than claiming an empty collection.
+Cards are grouped into three horizontally swipeable sections with keyboard and
+previous/next controls: **Awaiting Participants** and paired **My Ducks** hold
+the participants registered on this device, and **Ducks I'm Following** holds
+every `FOLLOWED` entry whether or not that participant has a duck yet. The page
+states the difference in place: entries registered here keep their full details
+and staff lookup code, and followed entries show the public projection only. A
+live or polling refresh immediately regroups a registered card when staff pair
+or unpair its participant. A group with no participants hides its entire
+section, including its heading and controls, rather than rendering an empty
+state; when all groups are empty the page keeps one guidance message so it is
+never blank. Sections stay hidden until the first successful full collection
+response, so a failed initial request shows only the error-only line and keeps
+checking rather than claiming an empty collection.
 
 After the registration redirect, the page highlights the matching registration.
 Only after that UUID appears in a successful full collection response does the
@@ -456,10 +463,63 @@ value, lookup code, or token. The mutation publishes the `participants` refresh
 domain, and the page rerenders from the authoritative collection endpoint rather
 than from the delete response.
 
-**Known gap:** a `FOLLOWED` entry has no removal control at all. Following
-someone is currently permanent for that browser until the cookie is cleared or
-the event is deleted. An explicit unfollow action would be a separate, non
-destructive change to the collection link only.
+### Unfollowing a Duck You Follow
+
+**Implemented:** a followed My Ducks card offers one **Stop following** action.
+It posts `{ commandId, registrationId }` to
+`POST /api/v1/registrations/mine/unfollow` and removes exactly one thing: this
+browser's `FOLLOWED` collection link. It is not a deletion and not a withdrawal,
+it never touches the registration or its race entry, and it is reversible by
+following again, so it asks for no destructive confirmation.
+
+The endpoint mirrors the follow and delete endpoints' transport rules: JSON only,
+a bounded body, the exact application `Origin`, RFC 4122 v4 command identifier
+and registration identifier validated before any database access, and the shared
+public rate limiter. Replay is resolved from the command history first, so
+retrying the same command after a committed unfollow returns
+`{ "unfollowed": true, "replayed": true }`; reusing that identifier for a
+different registration returns `409`.
+
+A missing or unknown collection cookie, an unrelated registration, and a link
+this browser holds as `REGISTRATION` all receive the same `404`, so the endpoint
+never reveals whether an unrelated registration exists and can never be used to
+delete a registration. Ownership of a `FOLLOWED` link is re-checked inside the
+guarded `race_commands` insert that opens the write batch, and the single
+`DELETE` is conditional on that command row and scoped to this collection, this
+registration, and `added_via = 'FOLLOWED'`. The mutation publishes no refresh
+signal because it changes nothing any other browser can see; the page rerenders
+from the authoritative collection endpoint rather than from the response.
+
+### Naming Your Own Duck
+
+**Implemented:** once staff pair a duck to a participant registered on this
+device, that card offers a **Give this duck a name** form. It posts
+`{ commandId, registrationId, duckName }` to
+`POST /api/v1/registrations/mine/duck-name`, and the name is stored on the race
+entry.
+
+The value is trimmed, internally whitespace-collapsed, and must be 1 to 40
+characters; blank-after-trim, overlong, and control or format characters are
+rejected with `422` before any database access, and the migration's `CHECK`
+repeats the same bound. Transport rules match the other public collection
+mutations exactly, including the exact `Origin` and the shared rate limiter.
+Retrying the same command with the same name replays; reusing that identifier
+with a different name returns `409`. The command row stores only a hash of the
+accepted name, and the redacted `DUCK_NAME_SET` audit event records the changed
+field name, never the text.
+
+Only a `REGISTRATION` link may name, and only while a duck is currently assigned
+to that entry. A followed link, an unrelated registration, and a missing cookie
+are one indistinguishable `404`; an owned entry with no duck yet returns `409`.
+The My Ducks projection reports the same permission in advance as `nameable`.
+
+**Deliberate scope:** the chosen name is shown only in the owner's own My Ducks
+view on the device that wrote it. It replaces "Duck #N" on that card, with the
+number kept beside it so the card still matches the physical duck. It is
+unmoderated free text for a public community event, so it never appears on the
+public race board, the public duck pages, the tag scan pages, another browser's
+followed card, or any staff-facing race operation: all of those keep the
+canonical duck number.
 
 ### Private Status Link
 
@@ -526,6 +586,25 @@ the **My Ducks** navigation. A result already in the collection renders the
 confirmed state instead of the action. Because the search response carries no
 lookup code and no private token, a followed entry can never gain either one,
 and `/api/v1/registrations/mine` returns `lookupCode: null` for it.
+
+### Following from a Duck Tag Scan or a Duck Page
+
+**Implemented:** the anonymous tag scan page `/t/<tag-token>` and the public duck
+page `/duck/<visible-number>` offer the same **Follow this duck** action, posting
+to the same `POST /api/v1/registrations/mine/follow` endpoint with the same
+`followId` and writing the same `FOLLOWED` link. A browser that already holds
+that participant — whether it registered them or followed them earlier — sees the
+**In My Ducks** state and a link to the saved list instead of an action.
+
+Both duck responses (`GET /api/v1/ducks/<tag-token>` and
+`GET /api/v1/ducks/number/<visible-number>`) carry the same `followId` and
+`inMyDucks` signals as a search result, and only for a participant the follow
+endpoint would actually accept: a withdrawn or disqualified registration, or one
+outside the current public event, carries neither signal and its page renders no
+control. The membership check is a read-only probe of the caller's own collection
+cookie, so a tag GET stays read-only and issues no cookie. Nothing else about
+these responses changed: they still carry no contact details, lookup code,
+private link, duck name, or staff data.
 
 ### Public Duck Detail View
 
