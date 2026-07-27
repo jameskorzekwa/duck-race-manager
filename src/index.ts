@@ -14,6 +14,7 @@ import {
   liveUiScript,
   participantScript,
   registrationScript,
+  staffAccessScript,
   staffDuckScript,
   staffHomeScript,
   startLineScript,
@@ -34,6 +35,7 @@ import {
   renderInventoryIntake,
   renderInventoryIntakeUnsupported,
   renderMyDucks,
+  renderStaffAccess,
   renderStaffHome,
   renderStaffLogin,
   renderStaffPairing,
@@ -160,7 +162,7 @@ export const createWorker = (
       });
     }
 
-    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)) {
+    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)) {
       const script = url.pathname === "/assets/live-ui.js"
         ? liveUiScript
         : url.pathname === "/assets/register.js"
@@ -169,19 +171,21 @@ export const createWorker = (
             ? participantScript
             : url.pathname === "/assets/staff-home.js"
               ? staffHomeScript
-              : url.pathname === "/assets/live.js"
-                ? liveScript
-                : url.pathname === "/assets/start-line.js"
-                  ? startLineScript
-                  : url.pathname === "/assets/finish-line.js"
-                    ? finishLineScript
-                    : url.pathname === "/assets/app-select.js"
-                      ? appSelectScript
-                      : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
+              : url.pathname === "/assets/staff-access.js"
+                ? staffAccessScript
+                : url.pathname === "/assets/live.js"
+                  ? liveScript
+                  : url.pathname === "/assets/start-line.js"
+                    ? startLineScript
+                    : url.pathname === "/assets/finish-line.js"
+                      ? finishLineScript
+                      : url.pathname === "/assets/app-select.js"
+                        ? appSelectScript
+                        : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)
+          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)
             ? "no-store"
             : "public, max-age=3600",
           "content-type": "text/javascript; charset=utf-8",
@@ -274,6 +278,25 @@ export const createWorker = (
       return withSessionCookies(actor === null
         ? staffHtml(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo"))))
         : staffHtml(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles)));
+    }
+
+    // Staff account and role management is event-independent administrator work,
+    // so it is its own page rather than a console section.
+    if (url.pathname === "/staff/access" && request.method === "GET") {
+      const actor = await authenticateRequest(request, env);
+      if (actor === null) {
+        const login = new URL("/staff", env.APP_ORIGIN);
+        login.searchParams.set("returnTo", url.pathname);
+        return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
+      }
+      if (!actor.isSystemAdmin) {
+        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to manage staff access.", actor), 403, true));
+      }
+      return withSessionCookies(staffHtml(renderStaffAccess(
+        actor.displayName ?? actor.email,
+        actor.isSystemAdmin,
+        actor.roles,
+      )));
     }
 
     if (url.pathname === "/staff/inventory-intake" && request.method === "GET") {

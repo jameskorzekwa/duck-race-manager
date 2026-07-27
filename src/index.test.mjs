@@ -96,6 +96,7 @@ test("serves registration and staff pairing browser clients", async () => {
   const participant = await worker.fetch(new Request("https://quickducks.com/assets/participant.js"), env);
   const staff = await worker.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env);
   const staffHome = await worker.fetch(new Request("https://quickducks.com/assets/staff-home.js"), env);
+  const staffAccess = await worker.fetch(new Request("https://quickducks.com/assets/staff-access.js"), env);
   const live = await worker.fetch(new Request("https://quickducks.com/assets/live.js"), env);
   const liveUi = await worker.fetch(new Request("https://quickducks.com/assets/live-ui.js"), env);
   const startLine = await worker.fetch(new Request("https://quickducks.com/assets/start-line.js"), env);
@@ -115,6 +116,12 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(staffHome.status, 200);
   assert.equal(staffHome.headers.get("cache-control"), "no-store");
   assert.match(await staffHome.text(), /\/api\/v1\/staff\/events\/return-review/);
+  // The staff access client is served like the other protected staff assets.
+  assert.equal(staffAccess.status, 200);
+  assert.equal(staffAccess.headers.get("cache-control"), "no-store");
+  assert.match(staffAccess.headers.get("content-type") ?? "", /text\/javascript/);
+  assert.equal(staffAccess.headers.get("strict-transport-security"), "max-age=31536000");
+  assert.match(await staffAccess.text(), /\/api\/v1\/staff\/profiles/);
   assert.match(await live.text(), /\/api\/v1\/race-board/);
   assert.equal(live.headers.get("cache-control"), "public, max-age=3600");
   assert.match(liveUiBody, /\/api\/v1\/live/);
@@ -210,6 +217,73 @@ test("gates the Android inventory intake station after authentication and role c
     assert.doesNotMatch(body, /name="visibleNumber"|name="tagUrl"|name="condition"|name="physicallyPresent"/);
     assert.match(body, /src="\/assets\/inventory-intake\.js"/);
   }
+});
+
+test("gates the standalone staff access page to system administrators", async () => {
+  const actor = (roles, isSystemAdmin = false) => ({
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Access Staff",
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  const page = (currentActor) => createWorker(async () => currentActor).fetch(
+    new Request("https://quickducks.com/staff/access"), env,
+  );
+
+  // Anonymous: redirect to sign-in with a safe same-origin return target.
+  const anonymous = await page(null);
+  assert.equal(anonymous.status, 303);
+  assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Faccess");
+
+  // Authenticated non-administrators: 403 through the shared staff auth error.
+  for (const roles of [[], ["REGISTRATION"], ["RACE_DIRECTOR"], ["DUCK_MANAGER", "RETURN_STEWARD"]]) {
+    const denied = await page(actor(roles));
+    const body = await denied.text();
+    assert.equal(denied.status, 403, roles.join(","));
+    assert.equal(denied.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.equal(denied.headers.get("cache-control"), "no-store");
+    assert.match(body, /permission to manage staff access/);
+    assert.doesNotMatch(body, /data-staff-access-form|data-staff-access-list/);
+  }
+
+  // Administrator: the page renders with the staff page header contract.
+  const allowed = await page(actor([], true));
+  const body = await allowed.text();
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.equal(allowed.headers.get("cache-control"), "no-store");
+  assert.equal(allowed.headers.get("referrer-policy"), "same-origin");
+  assert.match(
+    allowed.headers.get("content-security-policy") ?? "",
+    /form-action 'self' https:\/\/quickducks-staff\.example\.com; frame-ancestors/,
+  );
+  assert.match(body, /<meta name="robots" content="noindex,nofollow">/);
+  assert.match(body, /data-staff-access data-live-staff data-system-admin="true"/);
+  assert.match(body, /data-staff-access-form/);
+  assert.match(body, /data-staff-access-list/);
+  assert.match(body, /src="\/assets\/staff-access\.js"/);
+  assert.match(body, /src="\/assets\/app-select\.js"/);
+  assert.match(body, /Signed in as Access Staff/);
+
+  // Only GET renders the page; other methods fall through to not-found.
+  for (const method of ["POST", "PUT", "DELETE"]) {
+    const response = await createWorker(async () => actor([], true)).fetch(
+      new Request("https://quickducks.com/staff/access", { method }), env,
+    );
+    assert.equal(response.status, 404, method);
+  }
+});
+
+test("propagates rotated session cookies from the staff access page", async () => {
+  const response = await refreshWorker().fetch(
+    new Request("https://quickducks.com/staff/access", { headers: { cookie: expiredSessionCookie } }),
+    env,
+  );
+  const cookies = response.headers.get("set-cookie");
+
+  // The refreshed actor is a regular staff member, so this is the 403 path and
+  // it must still hand the browser its rotated cookies.
+  assert.equal(response.status, 403);
+  assert.match(cookies, /__Host-quickducks_staff=new\.jwt\.token/);
+  assert.match(cookies, /__Host-quickducks_staff_refresh=new\.refresh\.token/);
 });
 
 test("gates focused station pages by operational role", async () => {
@@ -733,7 +807,10 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   const staffHomeBody = await staffHome.text();
   assert.match(staffHomeBody, /data-return-review/);
   assert.match(staffHomeBody, /data-system-admin="true"/);
-  assert.match(staffHomeBody, /data-staff-access-form/);
+  // Staff access is its own page now; the console links to it and renders no
+  // account-management markup.
+  assert.doesNotMatch(staffHomeBody, /data-staff-access-form|data-create-role-set|id="access"/);
+  assert.match(staffHomeBody, /<a href="\/staff\/access">Access<\/a>/);
   assert.match(staffHomeBody, /id="events"/);
   assert.match(staffHomeBody, /id="participants"/);
   assert.match(staffHomeBody, /id="inventory"/);
@@ -741,7 +818,6 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.match(staffHomeBody, /id="returns"/);
   assert.match(staffHomeBody, /id="support"/);
   assert.match(staffHomeBody, /data-final-purge-form/);
-  assert.match(staffHomeBody, /Regular staff/);
   assert.match(staffHomeBody, /Administrator/);
   assert.match(staffHomeBody, /\/assets\/staff-home\.js/);
 
@@ -762,13 +838,13 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.doesNotMatch(regularStaffHome, /id="support"/);
   assert.doesNotMatch(regularStaffHome, /data-final-purge-form/);
   assert.match(regularStaffHome, /data-return-batch-item-form/);
-  assert.match(regularStaffHome, /<a href="#returns">Returns<\/a>/);
-  assert.doesNotMatch(regularStaffHome, /<a href="#participants">Participants<\/a>/);
+  assert.match(regularStaffHome, /<a href="#returns" data-event-scoped hidden>Returns<\/a>/);
+  assert.doesNotMatch(regularStaffHome, /<a href="#participants"/);
   assert.match(regularStaffHome, /id="participants"[^>]* hidden/);
   assert.match(regularStaffHome, /id="returns"/);
 
   const announcerHome = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
-  assert.match(announcerHome, /<a href="#heats">Heats<\/a>/);
+  assert.match(announcerHome, /<a href="#heats" data-event-scoped hidden>Heats<\/a>/);
   assert.match(announcerHome, /id="inventory"[^>]* hidden/);
   assert.match(announcerHome, /data-roles="ANNOUNCER"/);
 

@@ -21,6 +21,7 @@ import {
   registrationHandoffHelpersScript,
   registrationScript,
   stationStateHelpersScript,
+  staffAccessScript,
   staffDuckScript,
   staffHomeScript,
   startLineScript,
@@ -62,6 +63,7 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotThrow(() => new Function(participantScript));
   assert.doesNotThrow(() => new Function(staffDuckScript));
   assert.doesNotThrow(() => new Function(staffHomeScript));
+  assert.doesNotThrow(() => new Function(staffAccessScript));
   assert.doesNotThrow(() => new Function(liveScript));
   assert.doesNotThrow(() => new Function(startLineScript));
   assert.doesNotThrow(() => new Function(finishLineScript));
@@ -94,10 +96,14 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(staffDuckScript, /\/dispositions/);
   assert.match(staffHomeScript, /\/api\/v1\/staff\/events\/return-review/);
   assert.match(staffHomeScript, /\/purge-ready/);
-  assert.match(staffHomeScript, /\/api\/v1\/staff\/profiles/);
-  assert.match(staffHomeScript, /Regular staff/);
   assert.match(staffHomeScript, /Administrator/);
   assert.doesNotMatch(staffHomeScript, /duckKeepPreference|duck_keep_preference/);
+  // Staff account and role management moved to its own /staff/access client.
+  assert.match(staffAccessScript, /\/api\/v1\/staff\/profiles/);
+  assert.match(staffAccessScript, /Regular staff/);
+  assert.match(staffAccessScript, /System administrator/);
+  assert.doesNotMatch(staffAccessScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  assert.doesNotMatch(staffHomeScript, /\/api\/v1\/staff\/profiles/);
   assert.match(inventoryIntakeScript, /\/api\/v1\/staff\/inventory\/provisioning/);
   assert.match(inventoryIntakeScript, /provisioning\/classify/);
   assert.match(inventoryIntakeScript, /provisioning\/confirm/);
@@ -403,7 +409,7 @@ const confirmationCallsites = [
   [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Claim this event for permanent purge? Support mutations will be frozen.", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Permanently delete the complete race dataset now? This cannot be undone.", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
+  [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
 ];
 
 test("every confirmation callsite preserves its warning and returns before mutation on cancel", async () => {
@@ -413,7 +419,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((inventoryIntakeScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 20);
+  // One staff-access confirmation left the console with its page.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 19);
+  assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
 
   let mutations = 0;
   const harness = confirmationHarness();
