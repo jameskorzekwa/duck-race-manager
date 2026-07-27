@@ -1,3 +1,4 @@
+import { publicDuckName } from "./duck-name-filter.ts";
 import type { Env } from "./types.ts";
 
 interface StatusRow {
@@ -12,6 +13,7 @@ interface StatusRow {
   registration_status: string;
   race_entry_id: string;
   visible_number: number | null;
+  duck_name: string | null;
   round_one_heat_number: number | null;
   round_one_heat_status: string | null;
   round_one_place: number | null;
@@ -45,6 +47,11 @@ export interface PublicRaceStatus {
   };
   participantDisplayName: string;
   duck: { visibleNumber: number } | null;
+  // The participant-chosen name for this duck, or null when there is none and
+  // when the read-time filter suppresses one. The canonical duck number is
+  // always present alongside it, so a surface can show both and still match the
+  // number printed on the physical duck.
+  duckName: string | null;
   assignedHeat: {
     roundOne: { number: number; status: string } | null;
     final: { number: number; status: string } | null;
@@ -114,7 +121,7 @@ const statusSelect = `
   SELECT e.id AS event_id, e.slug AS event_slug, e.name AS event_name,
          e.event_date, e.status AS event_status, e.public_name_policy,
          r.first_name, r.last_name, r.status AS registration_status,
-         re.id AS race_entry_id, d.visible_number,
+         re.id AS race_entry_id, re.duck_name, d.visible_number,
          round_heat.heat_number AS round_one_heat_number,
          round_heat.status AS round_one_heat_status,
          round_result.place AS round_one_place,
@@ -181,6 +188,10 @@ const buildStatus = async (env: Env, row: StatusRow): Promise<PublicRaceStatus> 
     },
     participantDisplayName: displayName(row.public_name_policy, row.first_name, row.last_name),
     duck: row.visible_number === null ? null : { visibleNumber: row.visible_number },
+    // Read-time safety net. A name stored before duck names became public, or
+    // one that a later wordlist rejects, is suppressed here rather than only at
+    // write time, and the surface falls back to the canonical "Duck #N".
+    duckName: row.visible_number === null ? null : publicDuckName(row.duck_name),
     assignedHeat: {
       roundOne: row.round_one_heat_number === null ? null : {
         number: row.round_one_heat_number,

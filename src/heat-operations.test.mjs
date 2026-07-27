@@ -999,6 +999,12 @@ test("the heat roster projection exposes exactly its documented identifier field
     "raceEntryId",
     "slotNumber",
   ]);
+  // Deliberate: the participant-chosen duck name is public on the board and the
+  // duck pages, but it is never handed to the microphone. A name that slips past
+  // the filter can be cleared from a screen; it cannot be unsaid over a PA at a
+  // family event, and the announcer needs the number to line racers up anyway.
+  assert.equal(Object.hasOwn(announcerBody.roster[0], "duckName"), false);
+  assert.doesNotMatch(JSON.stringify(announcerBody), /duckName|duck_name/);
 
   // No contact detail, lookup code, private token, or staff note reaches either
   // projection, whatever identifiers they do carry.

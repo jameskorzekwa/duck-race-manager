@@ -650,6 +650,64 @@ test("staff inspection still returns the current active assignment", async () =>
   assert.equal(body.assignment.participant.firstName, "Daisy");
 });
 
+// A duck name is participant-written text that the public now sees, so the
+// scanned-duck projection carries it — but only to the roles that may clear it,
+// alongside the registration identifier the clear endpoint needs.
+test("the scanned duck carries its chosen name only for roles that may moderate it", async () => {
+  const pairedRow = (duckName) => () => ({
+    duck_id: "duck_test",
+    visible_number: 42,
+    inventory_status: "IN_USE",
+    duck_revision: 1,
+    tag_status: "ACTIVE",
+    event_name: "Test Duck Race",
+    event_status: "ROUND_ONE",
+    assignment_id: "active_assignment",
+    assignment_valid_to: null,
+    event_id: "event_test",
+    race_entry_id: "entry_test",
+    registration_id: "registration_test",
+    duck_name: duckName,
+    first_name: "Daisy",
+    last_name: "Duck",
+    email: "daisy@example.com",
+    phone: "555-0100",
+    lookup_code: "DAASY234",
+    registration_status: "ACTIVE",
+  });
+
+  const allowed = await (await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}`),
+    makeEnv(makeDb(pairedRow("Sir Quacks-a-Lot"))),
+    { ...actor, roles: ["REGISTRATION"] },
+  )).json();
+  assert.equal(allowed.assignment.participant.duckName, "Sir Quacks-a-Lot");
+  assert.equal(allowed.assignment.participant.duckNamePubliclyHidden, false);
+  assert.equal(allowed.assignment.participant.registrationId, "registration_test");
+
+  // A stored name the read-time filter suppresses is still shown to staff, and
+  // flagged, because that is exactly the case they have to act on.
+  const hidden = await (await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}`),
+    makeEnv(makeDb(pairedRow("Bastard Duck"))),
+    { ...actor, roles: ["RACE_DIRECTOR"] },
+  )).json();
+  assert.equal(hidden.assignment.participant.duckName, "Bastard Duck");
+  assert.equal(hidden.assignment.participant.duckNamePubliclyHidden, true);
+
+  // A duck manager keeps the narrow projection: no contact detail, no
+  // registration identifier, and no duck name to act on.
+  const narrow = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}`),
+    makeEnv(makeDb(pairedRow("Sir Quacks-a-Lot"))),
+    { ...actor, isSystemAdmin: false, roles: ["DUCK_MANAGER"] },
+  );
+  const narrowBody = await narrow.json();
+  assert.deepEqual(Object.keys(narrowBody.assignment.participant), ["registrationStatus"]);
+  assert.equal(JSON.stringify(narrowBody).includes("Sir Quacks-a-Lot"), false);
+  assert.equal(JSON.stringify(narrowBody).includes("registration_test"), false);
+});
+
 test("staff pairs the scanned duck with a code-selected participant atomically", async () => {
   const db = makeDb((sql) => {
     if (sql.includes("FROM race_commands")) return null;

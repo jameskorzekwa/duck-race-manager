@@ -6,6 +6,7 @@ import {
   requireAnyRole,
   type OperationalRole,
 } from "./authorization.ts";
+import { publicDuckName } from "./duck-name-filter.ts";
 import { isCommandId } from "./registration.ts";
 import {
   cognitoStaffProvisioner,
@@ -217,6 +218,8 @@ interface StaffDuckRow {
   assignment_valid_to: string | null;
   event_id: string | null;
   race_entry_id: string | null;
+  registration_id: string | null;
+  duck_name: string | null;
   first_name: string | null;
   last_name: string | null;
   email: string | null;
@@ -232,7 +235,8 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
             d.revision AS duck_revision, dt.status AS tag_status,
             e.name AS event_name, e.status AS event_status,
             da.id AS assignment_id, da.valid_to AS assignment_valid_to,
-            ed.event_id, da.race_entry_id,
+            ed.event_id, da.race_entry_id, re.duck_name,
+            r.id AS registration_id,
             r.first_name, r.last_name, r.email, r.phone, r.lookup_code,
             r.status AS registration_status
        FROM duck_tags dt
@@ -267,6 +271,14 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
     eventId: duck.event_id,
     raceEntryId: duck.race_entry_id,
     participant: includePii ? {
+      // The registration identifier and the stored duck name ship only to the
+      // roles that may clear that name, which is the same
+      // REGISTRATION/RACE_DIRECTOR set `canViewParticipantPii` describes and the
+      // same set the clear endpoint enforces. A duck manager keeps the narrow
+      // projection and is offered no moderation control.
+      registrationId: duck.registration_id,
+      duckName: duck.duck_name,
+      duckNamePubliclyHidden: duck.duck_name !== null && publicDuckName(duck.duck_name) === null,
       firstName: duck.first_name,
       lastName: duck.last_name,
       email: duck.email,

@@ -152,6 +152,11 @@ const consoleParts = {
   openRosterParticipant: /const openRosterParticipant = async \(registrationId\) => \{[\s\S]*?\n\};/,
   openRosterDuck: /const openRosterDuck = async \(duckId\) => \{[\s\S]*?\n\};/,
   loadHeatDetail: /const loadHeatDetail = async \(heatId\) => \{[\s\S]*?\n\};/,
+  commandOptions: /const commandOptions = \(method, payload\) => \(\{[\s\S]*?\n\}\);/,
+  addParticipantAction: /const addParticipantAction = \(label, className, action\) => \{[\s\S]*?\n\};/,
+  participantDuckNameFact: /const participantDuckNameFact = \(registration\) => \{[\s\S]*?\n\};/,
+  clearParticipantDuckName: /const clearParticipantDuckName = async \(button\) => \{[\s\S]*?\n\};/,
+  renderParticipantDetail: /const renderParticipantDetail = \(registration\) => \{[\s\S]*?\n\};/,
 };
 
 const build = (parts, injected, returned) => {
@@ -722,6 +727,177 @@ test("a duck deep link cannot leave a stale inventory panel open", async () => {
   await secondClick;
   assert.deepEqual(harness.rendered, ["duck-2"]);
   assert.equal(harness.detail.hidden, false);
+});
+
+// ---------------------------------------------------------------------------
+// Moderating a participant-chosen duck name
+// ---------------------------------------------------------------------------
+
+const registrationDetail = (overrides = {}) => ({
+  registrationId: "registration-1",
+  raceEntryId: "entry-1",
+  firstName: "Ada",
+  lastName: "Lovelace",
+  email: "ada@example.com",
+  phone: "555-0100",
+  status: "ACTIVE",
+  lookupCode: "ADAA2345",
+  createdVia: "PUBLIC",
+  notes: null,
+  revision: 3,
+  assignment: { id: "assignment-1", duck: { id: "duck-12", visibleNumber: 12 } },
+  duckName: null,
+  duckNamePubliclyHidden: false,
+  ...overrides,
+});
+
+const participantDetailHarness = ({ canRegistration = true, clearResponse = null } = {}) => {
+  const document = new FakeDocument();
+  const participantDetail = document.hook("[data-participant-detail]", "article");
+  const participantFacts = document.hook("[data-participant-facts]", "dl");
+  const participantActions = document.hook("[data-participant-actions]", "div");
+  document.hook("[data-participant-name]", "h3");
+  document.hook("#inventory", "section");
+  const facts = [];
+  const requests = [];
+  const confirmations = [];
+  let confirmAnswer = true;
+  const participantEditForm = {
+    elements: {
+      firstName: { value: "" },
+      lastName: { value: "" },
+      email: { value: "" },
+      phone: { value: "" },
+      notes: { value: "" },
+    },
+    reset() {},
+  };
+  const runtime = build(
+    [
+      "text",
+      "humanize",
+      "commandOptions",
+      "addParticipantAction",
+      "participantDuckNameFact",
+      "clearParticipantDuckName",
+      "renderParticipantDetail",
+    ],
+    {
+      document,
+      canRegistration,
+      canInventory: false,
+      canDirectRace: false,
+      participantDetail,
+      participantFacts,
+      participantActions,
+      participantEditForm,
+      selectedRegistration: null,
+      showFacts: (container, entries) => facts.push(...entries),
+      appConfirm: async (message, options) => {
+        confirmations.push([message, options]);
+        return confirmAnswer;
+      },
+      perform: async (button, message, operation) => operation(),
+      api: async (url, options) => {
+        requests.push([url, options]);
+        return clearResponse ?? { registration: registrationDetail({ duckName: null }) };
+      },
+      loadParticipants: async () => {},
+      changeParticipantStatus: async () => {},
+      deleteParticipant: async () => {},
+      crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" },
+    },
+    ["renderParticipantDetail", "participantDuckNameFact"],
+  );
+  return {
+    ...runtime,
+    facts,
+    requests,
+    confirmations,
+    participantActions,
+    setConfirmAnswer: (value) => { confirmAnswer = value; },
+    action: (label) => participantActions.children.find((child) => child.textContent === label) ?? null,
+  };
+};
+
+test("the participant panel shows the stored duck name and whether it is already hidden", () => {
+  const named = participantDetailHarness();
+  named.renderParticipantDetail(registrationDetail({ duckName: "Sir Quacks-a-Lot" }));
+  assert.deepEqual(
+    named.facts.find(([label]) => label === "Duck name"),
+    ["Duck name", "Sir Quacks-a-Lot"],
+  );
+  // The canonical duck number stays its own fact.
+  assert.deepEqual(named.facts.find(([label]) => label === "Duck"), ["Duck", "#12"]);
+
+  // Staff need to know when the read-time filter is already suppressing it, or
+  // they cannot tell a moderated duck from an unmoderated one.
+  const hidden = participantDetailHarness();
+  hidden.renderParticipantDetail(registrationDetail({
+    duckName: "Regrettable Pun",
+    duckNamePubliclyHidden: true,
+  }));
+  assert.deepEqual(
+    hidden.facts.find(([label]) => label === "Duck name"),
+    ["Duck name", "Regrettable Pun (already hidden from public surfaces)"],
+  );
+
+  const unnamed = participantDetailHarness();
+  unnamed.renderParticipantDetail(registrationDetail());
+  assert.deepEqual(unnamed.facts.find(([label]) => label === "Duck name"), ["Duck name", "Not named"]);
+});
+
+test("clearing a duck name is offered only with a name and the registration role", () => {
+  const named = participantDetailHarness();
+  named.renderParticipantDetail(registrationDetail({ duckName: "Sir Quacks-a-Lot" }));
+  const button = named.action("Clear duck name");
+  assert.ok(button, "a named duck offers the moderation action");
+  assert.equal(button.tagName, "BUTTON");
+  assert.equal(button.type, "button");
+  assert.equal(button.className, "button danger small");
+
+  // Nothing to clear means no button at all.
+  const unnamed = participantDetailHarness();
+  unnamed.renderParticipantDetail(registrationDetail());
+  assert.equal(unnamed.action("Clear duck name"), null);
+
+  // UI role filtering is convenience only — the API enforces it — but an
+  // announcer or duck manager is not shown a control that would only 403.
+  const readOnly = participantDetailHarness({ canRegistration: false });
+  readOnly.renderParticipantDetail(registrationDetail({ duckName: "Sir Quacks-a-Lot" }));
+  assert.equal(readOnly.action("Clear duck name"), null);
+});
+
+test("clearing a duck name confirms first, then posts one idempotent command", async () => {
+  const harness = participantDetailHarness();
+  harness.renderParticipantDetail(registrationDetail({ duckName: "Sir Quacks-a-Lot" }));
+
+  // Cancelling changes nothing.
+  harness.setConfirmAnswer(false);
+  await harness.action("Clear duck name").dispatch("click");
+  assert.deepEqual(harness.requests, []);
+  assert.match(harness.confirmations[0][0], /Clear the duck name chosen by Ada Lovelace/);
+  assert.match(harness.confirmations[0][0], /recorded in the audit trail/);
+  assert.deepEqual(harness.confirmations[0][1], { danger: true, confirmLabel: "Clear duck name" });
+
+  harness.setConfirmAnswer(true);
+  await harness.action("Clear duck name").dispatch("click");
+  assert.equal(harness.requests.length, 1);
+  const [url, options] = harness.requests[0];
+  assert.equal(url, "/api/v1/staff/registrations/registration-1/clear-duck-name");
+  assert.equal(options.method, "POST");
+  // The shared command envelope, so the browser sends the application Origin
+  // the server requires of a cookie-authenticated staff mutation.
+  assert.equal(options.headers["content-type"], "application/json");
+  // One command identifier and nothing else: the body carries no revision to
+  // race against and no participant text.
+  assert.deepEqual(Object.keys(JSON.parse(options.body)), ["commandId"]);
+  assert.match(JSON.parse(options.body).commandId, /^[0-9a-f-]{36}$/);
+  // The offending text is never part of the request.
+  assert.equal(options.body.includes("Sir Quacks-a-Lot"), false);
+
+  // The panel repaints from the authoritative response, which has no name left.
+  assert.deepEqual(harness.facts.filter(([label]) => label === "Duck name").at(-1), ["Duck name", "Not named"]);
 });
 
 // ---------------------------------------------------------------------------

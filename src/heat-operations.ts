@@ -237,6 +237,21 @@ const getHeatDetail = async (env: Env, eventId: string, heatId: string): Promise
   });
 };
 
+// The announcer projection is deliberately slot, participant name, and duck
+// number, and it deliberately does NOT carry the participant-chosen duck name
+// even though that name is now public everywhere else.
+//
+// This station is a script for someone holding a live microphone. Reading a name
+// out loud is the one place where a name that slipped past the filter stops
+// being text a visitor can look away from and becomes a public-address
+// announcement to a family event, with no undo and no moderation step in
+// between. The board, the duck pages, and the search results are all filtered
+// text that staff can clear in seconds; a spoken word cannot be cleared at all.
+//
+// The number is also what the announcer actually needs: the roster is read out
+// to line racers up against the duck in the water, and a chosen name is one more
+// ambiguous token to get wrong at volume. Nothing is lost by leaving it out —
+// the announcer can see it on the participant console if they ever need it.
 const announcerRoster = async (env: Env, eventId: string, heatId: string): Promise<Response> => {
   const heat = await getHeatSummary(env, eventId, heatId);
   if (heat === null) return json({ error: "Heat not found." }, 404);

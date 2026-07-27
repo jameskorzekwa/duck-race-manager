@@ -654,6 +654,10 @@ const participantSaveName = async (registration, form, input, button, feedback) 
   const endBusy = globalThis.quickDucksLive.beginBusy();
   try {
     let saved = false;
+    // A 422 is the server refusing this particular name, not a failure to
+    // reach it, so it gets its own message and no "try again". The rejected
+    // text is never echoed by the server and is never repeated here.
+    let refused = false;
     try {
       const response = await fetch("/api/v1/registrations/mine/duck-name", {
         method: "POST",
@@ -665,13 +669,16 @@ const participantSaveName = async (registration, form, input, button, feedback) 
         }),
       });
       saved = response.ok;
+      refused = response.status === 422;
     } catch {
       saved = false;
     }
     if (!saved) {
       button.disabled = false;
       button.textContent = label;
-      feedback.textContent = "That duck name could not be saved. Please try again.";
+      feedback.textContent = refused
+        ? "That name can’t be used on the public race board. Please choose another one."
+        : "That duck name could not be saved. Please try again.";
       feedback.hidden = false;
       return;
     }
@@ -705,7 +712,7 @@ const participantNameControls = (registration) => {
   form.append(
     label,
     button,
-    participantText("p", "Only this device sees the name you choose. Race staff and the public race board always show the duck number.", "muted"),
+    participantText("p", "The name you choose is shown publicly beside this duck’s number, on the race board and its duck page. Keep it friendly: race staff can remove a name that is not.", "muted"),
     feedback,
   );
   form.addEventListener("submit", (event) => {
@@ -1541,6 +1548,16 @@ const liveAddFact = (container, label, value) => {
   container.append(fact);
 };
 
+// Mirrors the server's duck identity exactly: the canonical number first, then
+// the participant-chosen name when the server's read-time filter allowed one.
+const liveDuckIdentity = (status) => {
+  if (!status.duck) return "Waiting for duck assignment";
+  const number = "Duck #" + status.duck.visibleNumber;
+  return typeof status.duckName === "string" && status.duckName.length > 0
+    ? number + " · " + status.duckName
+    : number;
+};
+
 const liveRaceFacts = (container, status, includeParticipant) => {
   if (!status) {
     container.append(liveText("p", "Race status is not currently public.", "muted"));
@@ -1548,7 +1565,7 @@ const liveRaceFacts = (container, status, includeParticipant) => {
   }
   const facts = liveText("dl", "", "facts");
   if (includeParticipant) liveAddFact(facts, "Participant", status.participantDisplayName);
-  liveAddFact(facts, "Duck", status.duck ? "Duck #" + status.duck.visibleNumber : "Waiting for duck assignment");
+  liveAddFact(facts, "Duck", liveDuckIdentity(status));
   const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
   liveAddFact(facts, "Assigned heat", assigned
     ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
@@ -1562,11 +1579,22 @@ const liveRaceFacts = (container, status, includeParticipant) => {
 
 // A board entry links to the public duck detail view whenever it actually shows
 // a duck number. Entries still waiting for a duck keep plain pending text.
+//
+// The link text stays the canonical "Duck #N" so the board always matches the
+// duck in the water; a participant-chosen name is appended beside it as a plain
+// text node, like every other value here.
+const liveBoardDuckName = (entry) =>
+  typeof entry.duckName === "string" && entry.duckName.length > 0 ? entry.duckName : null;
+
 const liveBoardDuckCell = (entry) => {
   const cell = liveText("span", "");
   const link = duckDetailLink(document, entry.duckNumber);
   if (link === null) cell.textContent = "Duck number pending";
   else cell.append(link);
+  const duckName = liveBoardDuckName(entry);
+  if (link !== null && duckName !== null) {
+    cell.append(liveText("span", " · " + duckName, "duck-name-note"));
+  }
   if (entry.place !== null) {
     cell.append(liveText("span", " · " + livePlaceLabel(entry.place) + " place"));
   }
@@ -1582,7 +1610,7 @@ const liveDuckDetailFacts = (container, status) => {
   }
   const facts = liveText("dl", "", "facts");
   liveAddFact(facts, "Participant", status.participantDisplayName);
-  liveAddFact(facts, "Duck", status.duck ? "Duck #" + status.duck.visibleNumber : "Waiting for duck assignment");
+  liveAddFact(facts, "Duck", liveDuckIdentity(status));
   liveAddFact(facts, "Round one heat", status.assignedHeat.roundOne
     ? "Heat " + status.assignedHeat.roundOne.number + " · " + duckHeatStatusLabel(status.assignedHeat.roundOne.status)
     : "Not assigned yet");
@@ -1659,6 +1687,10 @@ const liveRenderBoard = (board) => {
       const place = liveText("p", livePlaceLabel(entry.place) + " · " + entry.participantDisplayName, "podium-place");
       const link = duckDetailLink(document, entry.duckNumber);
       if (link !== null) place.append(liveText("span", " · "), link);
+      const duckName = liveBoardDuckName(entry);
+      if (link !== null && duckName !== null) {
+        place.append(liveText("span", " · " + duckName, "duck-name-note"));
+      }
       places.append(place);
     }
     podium.append(places);
@@ -4357,6 +4389,37 @@ const deleteParticipant = async (button) => {
   });
 };
 
+// The duck name is participant-written text that is shown publicly, so staff
+// see exactly what is stored and whether the read-time filter is already hiding
+// it. It is rendered through the shared safe text helper, so a hostile name can
+// only ever be text on this page.
+const participantDuckNameFact = (registration) => {
+  if (typeof registration.duckName !== "string" || registration.duckName.length === 0) {
+    return "Not named";
+  }
+  return registration.duckNamePubliclyHidden === true
+    ? registration.duckName + " (already hidden from public surfaces)"
+    : registration.duckName;
+};
+
+const clearParticipantDuckName = async (button) => {
+  const registration = selectedRegistration;
+  if (!await appConfirm(
+    "Clear the duck name chosen by " + registration.firstName + " " + registration.lastName
+    + "? The duck goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;
+  await perform(button, "Clearing duck name…", async () => {
+    const result = await api(
+      "/api/v1/staff/registrations/" + encodeURIComponent(registration.registrationId) + "/clear-duck-name",
+      commandOptions("POST", { commandId: crypto.randomUUID() }),
+    );
+    selectedRegistration = result.registration;
+    renderParticipantDetail(selectedRegistration);
+    await loadParticipants();
+  });
+};
+
 const renderParticipantDetail = (registration) => {
   selectedRegistration = registration;
   participantDetail.hidden = false;
@@ -4368,6 +4431,7 @@ const renderParticipantDetail = (registration) => {
     ["Phone", registration.phone || "Not provided"],
     ["Created via", humanize(registration.createdVia)],
     ["Duck", registration.assignment ? "#" + registration.assignment.duck.visibleNumber : "Unassigned"],
+    ["Duck name", participantDuckNameFact(registration)],
     ["Race entry", registration.raceEntryId],
     ["Revision", registration.revision],
   ]);
@@ -4377,6 +4441,14 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.phone.value = registration.phone || "";
   participantEditForm.elements.notes.value = registration.notes || "";
   participantActions.replaceChildren();
+  // Offered only when there is a name to clear. The server enforces the role.
+  if (canRegistration && typeof registration.duckName === "string" && registration.duckName.length > 0) {
+    addParticipantAction(
+      "Clear duck name",
+      "button danger small",
+      (event) => clearParticipantDuckName(event.currentTarget),
+    );
+  }
   if (canInventory) {
     addParticipantAction("Use for duck assignment", "button secondary small", () => {
       document.querySelector("[data-inventory-assign-form]").elements.raceEntryId.value = registration.raceEntryId;
@@ -5342,6 +5414,55 @@ const addFact = (label, value) => {
   summary.append(fact);
 };
 
+// Scanning the duck someone is complaining about is the fastest way for staff
+// to reach its record, so the moderation control lives here as well as in the
+// participant console. The control is rendered only when the response carried
+// the participant projection, which the API sends only to the roles the clear
+// endpoint itself accepts.
+const clearScannedDuckName = async (registrationId, button) => {
+  if (!await appConfirm(
+    "Clear this duck's chosen name? It goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;
+  button.disabled = true;
+  message.textContent = "Clearing duck name…";
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    await fetchJson("/api/v1/staff/registrations/" + encodeURIComponent(registrationId) + "/clear-duck-name", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId: crypto.randomUUID() }),
+    });
+    await load();
+    message.textContent = "Duck name cleared. This duck now shows its number only.";
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      button.disabled = false;
+      message.textContent = error.message;
+    }
+  } finally {
+    staffDuckBusy -= 1;
+    endBusy();
+    staffDuckSubscription?.resume();
+  }
+};
+
+const showDuckNameModeration = (participant) => {
+  if (typeof participant.duckName !== "string" || participant.duckName.length === 0) return;
+  addFact("Duck name", participant.duckNamePubliclyHidden === true
+    ? participant.duckName + " (already hidden from public surfaces)"
+    : participant.duckName);
+  if (typeof participant.registrationId !== "string") return;
+  const actions = text("div", "", "actions");
+  const button = text("button", "Clear duck name", "button danger small");
+  button.type = "button";
+  button.dataset.clearDuckName = participant.registrationId;
+  button.addEventListener("click", () => clearScannedDuckName(participant.registrationId, button));
+  actions.append(button);
+  summary.append(actions);
+};
+
 const showInspection = (data) => {
   const participant = data.assignment.participant || {};
   pageTitle.textContent = "Inspect Duck #" + data.duck.visibleNumber;
@@ -5354,6 +5475,7 @@ const showInspection = (data) => {
   if (!data.assignment.active) addFact("Assignment", "closed");
   if (participant.email) addFact("Email", participant.email);
   if (participant.phone) addFact("Phone", participant.phone);
+  showDuckNameModeration(participant);
 };
 
 const renderSelection = (registration) => {

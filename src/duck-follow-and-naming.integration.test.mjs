@@ -135,6 +135,9 @@ const harness = (context, { rateLimited = false } = {}) => {
   return {
     api: call(createWorker(async () => null)),
     staffApi: call(createWorker(async () => staffActor)),
+    // Same Worker, a different authenticated staff identity, so the moderation
+    // route can be exercised against each role that must and must not have it.
+    staffApiAs: (actor) => call(createWorker(async () => actor)),
     database,
   };
 };
@@ -195,6 +198,54 @@ const pairDuck = (database, registrationId, visibleNumber, tagToken) => {
   return raceEntryId;
 };
 
+// Puts a paired entry onto a heat roster, optionally with a finalized place so
+// the public board also publishes a podium for it.
+const seedHeat = (database, raceEntryId, { round = "ROUND_ONE", heatNumber = 1, place = null } = {}) => {
+  const heatId = `heat-${round}-${heatNumber}`;
+  const existing = database.prepare("SELECT id FROM heats WHERE id = ?").get(heatId);
+  if (existing === undefined) {
+    database.prepare(
+      `INSERT INTO heats (id, event_id, round, heat_number, status)
+       VALUES (?, 'event-ducks', ?, ?, 'PLANNED')`,
+    ).run(heatId, round, heatNumber);
+  }
+  // Rosters are only writable while the heat is planned and unlocked, so the
+  // entry goes in first and the heat is finalized afterwards.
+  database.prepare(
+    `INSERT INTO heat_entries
+       (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+     VALUES (?, 'event-ducks', ?, ?, ?, ?, 'BALANCED_DRAW', '2026-08-01T00:00:00Z')`,
+  ).run(`heat-entry-${raceEntryId}-${heatId}`, heatId, raceEntryId, round, place ?? 1);
+  if (place === null) return heatId;
+  database.prepare(
+    `UPDATE heats
+        SET status = 'FINALIZED', roster_locked_at = '2026-08-01T00:00:00Z',
+            finalized_at = '2026-08-01T00:00:00Z'
+      WHERE id = ?`,
+  ).run(heatId);
+  const assignmentId = database
+    .prepare("SELECT id FROM duck_assignments WHERE race_entry_id = ? AND valid_to IS NULL")
+    .get(raceEntryId).id;
+  database.prepare(
+    `INSERT INTO race_commands (id, event_id, command_type, requested_at, completed_at)
+     VALUES (?, 'event-ducks', 'FINALIZE_HEAT_RESULT', '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z')`,
+  ).run(`result-command-${raceEntryId}-${heatId}`);
+  database.prepare(
+    `INSERT INTO heat_results
+       (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status, revision,
+        finalized_at, recorded_by_staff_profile_id, source_command_id)
+     VALUES (?, 'event-ducks', ?, ?, ?, ?, 'FINALIZED', 1, '2026-08-01T00:00:00Z', 'staff', ?)`,
+  ).run(
+    `result-${raceEntryId}-${heatId}`,
+    heatId,
+    raceEntryId,
+    assignmentId,
+    place,
+    `result-command-${raceEntryId}-${heatId}`,
+  );
+  return heatId;
+};
+
 const tagToken = "t".repeat(32);
 const linkRows = (database) => database
   .prepare("SELECT collection_id, registration_id, added_via FROM browser_collection_registrations ORDER BY added_at, registration_id")
@@ -228,7 +279,10 @@ test("scanning a duck tag offers a follow to a browser that does not have that d
   assert.equal(scan.raceStatus.followId, raceEntryId);
   assert.equal(scan.raceStatus.inMyDucks, false);
   assert.equal(scan.raceStatus.duck.visibleNumber, 12);
-  assert.equal(/lookupCode|email|phone|privateStatusPath|duckName/i.test(JSON.stringify(scan)), false);
+  // This duck has no chosen name, so the public field is present and null; the
+  // scan still carries no contact detail, code, or private path.
+  assert.equal(scan.raceStatus.duckName, null);
+  assert.equal(/lookupCode|email|phone|privateStatusPath/i.test(JSON.stringify(scan)), false);
 
   // Following uses the existing endpoint and the existing collection semantics.
   const followResponse = await api("/api/v1/registrations/mine/follow", {
@@ -553,7 +607,7 @@ const nameDuck = (api, cookie, registrationId, duckName, commandId = crypto.rand
     body: { commandId, registrationId, duckName },
   });
 
-test("the owner names their paired duck and only their own card shows it", async (context) => {
+test("the owner names their paired duck and every public surface shows it beside the number", async (context) => {
   const { api, staffApi, database } = harness(context);
   seedEvent(database);
   const owner = await register(api, context, "Daisy", "Duck");
@@ -571,7 +625,7 @@ test("the owner names their paired duck and only their own card shows it", async
   );
   assert.equal(duckNameOf(database, owner.registrationId), "Sir Quacks-a-Lot");
 
-  // The owner's own collection is the one and only place the name appears.
+  // The owner's own card still shows it, as it always did.
   const mine = await jsonBody(
     await api("/api/v1/registrations/mine", { cookie: owner.cookie }),
     200,
@@ -581,23 +635,24 @@ test("the owner names their paired duck and only their own card shows it", async
   assert.equal(mine.registrations[0].nameable, true);
   assert.equal(mine.registrations[0].paired, true);
 
-  // Every public and staff surface keeps the canonical duck number.
+  // Every public surface now carries the name, and every one of them keeps the
+  // canonical duck number so the duck on the page still matches the duck in the
+  // water.
   const surfaces = [
     ["tag scan api", await (await api(`/api/v1/ducks/${tagToken}`)).text()],
     ["duck number api", await (await api("/api/v1/ducks/number/12")).text()],
-    ["race board", await (await api("/api/v1/race-board")).text()],
     ["public search", await (await api("/api/v1/race-status/search?eventId=event-ducks&name=Daisy")).text()],
     ["tag page", await (await api(`/t/${tagToken}`)).text()],
     ["duck page", await (await api("/duck/12")).text()],
-    ["staff duck view", await (await staffApi(`/api/v1/staff/ducks/${tagToken}`)).text()],
   ];
   for (const [label, body] of surfaces) {
-    assert.equal(body.includes("Sir Quacks-a-Lot"), false, `${label} must not carry the duck name`);
-    assert.equal(/duckName|duck_name/.test(body), false, `${label} must not carry the field`);
+    assert.equal(body.includes("Sir Quacks-a-Lot"), true, `${label} must carry the duck name`);
+    assert.match(body, /Duck #12|"visibleNumber":12|"duckNumber":12/, `${label} must keep the number`);
   }
 
-  // The follower's collection keeps the field in its uniform shape, always
-  // null, so a followed card can never render someone else's chosen name.
+  // A follower now sees the public name of the duck they follow, through the
+  // same public race-status projection every other visitor gets. The name is
+  // still not editable there and the follower still gets no lookup code.
   const followerMine = await jsonBody(
     await api("/api/v1/registrations/mine", { cookie: follower }),
     200,
@@ -605,11 +660,21 @@ test("the owner names their paired duck and only their own card shows it", async
   );
   assert.equal(followerMine.registrations.length, 1);
   assert.equal(followerMine.registrations[0].followed, true);
-  assert.equal(followerMine.registrations[0].duckName, null);
+  assert.equal(followerMine.registrations[0].duckName, null, "a followed card owns no name to edit");
   assert.equal(followerMine.registrations[0].nameable, false);
-  assert.equal(JSON.stringify(followerMine).includes("Sir Quacks-a-Lot"), false);
-  assert.match(surfaces.find(([label]) => label === "duck page")[1], /Duck #12/);
-  assert.match(surfaces.find(([label]) => label === "staff duck view")[1], /"visibleNumber":12/);
+  assert.equal(followerMine.registrations[0].lookupCode, null);
+  assert.equal(followerMine.registrations[0].raceStatus.duckName, "Sir Quacks-a-Lot");
+
+  // Staff see the stored name so they can moderate it, and it is not hidden.
+  const staffDuck = await jsonBody(
+    await staffApi(`/api/v1/staff/ducks/${tagToken}`),
+    200,
+    "staff duck view",
+  );
+  assert.equal(staffDuck.duck.visibleNumber, 12);
+  assert.equal(staffDuck.assignment.participant.duckName, "Sir Quacks-a-Lot");
+  assert.equal(staffDuck.assignment.participant.duckNamePubliclyHidden, false);
+  assert.equal(staffDuck.assignment.participant.registrationId, owner.registrationId);
 
   // The audit records the changed field, never the free text.
   const audit = database
@@ -654,6 +719,30 @@ test("the owner names their paired duck and only their own card shows it", async
     database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'NAME_DUCK'").get().count,
     2,
   );
+  clean(database);
+});
+
+test("the live race board carries the duck name on the roster and the podium", async (context) => {
+  const { api, database } = harness(context);
+  seedEvent(database);
+  const owner = await register(api, context, "Daisy", "Duck");
+  const raceEntryId = pairDuck(database, owner.registrationId, 12, tagToken);
+  seedHeat(database, raceEntryId, { round: "ROUND_ONE", heatNumber: 1 });
+  seedHeat(database, raceEntryId, { round: "FINAL", heatNumber: 1, place: 1 });
+  database.prepare("UPDATE events SET status = 'FINAL' WHERE id = 'event-ducks'").run();
+  await jsonBody(await nameDuck(api, owner.cookie, owner.registrationId, "Bubbles"), 200, "name duck");
+
+  const board = await jsonBody(await api("/api/v1/race-board"), 200, "race board");
+  const roster = board.event.roundOneHeats[0].roster[0];
+  assert.equal(roster.duckNumber, 12, "the roster keeps the canonical number");
+  assert.equal(roster.duckName, "Bubbles");
+  const podium = board.event.podium[0];
+  assert.equal(podium.place, 1);
+  assert.equal(podium.duckNumber, 12);
+  assert.equal(podium.duckName, "Bubbles");
+  // The board still publishes only the policy display name for the person.
+  assert.equal(roster.participantDisplayName, "Daisy D.");
+  assert.equal(/lookupCode|email|phone/i.test(JSON.stringify(board)), false);
   clean(database);
 });
 
@@ -757,6 +846,321 @@ test("only the owner of a paired duck may name it", async (context) => {
     database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'NAME_DUCK'").get().count,
     0,
   );
+  clean(database);
+});
+
+// ---------------------------------------------------------------------------
+// Filtering a public duck name
+// ---------------------------------------------------------------------------
+
+test("a disallowed duck name is refused without echoing it, logging it, or writing it", async (context) => {
+  const { api, database } = harness(context);
+  seedEvent(database);
+  const owner = await register(api, context, "Daisy", "Duck");
+  pairDuck(database, owner.registrationId, 12, tagToken);
+
+  const logged = [];
+  for (const method of ["log", "info", "warn", "error", "debug"]) {
+    context.mock.method(console, method, (...args) => logged.push(args));
+  }
+
+  const refused = [
+    "Fucking Duck",
+    "sh1t duck",
+    "F.U.C.K.",
+    "a s s",
+    "Total Ass",
+    // Evasions found by adversarial testing of the first filter.
+    "fvck",
+    "cvnt",
+    "kunt",
+    "niggr",
+    "ƒuck",
+    "azz hole",
+    "biatch",
+    "badass",
+  ];
+  for (const duckName of refused) {
+    const response = await api("/api/v1/registrations/mine/duck-name", {
+      method: "POST",
+      cookie: owner.cookie,
+      headers: { origin: "https://quickducks.com" },
+      body: { commandId: crypto.randomUUID(), registrationId: owner.registrationId, duckName },
+    });
+    const body = await response.json();
+    // A well-formed value refused on its meaning is the codebase's 422.
+    assert.equal(response.status, 422, `${duckName}: ${JSON.stringify(body)}`);
+    // The response explains the rule without ever repeating the word back.
+    assert.equal(JSON.stringify(body).includes(duckName), false, `${duckName} must not be echoed`);
+    assert.match(body.fields.duckName, /can’t be used on the public race board/);
+    assert.equal(duckNameOf(database, owner.registrationId), null, `${duckName} must not be stored`);
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'NAME_DUCK'").get().count,
+      0,
+      `${duckName} must not record a command`,
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action LIKE 'DUCK_NAME%'").get().count,
+      0,
+      `${duckName} must not write an audit row`,
+    );
+  }
+  // A name written in symbols or emoji is refused by the alphabet rule, which
+  // reports itself as the mechanical rule it is rather than as an accusation.
+  for (const duckName of ["🖕", "Duck 🖕", "★ Duck", "\uE000 Duck"]) {
+    const response = await api("/api/v1/registrations/mine/duck-name", {
+      method: "POST",
+      cookie: owner.cookie,
+      headers: { origin: "https://quickducks.com" },
+      body: { commandId: crypto.randomUUID(), registrationId: owner.registrationId, duckName },
+    });
+    const body = await response.json();
+    assert.equal(response.status, 422, `${duckName}: ${JSON.stringify(body)}`);
+    assert.equal(JSON.stringify(body).includes(duckName), false, `${duckName} must not be echoed`);
+    assert.match(body.fields.duckName, /letters, numbers, spaces, and simple punctuation/);
+    assert.equal(duckNameOf(database, owner.registrationId), null, `${duckName} must not be stored`);
+  }
+  assert.deepEqual(logged, [], "a refused name is never logged");
+
+  // The filter refuses only what it should: ordinary names still save,
+  // including the surnames a first-pass filter wrongly rejected.
+  for (const duckName of ["Sir Quacks-a-Lot", "Cockburn", "Shitake Mushroom"]) {
+    await jsonBody(
+      await nameDuck(api, owner.cookie, owner.registrationId, duckName),
+      200,
+      "innocent name",
+    );
+    assert.equal(duckNameOf(database, owner.registrationId), duckName);
+  }
+  clean(database);
+});
+
+test("a name already in the database is suppressed at read time on every public surface", async (context) => {
+  const { api, staffApi, database } = harness(context);
+  seedEvent(database);
+  const owner = await register(api, context, "Daisy", "Duck");
+  const raceEntryId = pairDuck(database, owner.registrationId, 12, tagToken);
+  seedHeat(database, raceEntryId, { round: "ROUND_ONE", heatNumber: 1 });
+
+  // Written straight into D1, exactly like a row stored before duck names
+  // became public or one that only a later wordlist rejects. The endpoint would
+  // refuse this value today.
+  database.prepare("UPDATE race_entries SET duck_name = ? WHERE registration_id = ?")
+    .run("Bastard Duck", owner.registrationId);
+  assert.equal(duckNameOf(database, owner.registrationId), "Bastard Duck");
+
+  const surfaces = [
+    ["tag scan api", await (await api(`/api/v1/ducks/${tagToken}`)).text()],
+    ["duck number api", await (await api("/api/v1/ducks/number/12")).text()],
+    ["race board", await (await api("/api/v1/race-board")).text()],
+    ["public search", await (await api("/api/v1/race-status/search?eventId=event-ducks&name=Daisy")).text()],
+    ["tag page", await (await api(`/t/${tagToken}`)).text()],
+    ["duck page", await (await api("/duck/12")).text()],
+    ["owner collection", await (await api("/api/v1/registrations/mine", { cookie: owner.cookie })).text()],
+  ];
+  for (const [label, body] of surfaces) {
+    assert.equal(body.includes("Bastard"), false, `${label} must suppress the stored name`);
+  }
+  // The duck is still fully identified by its canonical number everywhere.
+  assert.match(surfaces.find(([label]) => label === "duck page")[1], /Duck #12/);
+  assert.equal(
+    JSON.parse(surfaces.find(([label]) => label === "duck number api")[1]).raceStatus.duckName,
+    null,
+  );
+  assert.equal(
+    JSON.parse(surfaces.find(([label]) => label === "race board")[1])
+      .event.roundOneHeats[0].roster[0].duckNumber,
+    12,
+  );
+
+  // Staff still see the stored text, flagged as already hidden, because that is
+  // what they need in order to decide to clear it.
+  const staffDuck = await jsonBody(await staffApi(`/api/v1/staff/ducks/${tagToken}`), 200, "staff duck");
+  assert.equal(staffDuck.assignment.participant.duckName, "Bastard Duck");
+  assert.equal(staffDuck.assignment.participant.duckNamePubliclyHidden, true);
+  clean(database);
+});
+
+// ---------------------------------------------------------------------------
+// Staff moderation of a duck name
+// ---------------------------------------------------------------------------
+
+const clearDuckName = (staffApi, registrationId, commandId = crypto.randomUUID()) =>
+  staffApi(`/api/v1/staff/registrations/${registrationId}/clear-duck-name`, {
+    method: "POST",
+    headers: { origin: "https://quickducks.com" },
+    body: { commandId },
+  });
+
+test("staff clear a duck name idempotently, audit it without the text, and remove it from public view", async (context) => {
+  const { api, staffApi, database } = harness(context);
+  seedEvent(database);
+  const owner = await register(api, context, "Daisy", "Duck");
+  const raceEntryId = pairDuck(database, owner.registrationId, 12, tagToken);
+  seedHeat(database, raceEntryId, { round: "ROUND_ONE", heatNumber: 1 });
+  await jsonBody(await nameDuck(api, owner.cookie, owner.registrationId, "Regrettable Pun"), 200, "name");
+  assert.match(await (await api("/duck/12")).text(), /Regrettable Pun/);
+
+  const commandId = crypto.randomUUID();
+  const cleared = await jsonBody(
+    await clearDuckName(staffApi, owner.registrationId, commandId),
+    200,
+    "clear duck name",
+  );
+  assert.equal(cleared.replayed, false);
+  assert.equal(cleared.registration.duckName, null);
+  assert.equal(duckNameOf(database, owner.registrationId), null, "the name is cleared, not blanked");
+
+  // Every public surface falls back to the canonical duck number.
+  for (const [label, body] of [
+    ["duck page", await (await api("/duck/12")).text()],
+    ["tag page", await (await api(`/t/${tagToken}`)).text()],
+    ["duck number api", await (await api("/api/v1/ducks/number/12")).text()],
+    ["race board", await (await api("/api/v1/race-board")).text()],
+    ["owner collection", await (await api("/api/v1/registrations/mine", { cookie: owner.cookie })).text()],
+  ]) {
+    assert.equal(body.includes("Regrettable Pun"), false, `${label} must drop the cleared name`);
+  }
+  assert.match(await (await api("/duck/12")).text(), /Duck #12/);
+
+  // The audit records the action, the actor, and the changed field only.
+  const audit = database
+    .prepare("SELECT subject_id, actor_type, details_json FROM audit_events WHERE action = 'DUCK_NAME_CLEARED'")
+    .all()
+    .map((row) => ({ ...row }));
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].subject_id, owner.registrationId);
+  assert.equal(audit[0].actor_type, "STAFF");
+  assert.equal(audit[0].details_json.includes("Regrettable"), false, "the audit never carries the text");
+  const details = JSON.parse(audit[0].details_json);
+  assert.deepEqual(details.changed_fields, ["duck_name"]);
+  assert.equal(details.staff_profile_id, "staff");
+  assert.equal(details.cleared_via, "STAFF_MODERATION");
+  assert.equal(details.had_name, true);
+  // The command row carries no request fingerprint of the offending text.
+  assert.equal(
+    database.prepare("SELECT request_fingerprint FROM race_commands WHERE id = ?").get(commandId).request_fingerprint,
+    null,
+  );
+
+  // Replaying the same command is the same success and writes nothing new.
+  const replay = await jsonBody(
+    await clearDuckName(staffApi, owner.registrationId, commandId),
+    200,
+    "replayed clear",
+  );
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.registration.duckName, null);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'DUCK_NAME_CLEARED'").get().count,
+    1,
+  );
+  // Reusing that identifier for another operation is the usual conflict.
+  assert.equal((await clearDuckName(staffApi, crypto.randomUUID(), commandId)).status, 409);
+
+  // Clearing an already-clear name is still a success, with a fresh command.
+  const again = await jsonBody(
+    await clearDuckName(staffApi, owner.registrationId),
+    200,
+    "second clear",
+  );
+  assert.equal(again.registration.duckName, null);
+  assert.equal(
+    JSON.parse(
+      database
+        .prepare("SELECT details_json FROM audit_events WHERE action = 'DUCK_NAME_CLEARED' ORDER BY occurred_at DESC")
+        .all()
+        .map((row) => ({ ...row }))
+        .find((row) => JSON.parse(row.details_json).had_name === false).details_json,
+    ).had_name,
+    false,
+  );
+
+  // The participant may name the duck again afterwards, and the filter still
+  // applies to that attempt.
+  await jsonBody(await nameDuck(api, owner.cookie, owner.registrationId, "Bubbles"), 200, "rename");
+  assert.equal(duckNameOf(database, owner.registrationId), "Bubbles");
+  clean(database);
+});
+
+test("clearing a duck name is gated to registration, race director, and administrators", async (context) => {
+  const { api, staffApiAs, database } = harness(context);
+  seedEvent(database);
+  const owner = await register(api, context, "Daisy", "Duck");
+  pairDuck(database, owner.registrationId, 12, tagToken);
+
+  const actor = (roles, isSystemAdmin = false) => ({
+    id: "staff",
+    cognitoSub: "staff-sub",
+    email: "staff@example.com",
+    displayName: "Race Staff",
+    isSystemAdmin,
+    roles,
+    authentication: "bearer",
+  });
+
+  for (const [label, roles] of [
+    ["duck manager", ["DUCK_MANAGER"]],
+    ["announcer", ["ANNOUNCER"]],
+    ["heat runner", ["HEAT_RUNNER"]],
+    ["result taker", ["RESULT_TAKER"]],
+    ["no roles", []],
+  ]) {
+    await nameDuck(api, owner.cookie, owner.registrationId, "Regrettable Pun");
+    const response = await clearDuckName(staffApiAs(actor(roles)), owner.registrationId);
+    assert.equal(response.status, 403, label);
+    assert.equal(duckNameOf(database, owner.registrationId), "Regrettable Pun", `${label} must not write`);
+  }
+  // An unauthenticated caller never reaches the route at all.
+  const anonymous = await api(`/api/v1/staff/registrations/${owner.registrationId}/clear-duck-name`, {
+    method: "POST",
+    headers: { origin: "https://quickducks.com" },
+    body: { commandId: crypto.randomUUID() },
+  });
+  assert.equal(anonymous.status, 401);
+
+  for (const [label, roles, isSystemAdmin] of [
+    ["registration", ["REGISTRATION"], false],
+    ["race director", ["RACE_DIRECTOR"], false],
+    ["administrator", [], true],
+  ]) {
+    await nameDuck(api, owner.cookie, owner.registrationId, "Regrettable Pun");
+    assert.equal(duckNameOf(database, owner.registrationId), "Regrettable Pun");
+    const response = await clearDuckName(staffApiAs(actor(roles, isSystemAdmin)), owner.registrationId);
+    assert.equal(response.status, 200, `${label}: ${await response.text()}`);
+    assert.equal(duckNameOf(database, owner.registrationId), null, label);
+  }
+  clean(database);
+});
+
+test("a cookie-authenticated staff clear requires the exact application origin", async (context) => {
+  const { api, staffApiAs, database } = harness(context);
+  seedEvent(database);
+  const owner = await register(api, context, "Daisy", "Duck");
+  pairDuck(database, owner.registrationId, 12, tagToken);
+  await nameDuck(api, owner.cookie, owner.registrationId, "Regrettable Pun");
+
+  const cookieStaff = staffApiAs({
+    id: "staff",
+    cognitoSub: "staff-sub",
+    email: "staff@example.com",
+    displayName: "Race Staff",
+    isSystemAdmin: false,
+    roles: ["REGISTRATION"],
+    authentication: "cookie",
+  });
+  for (const [label, origin] of [["missing origin", undefined], ["cross origin", "https://evil.example"]]) {
+    const response = await cookieStaff(
+      `/api/v1/staff/registrations/${owner.registrationId}/clear-duck-name`,
+      {
+        method: "POST",
+        headers: origin === undefined ? {} : { origin },
+        body: { commandId: crypto.randomUUID() },
+      },
+    );
+    assert.equal(response.status, 403, label);
+    assert.equal(duckNameOf(database, owner.registrationId), "Regrettable Pun", label);
+  }
   clean(database);
 });
 

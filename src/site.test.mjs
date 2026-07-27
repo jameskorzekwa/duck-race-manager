@@ -268,6 +268,7 @@ const duckStatus = (overrides = {}) => ({
   },
   participantDisplayName: "Jamie R.",
   duck: { visibleNumber: 128 },
+  duckName: null,
   assignedHeat: { roundOne: { number: 7, status: "FINALIZED" }, final: { number: 1, status: "RUNNING" } },
   currentHeat: { round: "FINAL", number: 1, status: "RUNNING" },
   outcome: "FINALIST",
@@ -325,6 +326,29 @@ test("the public duck detail view degrades cleanly before heats and results exis
   assert.match(markup, /<dt>Round one heat<\/dt><dd>Not assigned yet<\/dd>/);
   assert.match(markup, /<dt>Final heat<\/dt><dd>Not in the final<\/dd>/);
   assert.match(markup, /<dt>Currently running<\/dt><dd>No heat is running right now<\/dd>/);
+});
+
+test("both public duck views show a chosen duck name beside the canonical number", () => {
+  for (const [label, render] of [["tag scan", renderDuck], ["duck number", renderPublicDuck]]) {
+    const named = render(duckStatus({ duckName: "Sir Quacks-a-Lot" }));
+    assert.match(named, /<dt>Duck<\/dt><dd>Duck #128 · Sir Quacks-a-Lot<\/dd>/, label);
+    // The heading stays the canonical number, so the page still matches the
+    // duck in the water even when the name is long or confusing.
+    assert.match(named, /<h1 class="page-title">Duck #128<\/h1>/, label);
+
+    // No name, or a name the read-time filter suppressed, leaves "Duck #N".
+    assert.match(render(duckStatus({ duckName: null })), /<dt>Duck<\/dt><dd>Duck #128<\/dd>/, label);
+  }
+});
+
+test("a chosen duck name is escaped like every other server value", () => {
+  const hostile = renderPublicDuck(duckStatus({ duckName: `<script>alert(1)</script> & "quotes"` }));
+  assert.doesNotMatch(hostile, /<script>alert\(1\)<\/script>/);
+  assert.match(hostile, /&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; &quot;quotes&quot;/);
+
+  const tagPage = renderDuck(duckStatus({ duckName: `<img src=x onerror=alert(1)>` }));
+  assert.doesNotMatch(tagPage, /<img src=x/);
+  assert.match(tagPage, /&lt;img src=x onerror=alert\(1\)&gt;/);
 });
 
 test("the public duck detail view escapes server values and shows no private material", () => {
