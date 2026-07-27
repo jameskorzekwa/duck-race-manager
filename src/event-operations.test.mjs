@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { eventSlugFromName, handleEventOperations } from "./event-operations.ts";
+import { eventSlugFromName, handleEventOperations, normalizedTimezone } from "./event-operations.ts";
 
 const staff = {
   id: "staff_test",
@@ -142,6 +142,56 @@ test("generates bounded ASCII URL-safe event slugs from names", () => {
   assert.match(bounded, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 });
 
+test("timezone validation accepts IANA identifiers the runtime resolves and rejects the rest", () => {
+  // Every zone the browser can offer must be accepted by the server.
+  for (const zone of [...Intl.supportedValuesOf("timeZone"), "UTC"]) {
+    assert.equal(normalizedTimezone(zone), zone, `${zone} must be accepted`);
+  }
+  // Legacy links are not in that list but are stored on existing events.
+  for (const zone of ["US/Mountain", "Asia/Calcutta", "GMT", "EST5EDT", "Etc/GMT+5"]) {
+    assert.equal(normalizedTimezone(zone), zone);
+  }
+  // Surrounding whitespace is trimmed, and the identifier is stored verbatim.
+  assert.equal(normalizedTimezone("  America/Denver  "), "America/Denver");
+  assert.equal(normalizedTimezone("America/Denver\n"), "America/Denver");
+
+  // Well-shaped but non-existent zones, offsets, junk, and non-strings fail.
+  for (const value of [
+    "Foo/Bar",
+    "Mars/Olympus_Mons",
+    "notazone",
+    "America/Denver extra",
+    "America//Denver",
+    "America/Denver/",
+    "/America/Denver",
+    "America/North/Dakota/Beulah",
+    "+05:00",
+    "-07:00",
+    "Z",
+    "",
+    "   ",
+    "A".repeat(65),
+    "<script>",
+    "'; DROP TABLE events;--",
+    "../../etc/passwd",
+    "America/De nver",
+    "America\nDenver",
+    42,
+    null,
+    undefined,
+    true,
+    {},
+    ["UTC"],
+  ]) {
+    assert.equal(normalizedTimezone(value), null, `${JSON.stringify(value)} must be rejected`);
+  }
+
+  // Accepted values always satisfy the organization-defaults length constraint.
+  for (const zone of Intl.supportedValuesOf("timeZone")) {
+    assert.ok(zone.trim().length >= 1 && zone.trim().length <= 64);
+  }
+});
+
 test("returns null for unrelated routes so a shared router can continue", async () => {
   const db = makeDb(() => null);
   const response = await handleEventOperations(
@@ -245,7 +295,10 @@ test("an administrator creates one immediate-mode draft with a required ducks-pe
   assert.equal(sql.includes("Annual Duck Race"), false);
   assert.ok(db.batches[0].every((statement) => statement.args.length > 0));
   assert.equal(db.batches[0][0].args[1], "annual-duck-race");
-  assert.equal(db.batches[0][0].args[4], 6);
+  // An omitted timezone binds null so COALESCE keeps the retained default.
+  assert.match(sql, /COALESCE\(\?, d\.timezone\)/);
+  assert.equal(db.batches[0][0].args[4], null);
+  assert.equal(db.batches[0][0].args[5], 6);
 });
 
 test("event creation validates the ducks-per-heat bounds before touching the database", async () => {
@@ -267,6 +320,193 @@ test("event creation validates the ducks-per-heat bounds before touching the dat
     assert.equal(db.statements.length, 0);
     assert.equal(db.batches.length, 0);
   }
+});
+
+// The console detects the operator's zone and sends it with the create command,
+// so a new race starts in the zone the operator is actually standing in.
+test("event creation persists a submitted detected timezone instead of the retained default", async () => {
+  const defaults = {
+    timezone: "America/Denver",
+    email_required: 0,
+    heat_assignment_mode: "IMMEDIATE_FIXED",
+    round_one_heat_capacity: 8,
+    final_heat_capacity: 16,
+    public_name_policy: "FIRST_NAME_ONLY",
+  };
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) return null;
+    if (sql === "SELECT id FROM events LIMIT 1") return null;
+    if (sql.includes("FROM organization_event_defaults")) return defaults;
+    return null;
+  });
+  const response = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events", "POST", {
+      commandId: crypto.randomUUID(),
+      name: "Detected Zone Race",
+      eventDate: "2026-09-01",
+      timezone: "Pacific/Auckland",
+      roundOneHeatCapacity: 6,
+    }),
+    makeEnv(db),
+    admin,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.equal(body.event.timezone, "Pacific/Auckland");
+  // The zone is a bound value, never interpolated into SQL.
+  assert.equal(db.batches[0][0].args[4], "Pacific/Auckland");
+  assert.equal(db.batches[0][0].sql.includes("Pacific/Auckland"), false);
+  const auditDetails = JSON.parse(db.batches[0][2].args[5]);
+  assert.equal(auditDetails.timezone, "Pacific/Auckland");
+});
+
+test("event creation validates a submitted timezone before any database access", async () => {
+  for (const timezone of ["Not/AZone", "notazone", "", "   ", "America/Denver'; DROP TABLE events;--", "+05:00", 42, null, "Europe/".padEnd(70, "x")]) {
+    const db = makeDb(() => null);
+    const response = await handleEventOperations(
+      jsonRequest("/api/v1/staff/events", "POST", {
+        commandId: crypto.randomUUID(),
+        name: "Bad Zone Race",
+        eventDate: "2026-09-01",
+        timezone,
+        roundOneHeatCapacity: 6,
+      }),
+      makeEnv(db),
+      admin,
+    );
+
+    assert.equal(response.status, 400, `timezone ${JSON.stringify(timezone)} must be rejected`);
+    assert.match((await response.json()).error, /valid IANA timezone/);
+    assert.equal(db.statements.length, 0);
+    assert.equal(db.batches.length, 0);
+  }
+});
+
+test("event creation without a timezone still inherits the retained organization default", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) return null;
+    if (sql === "SELECT id FROM events LIMIT 1") return null;
+    if (sql.includes("FROM organization_event_defaults")) return { ...draftEvent, timezone: "America/Chicago", email_required: 0 };
+    return null;
+  });
+  const response = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events", "POST", {
+      commandId: crypto.randomUUID(),
+      name: "Inherited Zone Race",
+      eventDate: "2026-09-01",
+      roundOneHeatCapacity: 6,
+    }),
+    makeEnv(db),
+    admin,
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal((await response.json()).event.timezone, "America/Chicago");
+  assert.equal(db.batches[0][0].args[4], null);
+});
+
+test("configuration accepts real IANA zone identifiers, including legacy links already stored", async () => {
+  for (const timezone of [
+    "UTC",
+    "America/Denver",
+    "Europe/London",
+    "Pacific/Chatham",
+    "America/Argentina/Buenos_Aires",
+    "America/Indiana/Indianapolis",
+    "Etc/GMT+5",
+    "US/Mountain",
+    "Asia/Calcutta",
+  ]) {
+    const db = makeDb((sql) => sql.includes("FROM race_commands") ? null : draftEvent);
+    const response = await handleEventOperations(
+      jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
+        commandId: crypto.randomUUID(),
+        revision: 0,
+        timezone,
+      }),
+      makeEnv(db),
+      admin,
+    );
+
+    assert.equal(response.status, 200, `timezone ${timezone} must be accepted`);
+    assert.equal((await response.json()).event.timezone, timezone);
+    // The stored identifier is exactly what was submitted, never canonicalized.
+    assert.equal(db.batches[0][1].args[3], timezone);
+  }
+});
+
+test("configuration rejects timezone junk with 400 and never reaches the database", async () => {
+  for (const timezone of [
+    "notazone",
+    "Not/AZone",
+    "Mars/Olympus_Mons",
+    "America/Denver extra",
+    "<script>alert(1)</script>",
+    "../../etc/passwd",
+    "'; DROP TABLE events;--",
+    "+05:00",
+    "12345",
+    "",
+    "   ",
+    "A".repeat(65),
+    "America//Denver",
+    "America/Denver/",
+    "America/North/Dakota/Beulah",
+    42,
+    null,
+    true,
+    ["America/Denver"],
+    { timezone: "America/Denver" },
+  ]) {
+    const db = makeDb((sql) => sql.includes("FROM race_commands") ? null : draftEvent);
+    const response = await handleEventOperations(
+      jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
+        commandId: crypto.randomUUID(),
+        revision: 0,
+        timezone,
+      }),
+      makeEnv(db),
+      admin,
+    );
+
+    assert.equal(response.status, 400, `timezone ${JSON.stringify(timezone)} must be rejected`);
+    assert.match((await response.json()).error, /valid IANA timezone/);
+    assert.equal(db.statements.length, 0, `timezone ${JSON.stringify(timezone)} must not query`);
+    assert.equal(db.batches.length, 0);
+  }
+});
+
+test("a timezone stored before the tightened check still loads and saves unchanged", async () => {
+  const legacyEvent = { ...draftEvent, timezone: "US/Mountain" };
+  const db = makeDb((sql) => {
+    if (sql.includes("AS registration_count")) {
+      return { registration_count: 0, event_duck_count: 0, round_one_heat_count: 0, final_heat_count: 0 };
+    }
+    return legacyEvent;
+  });
+  const detail = await handleEventOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test"),
+    makeEnv(db),
+    staff,
+  );
+  assert.equal((await detail.json()).event.timezone, "US/Mountain");
+
+  // An unrelated edit must not rewrite the stored zone.
+  const configureDb = makeDb((sql) => sql.includes("FROM race_commands") ? null : legacyEvent);
+  const configured = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
+      commandId: crypto.randomUUID(),
+      revision: 0,
+      roundOneHeatCapacity: 9,
+    }),
+    makeEnv(configureDb),
+    admin,
+  );
+
+  assert.equal(configured.status, 200);
+  assert.equal((await configured.json()).event.timezone, "US/Mountain");
+  assert.equal(configureDb.batches[0][1].args[3], "US/Mountain");
 });
 
 test("event creation refuses to create a second race dataset", async () => {
@@ -756,6 +996,85 @@ test("a new lifecycle command reports an already-completed transition without wr
   assert.equal(body.transitioned, false);
   assert.equal(body.alreadyAtTarget, true);
   assert.equal(db.batches.length, 0);
+});
+
+// End to end against the real migrated schema: the detected zone the console
+// sends survives creation, reload, and a later configuration edit.
+test("migrated SQLite stores the created timezone and round-trips it through configuration", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  database.exec("PRAGMA foreign_keys = ON");
+  const migrationsUrl = new URL("../db/migrations/", import.meta.url);
+  for (const name of readdirSync(migrationsUrl).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
+    database.exec(readFileSync(new URL(name, migrationsUrl), "utf8"));
+  }
+  database.exec("INSERT INTO staff_profiles (id, cognito_sub, email, display_name) VALUES ('admin_test', 'admin-sub', 'admin@example.com', 'Admin')");
+  const env = makeEnv(sqliteD1(database));
+  const seededDefault = database.prepare("SELECT timezone FROM organization_event_defaults WHERE singleton_id = 1").get().timezone;
+
+  const created = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events", "POST", {
+      commandId: crypto.randomUUID(),
+      name: "Zone Round Trip",
+      eventDate: "2026-09-01",
+      timezone: "Pacific/Auckland",
+      roundOneHeatCapacity: 6,
+    }),
+    env,
+    admin,
+  );
+  const createdBody = await created.json();
+  assert.equal(created.status, 201);
+  assert.equal(createdBody.event.timezone, "Pacific/Auckland");
+  assert.notEqual("Pacific/Auckland", seededDefault, "the detected zone differs from the retained default");
+  const storedRow = database.prepare("SELECT timezone FROM events WHERE id = ?").get(createdBody.event.id);
+  assert.equal(storedRow.timezone, "Pacific/Auckland");
+
+  // Reading the event back returns the stored zone for the picker to display.
+  const detail = await handleEventOperations(
+    new Request(`https://quickducks.com/api/v1/staff/events/${createdBody.event.id}`),
+    env,
+    admin,
+  );
+  assert.equal((await detail.json()).event.timezone, "Pacific/Auckland");
+
+  // A configuration save persists a new zone and retains it as the default.
+  const configured = await handleEventOperations(
+    jsonRequest(`/api/v1/staff/events/${createdBody.event.id}/configuration`, "PATCH", {
+      commandId: crypto.randomUUID(),
+      revision: 0,
+      timezone: "America/Argentina/Buenos_Aires",
+    }),
+    env,
+    admin,
+  );
+  assert.equal(configured.status, 200);
+  assert.equal((await configured.json()).event.timezone, "America/Argentina/Buenos_Aires");
+  assert.equal(
+    database.prepare("SELECT timezone FROM events WHERE id = ?").get(createdBody.event.id).timezone,
+    "America/Argentina/Buenos_Aires",
+  );
+  assert.equal(
+    database.prepare("SELECT timezone FROM organization_event_defaults WHERE singleton_id = 1").get().timezone,
+    "America/Argentina/Buenos_Aires",
+  );
+
+  // Rejected junk leaves the stored zone untouched.
+  const rejected = await handleEventOperations(
+    jsonRequest(`/api/v1/staff/events/${createdBody.event.id}/configuration`, "PATCH", {
+      commandId: crypto.randomUUID(),
+      revision: 1,
+      timezone: "Mars/Olympus_Mons",
+    }),
+    env,
+    admin,
+  );
+  assert.equal(rejected.status, 400);
+  assert.equal(
+    database.prepare("SELECT timezone FROM events WHERE id = ?").get(createdBody.event.id).timezone,
+    "America/Argentina/Buenos_Aires",
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 test("migrated SQLite makes concurrent, replayed, and stale lifecycle commands idempotent", async (context) => {

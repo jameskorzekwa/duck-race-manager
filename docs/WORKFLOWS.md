@@ -695,12 +695,17 @@ card so the primary action is obvious.
 ### Create and Configure
 
 **System administrator only:** create one event when no event row exists. Event
-creation requires a name, a date, and how many ducks race in each round-one
-heat (a whole number from 1 through 10,000). The heat size is chosen at
+creation requires a name, a date, a timezone, and how many ducks race in each
+round-one heat (a whole number from 1 through 10,000). The heat size is chosen at
 creation because heats are set up before registration opens: ducks are assigned
-to heats as they are paired with participants. A new event is always created in
-`IMMEDIATE_FIXED` (assign during pairing) mode; the remaining settings copy the
-retained organization defaults into a `DRAFT` event. The server derives the URL
+to heats as they are paired with participants. The console detects the
+operator's own zone with `Intl.DateTimeFormat().resolvedOptions().timeZone` and
+sends it with the create command, so a new race starts in the zone the operator
+is actually in rather than in the retained organization default. A create
+request that omits the timezone still inherits that retained default. A new
+event is always created in `IMMEDIATE_FIXED` (assign during pairing) mode; the
+remaining settings copy the retained organization defaults into a `DRAFT` event.
+The server derives the URL
 slug from the name as
 lowercase ASCII letters, numbers, and hyphens; the staff form shows the same
 read-only preview as the name changes. Diacritics are removed where possible,
@@ -709,13 +714,27 @@ a deterministic bounded fallback. Client-supplied slug values are ignored.
 
 Only a draft can be configured. Configuration includes:
 
-- Name, automatically derived slug preview, date, and IANA-style timezone.
+- Name, automatically derived slug preview, date, and timezone.
 - Optional registration-open and registration-close timestamps.
 - Optional or required email.
 - `IMMEDIATE_FIXED` (assign during pairing, the default for new events) or
   legacy `POST_CLOSE_BALANCED` heat assignment.
 - Ducks per round-one heat and final capacity from 1 through 10,000.
 - Public name policy.
+
+Both timezone fields are dropdowns, never free text. The server renders only
+the current value so no page carries hundreds of options; the browser then
+fills the list from `Intl.supportedValuesOf("timeZone")`, falling back to a
+bundled list of common zones when that API is missing. The detected zone is
+labelled `(detected)` in the list. The shared app-select enhancement turns the
+field into a searchable combobox: opening it reveals a filter input, typing
+narrows the list (matching is case-insensitive, substring based, and treats
+`_` and `/` as spaces so `new york` finds `America/New_York`), and arrow keys,
+Home/End, Enter, Escape, and Tab keep working. The server accepts a timezone
+only when it looks like an IANA identifier and the runtime's zone database
+resolves it; anything else is rejected with `400` before any database access.
+The accepted identifier is stored exactly as submitted, so zones stored earlier,
+including legacy links such as `US/Mountain`, keep loading and saving unchanged.
 
 Saving configuration also updates the retained organization defaults used by
 the next event. Configuration is revision-checked; a stale form is rejected.
