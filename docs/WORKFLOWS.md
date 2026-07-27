@@ -921,9 +921,10 @@ authority can manually close an open event.
 A system administrator can reopen registration while the event is
 `REGISTRATION_CLOSED` and no heat roster has been locked. Existing heats do not
 block a reopen: heats are created as participants are paired, not afterwards, so
-they are the normal state at this point. Reopening also splits back out any tail
-heat that closing had folded into the heat before it, restoring the pre-close
-layout exactly.
+they are the normal state at this point. Reopening also splits back out the
+slots closing had folded into an earlier heat, returning every heat to at most
+its capacity. See Minimum Heat Size and Tail Rebalancing for what that restores
+exactly and what it does not.
 
 ### Start Round One
 
@@ -940,15 +941,24 @@ checks pass:
 - Every round-one heat holds at least three entries. The blocker names reopening
   registration and signing up more participants as the remedy.
 - The round-one heat count does not exceed final capacity.
+- Every racer on a round-one roster is still `ACTIVE`. Withdrawal and
+  disqualification leave the heat entry in place and are allowed while the heat
+  is an unlocked plan, so this is what keeps a withdrawn participant from being
+  locked onto a racing roster and read out by the announcer. The blocker names
+  replacing that heat's roster as the remedy, which is reachable in exactly this
+  state.
 - Every round-one heat is still `PLANNED`, `LOADING`, or `READY`.
 
 Starting round one also locks every planned round-one roster, moving it to
 `LOADING` and stamping `roster_locked_at`, in the same guarded batch as the
-event transition.
+event transition. The roster lock carries the same all-`ACTIVE` predicate as the
+readiness blocker and the guarded `START_ROUND_ONE` command, so a stale roster
+fails the whole transition rather than being silently locked.
 
 **Operator step:** resolve every unpaired submission by pairing, withdrawal, or
 administrative disqualification before starting. If a heat would race with fewer
-than three ducks, reopen registration rather than trying to start.
+than three ducks, reopen registration rather than trying to start. If a racer
+withdrew after being paired, replace that heat's roster without them.
 
 Registration can close while a sticker is pending, and its owning operator can
 still confirm it during `REGISTRATION_CLOSED`. Round one remains blocked until
@@ -964,9 +974,11 @@ sticker first.
 
 A race director or system administrator can start the final when every round-one heat is
 `FINALIZED` or `CANCELLED`, at least one is finalized, each finalized round-one
-heat has one first-place result, one final heat with entries exists, and that
-final has not started. Starting the final locks the final roster in the same
-guarded batch, exactly as starting round one does for round one.
+heat has one first-place result, one final heat with entries exists, every racer
+on the final roster is still `ACTIVE`, and that final has not started. Starting
+the final locks the final roster in the same guarded batch, exactly as starting
+round one does for round one, including the same refusal for a roster holding a
+withdrawn or disqualified finalist.
 
 A race director or system administrator can complete the event when the final is finalized,
 all final heats are finalized or cancelled, and each finalized final contains
@@ -1011,6 +1023,12 @@ replace the unlocked roster if necessary. Unassignment itself preserves an
 existing heat entry. There is no current operation to replace a roster with zero
 entries or cancel an empty heat, so operators must resolve these cases before
 locking and avoid creating a stranded empty heat.
+
+Because the heat entry survives, the round refuses to start while any roster
+still holds the withdrawn or disqualified racer. That is reported as a readiness
+blocker, enforced inside the guarded start command, and enforced again by the
+roster lock itself, so the race can never begin with an inactive racer on a
+locked roster or in the announcer's roster read.
 
 ### Delete Registration
 
@@ -1318,32 +1336,55 @@ three places:
 - Round-one start readiness reports a blocker, and the guarded `START_ROUND_ONE`
   SQL refuses, while any round-one heat holds fewer than three entries.
 
-Because heats fill in pairing order, the last round-one heat is the only one
-that can be short. Closing registration therefore runs one deterministic
-rebalance in the same guarded batch as the status change:
+Heats fill in pairing order, but pairing keeps running while registration is
+closed, so a close/reopen cycle can leave more than one short heat in a row.
+Closing registration therefore repeats a deterministic fold in the same guarded
+batch as the status change:
 
-- If the last heat holds one or two entries and there is an earlier heat, those
-  entries move to the end of the earlier heat, which goes deliberately over its
-  capacity, and the emptied heat row is deleted. With a capacity of 10 and a
-  final heat of 2, the previous heat becomes a heat of 12.
-- If the short heat is the only heat, there is nothing to merge into. Nothing
+> While some round-one heat holds fewer than three entries and more than one
+> heat remains, move the last heat's entries to the end of the heat before it,
+> which goes deliberately over its capacity, and delete the emptied heat row.
+
+- With a capacity of 10 and a final heat of 2, the previous heat becomes a heat
+  of 12 in one pass.
+- A layout of 10 + 1 + 1 folds twice and becomes a single heat of 12, rather
+  than stopping on 10 + 2 and leaving a heat round one would refuse forever.
+- If the only heat left is still short, there is nothing to merge into. Nothing
   moves, and round one stays blocked until registration reopens and more
   participants sign up.
 
-Reopening registration reverses the fold exactly: the entries past the heat's
-own recorded slot count move back out into a restored heat, and the heat's
-capacity is restored. A close, reopen, one late registration, and second close
-therefore converges on a legal three-duck heat rather than oscillating.
+Every pass deletes exactly one heat, so the loop runs at most once per heat and
+always ends. It can only end with no short heat left or with a single heat, and
+a single short heat means the event has fewer than three entries in total, which
+no layout can fix. Closing registration therefore always produces a layout every
+heat of which can race, whenever the total makes that possible.
+
+Reopening registration is the mirrored loop over the same marker:
+
+> While some round-one heat holds more entries than its own `target_size`, move
+> the entries past `target_size` into a new last heat that owns a full capacity
+> of slots, and give the source heat its capacity back.
+
+A pass leaves a heat of `target_size` and creates one of the moved remainder, so
+the total overflow past `round_one_heat_capacity` strictly decreases and the
+loop ends. The recovered layout holds every participant once, in slot order,
+with no heat over capacity. It is not always the exact pre-close layout: a
+two-pass fold deleted the intermediate heat that carried the second marker, so
+10 + 1 + 1 reopens as 10 + 2. That is deliberate. The recovered layout is
+raceable, and closing again converges on the same result, whereas remembering
+the chain would need schema for a distinction no operator can observe.
 
 `heats.target_size` is the merge marker and needs no extra state. It records how
 many slots a heat owns: pairing sets it to `round_one_heat_capacity` and never
 inserts past it, and roster replacement rewrites it to the roster it just wrote.
 A merge is consequently the only writer that can leave a round-one heat holding
-more entries than its own `target_size`, and a merge can only run while
-transitioning out of `REGISTRATION_OPEN`, so at most one such heat exists at a
-time. Comparing against the heat's own `target_size` rather than the event
-capacity is what keeps the marker correct when pairing continues after
-registration closes and opens a fresh short heat behind the merged one.
+more entries than its own `target_size`. A fold chain overwrites markers rather
+than stacking them, because each pass records the receiving heat's pre-merge
+roster and then deletes the heat it emptied, so at most one heat is over its own
+`target_size` at any moment. Comparing against the heat's own `target_size`
+rather than the event capacity is what keeps the marker correct when pairing
+continues after registration closes and opens a fresh short heat behind the
+merged one.
 
 Both operations are atomic without a post-commit repair step:
 
@@ -1351,8 +1392,12 @@ Both operations are atomic without a post-commit repair step:
   `ON DELETE RESTRICT`, so an entry that failed to move aborts the delete and
   rolls the whole batch back.
 - A split creates the restored heat only when exactly the expected entries are
-  still past `target_size`. If it is not created, the moves reference a heat row
-  that does not exist and the foreign key aborts the batch.
+  still past `target_size` and round-one heats still fit inside
+  `final_heat_capacity`, which is the same guard pairing puts on its own heat
+  insert. If it is not created, the moves reference a heat row that does not
+  exist and the foreign key aborts the batch. When the plan can already see that
+  a heat would not fit, it simply does not split; the reopen still succeeds and
+  the next close folds the layout back together.
 
 Both are guarded on their own lifecycle command row, so a transition that loses
 its race writes nothing, and a replayed command identifier returns the recorded
@@ -1368,15 +1413,29 @@ roster has been locked.
 
 ### Roster Correction
 
-A race director or administrator can replace a nonempty roster only while the heat is
-`PLANNED` and unlocked and the event is in that heat's active round. Each entry
-must be active, currently assigned, absent from another heat in the same round,
-and, for a final roster, a finalized round-one winner. Replacement is
-revision-checked and audited.
+A race director or administrator can replace a nonempty roster while the heat is
+`PLANNED` and unlocked and its round has not started yet:
 
-Starting a round locks every roster in that round, so in normal operation this
-correction path has no window left; it survives only as a guarded recovery route
-for a heat that is somehow still planned and unlocked during its active round.
+| Heat round | Event status that accepts a replacement |
+| --- | --- |
+| `ROUND_ONE` | `REGISTRATION_CLOSED` |
+| `FINAL` | `ROUND_ONE` |
+
+Starting a round locks every planned heat of that round in the same batch as the
+status change, so "planned and unlocked" and "the round is running" cannot both
+be true; the editable window is the pre-start window and nothing else. Every
+other lifecycle status is refused with `409` and a message naming the window.
+
+Each entry must be active, currently assigned, absent from another heat in the
+same round, and, for a final roster, a finalized round-one winner. Replacement
+is revision-checked and audited, and every statement in its batch is guarded on
+the command row the batch itself inserts, so a replacement that loses its race
+writes nothing rather than emptying the heat first.
+
+This is the remedy the readiness blockers name. A withdrawn racer left on a
+roster, or a heat that fell below the minimum, is repaired here before the round
+starts. The staff console offers the replacement form for exactly these statuses,
+so it never presents a control the API would refuse.
 
 ## Heat Readiness and Running
 

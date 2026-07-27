@@ -1,10 +1,16 @@
 // Round-one heat rebalancing against the real migrated schema.
 //
-// Heats are built as participants are paired, so the last heat is the only one
-// that can be short. These tests drive the real pairing handler and the real
-// lifecycle handler so the merge on close, the split on reopen, the automatic
-// roster lock, and the minimum-heat-size blocker are all exercised against the
+// Heats are built as participants are paired, and pairing keeps running while
+// registration is closed, so a close/reopen cycle can leave more than one short
+// heat. These tests drive the real pairing handler and the real lifecycle
+// handler so the merge on close, the split on reopen, the automatic roster
+// lock, and the minimum-heat-size blocker are all exercised against the
 // production triggers, foreign keys, and uniqueness constraints.
+//
+// Every rebalance case ends by proving the layout it produced can actually
+// race: `assertRoundOneStarts` requires readiness to report no blocker and the
+// guarded start command to commit. A rebalance that merely moves rows around
+// but strands an unrunnable heat fails there.
 
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
@@ -13,6 +19,7 @@ import test from "node:test";
 
 import { handleEventOperations } from "./event-operations.ts";
 import { handleHeatOperations } from "./heat-operations.ts";
+import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
 
 const migrationNames = readdirSync(new URL("../db/migrations/", import.meta.url))
@@ -196,6 +203,82 @@ const assertStructurallySound = (database) => {
   assert.deepEqual(gaps, [], "slot numbers stay contiguous from one");
 };
 
+const eventStatus = (database) =>
+  database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status;
+
+// A late sign-up, seeded the same way `seed` does, so a test can pair one more
+// participant part way through a lifecycle cycle. Lookup codes stay inside the
+// ambiguity-free alphabet the pairing route enforces.
+const addLateParticipant = (database, index) => {
+  const lookupCode = `LATEDUC${LOOKUP_ALPHABET[index]}`;
+  const token = `tag-token-late-${index}`;
+  database.exec(`
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES ('registration-late-${index}', 'event_test', 'Late', 'Duck${index}', 'SUBMITTED',
+            '${lookupCode}', 'private-hash-late-${index}', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-late-${index}', 'event_test', 'registration-late-${index}');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+    VALUES ('duck-late-${index}', ${900 + index}, 'AVAILABLE', '2026-07-26T00:00:00Z', 'GOOD');
+    INSERT INTO duck_tags (id, duck_id, token, status)
+    VALUES ('tag-late-${index}', 'duck-late-${index}', '${token}', 'ACTIVE');
+  `);
+  return { lookupCode, token, raceEntryId: `entry-late-${index}` };
+};
+
+const withdraw = (env, registrationId, revision) => handleParticipantOperations(
+  new Request(`https://quickducks.com/api/v1/staff/registrations/${registrationId}/withdraw`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commandId: crypto.randomUUID(), expectedRevision: revision }),
+  }),
+  env,
+  director,
+);
+
+const replaceRoster = (env, heatId, revision, raceEntryIds) => handleHeatOperations(
+  new Request(`https://quickducks.com/api/v1/staff/events/event_test/heats/${heatId}/roster`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commandId: crypto.randomUUID(), revision, raceEntryIds }),
+  }),
+  env,
+  director,
+);
+
+const heatRow = (database, heatNumber) => database.prepare(
+  `SELECT id, revision FROM heats
+    WHERE event_id = 'event_test' AND round = 'ROUND_ONE' AND heat_number = ?`,
+).get(heatNumber);
+
+// The point of rebalancing is a layout round one can actually run, so every
+// rebalance case ends here: readiness reports no blocker AND the guarded start
+// command commits. A layout that merely looks balanced but leaves a heat below
+// the minimum fails this, which is exactly what a single-pass merge produced.
+const assertRoundOneStarts = async (env, database) => {
+  if (eventStatus(database) === "REGISTRATION_OPEN") {
+    assert.equal((await lifecycle(env, "close-registration")).status, 201);
+  }
+  const gate = await readiness(env);
+  assert.equal(
+    gate["start-round-one"].allowed,
+    true,
+    `start-round-one blocked: ${JSON.stringify(gate["start-round-one"].blockers)}`,
+  );
+  const started = await lifecycle(env, "start-round-one");
+  assert.equal(started.status, 201, await started.clone().text());
+  assert.equal(eventStatus(database), "ROUND_ONE");
+  // Every round-one heat is raceable and locked, with no leftover short heat.
+  for (const heat of heatLayout(database)) {
+    assert.ok(heat.size >= 3, `heat ${heat.number} raced with ${heat.size} ducks`);
+    assert.equal(heat.locked, true);
+    assert.equal(heat.status, "LOADING");
+  }
+  assertStructurallySound(database);
+};
+
 const setup = async (context, options, beforeBatch) => {
   const database = new DatabaseSync(":memory:");
   context.after(() => database.close());
@@ -237,6 +320,7 @@ test("closing registration merges a one-duck tail heat into the heat before it",
   );
   // Audit details carry heat numbers and counts only, never participant data.
   assert.doesNotMatch(audit[0].details_json, /Racer|Number|DUCK000|entry-/);
+  await assertRoundOneStarts(env, database);
 });
 
 test("closing registration merges a two-duck tail heat and reopening splits it back out", async (context) => {
@@ -263,6 +347,9 @@ test("closing registration merges a two-duck tail heat and reopening splits it b
   ]);
   assert.deepEqual(rosterOf(database, 2), tailBefore);
   assertStructurallySound(database);
+
+  // The restored layout closes back down to a runnable one.
+  await assertRoundOneStarts(env, database);
 });
 
 test("a close, reopen, one more registration, and close cycle converges on a three-duck heat", async (context) => {
@@ -303,8 +390,7 @@ test("a close, reopen, one more registration, and close cycle converges on a thr
     1,
   );
 
-  const gate = await readiness(env);
-  assert.equal(gate["start-round-one"].allowed, true, JSON.stringify(gate["start-round-one"].blockers));
+  await assertRoundOneStarts(env, database);
 });
 
 test("a lone short heat cannot merge and blocks round one until registration reopens", async (context) => {
@@ -343,6 +429,24 @@ test("a lone short heat cannot merge and blocks round one until registration reo
     database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status,
     "REGISTRATION_OPEN",
   );
+
+  // Taking the remedy makes the race runnable: one more sign-up fills the lone
+  // heat to the minimum, and the next close leaves it exactly there.
+  database.exec(`
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES ('registration-late', 'event_test', 'Late', 'Duck', 'SUBMITTED',
+            '${LATE_LOOKUP_CODE}', 'private-hash-late', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-late', 'event_test', 'registration-late');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+    VALUES ('duck-late', 900, 'AVAILABLE', '2026-07-26T00:00:00Z', 'GOOD');
+    INSERT INTO duck_tags (id, duck_id, token, status)
+    VALUES ('tag-late', 'duck-late', '${LATE_TOKEN}', 'ACTIVE');
+  `);
+  await pair(env, { lookupCode: LATE_LOOKUP_CODE, token: LATE_TOKEN });
+  await assertRoundOneStarts(env, database);
 });
 
 test("reopening registration is allowed with heats present and refused once round one starts", async (context) => {
@@ -355,9 +459,7 @@ test("reopening registration is allowed with heats present and refused once roun
   assert.deepEqual(closedGate["reopen-registration"].blockers, []);
 
   assert.equal((await lifecycle(env, "reopen-registration")).status, 201);
-  assert.equal((await lifecycle(env, "close-registration")).status, 201);
-
-  assert.equal((await lifecycle(env, "start-round-one")).status, 201);
+  await assertRoundOneStarts(env, database);
   const startedGate = await readiness(env);
   assert.equal(startedGate["reopen-registration"].allowed, false);
   assert.deepEqual(startedGate["reopen-registration"].blockers, [
@@ -418,6 +520,8 @@ test("starting round one locks every roster without a manual lock step", async (
   const listed = (await heats.json()).heats.filter((heat) => heat.round === "ROUND_ONE");
   assert.deepEqual(listed.map((heat) => heat.status), ["LOADING", "LOADING"]);
   assert.deepEqual(listed.map((heat) => heat.rosterLocked), [true, true]);
+  // Every locked heat is one the round could legally start with.
+  for (const heat of listed) assert.ok(heat.rosterSize >= 3);
 });
 
 test("a merged tail splits back out even when pairing opened a new heat after the close", async (context) => {
@@ -452,15 +556,24 @@ test("a merged tail splits back out even when pairing opened a new heat after th
   ]);
   assertStructurallySound(database);
 
-  // Closing again merges the new tail into the heat before it, and the totals
-  // are preserved across the whole cycle.
+  // Closing again folds the tail into the heat before it, and because that
+  // leaves a two-duck heat the loop folds once more rather than stopping on a
+  // layout round one would refuse forever. The totals survive the whole cycle.
   assert.equal((await lifecycle(env, "close-registration")).status, 201);
-  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [4, 2]);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [6]);
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE event_id = 'event_test'").get().count,
     6,
   );
+  assert.equal(
+    database.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'ROUND_ONE_TAIL_MERGED'",
+    ).get().count,
+    3,
+    "each fold is audited on its own",
+  );
   assertStructurallySound(database);
+  await assertRoundOneStarts(env, database);
 });
 
 test("a merge and a split replay their lifecycle command without moving entries twice", async (context) => {
@@ -489,6 +602,7 @@ test("a merge and a split replay their lifecycle command without moving entries 
     1,
   );
   assertStructurallySound(database);
+  await assertRoundOneStarts(env, database);
 });
 
 test("reopening a close that merged nothing leaves every heat untouched", async (context) => {
@@ -505,6 +619,7 @@ test("reopening a close that merged nothing leaves every heat untouched", async 
     0,
   );
   assertStructurallySound(database);
+  await assertRoundOneStarts(env, database);
 });
 
 test("the atomic round-one start refuses a heat that drops below the minimum after preflight", async (context) => {
@@ -540,5 +655,251 @@ test("the atomic round-one start refuses a heat that drops below the minimum aft
   );
   // Nothing was locked, so registration can still reopen as the remedy.
   assert.deepEqual(heatLayout(database).map((heat) => heat.locked), [false, false]);
+  assertStructurallySound(database);
+
+  // The remedy is reachable in this very state: registration is closed and the
+  // heats are still unlocked plans, which is exactly the window the roster
+  // editor accepts, so putting the dropped racer back makes the round start.
+  const orphaned = database.prepare(
+    `SELECT re.id FROM race_entries re
+       JOIN registrations r ON r.id = re.registration_id
+      WHERE re.event_id = 'event_test' AND r.status = 'ACTIVE'
+        AND NOT EXISTS (
+          SELECT 1 FROM heat_entries he
+           WHERE he.race_entry_id = re.id AND he.round = 'ROUND_ONE'
+        )`,
+  ).all().map((row) => row.id);
+  assert.equal(orphaned.length, 1);
+  const heat = heatRow(database, 2);
+  const repaired = await replaceRoster(
+    env,
+    heat.id,
+    heat.revision,
+    [...rosterOf(database, 2).map((entry) => entry.raceEntryId), ...orphaned],
+  );
+  assert.equal(repaired.status, 200, await repaired.clone().text());
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [3, 3]);
+  await assertRoundOneStarts(env, database);
+});
+
+// ---------------------------------------------------------------------------
+// Close/reopen cycles
+// ---------------------------------------------------------------------------
+
+// The exact sequence that used to strand a race: pairing continues while
+// registration is closed, so the reopen's split lands a heat behind a heat that
+// is already short, and a single-pass merge then converges on 10 + 2 forever.
+test("a close, late pairing, and reopen cycle still converges on a runnable layout", async (context) => {
+  const { database, env } = await setup(context, { ducksPerHeat: 10, participantCount: 11 });
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [10, 1]);
+
+  assert.equal((await lifecycle(env, "close-registration")).status, 201);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [11]);
+
+  // Pairing stays open through REGISTRATION_CLOSED, and heat one is full at
+  // capacity, so this opens a fresh short heat behind the merged one.
+  const late = addLateParticipant(database, 1);
+  assert.equal((await pair(env, late)).heat.number, 2);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [11, 1]);
+
+  // The reopen gives heat one its borrowed slot back, which leaves two short
+  // heats in a row: 10 + 1 + 1.
+  assert.equal((await lifecycle(env, "reopen-registration")).status, 201);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [10, 1, 1]);
+  assertStructurallySound(database);
+
+  // Closing again folds twice, not once, so no heat is left below the minimum.
+  assert.equal((await lifecycle(env, "close-registration")).status, 201);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [12]);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE event_id = 'event_test'").get().count,
+    12,
+  );
+  assertStructurallySound(database);
+  await assertRoundOneStarts(env, database);
+});
+
+test("repeated close and reopen cycles never strand an unrunnable layout", async (context) => {
+  const { database, env } = await setup(context, { ducksPerHeat: 10, participantCount: 11 });
+
+  // Three full cycles, each adding one late pairing while registration is
+  // closed, which is the state that produced a new short heat every time.
+  for (const index of [1, 2, 3]) {
+    assert.equal((await lifecycle(env, "close-registration")).status, 201);
+    await pair(env, addLateParticipant(database, index));
+    assert.equal((await lifecycle(env, "reopen-registration")).status, 201);
+    assertStructurallySound(database);
+    // No entry is ever lost or duplicated across a cycle.
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE event_id = 'event_test'").get().count,
+      11 + index,
+    );
+  }
+
+  await assertRoundOneStarts(env, database);
+});
+
+// ---------------------------------------------------------------------------
+// A withdrawn racer must never be locked onto a racing roster
+// ---------------------------------------------------------------------------
+
+test("a participant withdrawn while registration is closed blocks the round until the roster is replaced", async (context) => {
+  const { database, env, participants } = await setup(context, { ducksPerHeat: 4, participantCount: 8 });
+  assert.equal((await lifecycle(env, "close-registration")).status, 201);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [4, 4]);
+
+  // Withdrawal is allowed while the heat is still an unlocked plan, and it
+  // leaves the heat_entries row exactly where it was.
+  const withdrawn = await withdraw(env, "registration-5", 1);
+  assert.equal(withdrawn.status, 201, await withdrawn.clone().text());
+  assert.equal(
+    database.prepare("SELECT status FROM registrations WHERE id = 'registration-5'").get().status,
+    "WITHDRAWN",
+  );
+  assert.equal(rosterOf(database, 2).length, 4);
+
+  const gate = await readiness(env);
+  assert.equal(gate["start-round-one"].allowed, false);
+  assert.deepEqual(gate["start-round-one"].blockers, [
+    "A heat in round one still has a withdrawn or disqualified racer on the roster. "
+    + "Replace that roster before starting, so no inactive racer is locked in or announced.",
+  ]);
+
+  const blocked = await lifecycle(env, "start-round-one");
+  assert.equal(blocked.status, 409);
+  assert.match((await blocked.json()).readiness.blockers[0], /withdrawn or disqualified/);
+  assert.equal(eventStatus(database), "REGISTRATION_CLOSED");
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_ROUND_ONE'").get().count,
+    0,
+  );
+  // Nothing was locked, so the roster is still editable and the withdrawn racer
+  // never reached a racing roster or the announcer.
+  assert.deepEqual(heatLayout(database).map((heat) => heat.locked), [false, false]);
+
+  // The remedy the blocker names is reachable: replace the roster without them.
+  const heat = heatRow(database, 2);
+  const remaining = rosterOf(database, 2)
+    .map((entry) => entry.raceEntryId)
+    .filter((raceEntryId) => raceEntryId !== participants[4].raceEntryId);
+  assert.equal(remaining.length, 3);
+  const replaced = await replaceRoster(env, heat.id, heat.revision, remaining);
+  assert.equal(replaced.status, 200, await replaced.clone().text());
+  assert.deepEqual((await replaced.json()).roster.map((entry) => entry.raceEntryId), remaining);
+
+  await assertRoundOneStarts(env, database);
+  const announcer = await handleHeatOperations(
+    new Request(`https://quickducks.com/api/v1/staff/events/event_test/heats/${heat.id}/announcer-roster`),
+    env,
+    director,
+  );
+  assert.equal(announcer.status, 200);
+  const announced = (await announcer.json()).roster;
+  assert.equal(announced.length, 3);
+  assert.equal(announced.some((entry) => entry.displayName.includes("Number5")), false);
+});
+
+test("the guarded start refuses a roster that loses a racer between preflight and commit", async (context) => {
+  let withdrawn = false;
+  const { database, env } = await setup(context, { ducksPerHeat: 3, participantCount: 6 }, () => {
+    // Fires once, on the round-one start batch, after readiness already passed,
+    // so only the guarded SQL inside the batch can still catch it.
+    if (withdrawn) return;
+    if (eventStatus(database) !== "REGISTRATION_CLOSED") return;
+    withdrawn = true;
+    database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-4'");
+  });
+  assert.equal((await lifecycle(env, "close-registration")).status, 201);
+
+  const blocked = await lifecycle(env, "start-round-one");
+  assert.equal(blocked.status, 409);
+  assert.equal(eventStatus(database), "REGISTRATION_CLOSED");
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_ROUND_ONE'").get().count,
+    0,
+  );
+  assert.deepEqual(heatLayout(database).map((heat) => heat.locked), [false, false]);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.status), ["PLANNED", "PLANNED"]);
+  assertStructurallySound(database);
+});
+
+// ---------------------------------------------------------------------------
+// The split never outgrows the final
+// ---------------------------------------------------------------------------
+
+test("a split never creates more round-one heats than the final can hold", async (context) => {
+  const { database, env } = await setup(context, {
+    ducksPerHeat: 4,
+    participantCount: 5,
+    finalHeatCapacity: 2,
+  });
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [4, 1]);
+
+  assert.equal((await lifecycle(env, "close-registration")).status, 201);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [5]);
+
+  // A late pairing takes round one back up to the final's capacity, so the
+  // borrowed slot has nowhere to split out to.
+  await pair(env, addLateParticipant(database, 1));
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [5, 1]);
+
+  assert.equal((await lifecycle(env, "reopen-registration")).status, 201);
+  assert.equal(eventStatus(database), "REGISTRATION_OPEN");
+  // No third heat was created, so the invariant round-one heats never exceed
+  // final capacity holds throughout, and the reopen still succeeded.
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [5, 1]);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM heats WHERE event_id = 'event_test' AND round = 'ROUND_ONE'").get().count,
+    2,
+  );
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'ROUND_ONE_TAIL_SPLIT'").get().count,
+    0,
+  );
+  assertStructurallySound(database);
+
+  await assertRoundOneStarts(env, database);
+});
+
+test("the guarded split insert refuses a heat that would exceed final capacity mid-batch", async (context) => {
+  let filled = false;
+  const { database, env } = await setup(context, {
+    ducksPerHeat: 4,
+    participantCount: 5,
+    finalHeatCapacity: 3,
+  }, () => {
+    // Fires on the reopen batch only, after its plan already measured two
+    // heats, so nothing but the guard inside the insert can refuse the third
+    // heat. The late pairing runs while only one heat exists, so it is skipped.
+    if (filled) return;
+    if (eventStatus(database) !== "REGISTRATION_CLOSED") return;
+    const heats = database.prepare(
+      "SELECT COUNT(*) AS count FROM heats WHERE event_id = 'event_test' AND round = 'ROUND_ONE'",
+    ).get().count;
+    if (heats !== 2) return;
+    filled = true;
+    database.exec(`
+      INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+      VALUES ('heat-race', 'event_test', 'ROUND_ONE', 9, 'PLANNED', 4);
+    `);
+  });
+  assert.equal((await lifecycle(env, "close-registration")).status, 201);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [5]);
+  await pair(env, addLateParticipant(database, 1));
+
+  const refused = await lifecycle(env, "reopen-registration");
+  assert.equal(refused.status, 409);
+  assert.equal(eventStatus(database), "REGISTRATION_CLOSED");
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'REOPEN_REGISTRATION'").get().count,
+    0,
+  );
+  // The split wrote nothing at all: the merged heat still holds its borrowed
+  // slots and round one never gained a fourth heat.
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [5, 1, 0]);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM heats WHERE event_id = 'event_test' AND round = 'ROUND_ONE'").get().count,
+    3,
+  );
   assertStructurallySound(database);
 });

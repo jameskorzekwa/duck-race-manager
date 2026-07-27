@@ -349,6 +349,30 @@ const finishScan = async (url: URL, env: Env, eventId: string, heatId: string): 
     : json({ error: "That duck is not in the selected heat." }, 422);
 };
 
+// Rosters are editable in the window before their round starts, which is the
+// only window in which they are still unlocked plans: starting a round locks
+// every planned heat of that round to LOADING in the same batch as the status
+// change, so a heat that is PLANNED and unlocked and whose event has already
+// reached that round cannot exist. Round-one rosters are therefore replaceable
+// while registration is closed, and the final's roster while round one runs,
+// which is exactly where the readiness blockers send an operator to remove a
+// withdrawn racer or repair an undersized heat.
+const rosterEditableEventStatus: Record<Round, string> = {
+  ROUND_ONE: "REGISTRATION_CLOSED",
+  FINAL: "ROUND_ONE",
+};
+
+const rosterCommandCommitted = `EXISTS (
+    SELECT 1 FROM race_commands rc
+     WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = 'REPLACE_HEAT_ROSTER'
+       AND rc.result_id = ?
+  )`;
+
+const rosterWindowError: Record<Round, string> = {
+  ROUND_ONE: "A round-one roster can be replaced only while registration is closed and round one has not started.",
+  FINAL: "The final roster can be replaced only during round one, before the final starts.",
+};
+
 const updateRoster = async (
   request: Request,
   env: Env,
@@ -384,6 +408,12 @@ const updateRoster = async (
   if (heat === null) return json({ error: "Heat not found." }, 404);
   if (heat.status !== "PLANNED" || heat.roster_locked_at !== null) {
     return json({ error: "A heat roster can be edited only before it is locked." }, 409);
+  }
+  const event = await env.DB.prepare("SELECT status FROM events WHERE id = ?")
+    .bind(eventId).first<{ status: string }>();
+  if (event === null) return json({ error: "Event not found." }, 404);
+  if (event.status !== rosterEditableEventStatus[heat.round]) {
+    return json({ error: rosterWindowError[heat.round] }, 409);
   }
   if (heat.revision !== revision) return json({ error: "The heat changed. Refresh and try again." }, 409);
 
@@ -425,10 +455,19 @@ const updateRoster = async (
         FROM heats h JOIN events e ON e.id = h.event_id
         WHERE h.id = ? AND h.event_id = ? AND h.status = 'PLANNED'
           AND h.roster_locked_at IS NULL AND h.revision = ?
-          AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
-            OR (h.round = 'FINAL' AND e.status = 'FINAL'))`,
+          AND ((h.round = 'ROUND_ONE' AND e.status = 'REGISTRATION_CLOSED')
+            OR (h.round = 'FINAL' AND e.status = 'ROUND_ONE'))`,
     ).bind(commandId, eventId, heatId, now, now, actor.id, requestFingerprint, heatId, eventId, revision),
-    env.DB.prepare("DELETE FROM heat_entries WHERE event_id = ? AND heat_id = ?").bind(eventId, heatId),
+    // The command row above is the sentinel for the rest of the batch: when its
+    // guard rejected the write, this delete matches nothing and the whole
+    // replacement is a no-op instead of depending on a later foreign key to
+    // fail. The inserts below still carry `source_command_id`, so both layers
+    // agree on the same committed command.
+    env.DB.prepare(
+      `DELETE FROM heat_entries
+        WHERE event_id = ? AND heat_id = ?
+          AND ${rosterCommandCommitted}`,
+    ).bind(eventId, heatId, commandId, eventId, heatId),
   ];
   for (const [index, raceEntryId] of ids.entries()) {
     statements.push(env.DB.prepare(
@@ -453,8 +492,9 @@ const updateRoster = async (
       `UPDATE heats SET target_size = ?, revision = revision + 1,
               source_command_id = ?, updated_at = ?
         WHERE id = ? AND event_id = ? AND status = 'PLANNED'
-          AND roster_locked_at IS NULL AND revision = ?`,
-    ).bind(ids.length, commandId, now, heatId, eventId, revision),
+          AND roster_locked_at IS NULL AND revision = ?
+          AND ${rosterCommandCommitted}`,
+    ).bind(ids.length, commandId, now, heatId, eventId, revision, commandId, eventId, heatId),
     env.DB.prepare(
       `INSERT INTO audit_events
         (id, event_id, command_id, action, subject_type, subject_id,

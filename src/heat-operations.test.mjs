@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import { staffHomeScript } from "./client-scripts.ts";
 import { handleEventOperations } from "./event-operations.ts";
 import { handleHeatOperations } from "./heat-operations.ts";
 
@@ -651,4 +652,357 @@ test("the retired balanced round-one planner is unroutable and writes nothing", 
   }
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heats").get().count, 0);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type LIKE '%PLAN%'").get().count, 0);
+});
+
+// ---------------------------------------------------------------------------
+// The roster replacement window
+// ---------------------------------------------------------------------------
+//
+// Starting a round locks every planned heat of that round in the same batch as
+// the status change, so "PLANNED and unlocked" and "the round is running" are
+// mutually exclusive. The editable window is therefore the window before the
+// round starts, and these cases pin it from both ends: which lifecycle statuses
+// the API accepts, and that the console offers the form for exactly those.
+
+const LIFECYCLE_STATUSES = [
+  "DRAFT",
+  "REGISTRATION_OPEN",
+  "REGISTRATION_CLOSED",
+  "ROUND_ONE",
+  "FINAL",
+  "COMPLETED",
+];
+
+// A final heat holding the two round-one winners, so a FINAL roster replacement
+// reaches the same guard a round-one one does instead of failing eligibility.
+const seedFinalHeat = (database) => {
+  database.exec(`
+    INSERT INTO race_commands (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('result-command', 'event', 'FINALIZE_HEAT_RESULT', 'heat-1',
+            '2026-07-26T11:00:00Z', '2026-07-26T11:00:00Z');
+    UPDATE heats SET status = 'FINALIZED', finalized_at = '2026-07-26T11:00:00Z',
+           roster_locked_at = '2026-07-26T10:45:00Z'
+     WHERE id IN ('heat-1', 'heat-2');
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES
+      ('result-1', 'event', 'heat-1', 'entry-1', 'assignment-1', 1, 'FINALIZED', 1,
+       '2026-07-26T11:00:00Z', 'staff', 'result-command'),
+      ('result-2', 'event', 'heat-2', 'entry-4', 'assignment-4', 1, 'FINALIZED', 1,
+       '2026-07-26T11:00:00Z', 'staff', 'result-command');
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-final', 'event', 'FINAL', 1, 'PLANNED', 2);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES
+      ('final-entry-1', 'event', 'heat-final', 'entry-1', 'FINAL', 1,
+       'WINNER_PROMOTION', '2026-07-26T11:05:00Z'),
+      ('final-entry-2', 'event', 'heat-final', 'entry-4', 'FINAL', 2,
+       'WINNER_PROMOTION', '2026-07-26T11:05:00Z');
+  `);
+};
+
+const rosterAttempt = async (round, eventStatus) => {
+  const database = createDatabase();
+  seedRace(database);
+  seedRoundOneHeats(database);
+  if (round === "FINAL") seedFinalHeat(database);
+  database.exec(`UPDATE events SET status = '${eventStatus}' WHERE id = 'event'`);
+  const heatId = round === "FINAL" ? "heat-final" : "heat-2";
+  const raceEntryIds = round === "FINAL" ? ["entry-4", "entry-1"] : ["entry-5", "entry-4"];
+  const response = await handleHeatOperations(
+    jsonRequest(`/api/v1/staff/events/event/heats/${heatId}/roster`, "PUT", {
+      commandId: commandId(),
+      revision: 0,
+      raceEntryIds,
+    }),
+    { DB: d1(database) },
+    actor,
+  );
+  const body = await response.json();
+  const stored = database.prepare(
+    "SELECT race_entry_id FROM heat_entries WHERE heat_id = ? ORDER BY slot_number",
+  ).all(heatId).map((row) => row.race_entry_id);
+  const commands = database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'REPLACE_HEAT_ROSTER'",
+  ).get().count;
+  database.close();
+  return { status: response.status, body, stored, commands, raceEntryIds };
+};
+
+test("a round-one roster is replaceable only while registration is closed", async () => {
+  const accepted = [];
+  for (const status of LIFECYCLE_STATUSES) {
+    const attempt = await rosterAttempt("ROUND_ONE", status);
+    if (attempt.status === 200) {
+      accepted.push(status);
+      // The write actually happened, in the submitted slot order.
+      assert.deepEqual(attempt.stored, attempt.raceEntryIds, status);
+      assert.deepEqual(attempt.body.roster.map((entry) => entry.raceEntryId), attempt.raceEntryIds);
+      assert.equal(attempt.body.replayed, false);
+      assert.equal(attempt.commands, 1);
+      continue;
+    }
+    assert.equal(attempt.status, 409, status);
+    assert.match(attempt.body.error, /round-one roster can be replaced only while registration is closed/i);
+    // A refusal writes nothing at all, rather than deleting the roster first.
+    assert.deepEqual(attempt.stored, ["entry-4", "entry-5", "entry-6"], status);
+    assert.equal(attempt.commands, 0, status);
+  }
+  assert.deepEqual(accepted, ["REGISTRATION_CLOSED"]);
+});
+
+test("a final roster is replaceable only while round one is running", async () => {
+  const accepted = [];
+  for (const status of LIFECYCLE_STATUSES) {
+    const attempt = await rosterAttempt("FINAL", status);
+    if (attempt.status === 200) {
+      accepted.push(status);
+      assert.deepEqual(attempt.stored, attempt.raceEntryIds, status);
+      assert.equal(attempt.commands, 1);
+      continue;
+    }
+    assert.equal(attempt.status, 409, status);
+    assert.match(attempt.body.error, /final roster can be replaced only during round one/i);
+    assert.deepEqual(attempt.stored, ["entry-1", "entry-4"], status);
+    assert.equal(attempt.commands, 0, status);
+  }
+  assert.deepEqual(accepted, ["ROUND_ONE"]);
+});
+
+test("a roster replacement whose command row loses its guard writes nothing", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  const DB = d1(database);
+  const env = { DB };
+
+  // The event leaves the editable window between the preflight and the batch,
+  // so the guarded command insert matches nothing. The delete and the roster
+  // update carry the same sentinel, so the whole replacement is a no-op instead
+  // of emptying the heat and relying on a later foreign key to notice.
+  DB.beforeBatch = () => {
+    database.exec("UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event'");
+  };
+  const response = await handleHeatOperations(
+    jsonRequest("/api/v1/staff/events/event/heats/heat-2/roster", "PUT", {
+      commandId: commandId(),
+      revision: 0,
+      raceEntryIds: ["entry-5", "entry-4"],
+    }),
+    env,
+    actor,
+  );
+  assert.equal(response.status, 409);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'REPLACE_HEAT_ROSTER'").get().count,
+    0,
+  );
+  assert.deepEqual(
+    database.prepare("SELECT race_entry_id FROM heat_entries WHERE heat_id = 'heat-2' ORDER BY slot_number").all()
+      .map((row) => row.race_entry_id),
+    ["entry-4", "entry-5", "entry-6"],
+    "the roster is untouched",
+  );
+  assert.equal(database.prepare("SELECT target_size FROM heats WHERE id = 'heat-2'").get().target_size, 3);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The console renders the replacement form from its own copy of the lifecycle
+// state, so it can drift from the API and 409 every submission with a
+// misleading message. This runs the shipped console gate against the real API
+// answer for every lifecycle status and requires them to be identical.
+test("the console offers the roster form for exactly the states the API accepts", async () => {
+  const lifted = [
+    /const rosterEditableEventStatus = \{[^}]*\};/,
+    /const rosterFormAllowed = \(heat, event\) => [\s\S]*?;\n/,
+    /const addRosterForm = \(body\) => \{[\s\S]*?\n\};/,
+  ].map((pattern) => {
+    const match = staffHomeScript.match(pattern);
+    assert.ok(match, `the console script defines ${pattern}`);
+    return match[0];
+  }).join("\n");
+
+  const node = () => ({
+    children: [],
+    dataset: {},
+    append(...items) {
+      this.children.push(...items);
+    },
+    addEventListener() {},
+  });
+  const offersForm = (round, eventStatus) => {
+    const heatControls = node();
+    const addRosterForm = new Function(
+      "canDirectRace",
+      "currentEvent",
+      "text",
+      "document",
+      "heatControls",
+      `${lifted}\nreturn addRosterForm;`,
+    )(
+      true,
+      { id: "event", status: eventStatus },
+      () => node(),
+      { createElement: () => node() },
+      heatControls,
+    );
+    addRosterForm({
+      heat: { round, status: "PLANNED", rosterLocked: false, revision: 0 },
+      roster: [{ raceEntryId: "entry-4" }],
+    });
+    return heatControls.children.length > 0;
+  };
+
+  for (const round of ["ROUND_ONE", "FINAL"]) {
+    for (const status of LIFECYCLE_STATUSES) {
+      const attempt = await rosterAttempt(round, status);
+      assert.equal(
+        offersForm(round, status),
+        attempt.status === 200,
+        `console and API disagree for a ${round} heat in ${status}`,
+      );
+    }
+  }
+
+  // A locked or already advanced heat is never offered either, matching the
+  // refusal the API returns before it even looks at the event.
+  assert.equal(offersForm("ROUND_ONE", "REGISTRATION_CLOSED"), true);
+  const lockedControls = node();
+  new Function(
+    "canDirectRace",
+    "currentEvent",
+    "text",
+    "document",
+    "heatControls",
+    `${lifted}\nreturn addRosterForm;`,
+  )(true, { status: "REGISTRATION_CLOSED" }, () => node(), { createElement: () => node() }, lockedControls)({
+    heat: { round: "ROUND_ONE", status: "PLANNED", rosterLocked: true, revision: 0 },
+    roster: [],
+  });
+  assert.equal(lockedControls.children.length, 0);
+});
+
+// Starting the final locks its roster the same way starting round one does, so
+// it carries the same refusal: a finalist who withdrew is never locked in or
+// announced, and the reachable remedy is the final's own roster editor.
+test("a withdrawn finalist blocks the final until the final roster is replaced", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  seedFinalHeat(database);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1';
+  `);
+  const env = { DB: d1(database) };
+  const handleEvent = (request) => handleEventOperations(request, env, actor);
+
+  const readiness = await handleEvent(new Request(
+    "https://quickducks.com/api/v1/staff/events/event/readiness",
+  ));
+  const gate = (await readiness.json()).readiness["start-final"];
+  assert.equal(gate.allowed, false);
+  assert.deepEqual(gate.blockers, [
+    "A heat in the final still has a withdrawn or disqualified racer on the roster. "
+    + "Replace that roster before starting, so no inactive racer is locked in or announced.",
+  ]);
+
+  const blocked = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/start-final",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(blocked.status, 409);
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "ROUND_ONE");
+  const finalHeat = database.prepare("SELECT status, roster_locked_at, revision FROM heats WHERE id = 'heat-final'").get();
+  assert.equal(finalHeat.status, "PLANNED");
+  assert.equal(finalHeat.roster_locked_at, null);
+
+  const replaced = await handleHeatOperations(
+    jsonRequest("/api/v1/staff/events/event/heats/heat-final/roster", "PUT", {
+      commandId: commandId(),
+      revision: finalHeat.revision,
+      raceEntryIds: ["entry-4"],
+    }),
+    env,
+    actor,
+  );
+  assert.equal(replaced.status, 200, JSON.stringify(await replaced.clone().json()));
+
+  const started = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/start-final",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(started.status, 201, JSON.stringify(await started.clone().json()));
+  const locked = database.prepare("SELECT status, roster_locked_at FROM heats WHERE id = 'heat-final'").get();
+  assert.equal(locked.status, "LOADING");
+  assert.notEqual(locked.roster_locked_at, null);
+  assert.deepEqual(
+    database.prepare("SELECT race_entry_id FROM heat_entries WHERE heat_id = 'heat-final'").all()
+      .map((row) => row.race_entry_id),
+    ["entry-4"],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The roster projection contract
+// ---------------------------------------------------------------------------
+
+// The heat detail is served to ANNOUNCER, HEAT_RUNNER, and RESULT_TAKER, so
+// widening it is a privacy decision, not a rendering convenience. This pins the
+// exact identifier surface: a later field has to be added here deliberately.
+test("the heat roster projection exposes exactly its documented identifier fields", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  const handle = (request) => handleHeatOperations(request, { DB: d1(database) }, actor);
+
+  const detail = await handle(new Request("https://quickducks.com/api/v1/staff/events/event/heats/heat-1"));
+  assert.equal(detail.status, 200);
+  const body = await detail.json();
+
+  assert.deepEqual(Object.keys(body).sort(), ["heat", "results", "roster"]);
+  const [entry] = body.roster;
+  assert.deepEqual(Object.keys(entry).sort(), [
+    "assignmentSource",
+    "duck",
+    "heatEntryId",
+    "participant",
+    "raceEntryId",
+    "slotNumber",
+  ]);
+  assert.deepEqual(Object.keys(entry.participant).sort(), [
+    "firstName",
+    "lastName",
+    "registrationId",
+    "registrationStatus",
+  ]);
+  assert.deepEqual(Object.keys(entry.duck).sort(), ["id", "visibleNumber"]);
+
+  // The announcer projection is narrower still and names no internal duck or
+  // registration identifier at all.
+  const announcer = await handle(new Request(
+    "https://quickducks.com/api/v1/staff/events/event/heats/heat-1/announcer-roster",
+  ));
+  assert.equal(announcer.status, 200);
+  const announcerBody = await announcer.json();
+  assert.deepEqual(Object.keys(announcerBody).sort(), ["heat", "roster"]);
+  assert.deepEqual(Object.keys(announcerBody.roster[0]).sort(), [
+    "displayName",
+    "duckNumber",
+    "raceEntryId",
+    "slotNumber",
+  ]);
+
+  // No contact detail, lookup code, private token, or staff note reaches either
+  // projection, whatever identifiers they do carry.
+  for (const payload of [JSON.stringify(body), JSON.stringify(announcerBody)]) {
+    assert.doesNotMatch(payload, /email|phone|lookupCode|CODE000|private|token|notes/i);
+  }
 });

@@ -4797,9 +4797,18 @@ const loadHeats = async () => {
   await loadHeatDetail(selectedId);
 };
 
+// The roster editor is offered in exactly the window PUT /heats/:id/roster
+// accepts: an unlocked planned heat whose round has not started yet, which is
+// registration-closed for a round-one heat and round one for the final. Outside
+// that window every submission would 409, so the form is not rendered at all.
+const rosterEditableEventStatus = { ROUND_ONE: "REGISTRATION_CLOSED", FINAL: "ROUND_ONE" };
+
+const rosterFormAllowed = (heat, event) => Boolean(canDirectRace)
+  && heat.status === "PLANNED" && !heat.rosterLocked
+  && Boolean(event) && event.status === rosterEditableEventStatus[heat.round];
+
 const addRosterForm = (body) => {
-  if (!canDirectRace) return;
-  if (body.heat.status !== "PLANNED" || body.heat.rosterLocked) return;
+  if (!rosterFormAllowed(body.heat, currentEvent)) return;
   const details = text("details", "", "operation-card");
   details.append(text("summary", "Replace unlocked roster"));
   const form = document.createElement("form");
