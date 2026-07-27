@@ -203,6 +203,82 @@ test("lifecycle controls retain command IDs across response-loss retries and rej
   assert.match(staffHomeScript, /commandOptions\("POST", \{ commandId \}\)/);
 });
 
+test("lifecycle readiness marks achieved transitions done and a moot reopen not needed", () => {
+  const { lifecycleReadinessPresentation, lifecycleStatusOrder } = new Function(
+    `${eventLifecycleHelpersScript}; return { lifecycleReadinessPresentation, lifecycleStatusOrder };`,
+  )();
+
+  assert.deepEqual(lifecycleStatusOrder, [
+    "DRAFT", "REGISTRATION_OPEN", "REGISTRATION_CLOSED", "ROUND_ONE",
+    "FINAL", "COMPLETED", "RETURN_PROCESSING", "ARCHIVED",
+  ]);
+
+  const transition = (fromStatus, toStatus, allowed) => ({
+    fromStatus, toStatus, allowed, requiresAdmin: false, blockers: allowed ? [] : ["A blocker."],
+  });
+  const forward = {
+    "open-registration": transition("DRAFT", "REGISTRATION_OPEN", false),
+    "close-registration": transition("REGISTRATION_OPEN", "REGISTRATION_CLOSED", true),
+    "start-round-one": transition("REGISTRATION_CLOSED", "ROUND_ONE", false),
+    "start-final": transition("ROUND_ONE", "FINAL", false),
+    complete: transition("FINAL", "COMPLETED", false),
+    "start-return-processing": transition("COMPLETED", "RETURN_PROCESSING", false),
+  };
+  const reopen = { ...transition("REGISTRATION_CLOSED", "REGISTRATION_OPEN", false), requiresAdmin: true };
+
+  // REGISTRATION_OPEN: the already-achieved open reads as done, never blocked.
+  assert.deepEqual(lifecycleReadinessPresentation(forward["open-registration"], "REGISTRATION_OPEN"), {
+    kind: "done", chipText: "Done", chipClass: "status-chip done", upcoming: false,
+  });
+  // The next transition stays ready or blocked according to server readiness.
+  assert.deepEqual(lifecycleReadinessPresentation(forward["close-registration"], "REGISTRATION_OPEN"), {
+    kind: "ready", chipText: "Ready", chipClass: "status-chip ready", upcoming: true,
+  });
+  assert.deepEqual(
+    lifecycleReadinessPresentation({ ...forward["close-registration"], allowed: false }, "REGISTRATION_OPEN"),
+    { kind: "blocked", chipText: "Blocked", chipClass: "status-chip blocked", upcoming: true },
+  );
+  // Genuinely upcoming transitions keep the blocked treatment and their reasons.
+  for (const action of ["start-round-one", "start-final", "complete", "start-return-processing"]) {
+    assert.deepEqual(lifecycleReadinessPresentation(forward[action], "REGISTRATION_OPEN"), {
+      kind: "blocked", chipText: "Blocked", chipClass: "status-chip blocked", upcoming: true,
+    }, `${action} must stay blocked while upcoming`);
+  }
+  // The backward reopen is moot while registration is already open: neutral, not done, not blocked.
+  assert.deepEqual(lifecycleReadinessPresentation(reopen, "REGISTRATION_OPEN"), {
+    kind: "not-needed", chipText: "Not needed", chipClass: "status-chip", upcoming: false,
+  });
+
+  // ARCHIVED: every forward transition has been passed and reads as done.
+  for (const [action, state] of Object.entries(forward)) {
+    assert.deepEqual(lifecycleReadinessPresentation(state, "ARCHIVED"), {
+      kind: "done", chipText: "Done", chipClass: "status-chip done", upcoming: false,
+    }, `${action} must read as done on an archived event`);
+  }
+  // Reopen keeps genuine blocked semantics when it is unavailable rather than moot.
+  assert.equal(lifecycleReadinessPresentation(reopen, "ARCHIVED").kind, "blocked");
+  assert.equal(lifecycleReadinessPresentation(reopen, "ROUND_ONE").kind, "blocked");
+  assert.equal(lifecycleReadinessPresentation({ ...reopen, allowed: true }, "REGISTRATION_CLOSED").kind, "ready");
+  assert.equal(lifecycleReadinessPresentation(reopen, "REGISTRATION_CLOSED").kind, "blocked");
+
+  // The console renders the derived chip and hides blockers and action buttons
+  // for done and not-needed transitions; upcoming ones keep the existing flow.
+  assert.ok(staffHomeScript.includes("const presentation = lifecycleReadinessPresentation(state, event.status);"));
+  assert.ok(staffHomeScript.includes('card.append(text("span", presentation.chipText, presentation.chipClass));'));
+  assert.ok(staffHomeScript.includes(
+    'if (presentation.upcoming && state.requiresAdmin) card.append(text("span", "Administrator", "status-chip"));',
+  ));
+  assert.ok(staffHomeScript.includes(
+    'if (presentation.upcoming) for (const blocker of state.blockers) card.append(text("p", blocker, "muted"));',
+  ));
+  assert.ok(staffHomeScript.includes("if (presentation.upcoming && canDirectRace && (!state.requiresAdmin || isSystemAdmin)) {"));
+  assert.doesNotMatch(staffHomeScript, /state\.allowed \? "Ready" : "Blocked"/);
+
+  // The done chip shares the positive chip styling.
+  const markup = renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]);
+  assert.match(markup, /\.status-chip\.ready,\.status-chip\.done \{ background:#d9f5df; \}/);
+});
+
 test("every staff page signs out through an accessible POST form without JavaScript", () => {
   const pages = [
     renderStaffHome("Staff Member", false, ["REGISTRATION"]),

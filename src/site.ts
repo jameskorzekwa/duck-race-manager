@@ -198,7 +198,7 @@ form.operation-card > * + * { margin-top:0; }
 .data-card .actions { margin-top:.65rem; }
 .status-chip { display:inline-block; margin:0 .35rem .35rem 0; padding:.25rem .5rem; border:2px solid var(--ink); border-radius:999px; background:var(--cream); font-size:.72rem; font-weight:950; letter-spacing:.04em; text-transform:uppercase; }
 .status-chip.blocked { background:#ffd8d2; }
-.status-chip.ready { background:#d9f5df; }
+.status-chip.ready,.status-chip.done { background:#d9f5df; }
 .compact-facts { grid-template-columns:repeat(auto-fit,minmax(9rem,1fr)); margin:.8rem 0; }
 .compact-facts .fact { min-width:0; }
 .compact-facts .fact dd { overflow-wrap:anywhere; font-size:.95rem; }

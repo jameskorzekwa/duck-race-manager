@@ -2635,6 +2635,33 @@ const lifecycleShouldRenderEvent = (selectedEventId, current, incoming) => {
   if (incoming.revision !== current.revision) return incoming.revision > current.revision;
   return !current.updatedAt || !incoming.updatedAt || incoming.updatedAt >= current.updatedAt;
 };
+
+const lifecycleStatusOrder = [
+  "DRAFT",
+  "REGISTRATION_OPEN",
+  "REGISTRATION_CLOSED",
+  "ROUND_ONE",
+  "FINAL",
+  "COMPLETED",
+  "RETURN_PROCESSING",
+  "ARCHIVED",
+];
+
+const lifecycleReadinessPresentation = (state, eventStatus) => {
+  const eventRank = lifecycleStatusOrder.indexOf(eventStatus);
+  const fromRank = lifecycleStatusOrder.indexOf(state.fromStatus);
+  const toRank = lifecycleStatusOrder.indexOf(state.toStatus);
+  const isBackward = fromRank >= 0 && toRank >= 0 && toRank < fromRank;
+  if (isBackward && eventStatus === state.toStatus) {
+    return { kind: "not-needed", chipText: "Not needed", chipClass: "status-chip", upcoming: false };
+  }
+  if (!isBackward && eventRank >= 0 && toRank >= 0 && eventRank >= toRank) {
+    return { kind: "done", chipText: "Done", chipClass: "status-chip done", upcoming: false };
+  }
+  return state.allowed
+    ? { kind: "ready", chipText: "Ready", chipClass: "status-chip ready", upcoming: true }
+    : { kind: "blocked", chipText: "Blocked", chipClass: "status-chip blocked", upcoming: true };
+};
 `;
 
 export const eventSlugHelpersScript = String.raw`
@@ -2854,12 +2881,13 @@ const renderReadiness = (readiness) => {
   const event = currentEvent;
   readinessList.replaceChildren();
   for (const [action, state] of Object.entries(readiness)) {
+    const presentation = lifecycleReadinessPresentation(state, event.status);
     const card = text("div", "", "data-card");
     card.append(text("h3", lifecycleLabels[action] || humanize(action)));
-    card.append(text("span", state.allowed ? "Ready" : "Blocked", "status-chip " + (state.allowed ? "ready" : "blocked")));
-    if (state.requiresAdmin) card.append(text("span", "Administrator", "status-chip"));
-    for (const blocker of state.blockers) card.append(text("p", blocker, "muted"));
-    if (canDirectRace && (!state.requiresAdmin || isSystemAdmin)) {
+    card.append(text("span", presentation.chipText, presentation.chipClass));
+    if (presentation.upcoming && state.requiresAdmin) card.append(text("span", "Administrator", "status-chip"));
+    if (presentation.upcoming) for (const blocker of state.blockers) card.append(text("p", blocker, "muted"));
+    if (presentation.upcoming && canDirectRace && (!state.requiresAdmin || isSystemAdmin)) {
       const button = text("button", lifecycleLabels[action] || humanize(action), "button small");
       button.type = "button";
       button.disabled = !state.allowed;
