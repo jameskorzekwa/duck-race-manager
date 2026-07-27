@@ -1539,14 +1539,17 @@ const startRender = (event, detail) => {
   }
   if (detail.roster.length === 0) startRoster.append(startText("li", "This heat has no roster entries."));
   startAction.replaceChildren();
+  // Rosters lock automatically when the round starts, so this station never
+  // offers a lock action and a still-planned heat is simply waiting.
   const transition = {
-    PLANNED: ["lock", "Lock roster"],
     LOADING: ["ready", "Mark heat ready"],
     READY: ["call", "Call this heat"],
     CALLING: ["start", "Start this heat"],
   }[detail.heat.status];
   if (!transition) {
-    startMessage.textContent = detail.heat.status === "AWAITING_RESULT"
+    startMessage.textContent = detail.heat.status === "PLANNED"
+      ? "This roster locks by itself when the race director starts the round."
+      : detail.heat.status === "AWAITING_RESULT"
       ? "This heat is awaiting its official result. No other heat may start until the finish line publishes it."
       : detail.heat.status === "RUNNING"
       ? "This heat is running. The finish line must mark it finished."
@@ -3180,7 +3183,6 @@ let currentEventDetail = null;
 let selectedRegistration = null;
 let selectedDuck = null;
 let selectedHeat = null;
-let pendingHeatPlan = null;
 let staffCommandCount = 0;
 let staffLiveSubscription = null;
 
@@ -3431,7 +3433,6 @@ const renderEvent = (detail, readiness) => {
     eventConfigForm.elements.registrationOpensAt.value = toLocalInput(currentEvent.registrationOpensAt);
     eventConfigForm.elements.registrationClosesAt.value = toLocalInput(currentEvent.registrationClosesAt);
     eventConfigForm.elements.emailRequired.checked = currentEvent.emailRequired;
-    eventConfigForm.elements.heatAssignmentMode.value = currentEvent.heatAssignmentMode;
     eventConfigForm.elements.roundOneHeatCapacity.value = currentEvent.roundOneHeatCapacity;
     eventConfigForm.elements.finalHeatCapacity.value = currentEvent.finalHeatCapacity;
     eventConfigForm.elements.publicNamePolicy.value = currentEvent.publicNamePolicy;
@@ -3468,7 +3469,6 @@ const loadEvents = async (preferredId) => {
     selectedRegistration = null;
     selectedDuck = null;
     selectedHeat = null;
-    pendingHeatPlan = null;
     eventSummary.replaceChildren(empty("Create a draft event to begin."));
     readinessList.replaceChildren(empty("No lifecycle is available."));
     for (const selector of [
@@ -3602,7 +3602,6 @@ if (eventConfigForm) eventConfigForm.addEventListener("submit", async (event) =>
         registrationOpensAt: fromLocalInput(String(values.get("registrationOpensAt"))),
         registrationClosesAt: fromLocalInput(String(values.get("registrationClosesAt"))),
         emailRequired: values.get("emailRequired") === "on",
-        heatAssignmentMode: String(values.get("heatAssignmentMode")),
         roundOneHeatCapacity: Number(values.get("roundOneHeatCapacity")),
         finalHeatCapacity: Number(values.get("finalHeatCapacity")),
         publicNamePolicy: String(values.get("publicNamePolicy")),
@@ -4093,8 +4092,6 @@ const heatRoster = document.querySelector("[data-heat-roster]");
 const heatResults = document.querySelector("[data-heat-results]");
 const heatControls = document.querySelector("[data-heat-controls]");
 const finalistList = document.querySelector("[data-finalist-list]");
-const planResult = document.querySelector("[data-plan-result]");
-const planCommitButton = document.querySelector("[data-plan-commit]");
 
 const loadHeats = async () => {
   if (!currentEvent) return;
@@ -4208,8 +4205,10 @@ const resultForm = (body, mode) => {
 
 const renderHeatControls = (body) => {
   heatControls.replaceChildren();
+  // No lock control: starting the round locks every roster in one guarded
+  // command, so PLANNED offers nothing for an operator to press here.
   const transition = {
-    PLANNED: ["lock", "Lock roster"], LOADING: ["ready", "Mark ready"], READY: ["call", "Call heat"],
+    LOADING: ["ready", "Mark ready"], READY: ["call", "Call heat"],
     CALLING: ["start", "Start heat"], RUNNING: ["finish", "Finish heat"],
   }[body.heat.status];
   const canTransition = transition && (transition[0] === "finish" ? canTakeResults : canRunHeat);
@@ -4233,18 +4232,6 @@ const renderHeatControls = (body) => {
     });
     heatControls.append(button);
   }
-  const announcerButton = text("button", "Load announcer roster", "button secondary small");
-  announcerButton.type = "button";
-  announcerButton.addEventListener("click", async () => {
-    await perform(announcerButton, "Loading announcer roster…", async () => {
-      const result = await api(
-        "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/" + encodeURIComponent(selectedHeat.id) + "/announcer-roster",
-      );
-      heatRoster.replaceChildren();
-      for (const entry of result.roster) heatRoster.append(text("li", "Slot " + entry.slotNumber + " · " + entry.displayName + " · Duck #" + entry.duckNumber));
-    });
-  });
-  heatControls.append(announcerButton);
   addRosterForm(body);
   if (canTakeResults && body.heat.status === "AWAITING_RESULT") heatControls.append(resultForm(body, "finalize"));
   if (canDirectRace && body.heat.status === "FINALIZED" && body.results.length > 0) {
@@ -4290,33 +4277,6 @@ const loadHeatDetail = async (heatId) => {
 };
 
 document.querySelector("[data-refresh-heats]").addEventListener("click", () => loadHeats().catch((error) => setMessage(error.message, true)));
-
-document.querySelector("[data-plan-preview]").addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  await perform(button, "Building balanced heat preview…", async () => {
-    pendingHeatPlan = await api(
-      "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/round-one/plan-preview",
-      { method: "POST", headers: { accept: "application/json" } },
-    );
-    planResult.replaceChildren();
-    for (const heat of pendingHeatPlan.heats) planResult.append(historyCard("Heat " + heat.number + " · " + heat.size + " ducks", heat.entries.map((entry) => "#" + entry.duck.visibleNumber + " " + entry.participant.firstName + " " + entry.participant.lastName).join(" · ")));
-    planCommitButton.disabled = false;
-  });
-});
-
-planCommitButton.addEventListener("click", async () => {
-  if (!pendingHeatPlan) return;
-  if (!await appConfirm("Commit this exact balanced plan? Rosters become operational race data.")) return;
-  await perform(planCommitButton, "Committing balanced heat plan…", async () => {
-    await api(
-      "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/round-one/plan-commit",
-      commandOptions("POST", { commandId: crypto.randomUUID(), fingerprint: pendingHeatPlan.fingerprint }),
-    );
-    pendingHeatPlan = null;
-    planCommitButton.disabled = true;
-    await loadEvents(currentEvent.id);
-  });
-});
 
 const loadFinalists = async () => {
   if (!currentEvent) return;

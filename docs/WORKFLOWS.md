@@ -121,21 +121,23 @@ the dependency rules described below.
 The supported complete sequence is:
 
 1. A system administrator creates the only event as a draft, choosing how many
-   ducks race in each round-one heat, and configures it before registration.
+   ducks race in each round-one heat (at least 3), and configures it before
+   registration.
 2. A race director opens registration.
 3. Participants self-register, or registration staff create walk-ups.
 4. Duck managers intake physical ducks and active tag tokens for the event.
 5. Registration staff pair each eligible participant with one eligible duck.
-   In the default assign-during-pairing mode, each pairing also places the duck
-   into the lowest-numbered round-one heat with an open slot, creating the next
-   heat automatically when every existing heat is full.
-6. A race director closes registration.
-7. Only for an event explicitly configured for legacy post-close balanced mode,
-   a race director previews and commits the round-one plan.
-8. Registration staff and the race director resolve every still-submitted
-   participant and check readiness.
-9. The race director starts round one; heat runners run heats; result takers
-   finish them and publish one winner per heat.
+   Each pairing also places the duck into the lowest-numbered round-one heat
+   with an open slot, creating the next heat automatically when every existing
+   heat is full. This is the only heat assignment model.
+6. A race director closes registration. If the last heat holds fewer than three
+   ducks, closing folds it into the heat before it, which goes over capacity.
+7. Registration staff and the race director resolve every still-submitted
+   participant and check readiness. An administrator may reopen registration at
+   any point before round one starts, which splits a folded tail back out.
+8. The race director starts round one, which locks every round-one roster in the
+   same command; heat runners run heats; result takers finish them and publish
+   one winner per heat.
 10. Race readers verify automatic finalist promotion and the race director
     starts the final.
 11. Heat runners run the final and a result taker publishes the complete podium.
@@ -178,8 +180,8 @@ blocker text. **Ready** marks a transition whose server readiness checks pass,
 and **Blocked** with its server blocker reasons appears only for genuinely
 upcoming transitions. The backward reopen-registration control shows a neutral
 **Not needed** chip while the event is already `REGISTRATION_OPEN`; whenever
-reopening is genuinely unavailable (wrong state or heats already exist) it
-keeps the blocked treatment and reasons.
+reopening is genuinely unavailable (wrong state, or heat rosters already locked
+for racing) it keeps the blocked treatment and reasons.
 
 ## Public Site Phases
 
@@ -769,15 +771,16 @@ card so the primary action is obvious.
 
 **System administrator only:** create one event when no event row exists. Event
 creation requires a name, a date, a timezone, and how many ducks race in each
-round-one heat (a whole number from 1 through 10,000). The heat size is chosen at
+round-one heat (a whole number from 3 through 10,000). The heat size is chosen at
 creation because heats are set up before registration opens: ducks are assigned
 to heats as they are paired with participants. The console detects the
 operator's own zone with `Intl.DateTimeFormat().resolvedOptions().timeZone` and
 sends it with the create command, so a new race starts in the zone the operator
 is actually in rather than in the retained organization default. A create
 request that omits the timezone still inherits that retained default. A new
-event is always created in `IMMEDIATE_FIXED` (assign during pairing) mode; the
-remaining settings copy the retained organization defaults into a `DRAFT` event.
+event is always created in `IMMEDIATE_FIXED` (assign during pairing) mode, which
+is now the only mode; the remaining settings copy the retained organization
+defaults into a `DRAFT` event.
 The server derives the URL
 slug from the name as
 lowercase ASCII letters, numbers, and hyphens; the staff form shows the same
@@ -790,9 +793,13 @@ Only a draft can be configured. Configuration includes:
 - Name, automatically derived slug preview, date, and timezone.
 - Optional registration-open and registration-close timestamps.
 - Optional or required email.
-- `IMMEDIATE_FIXED` (assign during pairing, the default for new events) or
-  legacy `POST_CLOSE_BALANCED` heat assignment.
-- Ducks per round-one heat and final capacity from 1 through 10,000.
+- Heat assignment is always `IMMEDIATE_FIXED`, meaning heats are filled as
+  participants are paired. The retired `POST_CLOSE_BALANCED` planner no longer
+  exists; naming it in a configuration request is rejected with `400`.
+- Ducks per round-one heat from 3 through 10,000, and final capacity from 1
+  through 10,000. The database CHECK stays at `> 0` so events configured before
+  the minimum existed keep loading; the minimum is enforced in the API and in
+  the console input.
 - Public name policy.
 
 Both timezone fields are dropdowns, never free text. The server renders only
@@ -830,10 +837,12 @@ requires the field, so every new event satisfies this automatically. Opening
 does not check other setup, inventory, or staffing readiness. The same
 authority can manually close an open event.
 
-A system administrator can reopen registration only while the event is closed
-and no heat has been created. Immediate-mode pairing creates heats, so a closed
-immediate-mode event normally cannot be reopened after any participant has been
-paired into a heat.
+A system administrator can reopen registration while the event is
+`REGISTRATION_CLOSED` and no heat roster has been locked. Existing heats do not
+block a reopen: heats are created as participants are paired, not afterwards, so
+they are the normal state at this point. Reopening also splits back out any tail
+heat that closing had folded into the heat before it, restoring the pre-close
+layout exactly.
 
 ### Start Round One
 
@@ -847,13 +856,18 @@ checks pass:
 - Every active participant has a round-one heat entry.
 - No blank-sticker provisioning remains pending physical-write confirmation.
 - At least one round-one heat exists.
+- Every round-one heat holds at least three entries. The blocker names reopening
+  registration and signing up more participants as the remedy.
 - The round-one heat count does not exceed final capacity.
 - Every round-one heat is still `PLANNED`, `LOADING`, or `READY`.
 
+Starting round one also locks every planned round-one roster, moving it to
+`LOADING` and stamping `roster_locked_at`, in the same guarded batch as the
+event transition.
+
 **Operator step:** resolve every unpaired submission by pairing, withdrawal, or
-administrative disqualification before starting. A heat cannot lock while its
-roster contains a participant who is not `ACTIVE`; update the still-planned,
-unlocked roster before proceeding.
+administrative disqualification before starting. If a heat would race with fewer
+than three ducks, reopen registration rather than trying to start.
 
 Registration can close while a sticker is pending, and its owning operator can
 still confirm it during `REGISTRATION_CLOSED`. Round one remains blocked until
@@ -870,7 +884,8 @@ sticker first.
 A race director or system administrator can start the final when every round-one heat is
 `FINALIZED` or `CANCELLED`, at least one is finalized, each finalized round-one
 heat has one first-place result, one final heat with entries exists, and that
-final has not started.
+final has not started. Starting the final locks the final roster in the same
+guarded batch, exactly as starting round one does for round one.
 
 A race director or system administrator can complete the event when the final is finalized,
 all final heats are finalized or cancelled, and each finalized final contains
@@ -1133,15 +1148,15 @@ substring of at least two characters. It can show contact details, status, and
 an assigned duck. The UI disables already assigned results; the server also
 requires an unpaired `SUBMITTED` registration.
 
-In `IMMEDIATE_FIXED` mode — the default for newly created events — the command
-uses the lowest-numbered unlocked round-one heat below the configured
-ducks-per-heat size or creates the next heat inside the same atomic batch. It
-returns the heat number. Pairing rejects before creating a new heat when the
-existing round-one heat count has reached final capacity, and the atomic
-command re-checks both the open slot and that capacity with guarded SQL. In
-legacy `POST_CLOSE_BALANCED` mode, pairing returns heat assignment pending.
+The command uses the lowest-numbered unlocked round-one heat below the
+configured ducks-per-heat size or creates the next heat inside the same atomic
+batch. It returns the heat number. Pairing rejects before creating a new heat
+when the existing round-one heat count has reached final capacity, and the
+atomic command re-checks both the open slot and that capacity with guarded SQL.
+Pairing stays available through `REGISTRATION_CLOSED` so a participant paired
+after the close still lands in a heat.
 
-**Operator step:** physically place immediate-mode ducks in a bag labeled with
+**Operator step:** physically place ducks in a bag labeled with
 the returned heat number. QuickDucks records no bag placement or expected
 physical location confirmation.
 
@@ -1171,52 +1186,83 @@ workflow. Heat entries remain attached to the stable race entry.
 
 ## Heat Planning
 
-### Immediate Fixed Mode
+### Assign-at-Pairing Heats
 
-This is the default and standard mode for newly created events; the
-ducks-per-heat size is chosen when the event is created. Pairing builds
-round-one heats in staff pairing order. Each new participant uses the
+Heats are assigned while participants are paired with ducks, and there is no
+other model. The ducks-per-heat size is chosen when the event is created and can
+change only while the event is still a draft. Each new participant uses the
 lowest-numbered eligible heat with fewer entries than
 `round_one_heat_capacity`; otherwise QuickDucks creates the next heat in the
 same atomic pairing command, so heats exist and fill progressively from the
-moment pairing begins. The final partially filled heat is not automatically
-rebalanced.
+moment pairing begins.
 
-Closing registration does not automatically lock heat rosters. Operators still
-start round one and run every heat through the normal lock/readiness sequence.
-Round-one start readiness counts the heats created through pairing. Concurrent
-attempts that select the same slot are protected by guarded SQL inside the
-atomic batch — the slot is recomputed in the database and a full heat aborts
-the whole command — plus uniqueness constraints; one attempt may receive a
-conflict and must refresh/retry, which then lands in the next open heat.
+Concurrent attempts that select the same slot are protected by guarded SQL
+inside the atomic batch — the slot is recomputed in the database and a full heat
+aborts the whole command — plus uniqueness constraints; one attempt may receive
+a conflict and must refresh/retry, which then lands in the next open heat.
 
-### Post-Close Balanced Mode
+Slot numbers are always contiguous from one within a heat, because pairing
+computes the next slot as `COUNT(*) + 1` and `UNIQUE (heat_id, slot_number)`
+would otherwise reject a repeat. Every operation below preserves that.
 
-This legacy mode remains supported for backward compatibility when an
-administrator explicitly configures a draft to `POST_CLOSE_BALANCED`.
+### Minimum Heat Size and Tail Rebalancing
 
-After registration is closed, a race director or administrator can preview a balanced
-plan when no round-one heat exists. QuickDucks:
+A heat can only be raced with at least three ducks. That minimum is enforced in
+three places:
 
-1. Selects all `ACTIVE` entries with a current duck assignment.
-2. Orders them deterministically by visible duck number, then race-entry ID.
-3. Calculates `ceil(N / capacity)` heats.
-4. Divides entries so heat sizes differ by at most one.
-5. Returns the exact rosters and a fingerprint without writing data.
+- Event creation and draft configuration reject a `roundOneHeatCapacity` below
+  three with `400`.
+- Closing registration folds a short tail heat into the heat before it.
+- Round-one start readiness reports a blocker, and the guarded `START_ROUND_ONE`
+  SQL refuses, while any round-one heat holds fewer than three entries.
 
-The operator reviews the preview and commits that exact fingerprint. Commit
-creates all planned heat and roster rows atomically. If participants or
-assignments changed, commit fails and the operator must preview again.
+Because heats fill in pairing order, the last round-one heat is the only one
+that can be short. Closing registration therefore runs one deterministic
+rebalance in the same guarded batch as the status change:
 
-This is not a random physical draw. It is a deterministic balanced assignment.
-Preview and commit both reject a plan unless:
+- If the last heat holds one or two entries and there is an earlier heat, those
+  entries move to the end of the earlier heat, which goes deliberately over its
+  capacity, and the emptied heat row is deleted. With a capacity of 10 and a
+  final heat of 2, the previous heat becomes a heat of 12.
+- If the short heat is the only heat, there is nothing to merge into. Nothing
+  moves, and round one stays blocked until registration reopens and more
+  participants sign up.
 
-```text
-ceil(active participants / round-one capacity) <= final capacity
-```
+Reopening registration reverses the fold exactly: the entries past the heat's
+own recorded slot count move back out into a restored heat, and the heat's
+capacity is restored. A close, reopen, one late registration, and second close
+therefore converges on a legal three-duck heat rather than oscillating.
 
-Configuration and round-one roster replacement do not enforce each heat's
-configured target size, so operator review is still required.
+`heats.target_size` is the merge marker and needs no extra state. It records how
+many slots a heat owns: pairing sets it to `round_one_heat_capacity` and never
+inserts past it, and roster replacement rewrites it to the roster it just wrote.
+A merge is consequently the only writer that can leave a round-one heat holding
+more entries than its own `target_size`, and a merge can only run while
+transitioning out of `REGISTRATION_OPEN`, so at most one such heat exists at a
+time. Comparing against the heat's own `target_size` rather than the event
+capacity is what keeps the marker correct when pairing continues after
+registration closes and opens a fresh short heat behind the merged one.
+
+Both operations are atomic without a post-commit repair step:
+
+- A merge deletes the emptied tail heat last. `heat_entries` references `heats`
+  `ON DELETE RESTRICT`, so an entry that failed to move aborts the delete and
+  rolls the whole batch back.
+- A split creates the restored heat only when exactly the expected entries are
+  still past `target_size`. If it is not created, the moves reference a heat row
+  that does not exist and the foreign key aborts the batch.
+
+Both are guarded on their own lifecycle command row, so a transition that loses
+its race writes nothing, and a replayed command identifier returns the recorded
+result without moving anything a second time.
+
+### Reopening Registration
+
+Registration may reopen at any point before round one actually starts. Existing
+heats never block it, because heats are created as people register rather than
+afterwards. Newly registered participants simply fill the next available spot.
+Reopening is refused once the event has left `REGISTRATION_CLOSED` or any heat
+roster has been locked.
 
 ### Roster Correction
 
@@ -1226,24 +1272,28 @@ must be active, currently assigned, absent from another heat in the same round,
 and, for a final roster, a finalized round-one winner. Replacement is
 revision-checked and audited.
 
-Because the event must already be `ROUND_ONE` or `FINAL`, planned rosters are
-corrected after starting the applicable round but before locking the heat.
+Starting a round locks every roster in that round, so in normal operation this
+correction path has no window left; it survives only as a guarded recovery route
+for a heat that is somehow still planned and unlocked during its active round.
 
 ## Heat Readiness and Running
 
 For each round-one and final heat, station staff perform:
 
 1. Review heat detail and the authoritative roster.
-2. Optionally load the announcer roster, which shows full name, duck number, and
-   slot but no contact details.
-3. A heat runner `Lock roster`: requires at least one entry and every listed
-   registration to be `ACTIVE`, changes `PLANNED` to `LOADING`, and permanently
-   locks roster editing.
-4. `Mark ready`: changes `LOADING` to `READY`.
-5. `Call heat`: changes `READY` to `CALLING`.
-6. `Start heat`: changes `CALLING` to `RUNNING`.
-7. A result taker `Finish heat`: changes `RUNNING` to `AWAITING_RESULT`.
-8. A result taker enters and publishes the required result.
+2. `Mark ready`: changes `LOADING` to `READY`.
+3. `Call heat`: changes `READY` to `CALLING`.
+4. `Start heat`: changes `CALLING` to `RUNNING`.
+5. A result taker `Finish heat`: changes `RUNNING` to `AWAITING_RESULT`.
+6. A result taker enters and publishes the required result.
+
+There is no operator lock step. Starting round one moves every planned round-one
+heat to `LOADING`, stamps `roster_locked_at`, and permanently locks roster
+editing, all in the same guarded batch as the event transition; starting the
+final does the same for the final heat. The console and the start-line station
+therefore ship no `Lock roster` control. The `announcer-roster` endpoint remains
+available for the announcer surface, but the console button that refetched it
+into the same element it already showed was a visible no-op and was removed.
 
 ### Focused Start-Line Station
 
@@ -1252,8 +1302,10 @@ running heat, then the next unfinished heat in the event's active round. This
 prevents a newer prepared or running heat from hiding a pending official result.
 It shows event, round, heat number, status, roster names, and visible duck
 numbers without contact data. Depending on authoritative status, it exposes
-exactly one of `Lock roster`, `Mark heat ready`, `Call this heat`, or `Start this
-heat`. An awaiting-result heat instead displays that no next heat can start.
+exactly one of `Mark heat ready`, `Call this heat`, or `Start this heat`. A
+still-planned heat displays that its roster locks by itself when the race
+director starts the round, and an awaiting-result heat instead displays that no
+next heat can start.
 Starting requires a plain-language confirmation that reads back round, heat
 number, and racer count. The station has no finish, result, correction, reopen,
 or roster-edit control. Large high-contrast controls are at least 48 pixels
@@ -1786,7 +1838,8 @@ The following are not current operator workflows:
   return stations.
 - Event-specific assignments; current roles are organization-wide.
 - Random draw scanning into balanced heat bags, heat claims, and undo-last heat
-  loading.
+  loading. The post-close balanced planner that once approximated this has been
+  removed entirely.
 - Physical bag/location history, winners-bag verification scans, and announcer
   completion/check-off records.
 - In-race lost-duck replacement, found-duck handling, two-duck swap, and finalist
@@ -1815,8 +1868,8 @@ Important reconciliations include:
 | Legacy statement | Canonical current behavior |
 | --- | --- |
 | Granular provisioner, registration, official, viewer, or race-director roles | Seven composable operational roles exist; system administrator remains a separate account flag. |
-| Balanced physical random draw and scan-to-load | Preview deterministically orders ducks and commits complete balanced rosters. |
-| Immediate heats are fixed at ten | Capacity is configurable; current default is ten. |
+| Balanced physical random draw, scan-to-load, and the post-close balanced planner | Removed. Heats are filled as participants are paired; that is the only model. |
+| Immediate heats are fixed at ten | Capacity is configurable from three upward; current default is ten. |
 | Heat/final capacity compatibility is validated | Operators must verify it; current planning does not enforce final compatibility. |
 | Email assignment/upcoming/result messages are sent | Preference and support schema exist, but creation and delivery are not operational. |
 | Offline cache and outbox permit race-day work | Every authoritative operation is online-only. |

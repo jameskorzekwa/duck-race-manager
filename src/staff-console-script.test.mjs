@@ -38,7 +38,6 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
     "/api/v1/staff/events",
     "/api/v1/staff/registrations/",
     "/api/v1/staff/inventory/ducks",
-    "/heats/round-one/plan-preview",
     "/results/",
     "/api/v1/staff/support/events/",
     "/force-delete",
@@ -47,6 +46,11 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
   }
   // Returns and the staged purge ceremony are gone; delete event is the only
   // cleanup call the console can make.
+  // The retired post-close balanced planner has no console surface left.
+  assert.doesNotMatch(staffHomeScript, /plan-preview|plan-commit|balanced|pendingHeatPlan/i);
+  // The announcer roster refetch button was a visible no-op and is gone, while
+  // the endpoint itself stays for the dedicated announcer surface.
+  assert.doesNotMatch(staffHomeScript, /announcer-roster|Load announcer roster/);
   for (const endpoint of [
     "/return-batches",
     "/purge-claim",
@@ -425,9 +429,9 @@ test("event creation requires a hinted ducks-per-heat field wired into the creat
 
   assert.match(
     adminMarkup,
-    /Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" step="1" required/,
+    /Ducks per heat<input name="roundOneHeatCapacity" type="number" min="3" max="10000" step="1" required/,
   );
-  assert.match(adminMarkup, /How many ducks race together in each round-one heat\./);
+  assert.match(adminMarkup, /How many ducks race together in each round-one heat, at least 3\./);
   assert.match(adminMarkup, /this can change only while the event is still a draft/);
   const createForm = adminMarkup.match(/<form data-event-create-form>[^]*?<\/form>/)?.[0];
   assert.ok(createForm);
@@ -437,7 +441,9 @@ test("event creation requires a hinted ducks-per-heat field wired into the creat
   // The config form keeps the draft-only editable value with the same field name.
   const configForm = adminMarkup.match(/<form data-event-config-form>[^]*?<\/form>/)?.[0];
   assert.ok(configForm);
-  assert.match(configForm, /Ducks per heat<input name="roundOneHeatCapacity"/);
+  assert.match(configForm, /Ducks per heat<input name="roundOneHeatCapacity" type="number" min="3"/);
+  // Heat assignment has one mode now, so the console offers no mode selector.
+  assert.doesNotMatch(configForm, /heatAssignmentMode/);
 
   // The create command now carries the detected timezone alongside the capacity.
   assert.match(

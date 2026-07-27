@@ -850,7 +850,6 @@ export const renderStaffHome = (
     || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
   const canStartLine = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
   const canFinishLine = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
-  const canDirectRace = hasRole("RACE_DIRECTOR");
   return page({
   title: "Staff tools",
   description: "Protected QuickDucks staff race operations.",
@@ -878,7 +877,7 @@ export const renderStaffHome = (
             <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
             <label>Event date<input name="eventDate" type="date" required></label>
             <label>Timezone<select name="timezone" data-timezone-select data-timezone-detect="true" data-app-select-search="true" required><option value="UTC">UTC</option></select><span>Detected from this device. Open the list and type to search every zone.</span></label>
-            <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
+            <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="3" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat, at least 3. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
             <button class="button" type="submit">Create draft event</button>
           </form>
         </details>` : ""}
@@ -897,8 +896,8 @@ export const renderStaffHome = (
                 <div class="field-grid"><label>Event date<input name="eventDate" type="date"></label><label>Timezone<select name="timezone" data-timezone-select data-app-select-search="true" required><option value="UTC">UTC</option></select></label></div>
                 <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="datetime-local"></label><label>Registration closes<input name="registrationClosesAt" type="datetime-local"></label></div>
                 <label class="check"><input name="emailRequired" type="checkbox"><span class="label-text">Require participant email</span></label>
-                <div class="field-grid"><label>Heat assignment<select name="heatAssignmentMode"><option value="IMMEDIATE_FIXED">Assign during pairing</option><option value="POST_CLOSE_BALANCED">Balanced plan after close</option></select></label><label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label></div>
-                <div class="field-grid"><label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="1" max="10000" required></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
+                <label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label>
+                <div class="field-grid"><label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="3" max="10000" required><span>At least 3, so every heat is a real race.</span></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
                 <button class="button" type="submit">Save draft configuration</button>
               </form>
             </details>` : ""}
@@ -979,7 +978,6 @@ export const renderStaffHome = (
       <section class="console-section" id="heats" aria-labelledby="heats-title" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
         <p class="eyebrow">Race control</p><h2 id="heats-title">Heats and results</h2>
         <div class="console-grid">
-          <article class="operation-card"${canDirectRace ? "" : " hidden"}><h3>Balanced round-one plan</h3><p class="muted">For post-close balanced events, preview the exact roster before committing it.</p><div class="actions"><button class="button secondary small" type="button" data-plan-preview>Preview plan</button><button class="button small" type="button" data-plan-commit disabled>Commit preview</button></div><div class="data-list" data-plan-result></div></article>
           <article class="operation-card"><h3>Finalists</h3><button class="button secondary small" type="button" data-refresh-finalists>Verify finalists</button><div class="data-list" data-finalist-list></div></article>
         </div>
         <div class="section-tools"><button class="button secondary small" type="button" data-refresh-heats>Refresh heats</button></div>
@@ -1047,7 +1045,7 @@ export const renderStartLine = (
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
     <h3>Roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
     <div class="station-action" data-station-action></div>
-    <p class="message-line muted" data-station-message aria-live="polite">This station can only lock, ready, call, or start a heat.</p>
+    <p class="message-line muted" data-station-message aria-live="polite">This station can only ready, call, or start a heat.</p>
     ${interactive ? '<script src="/assets/start-line.js" defer></script>' : ""}
   </section>`,
 });

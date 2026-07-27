@@ -665,8 +665,8 @@ test("staff pairs the scanned duck with a code-selected participant atomically",
     if (sql.includes("FROM registrations")) {
       return {
         event_id: "event_test",
-        heat_assignment_mode: "POST_CLOSE_BALANCED",
         round_one_heat_capacity: 10,
+        final_heat_capacity: 50,
         registration_id: "registration_test",
         registration_status: "SUBMITTED",
         registration_revision: 0,
@@ -701,13 +701,19 @@ test("staff pairs the scanned duck with a code-selected participant atomically",
   assert.equal(body.duck.visibleNumber, 42);
   assert.equal(body.participant.firstName, "Daisy");
   assert.equal(body.participant.email, "daisy@example.com");
-  assert.equal(body.heatAssignmentPending, true);
+  // Heats are always assigned while pairing; there is no other mode, and no
+  // event can be left waiting for a retired planner.
+  assert.equal(body.heatAssignmentPending, false);
+  assert.deepEqual(body.heat, { round: "ROUND_ONE", number: 1 });
   assert.equal(db.batches.length, 1);
   const sql = db.batches[0].map((statement) => statement.sql).join("\n");
   assert.match(sql, /INSERT INTO duck_assignments/);
   assert.match(sql, /SET status = 'ACTIVE'/);
   assert.match(sql, /inventory_status = 'IN_USE'/);
   assert.match(sql, /DUCK_ASSIGNED/);
+  assert.match(sql, /INSERT INTO heats/);
+  assert.match(sql, /INSERT INTO heat_entries/);
+  assert.doesNotMatch(sql, /heat_assignment_mode/);
 });
 
 test("immediate pairing rejects before creating a round-one heat beyond final capacity", async () => {
@@ -779,8 +785,8 @@ test("staff cannot pair a reserved duck whose inventory state is unsafe", async 
     if (sql.includes("FROM registrations")) {
       return {
         event_id: "event_test",
-        heat_assignment_mode: "POST_CLOSE_BALANCED",
         round_one_heat_capacity: 10,
+        final_heat_capacity: 50,
         registration_id: "registration_test",
         registration_status: "SUBMITTED",
         registration_revision: 0,

@@ -87,7 +87,7 @@ const seedRace = (database) => {
        round_one_heat_capacity, final_heat_capacity)
     VALUES
       ('event', 'race-day', 'Race Day', 'America/Denver', 'REGISTRATION_CLOSED',
-       'POST_CLOSE_BALANCED', 2, 10);
+       'IMMEDIATE_FIXED', 3, 10);
   `);
   const registration = database.prepare(`
     INSERT INTO registrations
@@ -119,7 +119,8 @@ const seedRace = (database) => {
     VALUES (?, 'event', ?, ?, ?, '2026-07-26T10:00:00Z', 'staff', ?)
   `);
 
-  const firstNames = ["Daisy", "Donald", "Della", "Dewey"];
+  // Six racers fill two heats of three, the smallest layout a race can run.
+  const firstNames = ["Daisy", "Donald", "Della", "Dewey", "Huey", "Louie"];
   for (let index = 1; index <= firstNames.length; index += 1) {
     const registrationId = `registration-${index}`;
     const entryId = `entry-${index}`;
@@ -142,6 +143,26 @@ const seedRace = (database) => {
   }
 };
 
+// Heats are built as participants are paired, so a closed event already has
+// its round-one heats. This mirrors exactly what the pairing route writes.
+const seedRoundOneHeats = (database) => {
+  database.exec(`
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-1', 'event', 'ROUND_ONE', 1, 'PLANNED', 3),
+           ('heat-2', 'event', 'ROUND_ONE', 2, 'PLANNED', 3);
+  `);
+  const entry = database.prepare(`
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES (?, 'event', ?, ?, 'ROUND_ONE', ?, 'PAIRING', '2026-07-26T10:30:00Z')
+  `);
+  for (let index = 1; index <= 6; index += 1) {
+    const heatId = index <= 3 ? "heat-1" : "heat-2";
+    const slot = index <= 3 ? index : index - 3;
+    entry.run(`heat-entry-${index}`, heatId, `entry-${index}`, slot);
+  }
+};
+
 const jsonRequest = (path, method, body) => new Request(`https://quickducks.com${path}`, {
   method,
   headers: { "content-type": "application/json" },
@@ -150,9 +171,10 @@ const jsonRequest = (path, method, body) => new Request(`https://quickducks.com$
 
 const commandId = () => crypto.randomUUID();
 
-test("heat operations cover balanced planning, lifecycle, results, corrections, and verification", async () => {
+test("heat operations cover the paired-heat lifecycle, results, corrections, and verification", async () => {
   const database = createDatabase();
   seedRace(database);
+  seedRoundOneHeats(database);
   const env = { DB: d1(database) };
   const handle = (request) => handleHeatOperations(request, env, actor);
   const handleEvent = (request) => handleEventOperations(request, env, actor);
@@ -162,32 +184,14 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
     null,
   );
 
-  const preview = await handle(jsonRequest(
-    "/api/v1/staff/events/event/heats/round-one/plan-preview",
-    "POST",
-    {},
-  ));
-  assert.equal(preview.status, 200);
-  const previewBody = await preview.json();
-  assert.equal(previewBody.balanced, true);
-  assert.deepEqual(previewBody.heats.map((heat) => heat.size), [2, 2]);
-
-  const planCommand = commandId();
-  const commitBody = { commandId: planCommand, fingerprint: previewBody.fingerprint };
-  const commit = await handle(jsonRequest(
-    "/api/v1/staff/events/event/heats/round-one/plan-commit",
-    "POST",
-    commitBody,
-  ));
-  assert.equal(commit.status, 201);
-  assert.equal((await commit.json()).committed, true);
-  const commitReplay = await handle(jsonRequest(
-    "/api/v1/staff/events/event/heats/round-one/plan-commit",
-    "POST",
-    commitBody,
-  ));
-  assert.equal(commitReplay.status, 200);
-  assert.equal((await commitReplay.json()).replayed, true);
+  // The retired post-close balanced planner has no routes left at all.
+  for (const path of ["plan-preview", "plan-commit"]) {
+    assert.equal(
+      await handle(jsonRequest(`/api/v1/staff/events/event/heats/round-one/${path}`, "POST", {})),
+      null,
+      `${path} must no longer be routed`,
+    );
+  }
 
   const listed = await handle(new Request("https://quickducks.com/api/v1/staff/events/event/heats"));
   assert.equal(listed.status, 200);
@@ -201,19 +205,23 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   ));
   assert.equal(startRoundOne.status, 201, JSON.stringify(await startRoundOne.clone().json()));
 
+  // Starting the round locked every roster, so no operator lock step remains
+  // and the heats are already LOADING.
   const firstHeatId = roundHeats[0].id;
   const firstDetail = await handle(new Request(
     `https://quickducks.com/api/v1/staff/events/event/heats/${firstHeatId}`,
   ));
-  const firstRoster = (await firstDetail.json()).roster;
-  const reversedRoster = firstRoster.map((entry) => entry.raceEntryId).reverse();
-  const rosterEdit = await handle(jsonRequest(
+  const firstDetailBody = await firstDetail.json();
+  assert.equal(firstDetailBody.heat.status, "LOADING");
+  assert.equal(firstDetailBody.heat.rosterLocked, true);
+  const reversedRoster = firstDetailBody.roster.map((entry) => entry.raceEntryId).reverse();
+  const lockedEdit = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${firstHeatId}/roster`,
     "PUT",
-    { commandId: commandId(), revision: 0, raceEntryIds: reversedRoster },
+    { commandId: commandId(), revision: firstDetailBody.heat.revision, raceEntryIds: reversedRoster },
   ));
-  assert.equal(rosterEdit.status, 200);
-  assert.equal((await rosterEdit.json()).heat.revision, 1);
+  assert.equal(lockedEdit.status, 409);
+  assert.match((await lockedEdit.json()).error, /only before it is locked/i);
 
   const transition = async (heatId, operation, revision, expectedStatus) => {
     const response = await handle(jsonRequest(
@@ -227,20 +235,12 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
     return body.heat.revision;
   };
 
-  let firstRevision = await transition(firstHeatId, "lock", 1, "LOADING");
-  const lockedEdit = await handle(jsonRequest(
-    `/api/v1/staff/events/event/heats/${firstHeatId}/roster`,
-    "PUT",
-    { commandId: commandId(), revision: firstRevision, raceEntryIds: reversedRoster },
-  ));
-  assert.equal(lockedEdit.status, 409);
-  firstRevision = await transition(firstHeatId, "ready", firstRevision, "READY");
+  let firstRevision = await transition(firstHeatId, "ready", firstDetailBody.heat.revision, "READY");
   firstRevision = await transition(firstHeatId, "call", firstRevision, "CALLING");
   firstRevision = await transition(firstHeatId, "start", firstRevision, "RUNNING");
 
   const secondHeatId = roundHeats[1].id;
-  let secondRevision = await transition(secondHeatId, "lock", 0, "LOADING");
-  secondRevision = await transition(secondHeatId, "ready", secondRevision, "READY");
+  let secondRevision = await transition(secondHeatId, "ready", roundHeats[1].revision + 1, "READY");
   secondRevision = await transition(secondHeatId, "call", secondRevision, "CALLING");
   const blockedStart = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${secondHeatId}/start`,
@@ -262,7 +262,10 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
     `https://quickducks.com/api/v1/staff/events/event/heats/${firstHeatId}/announcer-roster`,
   ));
   const announcerBody = await announcer.json();
-  assert.equal(announcerBody.roster.length, 2);
+  // The endpoint stays available for the announcer surface even though the
+  // console no-op button that refetched it is gone.
+  assert.equal(announcer.status, 200);
+  assert.equal(announcerBody.roster.length, 3);
   assert.equal(JSON.stringify(announcerBody).includes("email"), false);
 
   const finalize = async (heatId, revision, winnerId) => {
@@ -343,10 +346,13 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   ));
   assert.equal(startFinal.status, 201, JSON.stringify(await startFinal.clone().json()));
 
+  // Starting the final locked its roster too, so it is already LOADING.
   const finalHeat = database.prepare(
-    "SELECT id, revision FROM heats WHERE event_id = 'event' AND round = 'FINAL'",
+    "SELECT id, revision, status, roster_locked_at FROM heats WHERE event_id = 'event' AND round = 'FINAL'",
   ).get();
-  let finalRevision = await transition(finalHeat.id, "lock", finalHeat.revision, "LOADING");
+  assert.equal(finalHeat.status, "LOADING");
+  assert.notEqual(finalHeat.roster_locked_at, null);
+  let finalRevision = finalHeat.revision;
 
   const dependentReopen = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${firstHeatId}/results/reopen`,
@@ -424,7 +430,7 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
          revision, finalized_at, recorded_by_staff_profile_id, source_command_id)
       VALUES ('draft-result', 'event', ?, ?, ?, 1, 'DRAFT', 99,
               '2026-07-26T12:00:00Z', 'staff', ?)
-    `).run(finalHeat.id, draftEntry.race_entry_id, draftEntry.assignment_id, planCommand), /CHECK constraint failed/);
+    `).run(finalHeat.id, draftEntry.race_entry_id, draftEntry.assignment_id, 'assignment-command-1'), /CHECK constraint failed/);
 
   const refinalize = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${finalHeat.id}/results/finalize`,
@@ -582,27 +588,21 @@ test("heat station rosters retain unassigned and withdrawn entries without expos
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE heat_id = 'heat-roster'").get().count, 2);
 });
 
-test("balanced preview and commit reject plans with more heats than final capacity", async () => {
+test("the retired balanced round-one planner is unroutable and writes nothing", async (context) => {
   const database = createDatabase();
+  context.after(() => database.close());
   seedRace(database);
-  database.exec("UPDATE events SET final_heat_capacity = 1 WHERE id = 'event'");
   const handle = (request) => handleHeatOperations(request, { DB: d1(database) }, actor);
 
-  const preview = await handle(jsonRequest(
+  // `null` means no handler claimed the path, which is how the shared staff
+  // router falls through to its 404. The routes are gone, not merely disabled.
+  for (const path of [
     "/api/v1/staff/events/event/heats/round-one/plan-preview",
-    "POST",
-    {},
-  ));
-  assert.equal(preview.status, 409);
-  assert.match((await preview.json()).error, /requires 2 heats.*final capacity of 1/i);
-
-  const commit = await handle(jsonRequest(
     "/api/v1/staff/events/event/heats/round-one/plan-commit",
-    "POST",
-    { commandId: commandId(), fingerprint: "stale-preview" },
-  ));
-  assert.equal(commit.status, 409);
-  assert.match((await commit.json()).error, /requires 2 heats.*final capacity of 1/i);
+  ]) {
+    assert.equal(await handle(jsonRequest(path, "POST", { commandId: commandId() })), null, path);
+    assert.equal(await handle(new Request(`https://quickducks.com${path}`)), null, `GET ${path}`);
+  }
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heats").get().count, 0);
-  database.close();
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type LIKE '%PLAN%'").get().count, 0);
 });

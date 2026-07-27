@@ -365,7 +365,6 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
 
 interface PairingContext {
   event_id: string;
-  heat_assignment_mode: string;
   round_one_heat_capacity: number;
   final_heat_capacity: number;
   registration_id: string;
@@ -426,7 +425,7 @@ const pairDuck = async (
 
   const replay = await env.DB.prepare(
     `SELECT da.id AS assignment_id, d.visible_number,
-            e.id AS event_id, e.heat_assignment_mode, e.round_one_heat_capacity,
+            e.id AS event_id, e.round_one_heat_capacity,
             e.final_heat_capacity,
             r.id AS registration_id, r.status AS registration_status,
             r.revision AS registration_revision,
@@ -488,7 +487,7 @@ const pairDuck = async (
   if (duck.active_assignment_id !== null) return json({ error: "This duck is already paired." }, 409);
 
   const context = await env.DB.prepare(
-    `SELECT e.id AS event_id, e.heat_assignment_mode, e.round_one_heat_capacity,
+    `SELECT e.id AS event_id, e.round_one_heat_capacity,
             e.final_heat_capacity,
             r.id AS registration_id, r.status AS registration_status,
             r.revision AS registration_revision,
@@ -561,8 +560,12 @@ const pairDuck = async (
       WHERE id = ?`,
   ).bind(now, now, duck.id));
 
+  // Assigning a heat while pairing is the only heat model. The retired
+  // post-close balanced planner is gone, so an event row that still carries the
+  // retired mode value is paired into heats exactly like every other event
+  // rather than being left with no route to a heat at all.
   let heat: { id: string; number: number; slot: number; isNew: boolean } | null = null;
-  if (context.heat_assignment_mode === "IMMEDIATE_FIXED") {
+  {
     const existingHeat = await env.DB.prepare(
       `SELECT h.id, h.heat_number, COUNT(he.id) AS entry_count
          FROM heats h

@@ -430,7 +430,6 @@ const confirmationCallsites = [
   [staffHomeScript, 'if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;'],
   [staffHomeScript, 'if (!await appConfirm(confirmation)) return;'],
   [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Commit this exact balanced plan? Rosters become operational race data.")) return;'],
   [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Permanently delete the registration for " + registration.firstName + " " + registration.lastName + "? This removes the participant and their race entry. This cannot be undone.", { danger: true })) return;'],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
@@ -449,9 +448,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((inventoryIntakeScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // 19 minus the four retired returns/purge confirmations, plus participant
-  // deletion.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 16);
+  // 19 minus the four retired returns/purge confirmations, minus the retired
+  // balanced-plan commit, plus participant deletion.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 15);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // My Ducks has exactly one destructive action: self-service deletion.
   assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
@@ -1150,7 +1149,10 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
   assert.match(participantScript, /ArrowLeft/);
   assert.match(participantScript, /replaceChildren/);
   assert.match(participantScript, /textContent/);
-  assert.match(startLineScript, /PLANNED: \["lock"/);
+  // Rosters lock when the round starts, so the station offers no lock action
+  // and a planned heat is only ever a waiting state here.
+  assert.doesNotMatch(startLineScript, /"lock"/);
+  assert.match(startLineScript, /LOADING: \["ready"/);
   assert.match(startLineScript, /CALLING: \["start"/);
   assert.doesNotMatch(startLineScript, /\/results\/finalize|\["finish"/);
   assert.match(finishLineScript, /NDEFReader/);

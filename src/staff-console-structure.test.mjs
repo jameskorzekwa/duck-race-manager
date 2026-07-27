@@ -45,6 +45,36 @@ const eventScopedToggle = () => {
 
 const scopedElement = (roleAllowed) => ({ hidden: true, dataset: roleAllowed === undefined ? {} : { roleAllowed } });
 
+// Three race-control surfaces were removed outright. The balanced planner is a
+// retired assignment model, and the lock-roster and announcer-roster buttons
+// are respectively obsolete (rounds lock themselves) and a visible no-op.
+test("the heats console drops the balanced planner, lock-roster, and announcer-roster controls", () => {
+  const consoles = [
+    ["administrator", renderStaffHome("Administrator", true, [])],
+    ["race director", renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])],
+    ["announcer", renderStaffHome("Announcer", false, ["ANNOUNCER"])],
+    ["heat runner", renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"])],
+  ];
+  for (const [label, markup] of consoles) {
+    const heats = markup.match(/<section class="console-section" id="heats"[^]*?<\/section>/)?.[0];
+    assert.ok(heats, `${label} renders the heats section`);
+    assert.doesNotMatch(heats, /Balanced round-one plan|data-plan-preview|data-plan-commit|data-plan-result/, label);
+    assert.doesNotMatch(heats, /Lock roster|Load announcer roster/, label);
+    // The surviving race-control surfaces are untouched.
+    assert.match(heats, /data-heat-list/, label);
+    assert.match(heats, /data-finalist-list/, label);
+  }
+
+  // The draft configuration form no longer offers a heat assignment mode.
+  const adminMarkup = renderStaffHome("Administrator", true, []);
+  assert.doesNotMatch(adminMarkup, /heatAssignmentMode|POST_CLOSE_BALANCED|Balanced plan after close/);
+
+  // The start-line station lost its lock action and says so.
+  const startLine = renderStartLine("Heat Runner", true, false, ["HEAT_RUNNER"]);
+  assert.doesNotMatch(startLine, /Lock roster|lock, ready, call/);
+  assert.match(startLine, /This station can only ready, call, or start a heat\./);
+});
+
 test("every event-scoped console section ships hidden so no section flashes before an event loads", () => {
   const consoles = [
     ["administrator", renderStaffHome("Administrator", true, [])],

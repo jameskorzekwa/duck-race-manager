@@ -54,7 +54,10 @@ interface EventRow {
   registration_opens_at: string | null;
   registration_closes_at: string | null;
   email_required: number;
-  heat_assignment_mode: "IMMEDIATE_FIXED" | "POST_CLOSE_BALANCED";
+  // Retired `POST_CLOSE_BALANCED` rows may still exist in a database that was
+  // never migrated away from the default, so the column is read as a string and
+  // only ever written as the single supported mode.
+  heat_assignment_mode: "IMMEDIATE_FIXED";
   round_one_heat_capacity: number;
   final_heat_capacity: number;
   public_name_policy: "FIRST_NAME_ONLY" | "FIRST_NAME_LAST_INITIAL" | "FULL_NAME";
@@ -217,8 +220,15 @@ export const normalizedTimezone = (value: unknown): string | null => {
 
 const canonicalFingerprint = (value: Record<string, unknown>): string => JSON.stringify(value);
 
-const normalizedHeatCapacity = (value: unknown): number | null =>
-  Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 10_000
+// A heat is only worth racing with a real field in it, so round-one capacity
+// starts at MINIMUM_HEAT_SIZE rather than at one. The database CHECK stays
+// `> 0` on purpose: events configured before this rule keep loading, and a
+// migration that deploys ahead of this Worker must stay compatible with the
+// Worker still running when it lands.
+const MINIMUM_HEAT_SIZE = 3;
+
+const normalizedHeatCapacity = (value: unknown, minimum: number): number | null =>
+  Number.isInteger(value) && (value as number) >= minimum && (value as number) <= 10_000
     ? value as number
     : null;
 
@@ -234,14 +244,15 @@ const createEvent = async (
   const commandId = payload.commandId;
   const name = normalizedName(payload.name);
   const eventDate = normalizedDate(payload.eventDate, false);
-  const ducksPerHeat = normalizedHeatCapacity(payload.roundOneHeatCapacity);
+  const ducksPerHeat = normalizedHeatCapacity(payload.roundOneHeatCapacity, MINIMUM_HEAT_SIZE);
   if (
     typeof commandId !== "string" || !isCommandId(commandId)
     || name === null || eventDate === undefined || eventDate === null
     || ducksPerHeat === null
   ) {
     return json({
-      error: "Command, event name, event date, and ducks per heat (a whole number from 1 to 10000) are required.",
+      error:
+        `Command, event name, event date, and ducks per heat (a whole number from ${MINIMUM_HEAT_SIZE} to 10000) are required.`,
     }, 400);
   }
   // The console sends the operator's detected zone. An API caller that omits it
@@ -404,17 +415,21 @@ const parseConfigurationPatch = (
     if (typeof payload.emailRequired !== "boolean") return { error: "emailRequired must be a boolean." };
     patch.emailRequired = payload.emailRequired;
   }
+  // Heats are filled as participants are paired with ducks. The retired
+  // post-close balanced planner is gone, so the only mode an API caller may
+  // name is the one the application implements.
   if ("heatAssignmentMode" in payload) {
-    if (payload.heatAssignmentMode !== "IMMEDIATE_FIXED" && payload.heatAssignmentMode !== "POST_CLOSE_BALANCED") {
-      return { error: "Select a valid heat assignment mode." };
+    if (payload.heatAssignmentMode !== "IMMEDIATE_FIXED") {
+      return { error: "Heats are assigned during duck pairing; there is no other heat assignment mode." };
     }
     patch.heatAssignmentMode = payload.heatAssignmentMode;
   }
   for (const key of ["roundOneHeatCapacity", "finalHeatCapacity"] as const) {
     if (key in payload) {
+      const minimum = key === "roundOneHeatCapacity" ? MINIMUM_HEAT_SIZE : 1;
       const value = payload[key];
-      if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > 10_000) {
-        return { error: `${key} must be an integer between 1 and 10000.` };
+      if (!Number.isInteger(value) || (value as number) < minimum || (value as number) > 10_000) {
+        return { error: `${key} must be an integer between ${minimum} and 10000.` };
       }
       patch[key] = value as number;
     }
@@ -492,7 +507,8 @@ const configureEvent = async (
       ? event.registration_closes_at
       : patch.registrationClosesAt,
     emailRequired: patch.emailRequired ?? (event.email_required === 1),
-    heatAssignmentMode: patch.heatAssignmentMode ?? event.heat_assignment_mode,
+    // Never write the retired mode back, even if a legacy row still holds it.
+    heatAssignmentMode: "IMMEDIATE_FIXED" as const,
     roundOneHeatCapacity: patch.roundOneHeatCapacity ?? event.round_one_heat_capacity,
     finalHeatCapacity: patch.finalHeatCapacity ?? event.final_heat_capacity,
     publicNamePolicy: patch.publicNamePolicy ?? event.public_name_policy,
@@ -625,6 +641,8 @@ interface ReadinessStats {
   active_entry_without_round_one_heat_count: number;
   pending_provisioning_count: number;
   round_one_heat_count: number;
+  round_one_undersized_heat_count: number;
+  locked_heat_count: number;
   round_one_unready_heat_count: number;
   round_one_unfinished_heat_count: number;
   round_one_finalized_heat_count: number;
@@ -635,7 +653,6 @@ interface ReadinessStats {
   final_unfinished_heat_count: number;
   final_finalized_heat_count: number;
   final_missing_result_count: number;
-  any_heat_count: number;
 }
 
 const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | null> =>
@@ -674,6 +691,13 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
             )) AS pending_provisioning_count,
         (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') AS round_one_heat_count,
+        (SELECT COUNT(*) FROM heats h
+          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
+            AND (SELECT COUNT(*) FROM heat_entries he
+                  WHERE he.heat_id = h.id) < ${MINIMUM_HEAT_SIZE}) AS round_one_undersized_heat_count,
+        (SELECT COUNT(*) FROM heats h
+          WHERE h.event_id = e.id
+            AND (h.status != 'PLANNED' OR h.roster_locked_at IS NOT NULL)) AS locked_heat_count,
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
            AND h.status NOT IN ('PLANNED', 'LOADING', 'READY')) AS round_one_unready_heat_count,
@@ -711,8 +735,7 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
             ) != MIN(3, (
               SELECT COUNT(*) FROM heat_entries he
                WHERE he.event_id = e.id AND he.heat_id = h.id
-            ))) AS final_missing_result_count,
-       (SELECT COUNT(*) FROM heats h WHERE h.event_id = e.id) AS any_heat_count
+            ))) AS final_missing_result_count
      FROM events e
      WHERE e.id = ?`,
   ).bind(eventId).first<ReadinessStats>();
@@ -777,12 +800,21 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
     from: "REGISTRATION_CLOSED",
     to: "REGISTRATION_OPEN",
     requiresAdmin: true,
+    // Heats are built as participants are paired, so existing heats are the
+    // normal state at this point and never block a reopen. Round one not having
+    // started is the real boundary, and `e.status = 'REGISTRATION_CLOSED'`
+    // already enforces it. Every heat must still be an unlocked plan so the
+    // tail split below can run against the roster-lock triggers.
     commandSql: `INSERT INTO race_commands
       (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
      SELECT ?, e.id, 'REOPEN_REGISTRATION', e.id, ?, ?, ?
        FROM events e
       WHERE e.id = ? AND e.status = 'REGISTRATION_CLOSED'
-        AND NOT EXISTS (SELECT 1 FROM heats h WHERE h.event_id = e.id)`,
+        AND NOT EXISTS (
+          SELECT 1 FROM heats h
+           WHERE h.event_id = e.id
+             AND (h.status != 'PLANNED' OR h.roster_locked_at IS NOT NULL)
+        )`,
     updateSql: `UPDATE events SET status = 'REGISTRATION_OPEN', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'REGISTRATION_CLOSED'
         AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'REOPEN_REGISTRATION')`,
@@ -837,6 +869,11 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
          AND NOT EXISTS (
           SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
             AND h.status NOT IN ('PLANNED', 'LOADING', 'READY')
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM heats h
+           WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
+             AND (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) < ${MINIMUM_HEAT_SIZE}
         )`,
     updateSql: `UPDATE events SET status = 'ROUND_ONE', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'REGISTRATION_CLOSED'
@@ -1014,7 +1051,13 @@ const readinessFor = (
       }
       break;
     case "reopen-registration":
-      if (stats.any_heat_count > 0) blockers.push("Registration cannot reopen after heats have been created.");
+      // Heats existing is not a blocker: they are built as participants are
+      // paired, and a reopened registration simply fills the next free spot.
+      // Only a heat that has already left its unlocked plan blocks a reopen,
+      // which cannot happen before round one starts.
+      if (stats.locked_heat_count > 0) {
+        blockers.push("Heat rosters are already locked for racing, so registration can no longer reopen.");
+      }
       break;
     case "start-round-one":
       if (stats.active_entry_count === 0) blockers.push("At least one paired participant is required.");
@@ -1027,6 +1070,11 @@ const readinessFor = (
           : `Finish ${stats.pending_provisioning_count} pending NFC stickers before starting round one.`);
       }
       if (stats.round_one_heat_count === 0) blockers.push("At least one round-one heat is required.");
+      if (stats.round_one_undersized_heat_count > 0) {
+        blockers.push(
+          `A heat cannot be raced with fewer than ${MINIMUM_HEAT_SIZE} ducks. Reopen registration and sign up more participants.`,
+        );
+      }
       if (stats.round_one_heat_count > event.final_heat_capacity) {
         blockers.push("Round-one heat count cannot exceed final capacity.");
       }
@@ -1071,6 +1119,406 @@ const eventReadiness = async (eventId: string, env: Env): Promise<Response> => {
       ]),
     ),
   });
+};
+
+// ---------------------------------------------------------------------------
+// Round-one tail rebalancing
+// ---------------------------------------------------------------------------
+//
+// Heats fill in pairing order, so the last round-one heat is the only one that
+// can be short. A heat of one or two ducks is not a race, so closing
+// registration folds that tail into the heat before it, deliberately taking
+// that heat over its capacity, and reopening registration splits the tail back
+// out so the pre-close layout returns exactly.
+//
+// `heats.target_size` records how many slots a heat owns. Pairing creates every
+// heat with `target_size = events.round_one_heat_capacity` and never inserts
+// past it, and the manual roster replacement rewrites `target_size` to the
+// roster it just wrote, so outside a merge a round-one roster is always exactly
+// `target_size` or smaller. A merge is therefore the only way a heat can hold
+// more entries than its own `target_size`, which makes that comparison a
+// complete and self-describing merge marker with no extra state. Comparing
+// against the heat's own `target_size` rather than the event capacity is what
+// keeps the marker correct when pairing continues after registration closed and
+// starts a fresh short heat behind the merged one.
+//
+// Slot numbers stay contiguous from 1 on both sides of the operation: a merge
+// appends at `max(slot) + 1`, and a split moves exactly the entries past
+// `target_size` into slots 1..k. Contiguity is what lets pairing keep computing
+// the next slot as `COUNT(*) + 1` without ever colliding with
+// `UNIQUE (heat_id, slot_number)`.
+
+interface TailHeatRow {
+  id: string;
+  heat_number: number;
+  entry_count: number;
+}
+
+interface MergeEntryRow {
+  id: string;
+}
+
+interface MergePlan {
+  targetHeatId: string;
+  targetHeatNumber: number;
+  targetEntryCount: number;
+  tailHeatId: string;
+  tailHeatNumber: number;
+  entryIds: string[];
+}
+
+const planTailMerge = async (eventId: string, env: Env): Promise<MergePlan | null> => {
+  const heats = await env.DB.prepare(
+    `SELECT h.id, h.heat_number,
+            (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) AS entry_count
+       FROM heats h
+      WHERE h.event_id = ? AND h.round = 'ROUND_ONE'
+        AND h.status = 'PLANNED' AND h.roster_locked_at IS NULL
+      ORDER BY h.heat_number DESC
+      LIMIT 2`,
+  ).bind(eventId).all<TailHeatRow>();
+  const [tail, previous] = heats.results;
+  // Nothing to do for a full tail, and nothing to merge into when the short
+  // tail is the only heat. That single-heat case is exactly the "cannot run"
+  // state, which the round-one readiness blocker reports with reopening
+  // registration as its remedy.
+  if (tail === undefined || previous === undefined) return null;
+  if (tail.entry_count === 0 || tail.entry_count >= MINIMUM_HEAT_SIZE) return null;
+
+  const entries = await env.DB.prepare(
+    `SELECT he.id FROM heat_entries he
+      WHERE he.event_id = ? AND he.heat_id = ?
+      ORDER BY he.slot_number`,
+  ).bind(eventId, tail.id).all<MergeEntryRow>();
+  if (entries.results.length !== tail.entry_count) return null;
+  return {
+    targetHeatId: previous.id,
+    targetHeatNumber: previous.heat_number,
+    targetEntryCount: previous.entry_count,
+    tailHeatId: tail.id,
+    tailHeatNumber: tail.heat_number,
+    entryIds: entries.results.map((row) => row.id),
+  };
+};
+
+const mergeStatements = (
+  plan: MergePlan,
+  eventId: string,
+  commandId: string,
+  now: string,
+  env: Env,
+): D1PreparedStatement[] => {
+  const plannedUnlocked = `h.event_id = ? AND h.round = 'ROUND_ONE'
+    AND h.status = 'PLANNED' AND h.roster_locked_at IS NULL`;
+  const plannedUnlockedSelf = `heats.event_id = ? AND heats.round = 'ROUND_ONE'
+    AND heats.status = 'PLANNED' AND heats.roster_locked_at IS NULL`;
+  const commandCommitted = `EXISTS (
+    SELECT 1 FROM race_commands rc
+     WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = 'CLOSE_REGISTRATION'
+  )`;
+  const statements: D1PreparedStatement[] = [
+    // Claim the target's slots by recording the roster it owned before the
+    // merge. The CASE collapses to 0 when the target gained or lost an entry
+    // since the plan was read, and `CHECK (target_size IS NULL OR
+    // target_size > 0)` then aborts the whole batch rather than letting the
+    // bound slot numbers below land on a roster they no longer describe.
+    env.DB.prepare(
+      `UPDATE heats
+          SET target_size = (
+                SELECT CASE WHEN COUNT(*) = ? THEN COUNT(*) ELSE 0 END
+                  FROM heat_entries he WHERE he.heat_id = heats.id
+              ),
+              revision = revision + 1, source_command_id = ?, updated_at = ?
+        WHERE heats.id = ? AND ${plannedUnlockedSelf}
+          AND ${commandCommitted}`,
+    ).bind(
+      plan.targetEntryCount,
+      commandId,
+      now,
+      plan.targetHeatId,
+      eventId,
+      commandId,
+      eventId,
+    ),
+  ];
+  // At most two entries can move, because a tail is only merged below the
+  // minimum heat size, so every move is a single fully bound row rather than a
+  // set update whose SET expression would re-read rows it had already written.
+  for (const [index, entryId] of plan.entryIds.entries()) {
+    statements.push(env.DB.prepare(
+      `UPDATE heat_entries
+          SET heat_id = ?, slot_number = ?, source_command_id = ?
+        WHERE id = ? AND event_id = ? AND heat_id = ?
+          AND EXISTS (SELECT 1 FROM heats h WHERE h.id = ? AND ${plannedUnlocked})
+          AND ${commandCommitted}`,
+    ).bind(
+      plan.targetHeatId,
+      plan.targetEntryCount + index + 1,
+      commandId,
+      entryId,
+      eventId,
+      plan.tailHeatId,
+      plan.targetHeatId,
+      eventId,
+      commandId,
+      eventId,
+    ));
+  }
+  // The emptied tail heat is removed last. `heat_entries` references `heats`
+  // ON DELETE RESTRICT, so if any move above did not apply the leftover row
+  // aborts this delete and rolls the entire batch back; the merge can never
+  // half-commit.
+  statements.push(env.DB.prepare(
+    `DELETE FROM heats
+      WHERE heats.id = ? AND ${plannedUnlockedSelf}
+        AND ${commandCommitted}`,
+  ).bind(plan.tailHeatId, eventId, commandId, eventId));
+  return statements;
+};
+
+interface SplitSourceRow {
+  id: string;
+  heat_number: number;
+  target_size: number;
+  entry_count: number;
+  next_heat_number: number;
+  round_one_heat_capacity: number;
+}
+
+interface SplitPlan {
+  sourceHeatId: string;
+  sourceTargetSize: number;
+  newHeatId: string;
+  newHeatNumber: number;
+  capacity: number;
+  entryIds: string[];
+}
+
+const planTailSplit = async (eventId: string, env: Env): Promise<SplitPlan | null> => {
+  // A merge is the only writer that can push a round-one roster past the
+  // heat's own `target_size`, and a merge is only reachable from
+  // REGISTRATION_OPEN, so at most one such heat can exist at a time here.
+  const source = await env.DB.prepare(
+    `SELECT h.id, h.heat_number, h.target_size,
+            (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) AS entry_count,
+            (SELECT COALESCE(MAX(other.heat_number), 0) + 1 FROM heats other
+              WHERE other.event_id = h.event_id AND other.round = 'ROUND_ONE') AS next_heat_number,
+            e.round_one_heat_capacity
+       FROM heats h
+       JOIN events e ON e.id = h.event_id
+      WHERE h.event_id = ? AND h.round = 'ROUND_ONE'
+        AND h.status = 'PLANNED' AND h.roster_locked_at IS NULL
+        AND h.target_size IS NOT NULL
+        AND (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) > h.target_size
+      ORDER BY h.heat_number
+      LIMIT 1`,
+  ).bind(eventId).first<SplitSourceRow>();
+  if (source === null) return null;
+
+  const entries = await env.DB.prepare(
+    `SELECT he.id FROM heat_entries he
+      WHERE he.event_id = ? AND he.heat_id = ? AND he.slot_number > ?
+      ORDER BY he.slot_number`,
+  ).bind(eventId, source.id, source.target_size).all<MergeEntryRow>();
+  if (entries.results.length === 0) return null;
+  return {
+    sourceHeatId: source.id,
+    sourceTargetSize: source.target_size,
+    newHeatId: crypto.randomUUID(),
+    newHeatNumber: source.next_heat_number,
+    capacity: source.round_one_heat_capacity,
+    entryIds: entries.results.map((row) => row.id),
+  };
+};
+
+const splitStatements = (
+  plan: SplitPlan,
+  eventId: string,
+  commandId: string,
+  now: string,
+  env: Env,
+): D1PreparedStatement[] => {
+  const commandCommitted = `EXISTS (
+    SELECT 1 FROM race_commands rc
+     WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = 'REOPEN_REGISTRATION'
+  )`;
+  const statements: D1PreparedStatement[] = [
+    // The replacement heat only appears when the exact rows the plan intends to
+    // move are still beyond `target_size`. If it does not appear, the moves
+    // below point at a heat that does not exist and the foreign key aborts the
+    // batch, so a split is all-or-nothing without needing a post-commit repair.
+    env.DB.prepare(
+      `INSERT INTO heats (id, event_id, round, heat_number, status, target_size, source_command_id)
+       SELECT ?, e.id, 'ROUND_ONE', ?, 'PLANNED', e.round_one_heat_capacity, ?
+         FROM events e
+        WHERE e.id = ?
+          AND ${commandCommitted}
+          AND (
+            SELECT COUNT(*) FROM heat_entries he
+             WHERE he.event_id = e.id AND he.heat_id = ? AND he.slot_number > ?
+          ) = ?
+          AND EXISTS (
+            SELECT 1 FROM heats source
+             WHERE source.id = ? AND source.event_id = e.id AND source.round = 'ROUND_ONE'
+               AND source.status = 'PLANNED' AND source.roster_locked_at IS NULL
+          )`,
+    ).bind(
+      plan.newHeatId,
+      plan.newHeatNumber,
+      commandId,
+      eventId,
+      commandId,
+      eventId,
+      plan.sourceHeatId,
+      plan.sourceTargetSize,
+      plan.entryIds.length,
+      plan.sourceHeatId,
+    ),
+    // Restore the slots the merge borrowed. Pairing reads the event capacity
+    // rather than `target_size` when it looks for room, so putting the capacity
+    // back keeps the merge marker honest for the next close.
+    env.DB.prepare(
+      `UPDATE heats
+          SET target_size = ?, revision = revision + 1, source_command_id = ?, updated_at = ?
+        WHERE heats.id = ? AND heats.event_id = ? AND heats.round = 'ROUND_ONE'
+          AND heats.status = 'PLANNED' AND heats.roster_locked_at IS NULL
+          AND ${commandCommitted}`,
+    ).bind(
+      plan.capacity,
+      commandId,
+      now,
+      plan.sourceHeatId,
+      eventId,
+      commandId,
+      eventId,
+    ),
+  ];
+  for (const [index, entryId] of plan.entryIds.entries()) {
+    statements.push(env.DB.prepare(
+      `UPDATE heat_entries
+          SET heat_id = ?, slot_number = ?, source_command_id = ?
+        WHERE id = ? AND event_id = ? AND heat_id = ?
+          AND ${commandCommitted}`,
+    ).bind(
+      plan.newHeatId,
+      index + 1,
+      commandId,
+      entryId,
+      eventId,
+      plan.sourceHeatId,
+      commandId,
+      eventId,
+    ));
+  }
+  return statements;
+};
+
+// Starting a round takes its rosters out of the operators' hands: every planned
+// heat is locked and advanced to LOADING in the same guarded batch as the event
+// transition, which is what replaces the retired manual lock-roster control.
+const lockRoundStatement = (
+  round: "ROUND_ONE" | "FINAL",
+  commandType: string,
+  eventId: string,
+  commandId: string,
+  actorId: string,
+  now: string,
+  env: Env,
+): D1PreparedStatement => env.DB.prepare(
+  `UPDATE heats
+      SET status = 'LOADING', roster_locked_at = ?, roster_locked_by_staff_profile_id = ?,
+          revision = revision + 1, source_command_id = ?, updated_at = ?
+    WHERE heats.event_id = ? AND heats.round = ? AND heats.status = 'PLANNED'
+      AND heats.roster_locked_at IS NULL
+      AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = heats.id)
+      AND EXISTS (
+        SELECT 1 FROM race_commands rc
+         WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = ?
+      )`,
+).bind(now, actorId, commandId, now, eventId, round, commandId, eventId, commandType);
+
+interface LifecycleSideEffects {
+  statements: D1PreparedStatement[];
+  audit: Record<string, unknown> | null;
+}
+
+const lifecycleSideEffects = async (
+  definition: LifecycleDefinition,
+  eventId: string,
+  commandId: string,
+  now: string,
+  env: Env,
+  actor: StaffActor,
+): Promise<LifecycleSideEffects> => {
+  if (definition.action === "close-registration") {
+    const plan = await planTailMerge(eventId, env);
+    if (plan === null) return { statements: [], audit: null };
+    return {
+      statements: mergeStatements(plan, eventId, commandId, now, env),
+      audit: {
+        action: "ROUND_ONE_TAIL_MERGED",
+        merged_heat_number: plan.tailHeatNumber,
+        into_heat_number: plan.targetHeatNumber,
+        moved_entry_count: plan.entryIds.length,
+        resulting_roster_size: plan.targetEntryCount + plan.entryIds.length,
+      },
+    };
+  }
+  if (definition.action === "reopen-registration") {
+    const plan = await planTailSplit(eventId, env);
+    if (plan === null) return { statements: [], audit: null };
+    return {
+      statements: splitStatements(plan, eventId, commandId, now, env),
+      audit: {
+        action: "ROUND_ONE_TAIL_SPLIT",
+        restored_heat_number: plan.newHeatNumber,
+        moved_entry_count: plan.entryIds.length,
+      },
+    };
+  }
+  if (definition.action === "start-round-one" || definition.action === "start-final") {
+    const round = definition.action === "start-round-one" ? "ROUND_ONE" : "FINAL";
+    return {
+      statements: [
+        lockRoundStatement(round, definition.commandType, eventId, commandId, actor.id, now, env),
+      ],
+      audit: { action: "HEAT_ROSTERS_LOCKED", round },
+    };
+  }
+  return { statements: [], audit: null };
+};
+
+const sideEffectAuditStatement = (
+  audit: Record<string, unknown>,
+  definition: LifecycleDefinition,
+  eventId: string,
+  commandId: string,
+  actorId: string,
+  now: string,
+  env: Env,
+): D1PreparedStatement => {
+  // Heat numbers, roster sizes, and the round name only: no participant,
+  // contact, or token material ever reaches an audit detail.
+  const { action, ...details } = audit;
+  return env.DB.prepare(
+    `INSERT INTO audit_events
+      (id, event_id, command_id, action, subject_type, subject_id,
+       actor_type, occurred_at, details_json)
+     SELECT ?, ?, ?, ?, 'EVENT', ?, 'STAFF', ?, ?
+       FROM race_commands
+      WHERE id = ? AND event_id = ? AND command_type = ?`,
+  ).bind(
+    crypto.randomUUID(),
+    eventId,
+    commandId,
+    String(action),
+    eventId,
+    now,
+    JSON.stringify({ staff_profile_id: actorId, command_id: commandId, ...details }),
+    commandId,
+    eventId,
+    definition.commandType,
+  );
 };
 
 const runLifecycleCommand = async (
@@ -1122,11 +1570,17 @@ const runLifecycleCommand = async (
   if (readiness.allowed !== true) return json({ error: "Event is not ready for this transition.", readiness }, 409);
 
   const now = new Date().toISOString();
+  // Round-one tail rebalancing and automatic roster locking ride in the same
+  // guarded batch as the status change, so the heats and the event status can
+  // never disagree. Every added statement carries the same command-committed
+  // guard as `updateSql`, so a transition that loses its race writes nothing.
+  const sideEffects = await lifecycleSideEffects(definition, eventId, commandId, now, env, actor);
   let results: D1Result<unknown>[];
   try {
     results = await env.DB.batch([
       env.DB.prepare(definition.commandSql).bind(commandId, now, now, fingerprint, eventId),
       env.DB.prepare(definition.updateSql).bind(now, eventId, commandId),
+      ...sideEffects.statements,
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -1151,6 +1605,9 @@ const runLifecycleCommand = async (
         eventId,
         definition.commandType,
       ),
+      ...(sideEffects.audit === null
+        ? []
+        : [sideEffectAuditStatement(sideEffects.audit, definition, eventId, commandId, actor.id, now, env)]),
     ]);
   } catch {
     const resolved = await safelyResolveLifecycleRace(commandId, eventId, fingerprint, definition, env);
