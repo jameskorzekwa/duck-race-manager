@@ -6,6 +6,7 @@ import {
 import { authenticateStaff } from "./auth.ts";
 import { hasAnyRole } from "./authorization.ts";
 import {
+  appSelectScript,
   finishLineScript,
   inventoryIntakeScript,
   liveScript,
@@ -156,7 +157,7 @@ export const createWorker = (
       });
     }
 
-    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)) {
+    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/live.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)) {
       const script = url.pathname === "/assets/live-ui.js"
         ? liveUiScript
         : url.pathname === "/assets/register.js"
@@ -171,11 +172,13 @@ export const createWorker = (
                   ? startLineScript
                   : url.pathname === "/assets/finish-line.js"
                     ? finishLineScript
-                    : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
+                    : url.pathname === "/assets/app-select.js"
+                      ? appSelectScript
+                      : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js"].includes(url.pathname)
+          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/start-line.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)
             ? "no-store"
             : "public, max-age=3600",
           "content-type": "text/javascript; charset=utf-8",
