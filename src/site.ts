@@ -1,4 +1,5 @@
 import { operationalRoles, type OperationalRole } from "./authorization.ts";
+import { renderParticipantQrSvg } from "./participant-qr.ts";
 import {
   homePhaseCta,
   phaseAllowsRaceStatus,
@@ -122,6 +123,14 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .page-title { max-width:12ch; font-size:clamp(2.7rem,10vw,5.4rem); }
 .muted { color:var(--muted); line-height:1.55; }
 .notice { margin:1.2rem 0; padding:1rem; border-left:.5rem solid var(--orange); background:#fff0df; line-height:1.5; }
+.lookup-code-notice { display:flex; flex-wrap:wrap; gap:1rem; align-items:center; }
+.lookup-code-detail { flex:1 1 14rem; min-width:0; }
+.lookup-code-qr { flex:0 0 auto; padding:.5rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; }
+.participant-qr { display:block; width:clamp(8rem,38vw,10.5rem); height:auto; }
+.qr-scanner { display:grid; gap:.75rem; margin-top:1rem; padding:1rem; border:2px solid var(--ink); border-radius:.9rem; background:#fff; }
+.qr-scanner[hidden] { display:none; }
+.qr-video { width:100%; max-width:26rem; min-width:0; margin:0 auto; aspect-ratio:1; border-radius:.65rem; background:var(--ink); object-fit:cover; }
+.qr-scanner .actions { margin:0; }
 form { display:grid; width:100%; min-width:0; max-width:100%; gap:1.15rem; clear:both; }
 .field-grid { display:grid; min-width:0; max-width:100%; gap:1rem; }
 .field-grid > *,form > *,label,fieldset { min-width:0; max-width:100%; }
@@ -632,7 +641,10 @@ export const renderStatus = (
       <p class="eyebrow">Private registration status</p>
       <h1 class="page-title" data-private-status-heading>${escapeHtml(heading)}</h1>
       <p class="lede" data-private-status-event>Keep this page private. This is your status link for ${escapeHtml(eventName)}.</p>
-      <div class="notice"><strong>Staff lookup code</strong><br><span class="code">${escapeHtml(lookupCode)}</span><br><span class="muted">Save this code or bookmark this page.</span></div>
+      <div class="notice lookup-code-notice">
+        <div class="lookup-code-detail"><strong>Staff lookup code</strong><br><span class="code">${escapeHtml(lookupCode)}</span><br><span class="muted">Show this screen to staff when you pick your duck. They can scan the code or type it in. Save this code or bookmark this page.</span></div>
+        <div class="lookup-code-qr">${renderParticipantQrSvg(lookupCode)}</div>
+      </div>
       <div data-live-personal="private"><dl class="facts"><div class="fact"><dt>Participant</dt><dd>${escapeHtml(participantName)}</dd></div><div class="fact"><dt>Status</dt><dd>${registrationStatus}</dd></div><div class="fact"><dt>Race date</dt><dd>${escapeHtml(raceDate)}</dd></div></dl>
         ${raceStatus === undefined ? "" : raceStatus === null
           ? '<p class="muted">Race status is not currently public.</p>'
@@ -1154,8 +1166,14 @@ export const renderStaffDuck = (
       <dl class="facts" data-duck-summary></dl>
       <section class="work-area" data-pairing-work hidden>
         <div class="privacy"><strong>Current event</strong><span data-pairing-event></span></div>
+        <div class="actions" data-qr-launch hidden><button class="button" type="button" data-scan-qr>Scan QR code</button></div>
+        <section class="qr-scanner" data-qr-scanner hidden aria-label="Participant QR scanner">
+          <video class="qr-video" data-qr-video muted playsinline></video>
+          <p class="muted" data-qr-message aria-live="polite">Point the camera at the participant's QR code.</p>
+          <div class="actions"><button class="button secondary" type="button" data-qr-cancel>Cancel and search manually</button></div>
+        </section>
         <form method="post" action="/staff" data-registration-search>
-          <label>Participant code, name, phone, or email<input name="query" autocomplete="off" minlength="2" maxlength="80" required placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com"><span>Contact details are visible only to authorized registration staff.</span></label>
+          <label>Participant code, name, phone, or email<input name="query" autocomplete="off" minlength="2" maxlength="80" required placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com"><span>An exact lookup code pairs immediately. Anything else searches by name, code, phone, or email. Contact details are visible only to authorized registration staff.</span></label>
           <button class="button secondary" type="submit">Find participant</button>
         </form>
         <div class="result-list" data-registration-results></div>

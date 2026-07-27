@@ -50,6 +50,44 @@ const renderedPages = [
 
 const style = renderedPages[0].match(/<style>([\s\S]+)<\/style>/)?.[1];
 
+test("the private status page shows a scannable QR beside the readable lookup code", () => {
+  const status = renderStatus({
+    first_name: "Daisy",
+    last_name: "Duck",
+    lookup_code: "DAASY234",
+    event_name: "Summer Duck Race",
+    event_date: "2026-08-30",
+    status: "SUBMITTED",
+  });
+
+  // The code stays readable so staff can always type it instead.
+  assert.match(status, /<span class="code">DAASY234<\/span>/);
+  assert.match(status, /<svg class="participant-qr"/);
+  assert.match(status, /viewBox="0 0 29 29"/);
+  // The QR encodes the code only; no participant detail may appear in it.
+  const qr = status.match(/<svg class="participant-qr"[\s\S]*?<\/svg>/)[0];
+  assert.doesNotMatch(qr, /Daisy|Duck|DAASY234|Summer/);
+  // A participant page still exposes no staff-only or contact data.
+  assert.doesNotMatch(status, /@example\.com|555-/);
+});
+
+test("the staff pairing page offers scanning, manual search, and a cancel path", () => {
+  const page = renderStaffDuck("a".repeat(32), "Registration staff");
+
+  assert.match(page, /data-scan-qr/);
+  // Scanning is hidden until the client confirms the browser supports it, so an
+  // unsupported device never shows a dead control.
+  assert.match(page, /data-qr-launch hidden/);
+  assert.match(page, /<section class="qr-scanner" data-qr-scanner hidden/);
+  assert.match(page, /<video class="qr-video" data-qr-video muted playsinline><\/video>/);
+  assert.match(page, /data-qr-cancel[^>]*>Cancel and search manually/);
+  // Manual search always remains present as the fallback path.
+  assert.match(page, /data-registration-search/);
+  assert.match(page, /An exact lookup code pairs immediately/);
+  // The page itself never renders a participant or a QR payload.
+  assert.doesNotMatch(page, /QD1:/);
+});
+
 test("shared CSS prevents intrinsic form and card widths from escaping containers", () => {
   assert.ok(style);
   assert.match(style, /\* \{ box-sizing:border-box; \}/);

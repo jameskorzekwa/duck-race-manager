@@ -17,6 +17,7 @@ import {
   liveRuntimeHelpersScript,
   liveUiScript,
   participantHandoffHelpersScript,
+  participantQrHelpersScript,
   participantScript,
   registrationHandoffHelpersScript,
   registrationScript,
@@ -32,6 +33,88 @@ import { searchScript } from "./site.ts";
 const eventSlugHelpers = () => new Function(
   `${eventSlugHelpersScript}; return { eventSlugFromName };`,
 )();
+
+const participantQrHelpers = () => new Function(
+  `${participantQrHelpersScript}; return { qrParseParticipantPayload, qrScannerSupported, qrCameraProblem };`,
+)();
+
+test("the scanner only accepts QuickDucks participant payloads", async () => {
+  const { qrParseParticipantPayload } = participantQrHelpers();
+  const { participantQrPayload } = await import("./participant-qr.ts");
+
+  // The browser parser must agree exactly with the server encoder.
+  assert.equal(qrParseParticipantPayload(participantQrPayload("DAASY234")), "DAASY234");
+  assert.equal(qrParseParticipantPayload(" qd1:daasy234 "), "DAASY234");
+  // Unrelated codes a camera will inevitably see must be ignored so the console
+  // keeps scanning instead of sending them to the pairing command.
+  assert.equal(qrParseParticipantPayload("https://quickducks.com/t/" + "a".repeat(32)), null);
+  assert.equal(qrParseParticipantPayload("DAASY234"), null);
+  assert.equal(qrParseParticipantPayload("QD1:DAISY234"), null);
+  assert.equal(qrParseParticipantPayload("QD1:"), null);
+  assert.equal(qrParseParticipantPayload(""), null);
+  assert.equal(qrParseParticipantPayload(undefined), null);
+});
+
+test("camera scanning is offered only where the browser can actually do it", () => {
+  const { qrScannerSupported } = participantQrHelpers();
+  const supported = {
+    isSecureContext: true,
+    BarcodeDetector: function BarcodeDetector() {},
+    navigator: { mediaDevices: { getUserMedia() {} } },
+  };
+
+  assert.equal(qrScannerSupported(supported), true);
+  assert.equal(qrScannerSupported({ ...supported, isSecureContext: false }), false);
+  assert.equal(qrScannerSupported({ ...supported, BarcodeDetector: undefined }), false);
+  assert.equal(qrScannerSupported({ ...supported, navigator: {} }), false);
+  assert.equal(qrScannerSupported({ ...supported, navigator: { mediaDevices: {} } }), false);
+});
+
+test("staff pairing pairs from a scan or an exact code and always keeps a manual path", () => {
+  assert.doesNotThrow(() => new Function(staffDuckScript));
+
+  // One shared, guarded pairing command backs every entry point.
+  assert.equal(staffDuckScript.match(/\/assignments"/g).length, 1);
+  assert.match(staffDuckScript, /const pairWithLookupCode = async \(lookupCode\)/);
+  assert.match(staffDuckScript, /commandId: crypto\.randomUUID\(\)/);
+
+  // A scanned participant code pairs without a second confirmation step.
+  assert.match(staffDuckScript, /qrParseParticipantPayload\(code\.rawValue\)/);
+  assert.match(staffDuckScript, /await pairWithLookupCode\(lookupCode\)/);
+  // An exact typed code pairs directly; anything else stays a reviewed list.
+  assert.match(staffDuckScript, /body\.exactMatch && body\.exactMatch\.assignedDuckNumber === null/);
+  assert.match(staffDuckScript, /await pairWithLookupCode\(body\.exactMatch\.lookupCode\)/);
+  assert.match(staffDuckScript, /button\.addEventListener\("click", \(\) => renderSelection\(registration\)\)/);
+
+  // A failed scan invites another attempt or a manual search instead of dead-ending.
+  assert.match(staffDuckScript, /not a QuickDucks participant code/);
+  assert.match(staffDuckScript, /Scan again, or search for the participant manually/);
+  assert.match(staffDuckScript, /data-qr-cancel/);
+
+  // The camera must be released on every exit path, not just on success.
+  assert.match(staffDuckScript, /for \(const track of qrStream\.getTracks\(\)\) track\.stop\(\)/);
+  assert.match(staffDuckScript, /addEventListener\("pagehide", qrReleaseCamera\)/);
+  assert.match(staffDuckScript, /if \(document\.hidden\) qrStop\(\)/);
+  // A live refresh must not tear down an in-progress scan.
+  assert.match(staffDuckScript, /isBlocked: \(\) => staffDuckBusy > 0 \|\| selectedRegistration !== null \|\| qrScanning/);
+
+  // Scanning is a convenience over the code, never a new source of truth.
+  assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+});
+
+test("camera failures explain the fix and always keep manual search available", () => {
+  const { qrCameraProblem } = participantQrHelpers();
+  const named = (name) => qrCameraProblem(Object.assign(new Error("denied"), { name }));
+
+  assert.match(named("NotAllowedError"), /Allow camera access/);
+  assert.match(named("NotFoundError"), /No usable camera/);
+  assert.match(named("NotReadableError"), /another app/);
+  for (const name of ["NotAllowedError", "NotFoundError", "NotReadableError", "AbortError", "Whatever"]) {
+    assert.match(named(name), /search manually|Cancel and search/);
+  }
+  // No provider or device detail may reach staff-visible text.
+  assert.doesNotMatch(named("NotAllowedError"), /denied/);
+});
 
 test("staff client generates and live-previews server-compatible event slugs", () => {
   const { eventSlugFromName } = eventSlugHelpers();

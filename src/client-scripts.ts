@@ -4616,7 +4616,56 @@ staffLiveSubscription = globalThis.quickDucksLive.subscribe({
 });
 `;
 
-export const staffDuckScript = finishHandoffHelpersScript + String.raw`
+// Pure helpers for participant QR pairing. These mirror `participant-qr.ts` on
+// the server: the browser only decides whether a scanned value looks like a
+// QuickDucks participant code and is worth sending. Every authorization,
+// event, inventory, and registration-state check stays server-side, so a
+// spoofed or hand-crafted QR gains nothing beyond typing a code by hand.
+export const participantQrHelpersScript = String.raw`
+const qrParticipantPrefix = "QD1:";
+const qrLookupCodePattern = /^[A-HJ-NP-Z2-9]{8}$/;
+
+const qrNormalizeLookupCode = (value) => String(value == null ? "" : value)
+  .trim()
+  .toUpperCase()
+  .replace(/[^A-Z0-9]/g, "");
+
+const qrParseParticipantPayload = (value) => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.toUpperCase().startsWith(qrParticipantPrefix)) return null;
+  const code = qrNormalizeLookupCode(trimmed.slice(qrParticipantPrefix.length));
+  return qrLookupCodePattern.test(code) ? code : null;
+};
+
+// Camera scanning needs a secure context, a camera, and native QR detection.
+// When any of those is missing the console hides the scan button entirely and
+// staff use the code field, which now pairs an exact code immediately.
+const qrScannerSupported = (scope) => {
+  const target = scope || globalThis;
+  const mediaDevices = target.navigator && target.navigator.mediaDevices;
+  return target.isSecureContext === true
+    && typeof target.BarcodeDetector === "function"
+    && !!mediaDevices
+    && typeof mediaDevices.getUserMedia === "function";
+};
+
+const qrCameraProblem = (error) => {
+  const name = error && error.name;
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "Camera access was blocked. Allow camera access for this site, or cancel and search manually.";
+  }
+  if (name === "NotFoundError" || name === "OverconstrainedError") {
+    return "No usable camera was found on this device. Cancel and search manually.";
+  }
+  if (name === "NotReadableError" || name === "AbortError") {
+    return "The camera is being used by another app. Close it and scan again, or cancel and search manually.";
+  }
+  return "The camera could not be started. Scan again, or cancel and search manually.";
+};
+`;
+
+export const staffDuckScript = finishHandoffHelpersScript + participantQrHelpersScript + String.raw`
 const finishStationStorageKey = "quickducks.finishStation";
 const finishStationTagMatch = location.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]{22,128})$/);
 let finishStationHandoff = false;
@@ -4702,6 +4751,145 @@ const renderSelection = (registration) => {
   document.querySelector("[data-confirm-pairing]").disabled = false;
 };
 
+// One pairing command shared by the confirm button, an exactly typed lookup
+// code, and a scanned QR code. Each entry point only supplies the code; the
+// guarded server command remains the single authority on whether the pairing
+// is allowed.
+const pairWithLookupCode = async (lookupCode) => {
+  if (!currentEvent) return { ok: false, error: "There is no event currently accepting duck pairing." };
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  message.textContent = "Pairing duck and participant…";
+  try {
+    const result = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/assignments", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: currentEvent.id,
+        lookupCode,
+      }),
+    });
+    workArea.hidden = true;
+    summary.replaceChildren();
+    addFact("Duck", "#" + result.duck.visibleNumber);
+    addFact("Participant", result.participant.firstName + " " + result.participant.lastName);
+    addFact("Heat", result.heat ? "Round one · Heat " + result.heat.number : "Assignment pending");
+    pageTitle.textContent = "Duck #" + result.duck.visibleNumber + " paired";
+    message.textContent = result.replayed ? "This pairing was already saved." : "Duck paired successfully.";
+    selectedRegistration = null;
+    globalThis.quickDucksLive.markClean(root);
+    return { ok: true };
+  } catch (error) {
+    if (error.message === "signed-out") return { ok: false, signedOut: true };
+    message.textContent = error.message;
+    return { ok: false, error: error.message };
+  } finally {
+    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
+    endBusy();
+    staffDuckSubscription?.resume();
+  }
+};
+
+const qrLaunch = document.querySelector("[data-qr-launch]");
+const qrPanel = document.querySelector("[data-qr-scanner]");
+const qrVideo = document.querySelector("[data-qr-video]");
+const qrMessage = document.querySelector("[data-qr-message]");
+const qrSupported = qrScannerSupported(globalThis);
+let qrStream = null;
+let qrDetector = null;
+let qrTimer = null;
+let qrScanning = false;
+
+const qrReleaseCamera = () => {
+  qrScanning = false;
+  if (qrTimer !== null) {
+    clearTimeout(qrTimer);
+    qrTimer = null;
+  }
+  if (qrStream !== null) {
+    for (const track of qrStream.getTracks()) track.stop();
+    qrStream = null;
+  }
+  qrVideo.srcObject = null;
+};
+
+const qrStop = () => {
+  qrReleaseCamera();
+  qrPanel.hidden = true;
+  qrLaunch.hidden = !qrSupported;
+};
+
+const qrTick = async () => {
+  if (!qrScanning) return;
+  try {
+    if (qrVideo.readyState >= 2 && qrVideo.videoWidth > 0) {
+      const codes = await qrDetector.detect(qrVideo);
+      for (const code of codes) {
+        const lookupCode = qrParseParticipantPayload(code.rawValue);
+        if (lookupCode !== null) {
+          qrScanning = false;
+          qrMessage.textContent = "Code scanned. Pairing…";
+          qrStop();
+          const outcome = await pairWithLookupCode(lookupCode);
+          if (!outcome.ok && !outcome.signedOut) {
+            message.textContent = outcome.error + " Scan again, or search for the participant manually.";
+          }
+          return;
+        }
+      }
+      if (codes.length > 0) {
+        qrMessage.textContent = "That is not a QuickDucks participant code. Ask for their registration screen and scan again, or cancel and search manually.";
+      }
+    }
+  } catch {
+    // Individual frames fail to decode constantly while the camera focuses.
+    // Keep scanning rather than surfacing per-frame noise to staff.
+  }
+  if (qrScanning) qrTimer = setTimeout(qrTick, 250);
+};
+
+const qrStart = async () => {
+  if (!currentEvent) return;
+  qrLaunch.hidden = true;
+  qrPanel.hidden = false;
+  qrMessage.textContent = "Starting the camera…";
+  try {
+    const formats = await globalThis.BarcodeDetector.getSupportedFormats();
+    if (!formats.includes("qr_code")) {
+      qrMessage.textContent = "This browser cannot scan QR codes. Cancel and search manually.";
+      return;
+    }
+    qrDetector = new globalThis.BarcodeDetector({ formats: ["qr_code"] });
+    qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+    // The page can be refreshed or cancelled while the permission prompt is
+    // open, so drop a stream that arrives after scanning was called off.
+    if (qrPanel.hidden) {
+      for (const track of qrStream.getTracks()) track.stop();
+      qrStream = null;
+      return;
+    }
+    qrVideo.srcObject = qrStream;
+    await qrVideo.play();
+    qrMessage.textContent = "Point the camera at the participant's QR code.";
+    qrScanning = true;
+    qrTick();
+  } catch (error) {
+    qrReleaseCamera();
+    qrMessage.textContent = qrCameraProblem(error);
+  }
+};
+
+qrLaunch.querySelector("[data-scan-qr]").addEventListener("click", qrStart);
+document.querySelector("[data-qr-cancel]").addEventListener("click", () => {
+  qrStop();
+  message.textContent = "Find the participant, review both records, then confirm once.";
+});
+addEventListener("pagehide", qrReleaseCamera);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) qrStop();
+});
+
 const showPairing = (data) => {
   pageTitle.textContent = "Pair Duck #" + data.duck.visibleNumber;
   addFact("Duck", "#" + data.duck.visibleNumber);
@@ -4714,8 +4902,11 @@ const showPairing = (data) => {
     message.textContent = "There is no event currently accepting duck pairing.";
     return;
   }
-  message.textContent = "Find the participant, review both records, then confirm once.";
+  message.textContent = qrSupported
+    ? "Scan the participant's QR code, or find them by code or name."
+    : "Find the participant by code or name, then confirm.";
   workArea.hidden = false;
+  qrLaunch.hidden = !qrSupported;
   document.querySelector("[data-pairing-event]").textContent = currentEvent.name;
 };
 
@@ -4727,6 +4918,7 @@ const load = async () => {
     ]);
     currentEvent = eventResponse.event;
     summary.replaceChildren();
+    qrStop();
     workArea.hidden = true;
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
@@ -4757,6 +4949,26 @@ document.querySelector("[data-registration-search]").addEventListener("submit", 
     const parameters = new URLSearchParams({ eventId: currentEvent.id, q: String(query) });
     const body = await fetchJson("/api/v1/staff/registrations/search?" + parameters);
     globalThis.quickDucksLive.markClean(event.currentTarget);
+    // An exactly typed lookup code identifies one participant with no
+    // ambiguity, so pair straight away instead of showing a one-row list to
+    // click. A code that is already paired falls through to the normal list,
+    // which explains which duck holds it.
+    if (body.exactMatch && body.exactMatch.assignedDuckNumber === null) {
+      const form = event.currentTarget;
+      results.append(text(
+        "p",
+        "Exact code match: " + body.exactMatch.firstName + " " + body.exactMatch.lastName + ". Pairing…",
+        "muted",
+      ));
+      const outcome = await pairWithLookupCode(body.exactMatch.lookupCode);
+      if (outcome.ok) {
+        form.reset();
+        results.replaceChildren();
+      } else if (!outcome.signedOut) {
+        results.replaceChildren(text("p", outcome.error, "error-text"));
+      }
+      return;
+    }
     if (body.registrations.length === 0) {
       results.append(text("p", "No matching registration was found.", "muted"));
       return;
@@ -4783,46 +4995,17 @@ document.querySelector("[data-registration-search]").addEventListener("submit", 
 
 document.querySelector("[data-confirm-pairing]").addEventListener("click", async (event) => {
   if (!selectedRegistration || !currentEvent) return;
-  event.currentTarget.disabled = true;
-  staffDuckBusy += 1;
-  const endBusy = globalThis.quickDucksLive.beginBusy();
-  message.textContent = "Pairing duck and participant…";
-  try {
-    const result = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/assignments", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: currentEvent.id,
-        lookupCode: selectedRegistration.lookupCode,
-      }),
-    });
-    workArea.hidden = true;
-    summary.replaceChildren();
-    addFact("Duck", "#" + result.duck.visibleNumber);
-    addFact("Participant", result.participant.firstName + " " + result.participant.lastName);
-    addFact("Heat", result.heat ? "Round one · Heat " + result.heat.number : "Assignment pending");
-    pageTitle.textContent = "Duck #" + result.duck.visibleNumber + " paired";
-    message.textContent = result.replayed ? "This pairing was already saved." : "Duck paired successfully.";
-    selectedRegistration = null;
-    globalThis.quickDucksLive.markClean(root);
-  } catch (error) {
-    if (error.message !== "signed-out") {
-      message.textContent = error.message;
-      event.currentTarget.disabled = false;
-    }
-  } finally {
-    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
-    endBusy();
-    staffDuckSubscription?.resume();
-  }
+  const button = event.currentTarget;
+  button.disabled = true;
+  const outcome = await pairWithLookupCode(selectedRegistration.lookupCode);
+  if (!outcome.ok && !outcome.signedOut) button.disabled = false;
 });
 
 staffDuckSubscription = globalThis.quickDucksLive.subscribe({
   domains: ["event", "participants", "ducks", "heats"],
   root,
   refresh: load,
-  isBlocked: () => staffDuckBusy > 0 || selectedRegistration !== null,
+  isBlocked: () => staffDuckBusy > 0 || selectedRegistration !== null || qrScanning,
 });
 }
 `;

@@ -6,6 +6,7 @@ import {
   requireAnyRole,
   type OperationalRole,
 } from "./authorization.ts";
+import { isLookupCode, normalizeLookupCode } from "./participant-qr.ts";
 import { isCommandId } from "./registration.ts";
 import {
   cognitoStaffProvisioner,
@@ -310,7 +311,7 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
     return json({ error: "Event and at least two search characters are required." }, 400);
   }
 
-  const exactCode = query.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const exactCode = normalizeLookupCode(query);
   const like = `%${escapeLike(query)}%`;
   const results = await env.DB.prepare(
     `SELECT r.id AS registration_id, re.id AS race_entry_id,
@@ -348,19 +349,28 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
     visible_number: number | null;
   }>();
 
-  return json({
-    registrations: results.results.map((row) => ({
-      registrationId: row.registration_id,
-      raceEntryId: row.race_entry_id,
-      firstName: row.first_name,
-      lastName: row.last_name,
-      email: row.email,
-      phone: row.phone,
-      lookupCode: row.lookup_code,
-      status: row.status,
-      assignedDuckNumber: row.visible_number,
-    })),
-  });
+  const registrations = results.results.map((row) => ({
+    registrationId: row.registration_id,
+    raceEntryId: row.race_entry_id,
+    firstName: row.first_name,
+    lastName: row.last_name,
+    email: row.email,
+    phone: row.phone,
+    lookupCode: row.lookup_code,
+    status: row.status,
+    assignedDuckNumber: row.visible_number,
+  }));
+
+  // A query that is exactly one participant's lookup code identifies a single
+  // person with no ambiguity, so the staff console pairs it directly instead of
+  // rendering a one-item list to click through. Anything else, including a
+  // partial code, stays a normal search. This only reports the match; the
+  // pairing command still performs every authorization and state check.
+  const exactMatch = isLookupCode(exactCode)
+    ? registrations.find((registration) => registration.lookupCode.toUpperCase() === exactCode) ?? null
+    : null;
+
+  return json({ registrations, exactMatch });
 };
 
 interface PairingContext {
@@ -419,8 +429,8 @@ const pairDuck = async (
   ) {
     return json({ error: "Command, event, and participant lookup code are required." }, 400);
   }
-  const lookupCode = lookupCodeValue.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-  if (!/^[A-HJ-NP-Z2-9]{8}$/.test(lookupCode)) {
+  const lookupCode = normalizeLookupCode(lookupCodeValue);
+  if (!isLookupCode(lookupCode)) {
     return json({ error: "Enter a valid participant lookup code." }, 400);
   }
 

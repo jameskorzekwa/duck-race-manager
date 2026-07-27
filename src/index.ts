@@ -92,6 +92,17 @@ const html = (body: string, status = 200, noindex = false, formActionOrigin?: st
     },
   });
 
+// Camera access stays denied for the whole site except the authenticated staff
+// duck-pairing page, which is the only surface that scans a participant QR
+// code. Public pages, APIs, and every other staff station keep `camera=()`.
+const withCameraAccess = (response: Response): Response => {
+  response.headers.set(
+    "permissions-policy",
+    securityHeaders["permissions-policy"].replace("camera=()", "camera=(self)"),
+  );
+  return response;
+};
+
 const withSecurityHeaders = (response: Response): Response => {
   for (const [name, value] of Object.entries(securityHeaders)) response.headers.set(name, value);
   return response;
@@ -389,12 +400,12 @@ export const createWorker = (
       if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"])) {
         return withSessionCookies(html(renderStaffAuthError("This account does not have permission to inspect staff duck records.", actor), 403, true));
       }
-      return withSessionCookies(staffHtml(renderStaffDuck(
+      return withSessionCookies(withCameraAccess(staffHtml(renderStaffDuck(
         staffDuckMatch[1],
         actor.displayName ?? actor.email,
         actor.isSystemAdmin,
         actor.roles,
-      )));
+      ))));
     }
 
     // Public duck detail by the number printed on the duck and shown on the

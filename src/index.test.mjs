@@ -678,6 +678,35 @@ test("routes authenticated tag scans to protected code and contact pairing searc
   assert.match(body, /data-registration-search/);
 });
 
+test("camera access is granted only to the authenticated duck-pairing page", async () => {
+  const token = "a".repeat(32);
+  const authenticated = createWorker(async () => ({
+    id: "staff_test",
+    cognitoSub: "staff-sub",
+    email: "staff@example.com",
+    displayName: "Registration Staff",
+    isSystemAdmin: false,
+    roles: ["REGISTRATION"],
+    authentication: "cookie",
+  }));
+  const pairing = await authenticated.fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
+
+  assert.equal(pairing.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
+
+  // Every other surface, signed in or not, keeps the camera denied.
+  const others = await Promise.all([
+    authenticated.fetch(new Request("https://quickducks.com/"), env),
+    authenticated.fetch(new Request("https://quickducks.com/register"), env),
+    authenticated.fetch(new Request("https://quickducks.com/staff"), env),
+    authenticated.fetch(new Request("https://quickducks.com/staff/finish-line"), env),
+    authenticated.fetch(new Request("https://quickducks.com/api/v1/events/current"), env),
+    authenticated.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env),
+  ]);
+  for (const response of others) {
+    assert.match(response.headers.get("permissions-policy") ?? "", /(^|, )camera=\(\)/);
+  }
+});
+
 test("starts hosted Cognito sign-in and renders safe callback failures", async () => {
   const start = await worker.fetch(
     new Request("https://quickducks.com/staff/login/start?returnTo=%2Fstaff"),
