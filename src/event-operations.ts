@@ -1390,18 +1390,12 @@ const forceDeleteEvent = async (
   const now = new Date().toISOString();
   const fingerprint = canonicalFingerprint({ operation: "FORCE_DELETE_EVENT", eventId, revision });
   // Every later statement is guarded so a stale-revision race deletes nothing.
+  // The sentinel row is also what `heat_entries_delete_unlocked` looks for, so
+  // a locked roster is deletable here and nowhere else.
   const sentinel = `EXISTS (
     SELECT 1 FROM race_commands
      WHERE id = ? AND event_id = ? AND command_type = 'FORCE_DELETE_EVENT'
   )`;
-  // ARCHIVED is no longer a lifecycle state; it survives here only as a
-  // transient value required by the CURRENTLY migrated schema. The status
-  // update satisfies `heat_entries_delete_unlocked`'s archived escape and the
-  // synthetic PURGING claim satisfies `events_require_purge_claim`. Both are
-  // written and destroyed inside this one atomic batch, so ARCHIVED is never
-  // observable through the UI or API and never persists past the delete.
-  // PR 4 drops those triggers and the event_purge_claims table; delete this
-  // status update and the synthetic claim insert at the same time.
   const scoped = (table: string): D1PreparedStatement =>
     env.DB.prepare(`DELETE FROM ${table} WHERE event_id = ? AND ${sentinel}`)
       .bind(eventId, commandId, eventId);
@@ -1421,27 +1415,12 @@ const forceDeleteEvent = async (
           WHERE e.id = ? AND e.revision = ?
             AND NOT EXISTS (SELECT 1 FROM events WHERE id != ?)`,
       ).bind(commandId, now, now, fingerprint, eventId, revision, eventId),
-      scoped("event_purge_claims"),
-      env.DB.prepare(
-        `UPDATE events SET status = 'ARCHIVED', updated_at = ? WHERE id = ? AND ${sentinel}`,
-      ).bind(now, eventId, commandId, eventId),
-      env.DB.prepare(
-        `INSERT INTO event_purge_claims
-          (event_id, command_id, status, claimed_by_staff_profile_id, claimed_at)
-         SELECT ?, ?, 'PURGING', ?, ? WHERE ${sentinel}`,
-      ).bind(eventId, commandId, actor.id, now, commandId, eventId),
       scoped("email_attempts"),
       scoped("email_notifications"),
       scoped("heat_result_history"),
       scoped("heat_results"),
       scoped("heat_entries"),
       scoped("heats"),
-      // Retired return tables. No code writes them any more, but rows recorded
-      // before this release still exist under the current schema, so the delete
-      // must clear them. PR 4 drops the tables and these three statements.
-      scoped("return_batch_items"),
-      scoped("return_batches"),
-      scoped("duck_event_dispositions"),
       scoped("duck_assignments"),
       scoped("event_ducks"),
       scoped("duck_inventory_events"),
@@ -1465,16 +1444,26 @@ const forceDeleteEvent = async (
       global("audit_events"),
       scoped("race_entries"),
       scoped("registrations"),
+      // The last two statements clear the sentinel row itself, so they cannot
+      // read it back. They re-check the sentinel insert's own condition
+      // instead — the event still at the expected revision, and still the only
+      // one. Nothing in this batch changes `events.revision` or creates an
+      // event, and a D1 batch is a single transaction, so those statements fire
+      // exactly when the sentinel insert did.
       env.DB.prepare(
         `DELETE FROM race_commands
           WHERE event_id = ?
-            AND EXISTS (SELECT 1 FROM event_purge_claims WHERE event_id = ? AND command_id = ?)`,
-      ).bind(eventId, eventId, commandId),
+            AND EXISTS (
+              SELECT 1 FROM events e
+               WHERE e.id = ? AND e.revision = ?
+                 AND NOT EXISTS (SELECT 1 FROM events other WHERE other.id != ?)
+            )`,
+      ).bind(eventId, eventId, revision, eventId),
       env.DB.prepare(
         `DELETE FROM events
-          WHERE id = ?
-            AND EXISTS (SELECT 1 FROM event_purge_claims WHERE event_id = ? AND command_id = ?)`,
-      ).bind(eventId, eventId, commandId),
+          WHERE id = ? AND revision = ?
+            AND NOT EXISTS (SELECT 1 FROM events other WHERE other.id != ?)`,
+      ).bind(eventId, revision, eventId),
     ]);
   } catch {
     return json({ error: "Event deletion did not complete. No partial deletion was accepted." }, 409);

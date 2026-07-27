@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -231,45 +231,62 @@ test("audit timeline selects only redacted fields", async () => {
   assert.deepEqual(db.statements[0].args.slice(0, 2), ["event_test", "event_test"]);
 });
 
-test("support migration enforces terminal notifications and a PURGING delete claim", () => {
+test("the migrated schema enforces terminal notifications and retired the purge claim", () => {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
-  for (const name of [
-    "0001_staff_identity.sql",
-    "0002_registration_foundation.sql",
-    "0003_assignment_and_heat_status.sql",
-    "0004_pairing_status_and_purge.sql",
-    "0005_staff_access_management.sql",
-    "0011_support_operations.sql",
-  ]) {
+  for (const name of readdirSync(new URL("../db/migrations/", import.meta.url))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort()) {
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
   }
   database.exec(`
     INSERT INTO staff_profiles (id, cognito_sub, email, is_system_admin)
     VALUES ('admin', 'admin-sub', 'admin@example.com', 1);
     INSERT INTO events (id, slug, name, timezone, status)
-    VALUES ('event', 'test-race', 'Test Race', 'America/Denver', 'ARCHIVED');
+    VALUES ('event', 'test-race', 'Test Race', 'America/Denver', 'COMPLETED');
     INSERT INTO registrations
       (id, event_id, first_name, last_name, lookup_code, private_token_hash, submitted_at, status_changed_at)
     VALUES ('registration', 'event', 'Daisy', 'Duck', 'DAISY234', 'hash', '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z');
   `);
 
+  // A terminal status still requires a terminal timestamp, and vice versa.
   assert.throws(() => database.exec(`
     INSERT INTO email_notifications
       (id, event_id, registration_id, notification_type, status)
     VALUES ('notification', 'event', 'registration', 'UPCOMING_HEAT', 'FAILED');
+  `), /CHECK constraint failed/);
+  assert.throws(() => database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status, terminal_at)
+    VALUES ('pending', 'event', 'registration', 'UPCOMING_HEAT', 'PENDING', '2026-07-25T00:00:00Z');
   `), /CHECK constraint failed/);
   database.exec(`
     INSERT INTO email_notifications
       (id, event_id, registration_id, notification_type, status, terminal_at)
     VALUES ('notification', 'event', 'registration', 'UPCOMING_HEAT', 'FAILED', '2026-07-25T00:00:00Z');
   `);
-  assert.throws(() => database.exec("DELETE FROM events WHERE id = 'event'"), /requires PURGING claim/);
-  database.exec(`
-    INSERT INTO event_purge_claims
-      (event_id, command_id, status, claimed_by_staff_profile_id, claimed_at)
-    VALUES ('event', 'command', 'PURGING', 'admin', '2026-07-25T00:00:00Z');
-  `);
+
+  // The purge claim table and its delete gate are gone; nothing stands between
+  // an administrator force delete and an event with no child rows left.
+  for (const name of ["event_purge_claims", "return_batches", "return_batch_items"]) {
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name = ?").get(name).count,
+      0,
+      name,
+    );
+  }
+  for (const name of ["events_require_purge_claim", "purging_events_are_read_only"]) {
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+        .get(name).count,
+      0,
+      name,
+    );
+  }
+  database.exec("DELETE FROM email_notifications WHERE event_id = 'event'");
+  database.exec("DELETE FROM registrations WHERE event_id = 'event'");
+  database.exec("DELETE FROM events WHERE id = 'event'");
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM events").get().count, 0);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

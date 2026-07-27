@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -55,20 +55,10 @@ const makeEnv = (db) => ({
   DB: db,
 });
 
-const migrationNames = [
-  "0001_staff_identity.sql",
-  "0002_registration_foundation.sql",
-  "0003_assignment_and_heat_status.sql",
-  "0004_pairing_status_and_purge.sql",
-  "0005_staff_access_management.sql",
-  "0006_participant_operations.sql",
-  "0007_duck_inventory_operations.sql",
-  "0008_event_operations.sql",
-  "0009_heat_result_operations.sql",
-  "0010_staff_lifecycle.sql",
-  "0011_support_operations.sql",
-  "0012_staff_role_assignments.sql",
-];
+// The full ordered chain, so these run against the schema production runs.
+const migrationNames = readdirSync(new URL("../db/migrations/", import.meta.url))
+  .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+  .sort();
 
 const sqliteD1 = (database, beforeBatch = () => {}) => ({
   prepare(sql) {
@@ -121,18 +111,45 @@ test("authenticates a Cognito subject only when a matching staff profile exists"
   assert.deepEqual(db.statements[0].args, [actor.cognitoSub]);
 });
 
-// Unknown D1 role vocabulary is ignored rather than trusted or fatal. Retired
-// values such as RETURN_STEWARD survive in staff_role_assignments until the
-// schema rebuild, so the session must still authenticate with exactly the
-// roles that remain valid and nothing more.
-test("authentication ignores unknown D1 roles instead of broadening access", async () => {
+// `staff_role_assignments` now constrains `role` to the current vocabulary, so
+// an unreadable stored set means the database was corrupted out of band. The
+// session denies rather than authorizing whatever subset it could parse.
+test("authentication denies a session whose stored roles are unreadable", async () => {
+  for (const results of [
+    [{ role: "ADMIN" }, { role: "REGISTRATION" }],
+    [{ role: "RETURN_STEWARD" }],
+    [{ role: "RETURN_STEWARD" }, { role: "REGISTRATION" }],
+    [{ role: "registration" }],
+    [{ role: null }],
+    [{ role: "REGISTRATION" }, { role: "REGISTRATION" }],
+  ]) {
+    const db = makeDb(() => ({
+      id: actor.id,
+      cognito_sub: actor.cognitoSub,
+      email: actor.email,
+      display_name: actor.displayName,
+      is_system_admin: 0,
+    }), () => ({ results }));
+    const result = await authenticateStaff(
+      new Request("https://quickducks.com/api/v1/staff/events", {
+        headers: { authorization: "Bearer valid.jwt.token" },
+      }),
+      makeEnv(db),
+      async () => ({ sub: actor.cognitoSub }),
+    );
+    assert.equal(result, null, JSON.stringify(results));
+  }
+});
+
+// A representable stored set still projects exactly its roles and nothing more.
+test("authentication projects a valid stored role set without broadening it", async () => {
   const db = makeDb(() => ({
     id: actor.id,
     cognito_sub: actor.cognitoSub,
     email: actor.email,
     display_name: actor.displayName,
     is_system_admin: 0,
-  }), () => ({ results: [{ role: "ADMIN" }, { role: "RETURN_STEWARD" }, { role: "REGISTRATION" }] }));
+  }), () => ({ results: [{ role: "RACE_DIRECTOR" }, { role: "REGISTRATION" }] }));
   const result = await authenticateStaff(
     new Request("https://quickducks.com/api/v1/staff/events", {
       headers: { authorization: "Bearer valid.jwt.token" },
@@ -141,35 +158,15 @@ test("authentication ignores unknown D1 roles instead of broadening access", asy
     async () => ({ sub: actor.cognitoSub }),
   );
   assert.notEqual(result, null);
-  assert.deepEqual(result.roles, ["REGISTRATION"]);
+  assert.deepEqual(result.roles, ["REGISTRATION", "RACE_DIRECTOR"]);
   assert.equal(result.isSystemAdmin, false);
-});
 
-// A stale RETURN_STEWARD row must not act as a role of its own: the actor is
-// treated exactly like one holding no roles at all.
-test("a stale RETURN_STEWARD assignment grants no permissions of its own", async () => {
-  const db = makeDb(() => ({
-    id: actor.id,
-    cognito_sub: actor.cognitoSub,
-    email: actor.email,
-    display_name: actor.displayName,
-    is_system_admin: 0,
-  }), () => ({ results: [{ role: "RETURN_STEWARD" }] }));
-  const staleActor = await authenticateStaff(
-    new Request("https://quickducks.com/api/v1/staff/events", {
-      headers: { authorization: "Bearer valid.jwt.token" },
-    }),
-    makeEnv(db),
-    async () => ({ sub: actor.cognitoSub }),
-  );
-  assert.deepEqual(staleActor.roles, []);
-  assert.equal(staleActor.isSystemAdmin, false);
-
-  // Every route the retired role used to unlock is either gone or forbidden.
+  // A session holding no roles at all reaches no staff route.
+  const roleless = { ...result, roles: [] };
   const denied = await handleStaffApi(
     new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}`),
     makeEnv(makeDb(() => null)),
-    staleActor,
+    roleless,
   );
   assert.equal(denied.status, 403);
 });

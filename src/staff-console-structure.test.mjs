@@ -117,8 +117,8 @@ test("console-nav anchors are event-scoped, ship hidden, and stay role filtered"
 
   // Role filtering still removes anchors entirely for roles that cannot use them.
   assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Announcer", false, ["ANNOUNCER"]))), ["#events", "#heats"]);
-  // A stale retired role unlocks no console anchor beyond the always-on event one.
-  assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Stale Steward", false, ["RETURN_STEWARD"]))), ["#events"]);
+  // An account with no operational roles gets no console anchor at all.
+  assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Roleless Staff", false, []))), []);
   assert.deepEqual(
     navHrefs(consoleNav(renderStaffHome("Registration Staff", false, ["REGISTRATION"]))),
     ["#events", "#participants"],
@@ -200,7 +200,6 @@ test("the staff nav lists only the pages the actor may open", () => {
     [renderStaffHome("Result Taker", false, ["RESULT_TAKER"]), ["/staff", "/staff/finish-line"]],
     [renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]), ["/staff", "/staff/inventory-intake"]],
     [renderStaffHome("Announcer", false, ["ANNOUNCER"]), ["/staff"]],
-    [renderStaffHome("Stale Steward", false, ["RETURN_STEWARD"]), ["/staff"]],
     [renderStaffHome("Registration Staff", false, ["REGISTRATION"]), ["/staff"]],
     [renderStaffHome("No Role", false, []), ["/staff"]],
     [renderStaffHome("Mixed Staff", false, ["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff", "/staff/finish-line", "/staff/inventory-intake"]],

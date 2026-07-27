@@ -100,6 +100,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0011_support_operations.sql",
     "0012_staff_role_assignments.sql",
     "0013_followed_collection_entries.sql",
+    "0014_simplified_lifecycle_schema.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -116,9 +117,6 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       ('staff-announcer', 'staff', 'ANNOUNCER', '2026-07-26T00:00:00Z'),
       ('staff-heats', 'staff', 'HEAT_RUNNER', '2026-07-26T00:00:00Z'),
       ('staff-results', 'staff', 'RESULT_TAKER', '2026-07-26T00:00:00Z'),
-      -- A stale retired assignment that PR 4 will clean up. The whole workflow
-      -- below must run normally with this row present.
-      ('staff-returns', 'staff', 'RETURN_STEWARD', '2026-07-26T00:00:00Z'),
       ('staff-director', 'staff', 'RACE_DIRECTOR', '2026-07-26T00:00:00Z');
   `);
 
@@ -658,7 +656,6 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "audit_events",
     "event_ducks",
     "duck_assignments",
-    "duck_event_dispositions",
     "duck_inventory_events",
     "heats",
     "heat_entries",
@@ -666,16 +663,14 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "heat_result_history",
     "browser_registration_collections",
     "browser_collection_registrations",
-    "return_batches",
-    "return_batch_items",
     "email_notifications",
     "email_attempts",
-    "event_purge_claims",
   ];
   for (const table of purgedTables) {
     assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, table);
   }
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_profiles").get().count, 2);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_role_assignments").get().count, 6);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM organization_event_defaults").get().count, 1);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 

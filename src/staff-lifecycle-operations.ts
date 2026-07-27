@@ -1,7 +1,6 @@
 import type { StaffActor } from "./auth.ts";
 import {
   normalizeOperationalRoles,
-  readStoredOperationalRoles,
   type OperationalRole,
 } from "./authorization.ts";
 import { isCommandId } from "./registration.ts";
@@ -69,7 +68,7 @@ interface LifecycleCommandRow {
 }
 
 const rolesFromCsv = (value: string): OperationalRole[] =>
-  readStoredOperationalRoles(value === "" ? [] : value.split(","));
+  normalizeOperationalRoles(value === "" ? [] : value.split(",")) ?? [];
 
 const staffProfileResponse = (
   profile: StaffProfileRow,
@@ -136,12 +135,9 @@ const commandMatches = (
   && command.requested_roles_json === rolesJson;
 
 const commandResponse = (command: LifecycleCommandRow): Response => {
-  // Historical commands can still carry retired role vocabulary, so the replay
-  // projection reads them tolerantly instead of collapsing to an empty list.
-  const storedRoles = JSON.parse(command.requested_roles_json ?? "null") as unknown;
   const requestedRoles = command.requested_roles_json === null
     ? rolesFromCsv(command.roles_csv)
-    : readStoredOperationalRoles(Array.isArray(storedRoles) ? storedRoles : []);
+    : normalizeOperationalRoles(JSON.parse(command.requested_roles_json)) ?? [];
   return json({
     staff: staffProfileResponse({
     ...command,

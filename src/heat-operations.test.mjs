@@ -1,20 +1,16 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { handleEventOperations } from "./event-operations.ts";
 import { handleHeatOperations } from "./heat-operations.ts";
 
-const migrationNames = [
-  "0001_staff_identity.sql",
-  "0002_registration_foundation.sql",
-  "0003_assignment_and_heat_status.sql",
-  "0004_pairing_status_and_purge.sql",
-  "0005_staff_access_management.sql",
-  "0008_event_operations.sql",
-  "0009_heat_result_operations.sql",
-];
+// The full ordered chain, so heat behavior is always exercised against the
+// schema production actually runs.
+const migrationNames = readdirSync(new URL("../db/migrations/", import.meta.url))
+  .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+  .sort();
 
 class D1Statement {
   constructor(database, sql) {
@@ -452,7 +448,12 @@ test("heat operations cover balanced planning, lifecycle, results, corrections, 
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE details_json LIKE '%reason%'").get().count >= 3, true);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 
-  database.exec("UPDATE events SET status = 'ARCHIVED' WHERE id = 'event'");
+  // Locked rosters are deletable only under the force delete sentinel.
+  database.exec(`
+    INSERT INTO race_commands (id, event_id, command_type, requested_at, completed_at)
+    VALUES ('force-delete-sentinel', 'event', 'FORCE_DELETE_EVENT',
+            '2026-07-26T09:00:00Z', '2026-07-26T09:00:00Z');
+  `);
   database.exec("DELETE FROM heat_results WHERE event_id = 'event'");
   database.exec("DELETE FROM heat_entries WHERE event_id = 'event'");
   database.exec("DELETE FROM heats WHERE event_id = 'event'");

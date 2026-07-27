@@ -136,7 +136,7 @@ const migratedDatabase = () => {
 
 // Seeds one complete mid-race dataset covering every event-linked table in the
 // migrated schema, independent of the event status under test.
-const seedFullEventDataset = (database, status, withPurgeClaim) => {
+const seedFullEventDataset = (database, status) => {
   database.exec(`
     INSERT INTO events (id, slug, name, event_date, timezone, status)
     VALUES ('event_test', 'test-race', 'Test Duck Race', '2026-08-30', 'UTC', '${status}');
@@ -213,20 +213,6 @@ const seedFullEventDataset = (database, status, withPurgeClaim) => {
     VALUES ('notification', 'event_test', 'registration', 'heat', 'HEAT_ASSIGNED', 'PENDING');
     INSERT INTO email_attempts (id, event_id, notification_id, attempt_number, stage, status, started_at)
     VALUES ('attempt', 'event_test', 'notification', 1, 'QUEUE', 'PENDING', '2026-07-26T02:00:00Z');
-    INSERT INTO return_batches
-      (id, event_id, status, source_command_id, started_by_staff_profile_id, started_at)
-    VALUES ('batch', 'event_test', 'OPEN', 'batch-command', 'admin_test', '2026-07-26T03:00:00Z');
-    INSERT INTO return_batch_items
-      (id, event_id, batch_id, event_duck_id, sequence_number, disposition, source_command_id,
-       added_by_staff_profile_id, added_at)
-    VALUES
-      ('batch-item', 'event_test', 'batch', 'event-duck', 1, 'RETURNED', 'item-command',
-       'admin_test', '2026-07-26T03:01:00Z');
-    INSERT INTO duck_event_dispositions
-      (id, event_id, event_duck_id, disposition, recorded_by_staff_profile_id, source_command_id, recorded_at)
-    VALUES
-      ('disposition', 'event_test', 'event-duck', 'RETURNED', 'admin_test',
-       '33333333-3333-4333-8333-333333333333', '2026-07-26T03:02:00Z');
     INSERT INTO browser_registration_collections (id, token_hash, created_at, last_seen_at, expires_at)
     VALUES ('collection', 'collection-hash', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', '2027-07-26T00:00:00Z');
     INSERT INTO browser_collection_registrations (collection_id, registration_id, added_at)
@@ -237,12 +223,6 @@ const seedFullEventDataset = (database, status, withPurgeClaim) => {
       ('audit', 'event_test', '11111111-1111-4111-8111-111111111111', 'DUCK_PAIRED', 'RACE_ENTRY',
        'entry', 'STAFF', '2026-07-26T00:00:00Z', '{}');
   `);
-  if (withPurgeClaim) {
-    database.exec(`
-      INSERT INTO event_purge_claims (event_id, command_id, status, claimed_by_staff_profile_id, claimed_at)
-      VALUES ('event_test', 'claim-command', 'PURGING', 'admin_test', '2026-07-26T04:00:00Z');
-    `);
-  }
 };
 
 const eventLinkedTables = [
@@ -254,20 +234,16 @@ const eventLinkedTables = [
   "event_ducks",
   "duck_assignments",
   "duck_inventory_events",
-  "duck_event_dispositions",
   "heats",
   "heat_entries",
   "heat_results",
   "heat_result_history",
   "email_notifications",
   "email_attempts",
-  "return_batches",
-  "return_batch_items",
   "browser_registration_collections",
   "browser_collection_registrations",
   "race_commands",
   "audit_events",
-  "event_purge_claims",
 ];
 
 const count = (database, table) =>
@@ -398,16 +374,34 @@ test("force delete removes the complete dataset in one guarded batch with bound 
   assert.match(sql, /DELETE FROM events/);
   assert.match(sql, /'FORCE_DELETE_EVENT'/);
   assert.match(sql, /e\.revision = \?/);
-  assert.match(sql, /SET status = 'ARCHIVED'/);
-  assert.match(sql, /'PURGING'/);
+  // The retired schema's scaffolding is gone: no mid-batch status rewrite, no
+  // synthetic purge claim, and no writes to the dropped tables.
+  assert.doesNotMatch(sql, /ARCHIVED/);
+  assert.doesNotMatch(sql, /PURGING/);
+  assert.doesNotMatch(sql, /event_purge_claims/);
+  assert.doesNotMatch(sql, /return_batch/);
+  assert.doesNotMatch(sql, /duck_event_dispositions/);
+  assert.doesNotMatch(sql, /UPDATE events/);
   assert.ok(statements.every((statement) => statement.args.length > 0));
   assert.match(
     statements[0].sql,
     /NOT EXISTS \(SELECT 1 FROM events WHERE id != \?\)/,
     "sentinel insert must re-check the only-event invariant inside the batch",
   );
+  // Every delete is guarded. Most read the FORCE_DELETE_EVENT sentinel row back;
+  // the final two clear that row themselves, so they re-check the sentinel
+  // insert's own condition (expected revision, still the only event) instead.
   const guarded = statements.filter((statement) => statement.sql.startsWith("DELETE FROM"));
-  assert.ok(guarded.every((statement) => /EXISTS \(\s*SELECT 1 FROM (?:race_commands|event_purge_claims)/.test(statement.sql)));
+  assert.ok(guarded.every((statement) =>
+    /EXISTS \(\s*SELECT 1 FROM race_commands/.test(statement.sql)
+    || /revision = \?[\s\S]*NOT EXISTS \(SELECT 1 FROM events other WHERE other\.id != \?\)/.test(statement.sql)));
+  const finalStatements = statements.slice(-2);
+  assert.match(finalStatements[0].sql, /^DELETE FROM race_commands/);
+  assert.match(finalStatements[1].sql, /^DELETE FROM events/);
+  for (const statement of finalStatements) {
+    assert.match(statement.sql, /revision = \?/);
+    assert.match(statement.sql, /NOT EXISTS \(SELECT 1 FROM events other WHERE other\.id != \?\)/);
+  }
 
   // `duck_tags.supersedes_tag_id` is the one self-reference in the delete set,
   // and it is ON DELETE RESTRICT. Its link must be cleared under the same
@@ -422,31 +416,23 @@ test("force delete removes the complete dataset in one guarded batch with bound 
   assert.deepEqual(statements[clearIndex].args, statements[tagDeleteIndex].args);
 });
 
-// Delete event is the only cleanup path now, so it must work from every one of
-// the six lifecycle statuses against the CURRENT migrated schema — triggers,
-// CHECK constraints, self-referential tag chains and all. This PR ships no
-// migration, so the retired RETURN_PROCESSING/ARCHIVED rows that may still
-// exist during the deploy window are covered too, both with and without a
-// pre-existing purge claim: the batch deletes claims before it writes its own
-// synthetic one, and only the no-claim case proves that ordering is not merely
-// reusing a row that already happened to be there.
-for (const [status, withPurgeClaim] of [
-  ["DRAFT", false],
-  ["REGISTRATION_OPEN", false],
-  ["REGISTRATION_CLOSED", false],
-  ["ROUND_ONE", false],
-  ["FINAL", false],
-  ["COMPLETED", false],
-  ["COMPLETED", true],
-  ["RETURN_PROCESSING", false],
-  ["RETURN_PROCESSING", true],
-  ["ARCHIVED", false],
-  ["ARCHIVED", true],
+// Delete event is the only cleanup path, so it must work from every one of the
+// six remaining lifecycle statuses against the rebuilt schema — triggers, CHECK
+// constraints, locked rosters, self-referential tag chains and all. The seeded
+// heat is FINALIZED with a locked roster, so each of these runs also proves the
+// rebuilt `heat_entries_delete_unlocked` sentinel escape end to end.
+for (const status of [
+  "DRAFT",
+  "REGISTRATION_OPEN",
+  "REGISTRATION_CLOSED",
+  "ROUND_ONE",
+  "FINAL",
+  "COMPLETED",
 ]) {
-  test(`migrated SQLite force delete clears every event-linked row from ${status}${withPurgeClaim ? " with an active purge claim" : ""}`, async (context) => {
+  test(`migrated SQLite force delete clears every event-linked row from ${status}`, async (context) => {
     const database = migratedDatabase();
     context.after(() => database.close());
-    seedFullEventDataset(database, status, withPurgeClaim);
+    seedFullEventDataset(database, status);
     const env = makeEnv(sqliteD1(database));
     const seededCommands = count(database, "race_commands");
 
@@ -505,7 +491,7 @@ for (const [status, withPurgeClaim] of [
 test("a command identifier still recorded for another operation returns 409 without writes", async (context) => {
   const database = migratedDatabase();
   context.after(() => database.close());
-  seedFullEventDataset(database, "ROUND_ONE", false);
+  seedFullEventDataset(database, "ROUND_ONE");
   const env = makeEnv(sqliteD1(database));
 
   const reuse = await handleEventOperations(
@@ -527,7 +513,7 @@ test("a command identifier still recorded for another operation returns 409 with
 test("a second event refuses with 409 and deletes nothing", async (context) => {
   const database = migratedDatabase();
   context.after(() => database.close());
-  seedFullEventDataset(database, "ROUND_ONE", false);
+  seedFullEventDataset(database, "ROUND_ONE");
   database.exec(`
     INSERT INTO events (id, slug, name, event_date, timezone, status)
     VALUES ('event_other', 'other-race', 'Other Duck Race', '2026-09-30', 'UTC', 'DRAFT');
@@ -554,7 +540,7 @@ test("a second event refuses with 409 and deletes nothing", async (context) => {
 test("a second event created between preflight and batch makes the batch delete nothing", async (context) => {
   const database = migratedDatabase();
   context.after(() => database.close());
-  seedFullEventDataset(database, "ROUND_ONE", false);
+  seedFullEventDataset(database, "ROUND_ONE");
   const d1 = sqliteD1(database);
   const raced = {
     prepare: (sql) => d1.prepare(sql),
@@ -593,7 +579,7 @@ test("a second event created between preflight and batch makes the batch delete 
 test("a concurrent revision change makes the guarded batch delete nothing", async (context) => {
   const database = migratedDatabase();
   context.after(() => database.close());
-  seedFullEventDataset(database, "REGISTRATION_OPEN", false);
+  seedFullEventDataset(database, "REGISTRATION_OPEN");
   const d1 = sqliteD1(database);
   const raced = {
     prepare: (sql) => d1.prepare(sql),
@@ -618,15 +604,15 @@ test("a concurrent revision change makes the guarded batch delete nothing", asyn
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
-// ARCHIVED is not a lifecycle state any more. Force delete still writes it (and
-// a synthetic PURGING claim) mid-batch because the current triggers demand it,
-// but the whole batch is atomic: a refused delete must leave the original
-// status and no claim behind, so ARCHIVED is never observable or reachable.
-test("a refused force delete leaves no ARCHIVED status and no synthetic purge claim", async (context) => {
+// Force delete no longer rewrites the status mid-batch, so a refused delete
+// must leave the event exactly as it was — same status, same revision — and
+// must not strand its FORCE_DELETE_EVENT sentinel, which would leave the
+// rebuilt roster trigger permanently escaped for this event.
+test("a refused force delete leaves the status untouched and strands no sentinel", async (context) => {
   for (const status of ["REGISTRATION_OPEN", "ROUND_ONE", "COMPLETED"]) {
     const database = migratedDatabase();
     context.after(() => database.close());
-    seedFullEventDataset(database, status, false);
+    seedFullEventDataset(database, status);
     const d1 = sqliteD1(database);
     const raced = {
       prepare: (sql) => d1.prepare(sql),
@@ -647,7 +633,19 @@ test("a refused force delete leaves no ARCHIVED status and no synthetic purge cl
       status,
       `${status} must survive a refused delete unchanged`,
     );
-    assert.equal(count(database, "event_purge_claims"), 0, status);
+    assert.equal(
+      database.prepare(
+        "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FORCE_DELETE_EVENT'",
+      ).get().count,
+      0,
+      `${status} must not strand a force delete sentinel`,
+    );
+    // The locked roster is therefore still protected by the rebuilt trigger.
+    assert.throws(
+      () => database.exec("DELETE FROM heat_entries WHERE id = 'heat-entry'"),
+      /heat roster is locked/,
+      status,
+    );
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   }
 });
@@ -657,7 +655,7 @@ test("a refused force delete leaves no ARCHIVED status and no synthetic purge cl
 test("no lifecycle route can move an event into a retired status", async (context) => {
   const database = migratedDatabase();
   context.after(() => database.close());
-  seedFullEventDataset(database, "COMPLETED", false);
+  seedFullEventDataset(database, "COMPLETED");
   const env = makeEnv(sqliteD1(database));
 
   for (const action of ["start-return-processing", "purge-ready", "purge-ready/cancel"]) {
@@ -679,5 +677,21 @@ test("no lifecycle route can move an event into a retired status", async (contex
     assert.equal(response, null, action);
   }
   assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status, "COMPLETED");
-  assert.equal(count(database, "event_purge_claims"), 0);
+});
+
+// The rebuilt CHECK is the authoritative backstop: even a direct write cannot
+// park an event in a retired status any more.
+test("the rebuilt events CHECK rejects the retired statuses outright", async (context) => {
+  const database = migratedDatabase();
+  context.after(() => database.close());
+  seedFullEventDataset(database, "COMPLETED");
+
+  for (const status of ["RETURN_PROCESSING", "ARCHIVED"]) {
+    assert.throws(
+      () => database.exec(`UPDATE events SET status = '${status}' WHERE id = 'event_test'`),
+      /CHECK constraint failed/,
+      status,
+    );
+  }
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status, "COMPLETED");
 });

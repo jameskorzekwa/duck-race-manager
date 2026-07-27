@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -52,20 +52,10 @@ const makeEnv = (db) => ({
   DB: db,
 });
 
-const migrationNames = [
-  "0001_staff_identity.sql",
-  "0002_registration_foundation.sql",
-  "0003_assignment_and_heat_status.sql",
-  "0004_pairing_status_and_purge.sql",
-  "0005_staff_access_management.sql",
-  "0006_participant_operations.sql",
-  "0007_duck_inventory_operations.sql",
-  "0008_event_operations.sql",
-  "0009_heat_result_operations.sql",
-  "0010_staff_lifecycle.sql",
-  "0011_support_operations.sql",
-  "0012_staff_role_assignments.sql",
-];
+// The full ordered chain, so these run against the schema production runs.
+const migrationNames = readdirSync(new URL("../db/migrations/", import.meta.url))
+  .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+  .sort();
 
 const createDatabase = () => {
   const database = new DatabaseSync(":memory:");

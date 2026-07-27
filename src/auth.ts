@@ -1,6 +1,6 @@
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 
-import { readStoredOperationalRoles, type OperationalRole } from "./authorization.ts";
+import { normalizeOperationalRoles, type OperationalRole } from "./authorization.ts";
 import type { Env } from "./types.ts";
 
 export interface StaffActor {
@@ -81,9 +81,12 @@ export const authenticateStaff = async (
         WHERE staff_profile_id = ? AND revoked_at IS NULL
         ORDER BY role`,
     ).bind(profile.id).all<{ role: string }>();
-    // Stored assignments may still hold retired vocabulary during the deploy
-    // window, so unknown roles are ignored instead of denying the session.
-    const roles = readStoredOperationalRoles(assignments.results.map((assignment) => assignment.role));
+    // Stored assignments are read strictly. The schema constrains `role` to the
+    // current vocabulary and forbids duplicate current roles, so an unreadable
+    // set means corrupt data; deny the session rather than authorize a guessed
+    // subset of it.
+    const roles = normalizeOperationalRoles(assignments.results.map((assignment) => assignment.role));
+    if (roles === null) return null;
 
     return {
       id: profile.id,

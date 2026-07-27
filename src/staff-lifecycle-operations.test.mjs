@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -606,50 +606,57 @@ test("a role change requesting the retired RETURN_STEWARD role is rejected as in
   }
 });
 
-// A target profile whose D1 rows still carry the retired role must still list
-// and project cleanly: the stale value is ignored, the valid ones survive.
-test("staff listing ignores a stale RETURN_STEWARD assignment without dropping valid roles", async () => {
-  const db = makeDb(() => null, (sql) =>
+// The retired role can no longer reach a listing: `staff_role_assignments`
+// rejects it, so a CSV containing it means corrupt data and the projection
+// collapses to no roles rather than guessing a subset.
+test("staff listing projects valid roles and refuses to guess at an unreadable set", async () => {
+  const valid = makeDb(() => null, (sql) =>
     sql.includes("FROM staff_profiles p")
-      ? { results: [{ ...profile, roles_csv: "REGISTRATION,RETURN_STEWARD,RACE_DIRECTOR" }] }
+      ? { results: [{ ...profile, roles_csv: "REGISTRATION,RACE_DIRECTOR" }] }
       : { results: [] });
   const response = await handleStaffLifecycleOperations(
     request("/api/v1/staff/profiles", undefined, "GET"),
-    makeEnv(db),
+    makeEnv(valid),
     actor,
   );
-  const body = await response.json();
-
   assert.equal(response.status, 200);
-  assert.deepEqual(body.staff[0].roles, ["REGISTRATION", "RACE_DIRECTOR"]);
+  assert.deepEqual((await response.json()).staff[0].roles, ["REGISTRATION", "RACE_DIRECTOR"]);
+
+  const corrupt = makeDb(() => null, (sql) =>
+    sql.includes("FROM staff_profiles p")
+      ? { results: [{ ...profile, roles_csv: "REGISTRATION,RETURN_STEWARD,RACE_DIRECTOR" }] }
+      : { results: [] });
+  const corruptResponse = await handleStaffLifecycleOperations(
+    request("/api/v1/staff/profiles", undefined, "GET"),
+    makeEnv(corrupt),
+    actor,
+  );
+  assert.equal(corruptResponse.status, 200);
+  assert.deepEqual((await corruptResponse.json()).staff[0].roles, []);
 });
 
-// Authentication must survive the retired role in live D1 rather than denying
-// the session, which would lock the account out during the deploy window.
-test("a live D1 profile carrying only the retired role authenticates with no roles", async () => {
+// Authentication is strict again now that the schema makes the retired role
+// unrepresentable. The migration deletes those rows before the Worker deploys,
+// so no live account can be locked out by this.
+test("a live D1 profile cannot hold the retired role and authenticates strictly", async () => {
   const database = new DatabaseSync(":memory:");
-  for (const name of [
-    "0001_staff_identity.sql",
-    "0002_registration_foundation.sql",
-    "0003_assignment_and_heat_status.sql",
-    "0004_pairing_status_and_purge.sql",
-    "0005_staff_access_management.sql",
-    "0006_participant_operations.sql",
-    "0007_duck_inventory_operations.sql",
-    "0008_event_operations.sql",
-    "0009_heat_result_operations.sql",
-    "0010_staff_lifecycle.sql",
-    "0011_support_operations.sql",
-    "0012_staff_role_assignments.sql",
-  ]) {
+  database.exec("PRAGMA foreign_keys = ON");
+  for (const name of readdirSync(new URL("../db/migrations/", import.meta.url))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort()) {
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
   }
   database.exec(`
     INSERT INTO staff_profiles (id, cognito_sub, email, display_name, is_system_admin, is_active)
-    VALUES ('stale', 'stale-sub', 'stale@example.com', 'Stale Steward', 0, 1);
+    VALUES ('kept', 'kept-sub', 'kept@example.com', 'Kept Staff', 0, 1);
     INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
-    VALUES ('stale-role', 'stale', 'RETURN_STEWARD', '2026-07-26T00:00:00Z');
+    VALUES ('kept-role', 'kept', 'REGISTRATION', '2026-07-26T00:00:00Z');
   `);
+  assert.throws(() => database.exec(`
+    INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+    VALUES ('retired-role', 'kept', 'RETURN_STEWARD', '2026-07-26T00:00:00Z');
+  `), /CHECK constraint failed/);
+
   const env = makeEnv({
     prepare: (sql) => ({
       sql,
@@ -660,16 +667,17 @@ test("a live D1 profile carrying only the retired role authenticates with no rol
     }),
   });
 
-  const staleActor = await authenticateStaff(
+  const keptActor = await authenticateStaff(
     new Request("https://quickducks.com/api/v1/staff/events", {
       headers: { authorization: "Bearer valid.test.token" },
     }),
     env,
-    async () => ({ sub: "stale-sub" }),
+    async () => ({ sub: "kept-sub" }),
   );
 
-  assert.notEqual(staleActor, null, "the session must not be denied by a retired role");
-  assert.deepEqual(staleActor.roles, []);
-  assert.equal(staleActor.isSystemAdmin, false);
+  assert.notEqual(keptActor, null);
+  assert.deepEqual(keptActor.roles, ["REGISTRATION"]);
+  assert.equal(keptActor.isSystemAdmin, false);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

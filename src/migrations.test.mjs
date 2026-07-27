@@ -17,13 +17,42 @@ const migrationNames = [
   "0011_support_operations.sql",
   "0012_staff_role_assignments.sql",
   "0013_followed_collection_entries.sql",
+  "0014_simplified_lifecycle_schema.sql",
 ];
+
+const lifecycleStatuses = [
+  "DRAFT",
+  "REGISTRATION_OPEN",
+  "REGISTRATION_CLOSED",
+  "ROUND_ONE",
+  "FINAL",
+  "COMPLETED",
+];
+
+const retiredTables = [
+  "duck_event_dispositions",
+  "return_batches",
+  "return_batch_items",
+  "event_purge_claims",
+];
+
+const objectNames = (database, type) => database
+  .prepare("SELECT name FROM sqlite_master WHERE type = ? ORDER BY name")
+  .all(type)
+  .map((row) => row.name);
+
+const count = (database, table) =>
+  database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count;
 
 const applyMigrations = (database, names = migrationNames) => {
   for (const name of names) {
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
   }
 };
+
+// Migrations are ordered and append-only, so an upgrade test for migration N
+// applies exactly 0001..N-1 first and never a later file.
+const migrationsBefore = (name) => migrationNames.slice(0, migrationNames.indexOf(name));
 
 const createDatabase = () => {
   const database = new DatabaseSync(":memory:");
@@ -126,7 +155,7 @@ test("staff access commands retain administrator and target relationships", () =
 test("0013 keeps existing collection links registration-sourced and constrains new sources", () => {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
-  applyMigrations(database, migrationNames.filter((name) => name !== "0013_followed_collection_entries.sql"));
+  applyMigrations(database, migrationsBefore("0013_followed_collection_entries.sql"));
   database.exec(`
     INSERT INTO events (id, slug, name, timezone, status)
     VALUES ('event', 'test-race', 'Test Race', 'America/Denver', 'REGISTRATION_OPEN');
@@ -187,7 +216,7 @@ test("0013 keeps existing collection links registration-sourced and constrains n
 test("0012 backfills historical command metadata without granting operational roles", () => {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
-  applyMigrations(database, migrationNames.filter((name) => name !== "0012_staff_role_assignments.sql"));
+  applyMigrations(database, migrationsBefore("0012_staff_role_assignments.sql"));
   database.exec(`
     INSERT INTO staff_profiles (id, cognito_sub, email, is_system_admin)
     VALUES
@@ -261,6 +290,466 @@ test("0012 backfills historical command metadata without granting operational ro
   assert.equal(database.prepare(
     "SELECT COUNT(*) AS count FROM staff_role_assignments WHERE staff_profile_id = 'promoted'",
   ).get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0014 from an empty database leaves the simplified schema", () => {
+  const database = createDatabase();
+
+  const tables = objectNames(database, "table");
+  for (const table of retiredTables) {
+    assert.ok(!tables.includes(table), `expected ${table} to be dropped`);
+  }
+
+  const triggers = objectNames(database, "trigger");
+  assert.ok(!triggers.includes("events_require_purge_claim"));
+  assert.ok(!triggers.includes("purging_events_are_read_only"));
+  // The surviving roster triggers keep their shipped names.
+  assert.ok(triggers.includes("heat_entries_insert_unlocked"));
+  assert.ok(triggers.includes("heat_entries_update_unlocked"));
+  assert.ok(triggers.includes("heat_entries_delete_unlocked"));
+  assert.ok(triggers.includes("heat_results_place_guard"));
+  assert.ok(triggers.includes("staff_profiles_keep_active_admin_on_update"));
+  assert.ok(triggers.includes("staff_profiles_keep_active_admin_on_delete"));
+
+  const deleteTrigger = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'heat_entries_delete_unlocked'",
+  ).get().sql;
+  assert.doesNotMatch(deleteTrigger, /ARCHIVED/);
+  assert.match(deleteTrigger, /FORCE_DELETE_EVENT/);
+
+  const indexes = objectNames(database, "index");
+  assert.ok(indexes.includes("events_status_date_idx"));
+  assert.ok(indexes.includes("staff_role_assignments_current_idx"));
+  assert.ok(indexes.includes("staff_role_assignments_history_idx"));
+
+  // Every remaining lifecycle status is accepted.
+  for (const status of lifecycleStatuses) {
+    database.exec(
+      `INSERT INTO events (id, slug, name, timezone, status)
+       VALUES ('event-${status}', 'slug-${status}', 'Race ${status}', 'UTC', '${status}')`,
+    );
+  }
+  assert.equal(count(database, "events"), lifecycleStatuses.length);
+
+  // Both retired statuses are rejected.
+  for (const status of ["RETURN_PROCESSING", "ARCHIVED"]) {
+    assert.throws(() => database.exec(
+      `INSERT INTO events (id, slug, name, timezone, status)
+       VALUES ('event-retired', 'slug-retired', 'Retired', 'UTC', '${status}')`,
+    ), /CHECK constraint failed/, status);
+  }
+
+  // Every other events constraint and default survived the rebuild.
+  assert.throws(() => database.exec(
+    `INSERT INTO events (id, slug, name, timezone, status)
+     VALUES ('event-blank', '   ', 'Blank Slug', 'UTC', 'DRAFT')`,
+  ), /CHECK constraint failed/);
+  assert.throws(() => database.exec(
+    `INSERT INTO events (id, slug, name, timezone, status)
+     VALUES ('event-dup', 'SLUG-DRAFT', 'Duplicate Slug', 'UTC', 'DRAFT')`,
+  ), /UNIQUE constraint failed/);
+  assert.throws(() => database.exec(
+    `INSERT INTO events (id, slug, name, timezone, status, registration_opens_at, registration_closes_at)
+     VALUES ('event-window', 'slug-window', 'Bad Window', 'UTC', 'DRAFT',
+             '2026-08-02T00:00:00Z', '2026-08-01T00:00:00Z')`,
+  ), /CHECK constraint failed/);
+  assert.throws(() => database.exec(
+    `INSERT INTO events (id, slug, name, timezone, status, round_one_heat_capacity)
+     VALUES ('event-capacity', 'slug-capacity', 'Bad Capacity', 'UTC', 'DRAFT', 0)`,
+  ), /CHECK constraint failed/);
+  assert.deepEqual(
+    { ...database.prepare("SELECT * FROM events WHERE id = 'event-DRAFT'").get() },
+    {
+      id: "event-DRAFT",
+      slug: "slug-DRAFT",
+      name: "Race DRAFT",
+      event_date: null,
+      timezone: "UTC",
+      status: "DRAFT",
+      registration_opens_at: null,
+      registration_closes_at: null,
+      email_required: 0,
+      heat_assignment_mode: "POST_CLOSE_BALANCED",
+      round_one_heat_capacity: 10,
+      final_heat_capacity: 50,
+      created_at: database.prepare("SELECT created_at FROM events WHERE id = 'event-DRAFT'").get().created_at,
+      updated_at: database.prepare("SELECT updated_at FROM events WHERE id = 'event-DRAFT'").get().updated_at,
+      public_name_policy: "FIRST_NAME_LAST_INITIAL",
+      revision: 0,
+    },
+  );
+
+  // Inbound foreign keys still resolve to the rebuilt events table.
+  assert.throws(() => database.exec(
+    `INSERT INTO registrations
+       (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+        submitted_at, status_changed_at)
+     VALUES ('orphan', 'missing-event', 'Daisy', 'Duck', 'SUBMITTED', 'DAISY123', 'orphan-hash',
+             '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z')`,
+  ), /FOREIGN KEY constraint failed/);
+  database.exec(
+    `INSERT INTO registrations
+       (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+        submitted_at, status_changed_at)
+     VALUES ('registration', 'event-DRAFT', 'Daisy', 'Duck', 'SUBMITTED', 'DAISY123', 'hash',
+             '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z')`,
+  );
+  assert.throws(
+    () => database.exec("DELETE FROM events WHERE id = 'event-DRAFT'"),
+    /FOREIGN KEY constraint failed/,
+    "ON DELETE RESTRICT must still protect the rebuilt events table",
+  );
+
+  // The role vocabulary lost exactly RETURN_STEWARD.
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff', 'staff-sub', 'staff@example.com'),
+           ('other-staff', 'other-sub', 'other@example.com');
+  `);
+  for (const role of [
+    "REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RACE_DIRECTOR",
+  ]) {
+    database.exec(
+      `INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+       VALUES ('role-${role}', 'staff', '${role}', '2026-07-26T00:00:00Z')`,
+    );
+  }
+  assert.throws(() => database.exec(
+    `INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+     VALUES ('role-retired', 'staff', 'RETURN_STEWARD', '2026-07-26T00:00:00Z')`,
+  ), /CHECK constraint failed/);
+  // The current-role partial unique index survived the rebuild.
+  assert.throws(() => database.exec(
+    `INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+     VALUES ('role-duplicate', 'staff', 'ANNOUNCER', '2026-07-26T00:00:00Z')`,
+  ), /UNIQUE constraint failed/);
+  // The revocation all-or-nothing CHECK survived the rebuild.
+  assert.throws(() => database.exec(
+    "UPDATE staff_role_assignments SET revoked_at = '2026-07-27T00:00:00Z' WHERE id = 'role-ANNOUNCER'",
+  ), /CHECK constraint failed/);
+  // Both staff_profiles foreign keys survived the rebuild.
+  assert.throws(() => database.exec(
+    `INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+     VALUES ('role-bad-target', 'missing-staff', 'REGISTRATION', '2026-07-26T00:00:00Z')`,
+  ), /FOREIGN KEY constraint failed/);
+  assert.throws(() => database.exec(
+    `INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at, assigned_by_staff_profile_id)
+     VALUES ('role-bad-actor', 'other-staff', 'RESULT_TAKER', '2026-07-27T00:00:00Z', 'missing-staff')`,
+  ), /FOREIGN KEY constraint failed/);
+
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.deepEqual(
+    database.prepare("PRAGMA integrity_check").all().map((row) => ({ ...row })),
+    [{ integrity_check: "ok" }],
+  );
+  database.close();
+});
+
+// Seeds the pre-0014 world: a full event dataset in a retired status, retired
+// return/disposition/purge rows, a RETURN_STEWARD assignment, and historical
+// role JSON that still names the retired role.
+const seedLegacyData = (database, eventStatus) => {
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, display_name, is_system_admin, is_active)
+    VALUES
+      ('admin', 'admin-sub', 'admin@example.com', 'Administrator', 1, 1),
+      ('steward', 'steward-sub', 'steward@example.com', 'Steward', 0, 1);
+    INSERT INTO staff_access_commands
+      (id, command_type, target_staff_profile_id, requested_by_staff_profile_id,
+       requested_at, completed_at, requested_account_type, requested_roles_json)
+    VALUES
+      ('grant-steward', 'ADD_STAFF', 'steward', 'admin', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z',
+       'STAFF', '["REGISTRATION","DUCK_MANAGER","ANNOUNCER","HEAT_RUNNER","RESULT_TAKER","RETURN_STEWARD","RACE_DIRECTOR"]'),
+      ('grant-admin', 'ADD_STAFF', 'admin', 'admin', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z',
+       'ADMIN', '[]'),
+      ('grant-steward-only', 'ADD_STAFF', 'steward', 'admin', '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z',
+       'STAFF', '["RETURN_STEWARD"]');
+    INSERT INTO staff_lifecycle_commands
+      (id, command_type, target_staff_profile_id, requested_by_staff_profile_id, requested_role,
+       result_is_system_admin, result_is_active, requested_at, completed_at, requested_roles_json)
+    VALUES
+      ('change-steward', 'CHANGE_STAFF_ROLE', 'steward', 'admin', 'STAFF', 0, 1,
+       '2026-07-02T00:00:00Z', '2026-07-02T00:00:00Z',
+       '["RETURN_STEWARD","RACE_DIRECTOR"]'),
+      ('deactivate-steward', 'DEACTIVATE_STAFF', 'steward', 'admin', NULL, 0, 1,
+       '2026-07-03T00:00:00Z', '2026-07-03T00:00:00Z', NULL);
+    INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+    VALUES
+      ('steward-returns', 'steward', 'RETURN_STEWARD', '2026-07-02T00:00:00Z'),
+      ('steward-registration', 'steward', 'REGISTRATION', '2026-07-02T00:00:00Z'),
+      ('steward-director', 'steward', 'RACE_DIRECTOR', '2026-07-02T00:00:00Z');
+
+    INSERT INTO events (id, slug, name, event_date, timezone, status)
+    VALUES ('event', 'legacy-race', 'Legacy Race', '2026-08-30', 'UTC', '${eventStatus}');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, email, status, lookup_code, private_token_hash,
+       email_notifications_enabled, submitted_at, status_changed_at)
+    VALUES ('registration', 'event', 'Daisy', 'Duck', 'daisy@example.com', 'ACTIVE', 'DAISY123',
+            'private-hash', 1, '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id) VALUES ('entry', 'event', 'registration');
+    INSERT INTO race_commands (id, event_id, command_type, requested_at, completed_at)
+    VALUES
+      ('pair-command', 'event', 'PAIR_DUCK', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'),
+      ('result-command', 'event', 'FINALIZE_HEAT_RESULTS', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck', 1, 'IN_USE', '2026-07-26T00:00:00Z');
+    INSERT INTO duck_tags (id, duck_id, token, status, supersedes_tag_id, activated_at, retired_at)
+    VALUES
+      ('tag-old', 'duck', '${"o".repeat(32)}', 'RETIRED', NULL, '2026-07-26T00:00:00Z', '2026-07-26T00:10:00Z'),
+      ('tag-new', 'duck', '${"n".repeat(32)}', 'ACTIVE', 'tag-old', '2026-07-26T00:10:00Z', NULL);
+    INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck', 'event', 'duck', '2026-07-26T00:00:00Z', 'admin');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES ('assignment', 'event', 'entry', 'event-duck', 'duck', '2026-07-26T00:00:00Z',
+            'admin', 'pair-command');
+    INSERT INTO duck_inventory_events
+      (id, event_id, duck_id, action, actor_staff_profile_id, source_command_id, occurred_at, details_json)
+    VALUES ('inventory', 'event', 'duck', 'DUCK_ASSIGNED', 'admin', 'pair-command',
+            '2026-07-26T00:00:00Z', '{}');
+    INSERT INTO heats (id, event_id, round, heat_number, status)
+    VALUES ('heat', 'event', 'ROUND_ONE', 1, 'PLANNED');
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry', 'event', 'heat', 'entry', 'ROUND_ONE', 1, 'PAIRING', '2026-07-26T00:00:00Z');
+    -- A locked, finalized roster: the legacy delete trigger would refuse this.
+    UPDATE heats
+       SET status = 'FINALIZED', roster_locked_at = '2026-07-26T01:00:00Z',
+           finalized_at = '2026-07-26T01:10:00Z'
+     WHERE id = 'heat';
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('heat-result', 'event', 'heat', 'entry', 'assignment', 1, 'FINALIZED', 1,
+            '2026-07-26T01:10:00Z', 'admin', 'result-command');
+    INSERT INTO heat_result_history
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id, invalidated_at,
+       invalidated_by_staff_profile_id, invalidated_by_source_command_id, invalidation_reason, created_at)
+    VALUES ('result-history', 'event', 'heat', 'entry', 'assignment', 2, 'SUPERSEDED', 1,
+            '2026-07-26T01:08:00Z', 'admin', 'result-command', '2026-07-26T01:09:00Z',
+            'admin', 'result-command', 'Correction test', '2026-07-26T01:08:00Z');
+    INSERT INTO email_notifications (id, event_id, registration_id, heat_id, notification_type, status)
+    VALUES ('notification', 'event', 'registration', 'heat', 'HEAT_ASSIGNED', 'PENDING');
+    INSERT INTO email_attempts (id, event_id, notification_id, attempt_number, stage, status, started_at)
+    VALUES ('attempt', 'event', 'notification', 1, 'QUEUE', 'PENDING', '2026-07-26T02:00:00Z');
+    INSERT INTO return_batches
+      (id, event_id, status, source_command_id, started_by_staff_profile_id, started_at)
+    VALUES ('batch', 'event', 'OPEN', 'batch-command', 'admin', '2026-07-26T03:00:00Z');
+    INSERT INTO return_batch_items
+      (id, event_id, batch_id, event_duck_id, sequence_number, disposition, source_command_id,
+       added_by_staff_profile_id, added_at)
+    VALUES ('batch-item', 'event', 'batch', 'event-duck', 1, 'RETURNED', 'item-command',
+            'admin', '2026-07-26T03:01:00Z');
+    INSERT INTO duck_event_dispositions
+      (id, event_id, event_duck_id, disposition, recorded_by_staff_profile_id, source_command_id, recorded_at)
+    VALUES ('disposition', 'event', 'event-duck', 'RETURNED', 'admin', 'pair-command',
+            '2026-07-26T03:02:00Z');
+    INSERT INTO event_purge_claims (event_id, command_id, status, claimed_by_staff_profile_id, claimed_at)
+    VALUES ('event', 'claim-command', 'PURGING', 'admin', '2026-07-26T04:00:00Z');
+    INSERT INTO browser_registration_collections (id, token_hash, created_at, last_seen_at, expires_at)
+    VALUES ('collection', 'collection-hash', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z',
+            '2027-07-26T00:00:00Z');
+    INSERT INTO browser_collection_registrations (collection_id, registration_id, added_at)
+    VALUES ('collection', 'registration', '2026-07-26T00:00:00Z');
+    INSERT INTO audit_events
+      (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
+    VALUES ('audit', 'event', 'pair-command', 'DUCK_PAIRED', 'RACE_ENTRY', 'entry', 'STAFF',
+            '2026-07-26T00:00:00Z', '{}');
+  `);
+};
+
+const clearedTables = [
+  "events",
+  "registrations",
+  "race_entries",
+  "ducks",
+  "duck_tags",
+  "event_ducks",
+  "duck_assignments",
+  "duck_inventory_events",
+  "heats",
+  "heat_entries",
+  "heat_results",
+  "heat_result_history",
+  "email_notifications",
+  "email_attempts",
+  "browser_registration_collections",
+  "browser_collection_registrations",
+  "race_commands",
+  "audit_events",
+];
+
+for (const eventStatus of ["ARCHIVED", "RETURN_PROCESSING", "COMPLETED"]) {
+  test(`0014 wipes legacy ${eventStatus} race data and keeps staff records`, () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec("PRAGMA foreign_keys = ON");
+    applyMigrations(database, migrationsBefore("0014_simplified_lifecycle_schema.sql"));
+    seedLegacyData(database, eventStatus);
+
+    applyMigrations(database, ["0014_simplified_lifecycle_schema.sql"]);
+
+    for (const table of clearedTables) {
+      assert.equal(count(database, table), 0, `expected ${table} to be empty`);
+    }
+    for (const table of retiredTables) {
+      assert.equal(
+        database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get(table).count,
+        0,
+        `expected ${table} to be dropped`,
+      );
+    }
+
+    // Staff profiles and their still-valid role assignments survive untouched.
+    assert.deepEqual(
+      database.prepare("SELECT id, email, is_system_admin, is_active FROM staff_profiles ORDER BY id")
+        .all().map((row) => ({ ...row })),
+      [
+        { id: "admin", email: "admin@example.com", is_system_admin: 1, is_active: 1 },
+        { id: "steward", email: "steward@example.com", is_system_admin: 0, is_active: 1 },
+      ],
+    );
+    assert.deepEqual(
+      database.prepare("SELECT id, role FROM staff_role_assignments ORDER BY id").all()
+        .map((row) => ({ ...row })),
+      [
+        { id: "steward-director", role: "RACE_DIRECTOR" },
+        { id: "steward-registration", role: "REGISTRATION" },
+      ],
+    );
+    assert.equal(count(database, "organization_event_defaults"), 1);
+    assert.equal(count(database, "staff_access_commands"), 3);
+    assert.equal(count(database, "staff_lifecycle_commands"), 2);
+
+    // The retired role survives in no historical role JSON either.
+    assert.deepEqual(
+      database.prepare("SELECT id, requested_roles_json FROM staff_access_commands ORDER BY id")
+        .all().map((row) => ({ ...row })),
+      [
+        { id: "grant-admin", requested_roles_json: "[]" },
+        {
+          id: "grant-steward",
+          requested_roles_json:
+            '["REGISTRATION","DUCK_MANAGER","ANNOUNCER","HEAT_RUNNER","RESULT_TAKER","RACE_DIRECTOR"]',
+        },
+        { id: "grant-steward-only", requested_roles_json: "[]" },
+      ],
+    );
+    assert.deepEqual(
+      database.prepare("SELECT id, requested_roles_json FROM staff_lifecycle_commands ORDER BY id")
+        .all().map((row) => ({ ...row })),
+      [
+        { id: "change-steward", requested_roles_json: '["RACE_DIRECTOR"]' },
+        { id: "deactivate-steward", requested_roles_json: null },
+      ],
+    );
+    assert.equal(
+      database.prepare(
+        `SELECT COUNT(*) AS count FROM staff_access_commands
+          WHERE requested_roles_json LIKE '%RETURN_STEWARD%'`,
+      ).get().count,
+      0,
+    );
+    assert.equal(
+      database.prepare(
+        `SELECT COUNT(*) AS count FROM staff_lifecycle_commands
+          WHERE requested_roles_json LIKE '%RETURN_STEWARD%'`,
+      ).get().count,
+      0,
+    );
+
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.deepEqual(
+      database.prepare("PRAGMA integrity_check").all().map((row) => ({ ...row })),
+      [{ integrity_check: "ok" }],
+    );
+    database.close();
+  });
+}
+
+// The rebuilt trigger must keep protecting a locked roster in normal operation
+// and open exactly one escape: the FORCE_DELETE_EVENT sentinel row.
+test("0014 heat_entries_delete_unlocked protects locked rosters except under the force delete sentinel", () => {
+  const database = createDatabase();
+  const seedRoster = (suffix, lock) => {
+    database.exec(`
+      INSERT INTO events (id, slug, name, timezone, status)
+      VALUES ('event-${suffix}', 'slug-${suffix}', 'Race ${suffix}', 'UTC', 'ROUND_ONE');
+      INSERT INTO registrations
+        (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+         submitted_at, status_changed_at)
+      VALUES ('registration-${suffix}', 'event-${suffix}', 'Daisy', 'Duck', 'ACTIVE', 'DAISY12${suffix}',
+              'hash-${suffix}', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+      INSERT INTO race_entries (id, event_id, registration_id)
+      VALUES ('entry-${suffix}', 'event-${suffix}', 'registration-${suffix}');
+      INSERT INTO heats (id, event_id, round, heat_number, status)
+      VALUES ('heat-${suffix}', 'event-${suffix}', 'ROUND_ONE', 1, 'PLANNED');
+      INSERT INTO heat_entries
+        (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+      VALUES ('heat-entry-${suffix}', 'event-${suffix}', 'heat-${suffix}', 'entry-${suffix}',
+              'ROUND_ONE', 1, 'PAIRING', '2026-07-26T00:00:00Z');
+    `);
+    if (lock) {
+      database.exec(`
+        UPDATE heats
+           SET status = 'FINALIZED', roster_locked_at = '2026-07-26T01:00:00Z',
+               finalized_at = '2026-07-26T01:10:00Z'
+         WHERE id = 'heat-${suffix}';
+      `);
+    }
+  };
+
+  // An unlocked PLANNED roster is still freely editable.
+  seedRoster("open", false);
+  database.exec("DELETE FROM heat_entries WHERE id = 'heat-entry-open'");
+  assert.equal(count(database, "heat_entries"), 0);
+
+  // A locked roster is still protected.
+  seedRoster("locked", true);
+  assert.throws(
+    () => database.exec("DELETE FROM heat_entries WHERE id = 'heat-entry-locked'"),
+    /heat roster is locked/,
+  );
+  assert.equal(count(database, "heat_entries"), 1);
+
+  // A sentinel for a different command type does not open the escape.
+  database.exec(`
+    INSERT INTO race_commands (id, event_id, command_type, requested_at, completed_at)
+    VALUES ('other-command', 'event-locked', 'FINALIZE_HEAT_RESULTS',
+            '2026-07-26T02:00:00Z', '2026-07-26T02:00:00Z');
+  `);
+  assert.throws(
+    () => database.exec("DELETE FROM heat_entries WHERE id = 'heat-entry-locked'"),
+    /heat roster is locked/,
+  );
+
+  // A sentinel for a different event does not open the escape either.
+  seedRoster("other", true);
+  database.exec(`
+    INSERT INTO race_commands (id, event_id, command_type, requested_at, completed_at)
+    VALUES ('force-other', 'event-other', 'FORCE_DELETE_EVENT',
+            '2026-07-26T02:00:00Z', '2026-07-26T02:00:00Z');
+  `);
+  assert.throws(
+    () => database.exec("DELETE FROM heat_entries WHERE id = 'heat-entry-locked'"),
+    /heat roster is locked/,
+  );
+
+  // The event's own force delete sentinel opens it.
+  database.exec(`
+    INSERT INTO race_commands (id, event_id, command_type, requested_at, completed_at)
+    VALUES ('force-locked', 'event-locked', 'FORCE_DELETE_EVENT',
+            '2026-07-26T02:00:00Z', '2026-07-26T02:00:00Z');
+    DELETE FROM heat_entries WHERE id = 'heat-entry-locked';
+  `);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE id = 'heat-entry-locked'").get().count,
+    0,
+  );
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });
