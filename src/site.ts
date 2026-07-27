@@ -627,7 +627,6 @@ const operationalRoleLabels: Record<OperationalRole, string> = {
   ANNOUNCER: "Announcer",
   HEAT_RUNNER: "Heat runner",
   RESULT_TAKER: "Result taker",
-  RETURN_STEWARD: "Return steward",
   RACE_DIRECTOR: "Race director",
 };
 
@@ -683,7 +682,6 @@ export const renderStaffHome = (
     || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
   const canStartLine = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
   const canFinishLine = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
-  const canReturns = hasRole("RETURN_STEWARD") || hasRole("RACE_DIRECTOR");
   const canDirectRace = hasRole("RACE_DIRECTOR");
   return page({
   title: "Staff tools",
@@ -700,7 +698,7 @@ export const renderStaffHome = (
       ${(canStartLine || canFinishLine) ? `<div class="actions station-links" aria-label="Race-day stations">${canStartLine ? '<a class="button station-control" href="/staff/start-line">Open start line</a>' : ""}${canFinishLine ? '<a class="button secondary station-control" href="/staff/finish-line">Open finish line</a>' : ""}</div>` : ""}
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
       <div class="actions"><a class="button secondary" href="/mock/staff/ducks/128/pair">Preview pairing layout</a></div>
-      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants" data-event-scoped hidden>Participants</a>' : ""}${canInventory ? '<a href="#inventory" data-event-scoped hidden>Inventory</a>' : ""}${canRaceRead ? '<a href="#heats" data-event-scoped hidden>Heats</a>' : ""}${canReturns ? '<a href="#returns" data-event-scoped hidden>Returns</a>' : ""}${isSystemAdmin ? '<a href="#support" data-event-scoped hidden>Support</a>' : ""}</nav>
+      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants" data-event-scoped hidden>Participants</a>' : ""}${canInventory ? '<a href="#inventory" data-event-scoped hidden>Inventory</a>' : ""}${canRaceRead ? '<a href="#heats" data-event-scoped hidden>Heats</a>' : ""}${isSystemAdmin ? '<a href="#support" data-event-scoped hidden>Support</a>' : ""}</nav>
       <p class="message-line muted" data-console-message aria-live="polite">Loading operations…</p>
 
       <section class="console-section" id="events" aria-labelledby="events-title"${canUseConsole ? "" : " hidden"}>
@@ -741,7 +739,7 @@ export const renderStaffHome = (
               <form data-delete-draft-form><label>Type the required confirmation<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Delete empty draft</button></form>
             </details>
             <details class="operation-card danger-zone" data-force-delete-card hidden><summary>Delete event</summary>
-              <p class="muted">Administrator-only. Permanently deletes this event and every record for it — registrations, ducks, tags, heats, results, returns, notifications, commands, and audit history — in any state. This cannot be undone.</p>
+              <p class="muted">Administrator-only. This is the only way to clear a race. It permanently deletes this event and every record for it — registrations, ducks, tags, heats, results, notifications, commands, and audit history — in any state. This cannot be undone.</p>
               <form data-force-delete-form><label>Type the exact event name to confirm<input name="confirmName" maxlength="120" required autocomplete="off"></label><button class="button danger" type="submit">Delete event</button></form>
             </details>` : ""}
           </div>
@@ -819,26 +817,12 @@ export const renderStaffHome = (
         <div class="console-grid wide"><div class="data-list" data-heat-list></div><article class="operation-card" data-heat-detail hidden><h3 data-heat-name>Heat detail</h3><dl class="facts compact-facts" data-heat-facts></dl><div data-heat-controls></div><h3>Roster</h3><ul class="roster-list" data-heat-roster></ul><h3>Published results</h3><div class="data-list" data-heat-results></div></article></div>
       </section>
 
-      <section class="console-section" id="returns" aria-labelledby="returns-title" data-event-scoped data-role-allowed="${canReturns ? "true" : "false"}" hidden>
-        <p class="eyebrow">Physical reconciliation</p><h2 id="returns-title">Returns</h2>
-        <div class="console-grid">
-          <article class="operation-card" data-return-review data-system-admin="${isSystemAdmin ? "true" : "false"}" hidden>
-            <h3 data-return-title>Loading return review…</h3><p class="message-line muted" data-return-message aria-live="polite"></p><dl class="facts compact-facts" data-return-summary></dl>
-            <form data-numbered-disposition-form hidden><div class="field-grid"><label>Duck number<input name="visibleNumber" type="number" min="1" max="999999999" inputmode="numeric" required></label><label>Confirmed disposition<select name="disposition" required><option value="" selected disabled>Choose outcome</option><option value="RETURNED">Returned, good condition</option><option value="QUARANTINED">Needs tag or inspection</option><option value="DAMAGED">Damaged</option><option value="RETIRED">Retired</option><option value="KEPT">Participant keeping duck</option><option value="MISSING">Missing</option><option value="UNACCOUNTED_FOR">Unaccounted for</option></select></label></div><button class="button secondary" type="submit">Record by duck number</button></form>
-            <form data-purge-ready-form hidden><label class="check"><input type="checkbox" name="review" required><span class="label-text">I reviewed every physical disposition and exception.</span></label><label class="check"><input type="checkbox" name="deletion" required><span class="label-text">I understand that purge permanently deletes the complete race dataset.</span></label><button class="button danger" type="submit">Mark event purge-ready</button></form>
-            <form data-cancel-purge-ready-form hidden><label>Correction reason<input name="reason" minlength="4" maxlength="500" required></label><button class="button secondary" type="submit">Reopen return processing</button></form>
-          </article>
-          <article class="operation-card"><h3>Bulk return batch</h3><p class="muted">Stage physical ducks, undo the latest scan if needed, then finalize the batch atomically.</p><div class="actions"><button class="button secondary small" type="button" data-create-return-batch>Start new batch</button></div><label>Open batch ID<input data-return-batch-id maxlength="128" autocomplete="off"></label><form data-return-batch-item-form><div class="field-grid"><label>Duck number<input name="visibleNumber" type="number" min="1" max="999999999" required></label><label>Disposition<select name="disposition"><option value="RETURNED">Returned</option><option value="QUARANTINED">Quarantined</option><option value="DAMAGED">Damaged</option><option value="RETIRED">Retired</option><option value="KEPT">Kept</option><option value="MISSING">Missing</option><option value="UNACCOUNTED_FOR">Unaccounted for</option></select></label></div><button class="button" type="submit">Add duck to batch</button></form><div class="actions"><button class="button secondary small" type="button" data-undo-return-item>Undo latest item</button><button class="button danger small" type="button" data-finalize-return-batch>Finalize batch</button></div><p class="message-line muted" data-return-batch-message aria-live="polite"></p></article>
-        </div>
-      </section>
-
       ${isSystemAdmin ? `<section class="console-section" id="support" aria-labelledby="support-title" data-support data-event-scoped data-role-allowed="true" hidden>
-        <p class="eyebrow">Administrator support</p><h2 id="support-title">Support and purge</h2>
-        <div class="privacy"><strong>Administrator-only diagnostics.</strong><span>Notification actions, audit records, purge claims, and permanent deletion are intentionally explicit.</span></div>
-        <div class="console-grid"><article class="operation-card"><h3>Operational summary</h3><button class="button secondary small" type="button" data-refresh-support>Refresh summary</button><dl class="facts compact-facts" data-support-summary></dl></article><article class="operation-card"><h3>Purge gate</h3><button class="button secondary small" type="button" data-refresh-purge-gate>Check purge gate</button><dl class="facts compact-facts" data-purge-gate></dl></article></div>
+        <p class="eyebrow">Administrator support</p><h2 id="support-title">Support</h2>
+        <div class="privacy"><strong>Administrator-only diagnostics.</strong><span>Notification actions and audit records are intentionally explicit. Clearing a race is done with Delete event in the Event section.</span></div>
+        <div class="console-grid"><article class="operation-card"><h3>Operational summary</h3><button class="button secondary small" type="button" data-refresh-support>Refresh summary</button><dl class="facts compact-facts" data-support-summary></dl></article></div>
         <details class="operation-card"><summary>Notification operations</summary><form class="section-tools" data-notification-filter-form><label>Status<select name="status"><option value="">All statuses</option><option value="WAITING_FOR_SYNC">Waiting for sync</option><option value="PENDING">Pending</option><option value="QUEUED">Queued</option><option value="SENDING">Sending</option><option value="SENT">Sent</option><option value="RETRY_PENDING">Retry pending</option><option value="DELIVERED">Delivered</option><option value="FAILED">Failed</option><option value="BOUNCED">Bounced</option><option value="COMPLAINED">Complained</option><option value="SUPPRESSED">Suppressed</option><option value="CANCELLED">Cancelled</option></select></label><button class="button secondary small" type="submit">Load notifications</button></form><div class="console-grid wide"><div class="data-list" data-notification-list></div><div class="data-list" data-notification-attempts></div></div></details>
         <details class="operation-card"><summary>Redacted audit timeline</summary><button class="button secondary small" type="button" data-refresh-audit>Load audit</button><div class="data-list" data-audit-list></div></details>
-        <div class="console-grid"><form class="operation-card danger-zone" data-purge-claim-form hidden><h3>Claim permanent purge</h3><p class="muted">The gate must pass. This freezes support operations for the event.</p><label>Type the required confirmation<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Claim purge</button></form><form class="operation-card danger-zone" data-final-purge-form hidden><h3>Final permanent purge</h3><label class="check"><input name="acknowledgement" type="checkbox" required><span class="label-text">I understand this permanently deletes the complete event, participant, duck, tag, result, command, browser, and audit dataset.</span></label><label>Type the required confirmation again<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Permanently delete race dataset</button></form></div>
       </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
       ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
@@ -1009,24 +993,6 @@ export const renderStaffDuck = (
         <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
         <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
       </section>
-      <section class="work-area" data-disposition-work hidden>
-        <div class="privacy"><strong>Physical return</strong><span data-disposition-event></span></div>
-        <form data-disposition-form>
-          <label>Confirmed disposition
-            <select name="disposition" required>
-              <option value="RETURNED">Returned, good condition</option>
-              <option value="QUARANTINED">Returned, needs tag or inspection</option>
-              <option value="DAMAGED">Damaged</option>
-              <option value="RETIRED">Retired</option>
-              <option value="KEPT">Participant keeping duck</option>
-              <option value="MISSING">Missing</option>
-              <option value="UNACCOUNTED_FOR">Unaccounted for</option>
-            </select>
-          </label>
-          <button class="button" type="submit" data-confirm-disposition>Record physical disposition</button>
-        </form>
-        <p class="muted" data-disposition-message aria-live="polite"></p>
-      </section>
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/staff-duck.js" defer></script>
     </section>`,
@@ -1182,7 +1148,7 @@ searchForm.addEventListener("submit", async (event) => {
   globalThis.quickDucksLive.markClean(searchForm);
 });
 globalThis.quickDucksLive.subscribe({
-  domains: ["event", "participants", "ducks", "heats", "returns"],
+  domains: ["event", "participants", "ducks", "heats"],
   root: searchForm,
   refresh: async () => {
     if (lastSearchName !== null) await runStatusSearch(lastSearchName);

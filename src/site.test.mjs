@@ -112,12 +112,14 @@ test("every rendered form class remains covered by the shared form constraints",
     }
   }
 
-  // 34 on the console after staff access moved out, plus the access page's
-  // grant form and the sign-out form every staff page renders.
-  assert.equal(openingForms, 36);
+  // Down from 36: the Returns section's four forms (numbered disposition,
+  // purge-ready, cancel purge-ready, return-batch item), the two purge forms
+  // in Support, and the staff duck page's disposition form are all gone.
+  assert.equal(openingForms, 29);
   assert.equal(closingForms, openingForms);
+  // "danger-zone" left the form vocabulary with the two purge forms; it now
+  // styles only the <details>/<article> wrappers around destructive actions.
   assert.deepEqual([...formClasses].sort(), [
-    "danger-zone",
     "operation-card",
     "search-form",
     "section-tools",

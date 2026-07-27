@@ -158,8 +158,18 @@ const seedFullEventDataset = (database, status, withPurgeClaim) => {
        '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
     INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
     VALUES ('duck', 1, 'IN_USE', '2026-07-26T00:00:00Z');
-    INSERT INTO duck_tags (id, duck_id, token, status)
-    VALUES ('tag', 'duck', '${"t".repeat(32)}', 'ACTIVE');
+    -- A replaced tag chain. \`duck_tags.supersedes_tag_id\` is a self-reference
+    -- declared ON DELETE RESTRICT, so every ACTIVE/RETIRED replacement still
+    -- points at the row it superseded. Three deep proves the delete is safe for
+    -- an arbitrary replacement chain, not just a single parent/child pair.
+    INSERT INTO duck_tags (id, duck_id, token, status, supersedes_tag_id, activated_at, retired_at)
+    VALUES
+      ('tag-original', 'duck', '${"o".repeat(32)}', 'RETIRED', NULL,
+       '2026-07-26T00:00:00Z', '2026-07-26T00:10:00Z'),
+      ('tag-replacement', 'duck', '${"r".repeat(32)}', 'RETIRED', 'tag-original',
+       '2026-07-26T00:10:00Z', '2026-07-26T00:20:00Z'),
+      ('tag', 'duck', '${"t".repeat(32)}', 'ACTIVE', 'tag-replacement',
+       '2026-07-26T00:20:00Z', NULL);
     INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
     VALUES ('event-duck', 'event_test', 'duck', '2026-07-26T00:00:00Z', 'admin_test');
     INSERT INTO duck_assignments
@@ -398,12 +408,39 @@ test("force delete removes the complete dataset in one guarded batch with bound 
   );
   const guarded = statements.filter((statement) => statement.sql.startsWith("DELETE FROM"));
   assert.ok(guarded.every((statement) => /EXISTS \(\s*SELECT 1 FROM (?:race_commands|event_purge_claims)/.test(statement.sql)));
+
+  // `duck_tags.supersedes_tag_id` is the one self-reference in the delete set,
+  // and it is ON DELETE RESTRICT. Its link must be cleared under the same
+  // sentinel guard immediately before the duck_tags delete, inside this batch.
+  const clearIndex = statements.findIndex(
+    (statement) => /UPDATE duck_tags\s+SET supersedes_tag_id = NULL/.test(statement.sql),
+  );
+  const tagDeleteIndex = statements.findIndex((statement) => /DELETE FROM duck_tags/.test(statement.sql));
+  assert.notEqual(clearIndex, -1, "the tag self-reference must be cleared inside the batch");
+  assert.equal(clearIndex + 1, tagDeleteIndex, "the clear must run immediately before the duck_tags delete");
+  assert.match(statements[clearIndex].sql, /EXISTS \(\s*SELECT 1 FROM race_commands/);
+  assert.deepEqual(statements[clearIndex].args, statements[tagDeleteIndex].args);
 });
 
+// Delete event is the only cleanup path now, so it must work from every one of
+// the six lifecycle statuses against the CURRENT migrated schema — triggers,
+// CHECK constraints, self-referential tag chains and all. This PR ships no
+// migration, so the retired RETURN_PROCESSING/ARCHIVED rows that may still
+// exist during the deploy window are covered too, both with and without a
+// pre-existing purge claim: the batch deletes claims before it writes its own
+// synthetic one, and only the no-claim case proves that ordering is not merely
+// reusing a row that already happened to be there.
 for (const [status, withPurgeClaim] of [
+  ["DRAFT", false],
   ["REGISTRATION_OPEN", false],
+  ["REGISTRATION_CLOSED", false],
   ["ROUND_ONE", false],
+  ["FINAL", false],
+  ["COMPLETED", false],
+  ["COMPLETED", true],
+  ["RETURN_PROCESSING", false],
   ["RETURN_PROCESSING", true],
+  ["ARCHIVED", false],
   ["ARCHIVED", true],
 ]) {
   test(`migrated SQLite force delete clears every event-linked row from ${status}${withPurgeClaim ? " with an active purge claim" : ""}`, async (context) => {
@@ -540,7 +577,12 @@ test("a second event created between preflight and batch makes the batch delete 
   assert.equal(count(database, "events"), 2);
   assert.equal(count(database, "registrations"), 1);
   assert.equal(count(database, "ducks"), 1);
-  assert.equal(count(database, "duck_tags"), 1);
+  assert.equal(count(database, "duck_tags"), 3);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM duck_tags WHERE supersedes_tag_id IS NOT NULL").get().count,
+    2,
+    "a refused delete must leave the replacement chain intact",
+  );
   assert.equal(count(database, "audit_events"), 1);
   assert.equal(count(database, "browser_registration_collections"), 1);
   assert.equal(count(database, "browser_collection_registrations"), 1);
@@ -574,4 +616,68 @@ test("a concurrent revision change makes the guarded batch delete nothing", asyn
   assert.equal(count(database, "audit_events"), 1);
   assert.equal(count(database, "race_commands"), 3);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// ARCHIVED is not a lifecycle state any more. Force delete still writes it (and
+// a synthetic PURGING claim) mid-batch because the current triggers demand it,
+// but the whole batch is atomic: a refused delete must leave the original
+// status and no claim behind, so ARCHIVED is never observable or reachable.
+test("a refused force delete leaves no ARCHIVED status and no synthetic purge claim", async (context) => {
+  for (const status of ["REGISTRATION_OPEN", "ROUND_ONE", "COMPLETED"]) {
+    const database = migratedDatabase();
+    context.after(() => database.close());
+    seedFullEventDataset(database, status, false);
+    const d1 = sqliteD1(database);
+    const raced = {
+      prepare: (sql) => d1.prepare(sql),
+      async batch(items) {
+        database.exec("UPDATE events SET revision = revision + 1 WHERE id = 'event_test'");
+        return d1.batch(items);
+      },
+    };
+
+    const response = await handleEventOperations(
+      forceDeleteRequest({ commandId: crypto.randomUUID(), revision: 0, confirmName: "Test Duck Race" }),
+      makeEnv(raced),
+      admin,
+    );
+    assert.equal(response.status, 409, status);
+    assert.equal(
+      database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status,
+      status,
+      `${status} must survive a refused delete unchanged`,
+    );
+    assert.equal(count(database, "event_purge_claims"), 0, status);
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  }
+});
+
+// The retired states must not be reachable through the API surface either: no
+// handler can put an event into RETURN_PROCESSING or ARCHIVED any more.
+test("no lifecycle route can move an event into a retired status", async (context) => {
+  const database = migratedDatabase();
+  context.after(() => database.close());
+  seedFullEventDataset(database, "COMPLETED", false);
+  const env = makeEnv(sqliteD1(database));
+
+  for (const action of ["start-return-processing", "purge-ready", "purge-ready/cancel"]) {
+    const response = await handleEventOperations(
+      new Request(`https://quickducks.com/api/v1/staff/events/event_test/${action}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          returnReviewCompleted: true,
+          permanentDeletionAcknowledged: true,
+          reason: "correction reason",
+        }),
+      }),
+      env,
+      admin,
+    );
+    // event-operations owns no such route, so it declines to handle it.
+    assert.equal(response, null, action);
+  }
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status, "COMPLETED");
+  assert.equal(count(database, "event_purge_claims"), 0);
 });

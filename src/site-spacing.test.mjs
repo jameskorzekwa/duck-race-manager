@@ -52,7 +52,8 @@ test("pairing, readiness, inventory, and staff-role renderers expose spacing hoo
   const homeMarkup = renderStaffHome("Administrator", true, []);
   const css = stylesheetFrom(homeMarkup);
 
-  assert.equal((duckMarkup.match(/class="work-area"/g) ?? []).length, 2);
+  // One work area now: pairing. The disposition work area went with returns.
+  assert.equal((duckMarkup.match(/class="work-area"/g) ?? []).length, 1);
   assert.match(homeMarkup, /class="operation-card inventory-detail-panel"[^>]*data-inventory-detail hidden/);
   assert.match(css, /\.result-button > \* \{ display:block; \}/);
   assert.match(css, /\.pairing-review > \* \+ \* \{ margin-top:var\(--space-xs\); \}/);

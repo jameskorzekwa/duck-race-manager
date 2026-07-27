@@ -52,7 +52,6 @@ const readyStats = {
   final_unfinished_heat_count: 0,
   final_finalized_heat_count: 1,
   final_missing_result_count: 0,
-  in_progress_heat_count: 0,
   any_heat_count: 2,
 };
 
@@ -469,7 +468,6 @@ const lifecycleCases = [
   ["start-round-one", "REGISTRATION_CLOSED", "ROUND_ONE", "START_ROUND_ONE"],
   ["start-final", "ROUND_ONE", "FINAL", "START_FINAL"],
   ["complete", "FINAL", "COMPLETED", "COMPLETE_EVENT"],
-  ["start-return-processing", "COMPLETED", "RETURN_PROCESSING", "START_RETURN_PROCESSING"],
 ];
 
 for (const [action, fromStatus, toStatus, commandType] of lifecycleCases) {
@@ -509,6 +507,84 @@ for (const [action, fromStatus, toStatus, commandType] of lifecycleCases) {
     assert.equal(command.args.includes("event_test"), true);
   });
 }
+
+// The lifecycle is exactly six statuses reached by exactly six transitions.
+// COMPLETED is terminal: results stay public until an administrator deletes
+// the event, so nothing may advance past it.
+test("readiness publishes exactly the six-status lifecycle", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands") && sql.includes("request_fingerprint")) return null;
+    if (sql.includes("submitted_registration_count")) return readyStats;
+    return { ...draftEvent, status: "COMPLETED" };
+  });
+  const response = await handleEventOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test/readiness"),
+    makeEnv(db),
+    staff,
+  );
+  const body = await response.json();
+
+  assert.deepEqual(Object.keys(body.readiness), [
+    "open-registration",
+    "close-registration",
+    "reopen-registration",
+    "start-round-one",
+    "start-final",
+    "complete",
+  ]);
+  const statuses = new Set();
+  for (const state of Object.values(body.readiness)) {
+    statuses.add(state.fromStatus);
+    statuses.add(state.toStatus);
+  }
+  assert.deepEqual([...statuses].sort(), [
+    "COMPLETED",
+    "DRAFT",
+    "FINAL",
+    "REGISTRATION_CLOSED",
+    "REGISTRATION_OPEN",
+    "ROUND_ONE",
+  ]);
+});
+
+test("the retired start-return-processing transition is gone", async () => {
+  const db = makeDb(() => {
+    throw new Error("a removed transition must not read the database");
+  });
+  const response = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/start-return-processing", "POST", {
+      commandId: crypto.randomUUID(),
+    }),
+    makeEnv(db),
+    staff,
+  );
+
+  // No lifecycle handler claims the path, so the module falls through.
+  assert.equal(response, null);
+  assert.equal(db.statements.length, 0);
+  assert.equal(db.batches.length, 0);
+});
+
+// A retired status must not be reachable through idempotency replay logic
+// either: the completed-transition probe only recognises current commands.
+test("lifecycle replay history never references retired commands", async () => {
+  const seen = [];
+  const db = makeDb((sql) => {
+    seen.push(sql);
+    if (sql.includes("FROM race_commands") && sql.includes("request_fingerprint")) return null;
+    if (sql.includes("candidate.command_type IN")) return null;
+    if (sql.includes("submitted_registration_count")) return readyStats;
+    return { ...draftEvent, status: "COMPLETED" };
+  });
+  await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/complete", "POST", { commandId: crypto.randomUUID() }),
+    makeEnv(db),
+    staff,
+  );
+  const sql = seen.join("\n");
+  assert.doesNotMatch(sql, /START_RETURN_PROCESSING|RECORD_DUCK_DISPOSITION|FINALIZE_RETURN_BATCH/);
+  assert.doesNotMatch(sql, /MARK_EVENT_PURGE_READY|CANCEL_EVENT_PURGE_READY/);
+});
 
 test("atomic round-one start rejects provisioning begun after readiness preflight", async (context) => {
   const database = new DatabaseSync(":memory:");

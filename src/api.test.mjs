@@ -69,7 +69,7 @@ const staffActor = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
-  roles: ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"],
+  roles: ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RACE_DIRECTOR"],
   authentication: "bearer",
 };
 
@@ -102,15 +102,23 @@ test("routes authenticated staff operation modules before the legacy fallback", 
   assert.equal((await response.json()).events[0].id, event.id);
 });
 
+// The legacy fallback still owns real routes (registration search, scan-first
+// pairing). Return review is not one of them any more, so the composed router
+// must answer 404 rather than reaching a handler.
 test("keeps legacy staff routes behind the composed operation router", async () => {
-  const response = await handleApi(
+  const search = await handleApi(
+    new Request("https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q=daisy"),
+    makeEnv(makeDb(() => null)),
+    async () => staffActor,
+  );
+  assert.equal(search.status, 200);
+
+  const retired = await handleApi(
     new Request("https://quickducks.com/api/v1/staff/events/return-review"),
     makeEnv(makeDb(() => null)),
     async () => staffActor,
   );
-
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { event: null });
+  assert.equal(retired.status, 404);
 });
 
 test("returns the current event without private configuration", async () => {
@@ -1074,6 +1082,84 @@ test("the public duck number lookup is bound and scoped to the current public ev
   assert.equal(statusStatement.sql.includes("128"), false);
   // The projection is the shared one: no private column is ever selected.
   assert.doesNotMatch(statusStatement.sql, /r\.email|r\.phone|lookup_code|private_token_hash|dt\.token/);
+});
+
+// Every public selection lists its statuses explicitly. With the lifecycle down
+// to six statuses, the public allow-list is the five post-draft ones and the
+// retired names must not appear in any public query.
+test("public event, status, and board selections allow exactly the five public statuses", async () => {
+  const publicStatuses = "'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED'";
+  const collected = [];
+  // Each public entry point is swept on its own so dropping COMPLETED from any
+  // single one of them fails here instead of hiding behind the others.
+  const sweep = async (label, request, db) => {
+    await handleApi(request, makeEnv(db));
+    const swept = db.statements.map((statement) => statement.sql);
+    collected.push(...swept);
+    const selections = swept.filter((sql) => /FROM events|JOIN events/.test(sql) && /status IN \(/.test(sql));
+    assert.ok(selections.length > 0, `${label} must pin an explicit public status allow-list`);
+    for (const sql of selections) {
+      const list = sql.match(/status IN \(([^)]*)\)/s)[1].replace(/\s+/g, " ").trim();
+      assert.equal(list, publicStatuses, `${label}: ${sql}`);
+    }
+    return selections.length;
+  };
+
+  let eventSelections = 0;
+  eventSelections += await sweep(
+    "current event",
+    new Request("https://quickducks.com/api/v1/events/current"),
+    makeDb(() => openEvent),
+  );
+  eventSelections += await sweep(
+    "duck number lookup",
+    new Request("https://quickducks.com/api/v1/ducks/number/128"),
+    duckNumberDb(),
+  );
+  eventSelections += await sweep(
+    "tag scan",
+    new Request(`https://quickducks.com/api/v1/ducks/${"a".repeat(32)}`),
+    duckNumberDb(),
+  );
+  eventSelections += await sweep(
+    "public race board",
+    new Request("https://quickducks.com/api/v1/race-board"),
+    makeDb((sql) => sql.includes("FROM events") ? publicEventRow : null),
+  );
+  eventSelections += await sweep(
+    "my registrations",
+    new Request("https://quickducks.com/api/v1/registrations/mine", {
+      headers: { cookie: `__Host-quickducks_browser=${"C".repeat(43)}` },
+    }),
+    makeDb(
+      (sql) => {
+        if (sql.includes("browser_registration_collections")) {
+          return { id: "collection_test", expires_at: "2099-01-01T00:00:00.000Z" };
+        }
+        if (sql.includes("FROM heats")) return null;
+        if (sql.includes("FROM race_entries")) return duckNumberRow;
+        return null;
+      },
+      (sql) => sql.includes("browser_collection_registrations") ? {
+        results: [{
+          registration_id: "registration_one",
+          race_entry_id: "entry_one",
+          first_name: "Daisy",
+          last_name: "Duck",
+          lookup_code: "DAISY123",
+          status: "ACTIVE",
+          added_via: "REGISTRATION",
+          public_name_policy: "FIRST_NAME_LAST_INITIAL",
+          is_paired: 1,
+        }],
+      } : { results: [] },
+    ),
+  );
+  assert.ok(eventSelections >= 5, "every public path pins an explicit status allow-list");
+  // COMPLETED stays publicly visible; the retired statuses are gone entirely.
+  for (const sql of collected) {
+    assert.doesNotMatch(sql, /RETURN_PROCESSING|ARCHIVED/, sql);
+  }
 });
 
 test("unknown, unpaired, and out-of-event duck numbers are indistinguishable 404s", async () => {

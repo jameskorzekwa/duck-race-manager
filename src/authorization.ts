@@ -6,7 +6,6 @@ export const operationalRoles = [
   "ANNOUNCER",
   "HEAT_RUNNER",
   "RESULT_TAKER",
-  "RETURN_STEWARD",
   "RACE_DIRECTOR",
 ] as const;
 
@@ -17,6 +16,9 @@ const operationalRoleSet = new Set<string>(operationalRoles);
 export const isOperationalRole = (value: unknown): value is OperationalRole =>
   typeof value === "string" && operationalRoleSet.has(value);
 
+// Strict validation for values a caller supplies. Anything outside the current
+// vocabulary — including the retired RETURN_STEWARD — makes the whole request
+// invalid, so grants and role changes reject it instead of silently dropping it.
 export const normalizeOperationalRoles = (
   value: unknown,
   requireNonempty = false,
@@ -28,6 +30,14 @@ export const normalizeOperationalRoles = (
   if (new Set(roles).size !== roles.length) return null;
   return operationalRoles.filter((role) => roles.includes(role));
 };
+
+// Tolerant projection for roles already stored in D1. Retired vocabulary such
+// as RETURN_STEWARD may still exist in staff_role_assignments until the PR 4
+// cleanup, so stale values are ignored rather than failing authentication or
+// erasing an actor's remaining valid roles. An ignored role grants nothing
+// because it can never appear in a required-role list.
+export const readStoredOperationalRoles = (values: readonly unknown[]): OperationalRole[] =>
+  operationalRoles.filter((role) => values.includes(role));
 
 export const hasAnyRole = (
   actor: StaffActor,

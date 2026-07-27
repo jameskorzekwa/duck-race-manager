@@ -155,7 +155,7 @@ Amazon Cognito authentication protects staff pages and staff APIs:
 
 Cognito establishes staff identity. The Worker verifies each access token and
 requires a matching staff profile for every protected read or mutation. The
-profile's administrator flag separately protects complete-race purge. Browser
+profile's administrator flag separately protects complete-race deletion. Browser
 sign-in uses authorization code plus PKCE; the resulting access token is held
 in a host-only, `Secure`, `HttpOnly`, `SameSite=Lax` cookie. Cookie-authenticated
 staff mutations also require an exact same-origin `Origin` header.

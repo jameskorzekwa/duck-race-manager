@@ -96,7 +96,7 @@ endpoint.
 GET /api/v1/ducks/{permanentTagToken}
 ```
 
-An unassigned, retired, unknown, or purged token returns the same `HOME`
+An unassigned, retired, unknown, or deleted token returns the same `HOME`
 destination and no inventory metadata. An actively assigned token returns a
 `RACE_STATUS` destination with privacy-filtered event, visible duck, assigned
 heat, currently running heat, and finalized progression/result fields. It never
@@ -187,53 +187,27 @@ name, and either `STAFF` or `ADMIN`. It creates or safely resumes a passwordless
 Cognito identity, writes the matching D1 authorization profile, and retains an
 administrator access audit. Regular staff cannot list or grant access.
 
-## Return Review and Purge Readiness
+## Delete Event
 
 ```http
-GET  /api/v1/staff/events/return-review
-POST /api/v1/staff/ducks/{tagToken}/dispositions
-POST /api/v1/staff/events/{eventId}/ducks/{visibleNumber}/dispositions
-POST /api/v1/staff/events/{eventId}/purge-ready
-POST /api/v1/staff/events/{eventId}/purge-ready/cancel
+POST /api/v1/staff/events/{eventId}/force-delete
 ```
 
-After racing reaches `COMPLETED`, authenticated staff scan each physical duck
-and record `RETURNED`, `QUARANTINED`, `DAMAGED`, `RETIRED`, `KEPT`, `MISSING`,
-or `UNACCOUNTED_FOR`. The idempotent command atomically records or explicitly
-corrects the event disposition, closes the active assignment, releases the
-event reservation, updates inventory, writes an audit event, and moves the
-event into `RETURN_PROCESSING`.
-The event-scoped visible-number route supports located ducks without a readable
-tag and ducks that must be marked missing or unaccounted for because they cannot
-be physically scanned.
+Deleting the event is the only cleanup path. Duck returns and dispositions are
+not tracked, and there is no purge-readiness, purge-gate, or purge-claim stage.
 
-The staff return-review panel reports counts and unresolved gates. A system
-administrator must acknowledge both the completed physical review and
-permanent deletion before marking an event `ARCHIVED`. The transition is
-blocked by unresolved dispositions, unreleased reservations, active
-assignments, running heats, or heats awaiting results. `ARCHIVED` is read-only;
-an administrator can reopen `RETURN_PROCESSING` only with a recorded correction
-reason.
+The route requires a system administrator, an idempotent command UUID, the
+event's current `revision`, a `confirmName` typed exactly as the event name, and
+no other event dataset. It works from any lifecycle status, including
+`COMPLETED`. One atomic batch deletes browser links and collections, heats,
+entries, current and superseded results, notifications and attempts,
+assignments, event duck reservations, inventory events, ducks and tags,
+registrations, race entries, commands, audits, and the event row.
 
-## Complete Race Purge
-
-```http
-POST /api/v1/staff/events/{eventId}/purge
-```
-
-Purge requires a system administrator, purge-ready event state, no other event
-dataset, a physical disposition for every event duck, and an exact typed
-confirmation. It transactionally deletes browser links, heats, results,
-assignments, registrations, commands, audits, event, duck tags, ducks, and
-browser collections. The next race re-registers physical ducks from scratch.
-
-## Post-Race Purge
-
-After return processing, the complete race dataset is deleted, including
-events, participants, browser collections, ducks, tags, assignments, heats,
-results, messages, commands, and audits. Staff accounts, schema, and
+Staff accounts, staff access history, organization defaults, schema, and
 infrastructure remain. Every physical duck used in a later race must be scanned
-and registered again.
+and registered again. A well-formed retry against an already-deleted event
+returns `{ "deleted": true, "alreadyDeleted": true }`.
 
 ## Runtime Configuration
 

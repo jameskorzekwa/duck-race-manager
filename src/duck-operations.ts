@@ -121,8 +121,6 @@ interface DuckSummaryRow {
   heat_number: number | null;
   heat_status: string | null;
   heat_slot_number: number | null;
-  disposition: string | null;
-  disposition_recorded_at: string | null;
 }
 
 const duckSelect = `
@@ -136,8 +134,7 @@ const duckSelect = `
          da.race_entry_id, r.id AS registration_id,
          r.first_name, r.last_name, r.status AS registration_status,
          h.id AS heat_id, h.round AS heat_round, h.heat_number,
-         h.status AS heat_status, he.slot_number AS heat_slot_number,
-         ded.disposition, ded.recorded_at AS disposition_recorded_at
+         h.status AS heat_status, he.slot_number AS heat_slot_number
     FROM ducks d
     LEFT JOIN duck_tags dt ON dt.id = (
       SELECT dt2.id
@@ -168,8 +165,7 @@ const duckSelect = `
        ORDER BY CASE h2.round WHEN 'FINAL' THEN 0 ELSE 1 END, h2.heat_number
        LIMIT 1
     )
-    LEFT JOIN heats h ON h.id = he.heat_id
-    LEFT JOIN duck_event_dispositions ded ON ded.event_duck_id = ed.id`;
+    LEFT JOIN heats h ON h.id = he.heat_id`;
 
 const summaryResponse = (row: DuckSummaryRow, includePii: boolean): Record<string, unknown> => ({
   id: row.duck_id,
@@ -211,10 +207,6 @@ const summaryResponse = (row: DuckSummaryRow, includePii: boolean): Record<strin
     number: row.heat_number,
     status: row.heat_status,
     slotNumber: row.heat_slot_number,
-  },
-  disposition: row.disposition === null ? null : {
-    status: row.disposition,
-    recordedAt: row.disposition_recorded_at,
   },
 });
 
@@ -273,11 +265,9 @@ const getDuckHistory = async (
     }>(),
     env.DB.prepare(
       `SELECT ed.id, ed.reserved_at, ed.released_at, ed.release_reason,
-              e.id AS event_id, e.name AS event_name, e.status AS event_status,
-              ded.disposition, ded.recorded_at AS disposition_recorded_at
+              e.id AS event_id, e.name AS event_name, e.status AS event_status
          FROM event_ducks ed
          JOIN events e ON e.id = ed.event_id
-         LEFT JOIN duck_event_dispositions ded ON ded.event_duck_id = ed.id
         WHERE ed.duck_id = ?
         ORDER BY ed.reserved_at DESC, ed.id DESC`,
     ).bind(duckId).all<{
@@ -288,8 +278,6 @@ const getDuckHistory = async (
       event_id: string;
       event_name: string;
       event_status: string;
-      disposition: string | null;
-      disposition_recorded_at: string | null;
     }>(),
     env.DB.prepare(
       `SELECT da.id, da.valid_from, da.valid_to, da.end_reason,
@@ -353,10 +341,6 @@ const getDuckHistory = async (
       releasedAt: row.released_at,
       releaseReason: row.release_reason,
       event: { id: row.event_id, name: row.event_name, status: row.event_status },
-      disposition: row.disposition === null ? null : {
-        status: row.disposition,
-        recordedAt: row.disposition_recorded_at,
-      },
     })),
     assignments: assignments.results.map((row) => ({
       id: row.id,

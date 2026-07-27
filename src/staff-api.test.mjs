@@ -13,7 +13,7 @@ const actor = {
   email: "staff@example.com",
   displayName: "Staff Member",
   isSystemAdmin: false,
-  roles: ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"],
+  roles: ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RACE_DIRECTOR"],
   authentication: "bearer",
 };
 
@@ -121,14 +121,18 @@ test("authenticates a Cognito subject only when a matching staff profile exists"
   assert.deepEqual(db.statements[0].args, [actor.cognitoSub]);
 });
 
-test("authentication rejects invalid D1 roles instead of broadening access", async () => {
+// Unknown D1 role vocabulary is ignored rather than trusted or fatal. Retired
+// values such as RETURN_STEWARD survive in staff_role_assignments until the
+// schema rebuild, so the session must still authenticate with exactly the
+// roles that remain valid and nothing more.
+test("authentication ignores unknown D1 roles instead of broadening access", async () => {
   const db = makeDb(() => ({
     id: actor.id,
     cognito_sub: actor.cognitoSub,
     email: actor.email,
     display_name: actor.displayName,
     is_system_admin: 0,
-  }), () => ({ results: [{ role: "ADMIN" }] }));
+  }), () => ({ results: [{ role: "ADMIN" }, { role: "RETURN_STEWARD" }, { role: "REGISTRATION" }] }));
   const result = await authenticateStaff(
     new Request("https://quickducks.com/api/v1/staff/events", {
       headers: { authorization: "Bearer valid.jwt.token" },
@@ -136,7 +140,38 @@ test("authentication rejects invalid D1 roles instead of broadening access", asy
     makeEnv(db),
     async () => ({ sub: actor.cognitoSub }),
   );
-  assert.equal(result, null);
+  assert.notEqual(result, null);
+  assert.deepEqual(result.roles, ["REGISTRATION"]);
+  assert.equal(result.isSystemAdmin, false);
+});
+
+// A stale RETURN_STEWARD row must not act as a role of its own: the actor is
+// treated exactly like one holding no roles at all.
+test("a stale RETURN_STEWARD assignment grants no permissions of its own", async () => {
+  const db = makeDb(() => ({
+    id: actor.id,
+    cognito_sub: actor.cognitoSub,
+    email: actor.email,
+    display_name: actor.displayName,
+    is_system_admin: 0,
+  }), () => ({ results: [{ role: "RETURN_STEWARD" }] }));
+  const staleActor = await authenticateStaff(
+    new Request("https://quickducks.com/api/v1/staff/events", {
+      headers: { authorization: "Bearer valid.jwt.token" },
+    }),
+    makeEnv(db),
+    async () => ({ sub: actor.cognitoSub }),
+  );
+  assert.deepEqual(staleActor.roles, []);
+  assert.equal(staleActor.isSystemAdmin, false);
+
+  // Every route the retired role used to unlock is either gone or forbidden.
+  const denied = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}`),
+    makeEnv(makeDb(() => null)),
+    staleActor,
+  );
+  assert.equal(denied.status, 403);
 });
 
 test("rejects anonymous staff API requests", async () => {
@@ -338,6 +373,42 @@ test("an administrator creates passwordless regular staff with command and audit
     accountType: "STAFF",
     roles: ["REGISTRATION", "DUCK_MANAGER"],
   });
+});
+
+// The grant path shares the strict role validator, so the retired role is a
+// malformed request: no Cognito identity is created and no row is written.
+test("granting staff access with the retired RETURN_STEWARD role is rejected", async () => {
+  const admin = { ...actor, isSystemAdmin: true, roles: [] };
+  for (const roles of [["RETURN_STEWARD"], ["REGISTRATION", "RETURN_STEWARD"]]) {
+    const db = makeDb(() => null);
+    const provisioner = {
+      async create() {
+        assert.fail("an invalid role must not create a Cognito identity");
+      },
+      async delete() {
+        assert.fail("nothing to delete");
+      },
+    };
+    const response = await handleStaffApi(
+      new Request("https://quickducks.com/api/v1/staff/profiles", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          email: "new.staff@example.com",
+          displayName: "New Staff",
+          role: "STAFF",
+          roles,
+        }),
+      }),
+      makeEnv(db),
+      admin,
+      provisioner,
+    );
+
+    assert.equal(response.status, 400, roles.join(","));
+    assert.equal(db.batches.length, 0);
+  }
 });
 
 test("an administrator can grant administrator role", async () => {
@@ -746,403 +817,81 @@ test("staff cannot pair a reserved duck whose inventory state is unsafe", async 
   assert.equal(db.batches.length, 0);
 });
 
-test("staff records a duck disposition and closes return state atomically", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("JOIN duck_tags")) {
-      return {
-        duck_id: "duck_test",
-        visible_number: 42,
-        event_duck_id: "event_duck_test",
-        event_status: "COMPLETED",
-        disposition_id: null,
-        active_assignment_id: "assignment_test",
-      };
-    }
-    return null;
-  });
-  const response = await handleStaffApi(
-    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}/dispositions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        disposition: "RETURNED",
+// Duck returns are no longer tracked, so every disposition, return-review, and
+// staged-purge route that the legacy fallback used to own must be gone. The
+// fallback answers 404 for an unknown path, and it must never touch D1.
+const retiredStaffRoutes = [
+  ["POST", `/api/v1/staff/ducks/${"a".repeat(32)}/dispositions`],
+  ["POST", "/api/v1/staff/events/event_test/ducks/42/dispositions"],
+  ["GET", "/api/v1/staff/events/return-review"],
+  ["POST", "/api/v1/staff/events/event_test/purge-ready"],
+  ["POST", "/api/v1/staff/events/event_test/purge-ready/cancel"],
+  ["POST", "/api/v1/staff/events/event_test/purge"],
+];
+
+for (const [method, path] of retiredStaffRoutes) {
+  test(`retired route ${method} ${path} is gone`, async () => {
+    const db = makeDb(() => {
+      throw new Error("a removed route must not read the database");
+    });
+    const response = await handleStaffApi(
+      new Request(`https://quickducks.com${path}`, method === "GET" ? undefined : {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          eventId: "event_test",
+          disposition: "RETURNED",
+          confirmation: "DELETE Test Duck Race",
+          returnReviewCompleted: true,
+          permanentDeletionAcknowledged: true,
+          reason: "correction reason",
+        }),
       }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-  const body = await response.json();
+      makeEnv(db),
+      { ...actor, isSystemAdmin: true, roles: [] },
+    );
 
-  assert.equal(response.status, 201);
-  assert.equal(body.inventoryStatus, "AVAILABLE");
-  assert.equal(body.eventStatus, "RETURN_PROCESSING");
-  assert.equal(db.batches.length, 1);
-  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.match(sql, /RECORD_DUCK_DISPOSITION/);
-  assert.match(sql, /status IN \('COMPLETED', 'RETURN_PROCESSING'\)/);
-  assert.match(sql, /INSERT INTO duck_event_dispositions/);
-  assert.match(sql, /UPDATE duck_assignments/);
-  assert.match(sql, /UPDATE event_ducks/);
-  assert.match(sql, /inventory_status = \?/);
-  assert.match(sql, /status = 'RETURN_PROCESSING'/);
-  const audit = db.batches[0].find((statement) => statement.sql.includes("INSERT INTO audit_events"));
-  assert.equal(audit.args[3], "DUCK_DISPOSITION_RECORDED");
-});
-
-test("staff can explicitly correct a disposition during return processing", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("JOIN duck_tags")) {
-      return {
-        duck_id: "duck_test",
-        visible_number: 42,
-        event_duck_id: "event_duck_test",
-        event_status: "RETURN_PROCESSING",
-        disposition_id: "disposition_test",
-        active_assignment_id: null,
-      };
-    }
-    return null;
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Not found." });
+    assert.equal(db.batches.length, 0);
   });
+}
+
+// The scanned-duck projection is pairing and inspection only now. It must not
+// advertise a disposition permission or leak a stored disposition value.
+test("the staff duck projection no longer exposes returns", async () => {
+  const db = makeDb(() => ({
+    duck_id: "duck_test",
+    visible_number: 42,
+    inventory_status: "AVAILABLE",
+    duck_revision: 1,
+    tag_status: "ACTIVE",
+    event_name: "Test Duck Race",
+    event_status: "COMPLETED",
+    assignment_id: null,
+    assignment_valid_to: null,
+    event_id: "event_test",
+    race_entry_id: null,
+    first_name: null,
+    last_name: null,
+    email: null,
+    phone: null,
+    lookup_code: null,
+    registration_status: null,
+  }));
   const response = await handleStaffApi(
-    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}/dispositions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        disposition: "DAMAGED",
-      }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-
-  assert.equal(response.status, 201);
-  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.match(sql, /UPDATE duck_event_dispositions/);
-  assert.doesNotMatch(sql, /INSERT INTO duck_event_dispositions/);
-  assert.doesNotMatch(sql, /UPDATE duck_assignments/);
-  const audit = db.batches[0].find((statement) => statement.sql.includes("INSERT INTO audit_events"));
-  assert.equal(audit.args[3], "DUCK_DISPOSITION_CORRECTED");
-});
-
-test("replaying a disposition command does not write a second disposition", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("SELECT event_id, command_type, result_id FROM race_commands")) {
-      return {
-        event_id: "event_test",
-        command_type: "RECORD_DUCK_DISPOSITION",
-        result_id: "disposition_test",
-      };
-    }
-    if (sql.includes("FROM duck_event_dispositions ded")) {
-      return {
-        disposition_id: "disposition_test",
-        disposition: "RETURNED",
-        visible_number: 42,
-        inventory_status: "AVAILABLE",
-        event_status: "RETURN_PROCESSING",
-      };
-    }
-    return null;
-  });
-  const response = await handleStaffApi(
-    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}/dispositions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: "2c293c36-bca9-4bd0-bc12-a5c9d1ab8370",
-        eventId: "event_test",
-        disposition: "RETURNED",
-      }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).replayed, true);
-  assert.equal(db.batches.length, 0);
-});
-
-test("staff records a missing duck by visible number when it cannot be scanned", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("FROM ducks d") && sql.includes("d.visible_number = ?")) {
-      return {
-        duck_id: "duck_test",
-        visible_number: 42,
-        event_duck_id: "event_duck_test",
-        event_status: "RETURN_PROCESSING",
-        disposition_id: null,
-        active_assignment_id: "assignment_test",
-      };
-    }
-    return null;
-  });
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/event_test/ducks/42/dispositions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ commandId: crypto.randomUUID(), disposition: "MISSING" }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-  const body = await response.json();
-
-  assert.equal(response.status, 201);
-  assert.equal(body.duck.visibleNumber, 42);
-  assert.equal(body.inventoryStatus, "MISSING");
-  const duckUpdate = db.batches[0].find((statement) => statement.sql.includes("UPDATE ducks"));
-  assert.equal(duckUpdate.args[0], "MISSING");
-});
-
-test("only a system administrator can mark an event purge-ready", async () => {
-  const db = makeDb(() => null);
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/event_test/purge-ready", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        returnReviewCompleted: true,
-        permanentDeletionAcknowledged: true,
-      }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-
-  assert.equal(response.status, 403);
-  assert.equal(db.statements.length, 0);
-});
-
-test("return review identifies unresolved duck numbers without participant data", async () => {
-  const db = makeDb(
-    (sql) => {
-      if (sql.includes("FROM events")) {
-        return { id: "event_test", name: "Test Duck Race", status: "RETURN_PROCESSING" };
-      }
-      if (sql.includes("COUNT(*) AS total_count")) {
-        return { total_count: 3, unresolved_count: 1, unreleased_count: 0 };
-      }
-      return null;
-    },
-    (sql) => {
-      if (sql.includes("ded.id IS NULL")) return { results: [{ visible_number: 42 }] };
-      if (sql.includes("GROUP BY disposition")) {
-        return { results: [{ disposition: "RETURNED", disposition_count: 2 }] };
-      }
-      return { results: [] };
-    },
-  );
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/return-review"),
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}`),
     makeEnv(db),
     actor,
   );
   const body = await response.json();
 
   assert.equal(response.status, 200);
-  assert.deepEqual(body.review.unresolvedDuckNumbers, [42]);
-  assert.equal(body.review.dispositions.RETURNED, 2);
-  assert.equal(JSON.stringify(body).includes("participant"), false);
-});
-
-test("purge readiness is blocked while a physical duck is unresolved", async () => {
-  const admin = { ...actor, isSystemAdmin: true, roles: [] };
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("SELECT id, name, status FROM events")) {
-      return { id: "event_test", name: "Test Duck Race", status: "RETURN_PROCESSING" };
-    }
-    if (sql.includes("FROM event_ducks ed") && sql.includes("ded.id IS NULL")) return { id: "event_duck_test" };
-    return null;
-  });
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/event_test/purge-ready", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        returnReviewCompleted: true,
-        permanentDeletionAcknowledged: true,
-      }),
-    }),
-    makeEnv(db),
-    admin,
-  );
-
-  assert.equal(response.status, 409);
-  assert.match((await response.json()).error, /Every event duck/);
-  assert.equal(db.batches.length, 0);
-});
-
-test("an administrator marks a fully reconciled event purge-ready", async () => {
-  const admin = { ...actor, isSystemAdmin: true, roles: [] };
-  const db = makeDb(
-    (sql) => {
-      if (sql.includes("FROM race_commands")) return null;
-      if (sql.includes("SELECT id, name, status FROM events")) {
-        return { id: "event_test", name: "Test Duck Race", status: "RETURN_PROCESSING" };
-      }
-      return null;
-    },
-    (sql) => sql.includes("FROM duck_event_dispositions")
-      ? { results: [{ disposition: "RETURNED", disposition_count: 12 }] }
-      : { results: [] },
-  );
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/event_test/purge-ready", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        returnReviewCompleted: true,
-        permanentDeletionAcknowledged: true,
-      }),
-    }),
-    makeEnv(db),
-    admin,
-  );
-  const body = await response.json();
-
-  assert.equal(response.status, 201);
-  assert.equal(body.event.status, "ARCHIVED");
-  assert.equal(body.dispositions.RETURNED, 12);
-  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.match(sql, /MARK_EVENT_PURGE_READY/);
-  assert.match(sql, /status IN \('COMPLETED', 'RETURN_PROCESSING'\)/);
-  assert.match(sql, /status = 'ARCHIVED'/);
-  assert.match(sql, /EVENT_MARKED_PURGE_READY/);
-});
-
-test("an administrator can reopen purge readiness for a correction", async () => {
-  const admin = { ...actor, isSystemAdmin: true, roles: [] };
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("SELECT id, name, status FROM events")) {
-      return { id: "event_test", name: "Test Duck Race", status: "ARCHIVED" };
-    }
-    return null;
-  });
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/event_test/purge-ready/cancel", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ commandId: crypto.randomUUID(), reason: "Duck 42 needs correction" }),
-    }),
-    makeEnv(db),
-    admin,
-  );
-
-  assert.equal(response.status, 201);
-  assert.equal((await response.json()).event.status, "RETURN_PROCESSING");
-  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.match(sql, /CANCEL_EVENT_PURGE_READY/);
-  assert.match(sql, /status = 'ARCHIVED'/);
-  assert.match(sql, /status = 'RETURN_PROCESSING'/);
-  assert.match(sql, /EVENT_PURGE_READY_CANCELLED/);
-});
-
-test("only a system administrator can purge a race", async () => {
-  const db = makeDb(() => null);
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/event_test/purge", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ confirmation: "DELETE Test Duck Race" }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-
-  assert.equal(response.status, 403);
-  assert.equal(db.statements.length, 0);
-});
-
-test("purge deletes the complete race, duck, tag, browser, and audit dataset", async () => {
-  const admin = { ...actor, isSystemAdmin: true, roles: [] };
-  const db = makeDb((sql) => {
-    if (sql.includes("SELECT id, name, status FROM events")) {
-      return { id: "event_test", name: "Test Duck Race", status: "ARCHIVED" };
-    }
-    if (sql.includes("FROM event_purge_claims")) return { status: "PURGING" };
-    if (sql.includes("WHERE id !=")) return null;
-    if (sql.includes("LEFT JOIN duck_event_dispositions")) return null;
-    return null;
-  });
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/event_test/purge", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ confirmation: "DELETE Test Duck Race" }),
-    }),
-    makeEnv(db),
-    admin,
-  );
-
-  assert.equal(response.status, 204);
-  assert.equal(db.batches.length, 1);
-  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.match(sql, /DELETE FROM browser_collection_registrations/);
-  assert.match(sql, /DELETE FROM email_attempts/);
-  assert.match(sql, /DELETE FROM email_notifications/);
-  assert.match(sql, /DELETE FROM heat_result_history/);
-  assert.match(sql, /DELETE FROM heat_results/);
-  assert.match(sql, /DELETE FROM return_batch_items/);
-  assert.match(sql, /DELETE FROM return_batches/);
-  assert.match(sql, /DELETE FROM duck_assignments/);
-  assert.match(sql, /DELETE FROM duck_inventory_events/);
-  assert.match(sql, /DELETE FROM registrations/);
-  assert.match(sql, /DELETE FROM audit_events/);
-  assert.equal(db.batches[0].find((statement) => statement.sql.includes("audit_events")).sql, "DELETE FROM audit_events");
-  assert.match(sql, /DELETE FROM events/);
-  assert.match(sql, /DELETE FROM duck_tags/);
-  assert.match(sql, /DELETE FROM ducks/);
-  assert.match(sql, /DELETE FROM browser_registration_collections/);
-  assert.equal(response.headers.get("clear-site-data"), '"cache", "cookies", "storage"');
-});
-
-test("final purge executes against the complete migrated schema", async () => {
-  const database = new DatabaseSync(":memory:");
-  database.exec("PRAGMA foreign_keys = ON");
-  for (const name of migrationNames) {
-    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
-  }
-  database.exec(`
-    INSERT INTO staff_profiles
-      (id, cognito_sub, email, display_name, is_system_admin, is_active)
-    VALUES
-      ('staff_test', 'staff-sub', 'staff@example.com', 'Staff Member', 1, 1);
-    INSERT INTO events (id, slug, name, timezone, status)
-    VALUES ('event_test', 'test-race', 'Test Duck Race', 'UTC', 'ARCHIVED');
-    INSERT INTO event_purge_claims
-      (event_id, command_id, status, claimed_by_staff_profile_id, claimed_at)
-    VALUES
-      ('event_test', 'claim-command', 'PURGING', 'staff_test', '2026-07-26T00:00:00Z');
-  `);
-
-  const response = await handleStaffApi(
-    new Request("https://quickducks.com/api/v1/staff/events/event_test/purge", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ confirmation: "DELETE Test Duck Race" }),
-    }),
-    makeEnv(sqliteD1(database)),
-    { ...actor, isSystemAdmin: true, roles: [] },
-  );
-
-  assert.equal(response.status, 204);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM events").get().count, 0);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM event_purge_claims").get().count, 0);
-  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
-  database.close();
+  assert.deepEqual(Object.keys(body.permissions), ["pair"]);
+  assert.equal("disposition" in body, false);
+  const sql = db.statements.map((statement) => statement.sql).join("\n");
+  assert.doesNotMatch(sql, /duck_event_dispositions/);
 });
 
 const seedImmediatePairingEvent = (database, { ducksPerHeat, finalHeatCapacity }) => {

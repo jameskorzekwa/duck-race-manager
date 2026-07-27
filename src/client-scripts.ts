@@ -633,7 +633,7 @@ if (participantRoot) {
     participantCleanRegisteredQuery();
   }
   globalThis.quickDucksLive.subscribe({
-    domains: ["event", "participants", "ducks", "heats", "returns"],
+    domains: ["event", "participants", "ducks", "heats"],
     root: participantRoot,
     refresh: participantRefreshWork,
   });
@@ -643,7 +643,7 @@ if (participantRoot) {
 `;
 
 export const liveRuntimeHelpersScript = String.raw`
-const liveAllowedDomains = new Set(["all", "event", "participants", "ducks", "heats", "returns", "staff", "support"]);
+const liveAllowedDomains = new Set(["all", "event", "participants", "ducks", "heats", "staff", "support"]);
 const livePollDelay = (connected) => connected ? 30000 : 5000;
 const liveDirtyDeferralMs = 300000;
 const liveReconnectDelay = (attempt, randomValue = Math.random()) => {
@@ -969,10 +969,9 @@ const stationHeatRenderKey = (event, detail) => [
 ].join(":");
 `;
 
-// Every event lifecycle status accepted by the events table maps to plain
-// race-day language. The public board projection currently publishes only
-// REGISTRATION_OPEN through COMPLETED, but the remaining statuses are mapped so
-// the board never falls back to raw enum text.
+// Every event lifecycle status maps to plain race-day language. The public
+// board projection publishes REGISTRATION_OPEN through COMPLETED; DRAFT is
+// mapped too so the board never falls back to raw enum text.
 export const liveBoardStageScript = String.raw`
 const liveEventStages = {
   DRAFT: ["Race being prepared", "Race staff are still preparing this race."],
@@ -981,8 +980,6 @@ const liveEventStages = {
   ROUND_ONE: ["Round one under way", "Round one is under way."],
   FINAL: ["Final under way", "The final is under way."],
   COMPLETED: ["Results official", "Every heat is finished and the results are final."],
-  RETURN_PROCESSING: ["Race complete", "The race is complete and staff are collecting the ducks."],
-  ARCHIVED: ["Race complete", "The race is complete."],
 };
 const liveEventStage = (status) => {
   const stage = liveEventStages[Object.prototype.hasOwnProperty.call(liveEventStages, status) ? status : ""];
@@ -1256,7 +1253,7 @@ const liveRefreshWork = async () => {
 };
 if (liveBoardRoot) {
   globalThis.quickDucksLive.subscribe({
-    domains: ["event", "participants", "ducks", "heats", "returns"],
+    domains: ["event", "participants", "ducks", "heats"],
     root: liveBoardRoot,
     refresh: liveRefreshWork,
   });
@@ -2709,7 +2706,7 @@ const intakeLiveRefresh = async () => {
   }
 };
 intakeSubscription = globalThis.quickDucksLive.subscribe({
-  domains: ["event", "ducks", "returns"],
+  domains: ["event", "ducks"],
   root: intakeRoot,
   refresh: intakeLiveRefresh,
   isBlocked: () => intakeMachine.isBusy() || intakeMachine.hasPending(),
@@ -2752,8 +2749,6 @@ const lifecycleStatusOrder = [
   "ROUND_ONE",
   "FINAL",
   "COMPLETED",
-  "RETURN_PROCESSING",
-  "ARCHIVED",
 ];
 
 const lifecycleReadinessPresentation = (state, eventStatus) => {
@@ -2848,7 +2843,6 @@ const canRaceRead = hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER") || hasRole("R
 const canDirectRace = hasRole("RACE_DIRECTOR");
 const canRunHeat = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
 const canTakeResults = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
-const canReturns = hasRole("RETURN_STEWARD") || hasRole("RACE_DIRECTOR");
 const consoleMessage = document.querySelector("[data-console-message]");
 const eventSelect = document.querySelector("[data-event-select]");
 let currentEvent = null;
@@ -2857,7 +2851,6 @@ let selectedRegistration = null;
 let selectedDuck = null;
 let selectedHeat = null;
 let pendingHeatPlan = null;
-let reviewEvent = null;
 let staffCommandCount = 0;
 let staffLiveSubscription = null;
 
@@ -2998,7 +2991,6 @@ const lifecycleLabels = {
   "start-round-one": "Start round one",
   "start-final": "Start final",
   complete: "Complete event",
-  "start-return-processing": "Start return processing",
 };
 
 const renderReadiness = (readiness) => {
@@ -3138,20 +3130,19 @@ const loadEvents = async (preferredId) => {
     selectedDuck = null;
     selectedHeat = null;
     pendingHeatPlan = null;
-    reviewEvent = null;
     eventSummary.replaceChildren(empty("Create a draft event to begin."));
     readinessList.replaceChildren(empty("No lifecycle is available."));
     for (const selector of [
       "[data-participant-list]", "[data-inventory-list]", "[data-heat-list]",
-      "[data-finalist-list]", "[data-return-summary]", "[data-support-summary]",
+      "[data-finalist-list]", "[data-support-summary]",
       "[data-notification-list]", "[data-notification-attempts]", "[data-audit-list]",
-      "[data-purge-gate]", "[data-walkup-result]", "[data-label-result]",
+      "[data-walkup-result]", "[data-label-result]",
       "[data-participant-name]", "[data-participant-facts]", "[data-participant-actions]",
       "[data-inventory-name]", "[data-inventory-facts]", "[data-inventory-history]",
       "[data-heat-name]", "[data-heat-facts]", "[data-heat-roster]",
       "[data-heat-results]", "[data-heat-controls]",
     ]) document.querySelector(selector)?.replaceChildren();
-    for (const selector of ["[data-participant-detail]", "[data-inventory-detail]", "[data-heat-detail]", "[data-return-review]"]) {
+    for (const selector of ["[data-participant-detail]", "[data-inventory-detail]", "[data-heat-detail]"]) {
       const element = document.querySelector(selector);
       if (element) element.hidden = true;
     }
@@ -3177,7 +3168,6 @@ const loadEvents = async (preferredId) => {
     setMessage("No event dataset exists. An administrator can create one.");
     const loads = [];
     if (canInventory) loads.push(loadInventory());
-    if (canReturns) loads.push(loadReturnReview());
     await Promise.allSettled(loads);
     return;
   }
@@ -3207,8 +3197,7 @@ const loadEvent = async (eventId) => {
     if (selectedDuck && !inventoryDetail.hidden) loads.push(loadDuckDetail(selectedDuck.id));
   }
   if (canRaceRead) loads.push(loadHeats(), loadFinalists());
-  if (canReturns) loads.push(loadReturnReview());
-  if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit(), loadPurgeGate());
+  if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit());
   const results = await Promise.allSettled(loads);
   const failed = results.filter((result) => result.status === "rejected");
   setMessage(failed.length === 0
@@ -3972,150 +3961,10 @@ const loadFinalists = async () => {
 };
 document.querySelector("[data-refresh-finalists]").addEventListener("click", () => loadFinalists().catch((error) => setMessage(error.message, true)));
 
-const returnReview = document.querySelector("[data-return-review]");
-const returnTitle = document.querySelector("[data-return-title]");
-const returnMessage = document.querySelector("[data-return-message]");
-const returnSummary = document.querySelector("[data-return-summary]");
-const numberedDispositionForm = document.querySelector("[data-numbered-disposition-form]");
-const purgeReadyForm = document.querySelector("[data-purge-ready-form]");
-const cancelPurgeReadyForm = document.querySelector("[data-cancel-purge-ready-form]");
-
-const loadReturnReview = async () => {
-  const body = await api("/api/v1/staff/events/return-review");
-  reviewEvent = body.event;
-  numberedDispositionForm.hidden = true;
-  purgeReadyForm.hidden = true;
-  cancelPurgeReadyForm.hidden = true;
-  returnSummary.replaceChildren();
-  if (!reviewEvent) {
-    returnReview.hidden = true;
-    return;
-  }
-  returnReview.hidden = false;
-  returnTitle.textContent = reviewEvent.name;
-  const dispositions = Object.entries(body.review.dispositions).map(([name, count]) => humanize(name) + ": " + count).join(" · ");
-  showFacts(returnSummary, [["Event status", humanize(reviewEvent.status)], ["Physical ducks", body.review.totalDucks], ["Unresolved", body.review.unresolvedDucks], ["Unreleased", body.review.unreleasedDucks], ["Dispositions", dispositions || "None recorded"]]);
-  if (body.review.unresolvedDuckNumbers.length > 0) addFact(returnSummary, "Unresolved numbers", body.review.unresolvedDuckNumbers.join(", "));
-  const blocked = body.review.unresolvedDucks > 0 || body.review.unreleasedDucks > 0 || body.review.hasBlockingHeat || body.review.hasActiveAssignment;
-  if (reviewEvent.status === "ARCHIVED") {
-    setMessage("This event is read-only and purge-ready.", false, returnMessage);
-    if (isSystemAdmin) cancelPurgeReadyForm.hidden = false;
-  } else {
-    numberedDispositionForm.hidden = false;
-    setMessage(blocked ? "Finish every disposition, reservation, assignment, and active heat." : "All automated return gates pass.", blocked, returnMessage);
-    if (isSystemAdmin) {
-      purgeReadyForm.hidden = false;
-      purgeReadyForm.querySelector("button").disabled = blocked;
-    }
-  }
-};
-
-numberedDispositionForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const values = new FormData(form);
-  await perform(button, "Saving physical disposition…", async () => {
-    await api(
-      "/api/v1/staff/events/" + encodeURIComponent(reviewEvent.id) + "/ducks/" + encodeURIComponent(String(values.get("visibleNumber"))) + "/dispositions",
-      commandOptions("POST", { commandId: crypto.randomUUID(), disposition: String(values.get("disposition")) }),
-    );
-    form.reset();
-    const loads = [loadReturnReview()];
-    if (canInventory) loads.push(loadInventory());
-    await Promise.all(loads);
-  });
-});
-
-purgeReadyForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const button = event.currentTarget.querySelector("button");
-  if (!await appConfirm("Mark this event purge-ready and disable normal race changes?", { danger: true })) return;
-  await perform(button, "Validating final return gates…", async () => {
-    await api("/api/v1/staff/events/" + encodeURIComponent(reviewEvent.id) + "/purge-ready", commandOptions("POST", {
-      commandId: crypto.randomUUID(), returnReviewCompleted: true, permanentDeletionAcknowledged: true,
-    }));
-    await Promise.all([loadEvents(reviewEvent.id), loadReturnReview()]);
-  });
-});
-
-cancelPurgeReadyForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const reason = String(new FormData(form).get("reason"));
-  await perform(button, "Reopening return processing…", async () => {
-    await api("/api/v1/staff/events/" + encodeURIComponent(reviewEvent.id) + "/purge-ready/cancel", commandOptions("POST", { commandId: crypto.randomUUID(), reason }));
-    form.reset();
-    await loadEvents(reviewEvent.id);
-  });
-});
-
-const returnBatchId = document.querySelector("[data-return-batch-id]");
-const returnBatchMessage = document.querySelector("[data-return-batch-message]");
-document.querySelector("[data-create-return-batch]").addEventListener("click", async (event) => {
-  await perform(event.currentTarget, "Starting return batch…", async () => {
-    const result = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/return-batches", commandOptions("POST", { commandId: crypto.randomUUID() }));
-    returnBatchId.value = result.batch.id;
-    setMessage("Batch " + result.batch.id + " is open.", false, returnBatchMessage);
-  });
-});
-
-document.querySelector("[data-return-batch-item-form]").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const values = new FormData(form);
-  const batchId = returnBatchId.value.trim();
-  if (!batchId) {
-    setMessage("Start a batch or enter its ID first.", true, returnBatchMessage);
-    return;
-  }
-  await perform(button, "Adding duck to return batch…", async () => {
-    const result = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/return-batches/" + encodeURIComponent(batchId) + "/items", commandOptions("POST", {
-      commandId: crypto.randomUUID(), visibleNumber: Number(values.get("visibleNumber")), disposition: String(values.get("disposition")),
-    }));
-    form.elements.visibleNumber.value = "";
-    setMessage("Staged Duck #" + result.item.visibleNumber + " as " + humanize(result.item.disposition) + ".", false, returnBatchMessage);
-  });
-});
-
-document.querySelector("[data-undo-return-item]").addEventListener("click", async (event) => {
-  const batchId = returnBatchId.value.trim();
-  if (!batchId) {
-    setMessage("Start a batch or enter its ID first.", true, returnBatchMessage);
-    return;
-  }
-  await perform(event.currentTarget, "Undoing latest return item…", async () => {
-    const result = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/return-batches/" + encodeURIComponent(batchId) + "/undo-last", commandOptions("POST", { commandId: crypto.randomUUID() }));
-    setMessage("Undid staged Duck #" + result.item.visibleNumber + ".", false, returnBatchMessage);
-  });
-});
-
-document.querySelector("[data-finalize-return-batch]").addEventListener("click", async (event) => {
-  const batchId = returnBatchId.value.trim();
-  if (!batchId) {
-    setMessage("Start a batch or enter its ID first.", true, returnBatchMessage);
-    return;
-  }
-  if (!await appConfirm("Finalize this return batch? Every staged disposition will become authoritative.")) return;
-  await perform(event.currentTarget, "Finalizing return batch…", async () => {
-    const result = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/return-batches/" + encodeURIComponent(batchId) + "/finalize", commandOptions("POST", { commandId: crypto.randomUUID() }));
-    setMessage("Finalized " + result.batch.itemCount + " return items.", false, returnBatchMessage);
-    returnBatchId.value = "";
-    const loads = [loadReturnReview()];
-    if (canInventory) loads.push(loadInventory());
-    await Promise.all(loads);
-  });
-});
-
 const supportSummary = document.querySelector("[data-support-summary]");
 const notificationList = document.querySelector("[data-notification-list]");
 const notificationAttempts = document.querySelector("[data-notification-attempts]");
 const auditList = document.querySelector("[data-audit-list]");
-const purgeGate = document.querySelector("[data-purge-gate]");
-const purgeClaimForm = document.querySelector("[data-purge-claim-form]");
-const finalPurgeForm = document.querySelector("[data-final-purge-form]");
 
 const loadSupportSummary = async () => {
   if (!isSystemAdmin || !currentEvent) return;
@@ -4123,7 +3972,7 @@ const loadSupportSummary = async () => {
   showFacts(supportSummary, [
     ["Total blockers", body.blockerCount], ["Registration", body.areas.registration.blockerCount],
     ["Inventory", body.areas.duck.blockerCount], ["Heats", body.areas.heat.blockerCount],
-    ["Returns", body.areas.return.blockerCount], ["Notifications", body.areas.notification.blockerCount],
+    ["Notifications", body.areas.notification.blockerCount],
   ]);
 };
 
@@ -4195,21 +4044,8 @@ const loadAudit = async () => {
   if (body.events.length === 0) auditList.append(empty("No audit events are recorded."));
 };
 
-const loadPurgeGate = async () => {
-  if (!isSystemAdmin || !currentEvent) return;
-  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEvent.id) + "/purge-gate");
-  const blockerText = Object.entries(body.blockers).filter(([, value]) => value === true || Number(value) > 0).map(([name, value]) => humanize(name) + ": " + value).join(" · ");
-  showFacts(purgeGate, [["Gate", body.ready ? "Ready" : "Blocked"], ["Blockers", blockerText || "None"], ["Claim", body.claim ? humanize(body.claim.status) : "Not claimed"], ["Claimed by", body.claim && body.claim.claimedBy ? body.claim.claimedBy : "None"]]);
-  purgeClaimForm.hidden = !body.ready;
-  finalPurgeForm.hidden = !body.claim || body.claim.status !== "PURGING";
-  const expected = "DELETE " + body.event.name;
-  purgeClaimForm.elements.confirmation.placeholder = expected;
-  finalPurgeForm.elements.confirmation.placeholder = expected;
-};
-
 if (isSystemAdmin) {
   document.querySelector("[data-refresh-support]").addEventListener("click", () => loadSupportSummary().catch((error) => setMessage(error.message, true)));
-  document.querySelector("[data-refresh-purge-gate]").addEventListener("click", () => loadPurgeGate().catch((error) => setMessage(error.message, true)));
   document.querySelector("[data-notification-filter-form]").addEventListener("submit", (event) => {
     event.preventDefault();
     loadNotifications()
@@ -4217,32 +4053,10 @@ if (isSystemAdmin) {
       .catch((error) => setMessage(error.message, true));
   });
   document.querySelector("[data-refresh-audit]").addEventListener("click", () => loadAudit().catch((error) => setMessage(error.message, true)));
-  purgeClaimForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const button = form.querySelector("button");
-    const confirmation = String(new FormData(form).get("confirmation"));
-    if (!await appConfirm("Claim this event for permanent purge? Support mutations will be frozen.", { danger: true })) return;
-    await perform(button, "Claiming permanent purge…", async () => {
-      await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/purge-claim", commandOptions("POST", { commandId: crypto.randomUUID(), confirmation }));
-      await loadPurgeGate();
-    });
-  });
-  finalPurgeForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const button = form.querySelector("button");
-    const confirmation = String(new FormData(form).get("confirmation"));
-    if (!await appConfirm("Permanently delete the complete race dataset now? This cannot be undone.", { danger: true })) return;
-    await perform(button, "Permanently deleting race dataset…", async () => {
-      await api("/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/purge", commandOptions("POST", { confirmation }));
-      location.assign("/staff");
-    });
-  });
 }
 
 staffLiveSubscription = globalThis.quickDucksLive.subscribe({
-  domains: ["event", "participants", "ducks", "heats", "returns", "staff", "support"],
+  domains: ["event", "participants", "ducks", "heats", "staff", "support"],
   root: operationsRoot,
   refresh: () => loadEvents(currentEvent?.id),
   isBlocked: () => staffCommandCount > 0,
@@ -4324,7 +4138,6 @@ const staffRoleLabels = {
   ANNOUNCER: "Announcer",
   HEAT_RUNNER: "Heat runner",
   RESULT_TAKER: "Result taker",
-  RETURN_STEWARD: "Return steward",
   RACE_DIRECTOR: "Race director",
 };
 
@@ -4461,9 +4274,6 @@ const token = root.dataset.token;
 const pageTitle = document.querySelector("[data-staff-title]");
 const summary = document.querySelector("[data-duck-summary]");
 const workArea = document.querySelector("[data-pairing-work]");
-const dispositionArea = document.querySelector("[data-disposition-work]");
-const dispositionForm = document.querySelector("[data-disposition-form]");
-const dispositionMessage = document.querySelector("[data-disposition-message]");
 const message = document.querySelector("[data-staff-message]");
 let currentEvent = null;
 let selectedRegistration = null;
@@ -4499,26 +4309,6 @@ const addFact = (label, value) => {
   summary.append(fact);
 };
 
-const showDisposition = (data) => {
-  if (!data.permissions.recordDisposition || !data.event || !["COMPLETED", "RETURN_PROCESSING"].includes(data.event.status)) return false;
-  dispositionArea.hidden = false;
-  dispositionArea.dataset.eventId = data.event.id;
-  document.querySelector("[data-disposition-event]").textContent = data.event.name;
-  const select = dispositionForm.elements.disposition;
-  const button = document.querySelector("[data-confirm-disposition]");
-  button.disabled = false;
-  if (data.disposition) {
-    select.value = data.disposition;
-    button.textContent = "Save disposition correction";
-    dispositionMessage.textContent = "Current disposition: " + data.disposition.replaceAll("_", " ").toLowerCase() + ".";
-  } else {
-    button.textContent = "Record physical disposition";
-    dispositionMessage.textContent = "Confirm the physical duck before recording this final outcome.";
-  }
-  message.textContent = "Review this duck, then record its confirmed physical disposition.";
-  return true;
-};
-
 const showInspection = (data) => {
   const participant = data.assignment.participant || {};
   pageTitle.textContent = "Inspect Duck #" + data.duck.visibleNumber;
@@ -4529,10 +4319,8 @@ const showInspection = (data) => {
   if (participant.lookupCode) addFact("Lookup code", participant.lookupCode);
   if (participant.registrationStatus) addFact("Registration", participant.registrationStatus.replaceAll("_", " ").toLowerCase());
   if (!data.assignment.active) addFact("Assignment", "closed");
-  if (data.disposition) addFact("Disposition", data.disposition.replaceAll("_", " ").toLowerCase());
   if (participant.email) addFact("Email", participant.email);
   if (participant.phone) addFact("Phone", participant.phone);
-  showDisposition(data);
 };
 
 const renderSelection = (registration) => {
@@ -4552,7 +4340,6 @@ const showPairing = (data) => {
   pageTitle.textContent = "Pair Duck #" + data.duck.visibleNumber;
   addFact("Duck", "#" + data.duck.visibleNumber);
   addFact("Inventory", data.duck.inventoryStatus.replaceAll("_", " ").toLowerCase());
-  if (showDisposition(data)) return;
   if (!data.pairingRequired) {
     message.textContent = "This duck cannot be paired in its current inventory or tag state.";
     return;
@@ -4575,8 +4362,6 @@ const load = async () => {
     currentEvent = eventResponse.event;
     summary.replaceChildren();
     workArea.hidden = true;
-    dispositionArea.hidden = true;
-    dispositionMessage.textContent = "";
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
   } catch (error) {
@@ -4586,7 +4371,6 @@ const load = async () => {
         currentEvent = null;
         summary.replaceChildren();
         workArea.hidden = true;
-        dispositionArea.hidden = true;
         document.querySelector("[data-registration-results]").replaceChildren();
         document.querySelector("[data-pairing-review]").replaceChildren();
       }
@@ -4668,41 +4452,8 @@ document.querySelector("[data-confirm-pairing]").addEventListener("click", async
   }
 });
 
-dispositionForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const button = document.querySelector("[data-confirm-disposition]");
-  const disposition = new FormData(event.currentTarget).get("disposition");
-  button.disabled = true;
-  staffDuckBusy += 1;
-  const endBusy = globalThis.quickDucksLive.beginBusy();
-  dispositionMessage.textContent = "Saving physical disposition…";
-  try {
-    const result = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/dispositions", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: dispositionArea.dataset.eventId,
-        disposition: String(disposition),
-      }),
-    });
-    await load();
-    dispositionMessage.textContent = result.replayed
-      ? "This disposition was already saved."
-      : "Disposition saved. Inventory is now " + result.inventoryStatus.replaceAll("_", " ").toLowerCase() + ".";
-    globalThis.quickDucksLive.markClean(event.currentTarget);
-  } catch (error) {
-    if (error.message !== "signed-out") dispositionMessage.textContent = error.message;
-    button.disabled = false;
-  } finally {
-    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
-    endBusy();
-    staffDuckSubscription?.resume();
-  }
-});
-
 staffDuckSubscription = globalThis.quickDucksLive.subscribe({
-  domains: ["event", "participants", "ducks", "heats", "returns"],
+  domains: ["event", "participants", "ducks", "heats"],
   root,
   refresh: load,
   isBlocked: () => staffDuckBusy > 0 || selectedRegistration !== null,

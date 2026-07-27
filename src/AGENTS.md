@@ -19,8 +19,8 @@ mapping. Tests are colocated `.test.mjs` files run directly by Node 24.
 7. `staff-api.ts`
 
 Do not reorder casually. Some routes are intentionally excluded by an earlier
-module and handled by the fallback, including registration search, return
-review, scan-first pairing, single dispositions, and final purge.
+module and handled by the fallback, including registration search and
+scan-first pairing.
 
 ## DOMAIN MAP
 
@@ -35,7 +35,7 @@ review, scan-first pairing, single dispositions, and final purge.
 | Participant operations | `participant-operations.ts` |
 | Inventory/tags/assignments | `duck-operations.ts`, `staff-api.ts` |
 | Heats/results | `heat-operations.ts` |
-| Returns/support/purge | `support-operations.ts`, `staff-api.ts` |
+| Support diagnostics | `support-operations.ts` |
 
 ## CODING CONVENTIONS
 
@@ -86,7 +86,7 @@ node --test src/role-authorization.integration.test.mjs
 - Real `node:sqlite` adapters validate migrated schemas and transactional
   workflows. Keep `PRAGMA foreign_keys = ON` and close each database.
 - `race-workflow.integration.test.mjs` must continue to exercise registration,
-  duck intake/pairing, every heat transition, final results, returns, and purge
+  duck intake/pairing, every heat transition, final results, and delete event
   through real Worker handlers.
 - `role-authorization.integration.test.mjs` is the least-privilege matrix.
 - `race-board.test.mjs` protects board ordering/privacy/current assignments;

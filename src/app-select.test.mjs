@@ -438,12 +438,17 @@ test("every page with a select loads the shared enhancement script", () => {
     renderStaffHome("Registration Staff", false, ["REGISTRATION"]),
     renderStaffAccess("Administrator"),
     renderInventoryIntake("Duck Manager", "https://quickducks.com"),
-    renderStaffDuck("tag-token", "Return Steward"),
   ];
   for (const markup of pages) {
     assert.match(markup, /<script src="\/assets\/app-select\.js" defer><\/script>/);
     assert.match(markup, /<select[\s>]/);
   }
+
+  // The staff duck page lost its only select with the disposition form. It
+  // still loads the shared script, which is a no-op when no select exists.
+  const duckMarkup = renderStaffDuck("tag-token", "Registration Staff");
+  assert.match(duckMarkup, /<script src="\/assets\/app-select\.js" defer><\/script>/);
+  assert.doesNotMatch(duckMarkup, /<select[\s>]/);
 });
 
 test("app-select styling matches the chunky ink/cream/yellow design system and layering rules", () => {

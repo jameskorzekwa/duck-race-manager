@@ -11,7 +11,7 @@ import {
   renderStartLine,
 } from "./site.ts";
 
-const eventScopedIds = ["participants", "inventory", "heats", "returns", "support"];
+const eventScopedIds = ["participants", "inventory", "heats", "support"];
 
 const sectionTag = (markup, id) => {
   const match = markup.match(new RegExp(`<section class="console-section" id="${id}"[^>]*>`));
@@ -51,7 +51,7 @@ test("every event-scoped console section ships hidden so no section flashes befo
     ["race director", renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])],
     ["registration", renderStaffHome("Registration Staff", false, ["REGISTRATION"])],
     ["announcer", renderStaffHome("Announcer", false, ["ANNOUNCER"])],
-    ["return steward", renderStaffHome("Return Steward", false, ["RETURN_STEWARD"])],
+    ["result taker", renderStaffHome("Result Taker", false, ["RESULT_TAKER"])],
   ];
 
   for (const [label, markup] of consoles) {
@@ -82,24 +82,21 @@ test("every event-scoped console section ships hidden so no section flashes befo
 test("role gating is recorded on each event-scoped section and survives event existence", () => {
   const registration = renderStaffHome("Registration Staff", false, ["REGISTRATION"]);
   const announcer = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
-  const steward = renderStaffHome("Return Steward", false, ["RETURN_STEWARD"]);
 
   assert.match(sectionTag(registration, "participants"), /data-role-allowed="true"/);
   assert.match(sectionTag(registration, "inventory"), /data-role-allowed="false"/);
   assert.match(sectionTag(registration, "heats"), /data-role-allowed="false"/);
-  assert.match(sectionTag(registration, "returns"), /data-role-allowed="false"/);
 
   assert.match(sectionTag(announcer, "heats"), /data-role-allowed="true"/);
   assert.match(sectionTag(announcer, "participants"), /data-role-allowed="false"/);
   assert.match(sectionTag(announcer, "inventory"), /data-role-allowed="false"/);
 
-  assert.match(sectionTag(steward, "returns"), /data-role-allowed="true"/);
-  assert.match(sectionTag(steward, "heats"), /data-role-allowed="false"/);
-  assert.equal(sectionTag(steward, "support"), null);
+  // The Returns section is gone from every console, for every role.
+  for (const markup of [registration, announcer]) assert.equal(sectionTag(markup, "returns"), null);
 
   // A race director may use every event-scoped section except administrator support.
   const director = renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]);
-  for (const id of ["participants", "inventory", "heats", "returns"]) {
+  for (const id of ["participants", "inventory", "heats"]) {
     assert.match(sectionTag(director, id), /data-role-allowed="true"/, id);
   }
   assert.equal(sectionTag(director, "support"), null);
@@ -107,7 +104,7 @@ test("role gating is recorded on each event-scoped section and survives event ex
 
 test("console-nav anchors are event-scoped, ship hidden, and stay role filtered", () => {
   const admin = consoleNav(renderStaffHome("Administrator", true, []));
-  assert.deepEqual(navHrefs(admin), ["#events", "#participants", "#inventory", "#heats", "#returns", "#support"]);
+  assert.deepEqual(navHrefs(admin), ["#events", "#participants", "#inventory", "#heats", "#support"]);
   // Access left the console nav for its own page.
   assert.doesNotMatch(admin, /#access/);
   for (const anchor of admin.matchAll(/<a href="#([a-z]+)"([^>]*)>/g)) {
@@ -120,7 +117,8 @@ test("console-nav anchors are event-scoped, ship hidden, and stay role filtered"
 
   // Role filtering still removes anchors entirely for roles that cannot use them.
   assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Announcer", false, ["ANNOUNCER"]))), ["#events", "#heats"]);
-  assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Return Steward", false, ["RETURN_STEWARD"]))), ["#events", "#returns"]);
+  // A stale retired role unlocks no console anchor beyond the always-on event one.
+  assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Stale Steward", false, ["RETURN_STEWARD"]))), ["#events"]);
   assert.deepEqual(
     navHrefs(consoleNav(renderStaffHome("Registration Staff", false, ["REGISTRATION"]))),
     ["#events", "#participants"],
@@ -202,7 +200,7 @@ test("the staff nav lists only the pages the actor may open", () => {
     [renderStaffHome("Result Taker", false, ["RESULT_TAKER"]), ["/staff", "/staff/finish-line"]],
     [renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]), ["/staff", "/staff/inventory-intake"]],
     [renderStaffHome("Announcer", false, ["ANNOUNCER"]), ["/staff"]],
-    [renderStaffHome("Return Steward", false, ["RETURN_STEWARD"]), ["/staff"]],
+    [renderStaffHome("Stale Steward", false, ["RETURN_STEWARD"]), ["/staff"]],
     [renderStaffHome("Registration Staff", false, ["REGISTRATION"]), ["/staff"]],
     [renderStaffHome("No Role", false, []), ["/staff"]],
     [renderStaffHome("Mixed Staff", false, ["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff", "/staff/finish-line", "/staff/inventory-intake"]],
@@ -217,7 +215,7 @@ test("the staff nav lists only the pages the actor may open", () => {
   }
 
   // Only an administrator ever sees the access link.
-  for (const role of ["RACE_DIRECTOR", "REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RETURN_STEWARD"]) {
+  for (const role of ["RACE_DIRECTOR", "REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
     assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /\/staff\/access/, role);
   }
 });
@@ -290,9 +288,12 @@ test("the access page keeps every hook, field name, and control the access clien
   assert.match(markup, /<label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required><\/label>/);
   assert.match(markup, /<label>Display name<input name="displayName" autocomplete="off" maxlength="100" required><\/label>/);
   assert.match(markup, /<select name="role" required><option value="STAFF">Regular staff<\/option><option value="ADMIN">System administrator<\/option><\/select>/);
-  for (const role of ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RETURN_STEWARD", "RACE_DIRECTOR"]) {
+  for (const role of ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER", "RACE_DIRECTOR"]) {
     assert.ok(markup.includes(`<input type="checkbox" name="roles" value="${role}">`), `missing role checkbox ${role}`);
   }
+  // The retired role is not offerable, and there are exactly six checkboxes.
+  assert.equal((markup.match(/<input type="checkbox" name="roles"/g) ?? []).length, 6);
+  assert.doesNotMatch(markup, /RETURN_STEWARD|Return steward/);
 
   // Existing visual language: operations panel, details card, privacy note.
   assert.match(markup, /<details class="operation-card" data-staff-access-create-card><summary>Add staff access<\/summary>/);

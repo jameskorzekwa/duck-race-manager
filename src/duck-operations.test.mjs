@@ -176,7 +176,9 @@ test("duck-manager inventory includes relationships but redacts participant iden
   assert.equal(body.ducks[0].participant.firstName, undefined);
   assert.equal(body.ducks[0].participant.status, "ACTIVE");
   assert.equal(body.ducks[0].heat.number, 4);
-  assert.equal(body.ducks[0].disposition, null);
+  // Returns are no longer tracked, so no disposition is projected or read.
+  assert.equal("disposition" in body.ducks[0], false);
+  assert.doesNotMatch(db.statements[0].sql, /duck_event_dispositions/);
   assert.equal(JSON.stringify(body).includes("token"), false);
   assert.match(db.statements[0].sql, /ORDER BY d\.visible_number/);
   assert.doesNotMatch(db.statements[0].sql, /LIMIT 200/);

@@ -546,8 +546,8 @@ Operator smoke checks after deployment:
    with code `1008`; ordinary clients never send frames.
 6. With an unsaved non-destructive form on one device, mutate matching data on a
    second device and confirm the first device defers its queued refresh until the
-   form is saved/reset. Separately verify staff deactivation and test-data purge
-   clear protected/participant rendering immediately instead of deferring.
+   form is saved/reset. Separately verify staff deactivation and test-event
+   deletion clear protected/participant rendering immediately instead of deferring.
 7. On a browser with no saved registrations, search a controlled test
    participant by exact name, use **Add to My Ducks**, and confirm the action
    confirms in place and the **My Ducks** navigation appears. Then open

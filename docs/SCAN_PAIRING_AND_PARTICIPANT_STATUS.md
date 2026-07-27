@@ -1,5 +1,13 @@
 # Scan, Pairing, and Participant Status
 
+> **Design history.** This document predates the removal of duck-return
+> tracking and the staged purge ceremony. Returns, dispositions, return
+> batches, the `RETURN_STEWARD` role, and the `RETURN_PROCESSING`/`ARCHIVED`
+> statuses no longer exist. The lifecycle is `DRAFT -> REGISTRATION_OPEN ->
+> REGISTRATION_CLOSED -> ROUND_ONE -> FINAL -> COMPLETED`, and the
+> administrator "Delete event" action is the only cleanup path. See
+> `docs/WORKFLOWS.md` for implemented behavior.
+
 This document is the canonical design for duck-tag navigation, staff pairing,
 participant status recovery, and multiple registrations from one browser. It
 supersedes earlier statements that every public scan displays a generic duck

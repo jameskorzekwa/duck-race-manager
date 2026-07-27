@@ -1,5 +1,13 @@
 # Heat Assignment, Notifications, and Duck Inspection
 
+> **Design history.** This document predates the removal of duck-return
+> tracking and the staged purge ceremony. Returns, dispositions, return
+> batches, the `RETURN_STEWARD` role, and the `RETURN_PROCESSING`/`ARCHIVED`
+> statuses no longer exist. The lifecycle is `DRAFT -> REGISTRATION_OPEN ->
+> REGISTRATION_CLOSED -> ROUND_ONE -> FINAL -> COMPLETED`, and the
+> administrator "Delete event" action is the only cleanup path. See
+> `docs/WORKFLOWS.md` for implemented behavior.
+
 ## Purpose
 
 Each event selects one of two first-round heat assignment modes. Both modes use
