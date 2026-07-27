@@ -162,6 +162,17 @@ response is lost, the console first refetches: a changed state remains disabled,
 while an event still in the source state re-enables the same control with the
 same command ID for a safe retry.
 
+The console derives each readiness card's display from the event's current
+status against the canonical status order; the readiness API itself is
+unchanged. A forward transition whose target status the event has already
+reached or passed shows a positive **Done** chip with no action button and no
+blocker text. **Ready** marks a transition whose server readiness checks pass,
+and **Blocked** with its server blocker reasons appears only for genuinely
+upcoming transitions. The backward reopen-registration control shows a neutral
+**Not needed** chip while the event is already `REGISTRATION_OPEN`; whenever
+reopening is genuinely unavailable (wrong state or heats already exist) it
+keeps the blocked treatment and reasons.
+
 ## Participant Registration
 
 ### Public Registration
