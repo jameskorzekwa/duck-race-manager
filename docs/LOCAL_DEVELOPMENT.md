@@ -173,3 +173,31 @@ Real browser verification is expected for any UI change. Point it at the local
 site and check console errors and horizontal overflow at 320, 390, 768, and
 1280 px. Seed the state the change affects rather than trusting a mock — the
 lifecycle phase determines navigation, calls to action, and whole page bodies.
+
+## Trying a branch someone else prepared
+
+Merging to `main` deploys to production, so behavior changes get looked at here
+first. An agent handing over a branch should have left the server running and
+told you where its working copy is. To pick it up yourself, or to restart it:
+
+```sh
+cd <path the agent gave you>       # or: git clone <repo> && git switch <branch>
+npm ci
+npm run dev:local
+npm run seed:local -- --state=<the state the change affects>
+```
+
+Things worth knowing while reviewing:
+
+- The first start applies migrations and asks you to confirm. Later starts
+  report "No migrations to apply" and come straight up.
+- Switching branches does not reset data. The local database lives under
+  `.wrangler/`, which is gitignored, so it survives a `git switch` and a
+  restart. Re-seed when you want a known state, and run
+  `npm run db:reset:local` after a branch that adds a migration.
+- Sign in at `/staff` as the account whose role the change touches, not always
+  the administrator. An administrator passes every role check implicitly, so it
+  is the one account that cannot show you a permission mistake.
+
+Approve or reject on the pull request, or just say so — nothing merges until you
+do.

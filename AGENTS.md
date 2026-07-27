@@ -59,6 +59,49 @@ npm run seed:local -- --state=round-one  # fill it with a race at a chosen lifec
 tests, dependency audit, or migrations. CI also runs
 `npm audit --audit-level=high`.
 
+## REVIEW BEFORE MERGE
+
+Merging to `main` deploys to production unattended. There is no staging
+environment and no manual approval step in the pipeline, so the merge *is* the
+release. James tries every behavior change on his own machine before that
+happens.
+
+**Never merge a pull request that changes behavior until James has tried it and
+said to merge it.** This overrides the general "open and merge the PR" rule in
+`jameskorzekwa/agent-config`, which assumes a repository where merging is not
+deploying.
+
+Before asking him to look:
+
+1. Run the branch locally with `npm run dev:local`, from the working copy that
+   actually holds the change.
+2. Seed each state the change affects with
+   `npm run seed:local -- --state=<state>`. `docs/LOCAL_DEVELOPMENT.md` lists
+   them.
+3. Verify it yourself first, in a real browser, including console errors and
+   horizontal overflow at 320/390/768/1280px. Hand over work you already believe
+   is right.
+4. Leave the dev server running and the temporary clone in place. He is about to
+   use both.
+
+Then, in the response, give him:
+
+- The local URL to open, and the exact seed command for each state worth seeing.
+- The path to the temporary clone, so he can restart the server himself if it is
+  no longer running when he gets to it.
+- What changed in terms of what he will see, and which pages or flows to try.
+- Anything you could not verify yourself, and why.
+- The pull request link, stated plainly as unmerged and waiting on him.
+
+Silence is not approval, and approval of one screen is not approval of the
+change. After he approves: merge, confirm the release pipeline succeeded, and
+only then stop the server and delete the temporary clone. If he asks for
+changes, push to the same branch and hand it back the same way.
+
+A change with no runnable surface — documentation, comments, or repository
+metadata that cannot alter what the site does — may be merged without the local
+pass, but say so in the response rather than merging quietly.
+
 ## ARCHITECTURE
 
 - `src/index.ts` routes `/api/v1/*` into `handleApi` after canonical-origin
@@ -105,7 +148,9 @@ tests, dependency audit, or migrations. CI also runs
 - Normal production releases follow required CI and a reviewed merge to `main`;
   the release workflow validates again, deploys unattended, then creates the
   automatic patch tag and release. Intentional major/minor releases use a
-  reviewed protected tag on a default-branch commit.
+  reviewed protected tag on a default-branch commit. Because that merge ships
+  straight to production, behavior changes wait for James's local sign-off first
+  — see REVIEW BEFORE MERGE.
 - Workflow edits must preserve empty top-level permissions, job-scoped
   credentials, FIFO production concurrency, and the documented CloudFormation
   -> D1 -> Worker -> smoke test -> automatic tag/GitHub release order.
