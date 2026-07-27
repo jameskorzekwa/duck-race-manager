@@ -193,6 +193,10 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .console-nav { position:sticky; z-index:5; top:.5rem; display:flex; gap:.45rem; margin:1.3rem 0; padding:.65rem; overflow-x:auto; border:2px solid var(--ink); border-radius:.9rem; background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
 .console-nav a { flex:none; padding:.55rem .7rem; border-radius:.55rem; font-size:.85rem; font-weight:900; text-decoration:none; }
 .console-nav a:hover,.console-nav a:focus-visible { background:var(--yellow); outline:2px solid var(--ink); }
+.staff-nav { display:flex; flex-wrap:wrap; gap:.45rem; max-width:100%; margin:0 0 1.2rem; padding:.55rem; border:2px solid var(--ink); border-radius:.9rem; background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
+.staff-nav a { display:inline-flex; min-width:0; max-width:100%; min-height:2.75rem; align-items:center; padding:.5rem .7rem; border-radius:.55rem; font-size:.85rem; font-weight:900; overflow-wrap:anywhere; text-decoration:none; }
+.staff-nav a:hover,.staff-nav a:focus-visible { background:var(--yellow); outline:2px solid var(--ink); }
+.staff-nav a[aria-current="page"] { background:var(--yellow); box-shadow:2px 2px 0 var(--ink); }
 .console-section { scroll-margin-top:6rem; margin:1.4rem 0; padding:clamp(1rem,3vw,1.5rem); border:3px solid var(--ink); border-radius:1rem; background:#fffdf8; }
 .console-section > * + * { margin-top:1rem; }
 .console-section > h2 { margin-bottom:0; font-size:clamp(1.8rem,5vw,2.7rem); }
@@ -634,6 +638,38 @@ const roleCheckboxes = operationalRoles.map((role) =>
 const staffLogoutForm = (): string =>
   '<form class="staff-logout" method="post" action="/staff/logout"><button type="submit">Sign out</button></form>';
 
+// Persistent staff navigation. It lists only the pages this actor may open, so a
+// missing link is a convenience filter; every page and API repeats the check.
+// `anyStaff` is open to every signed-in staff member, an empty `anyOf` is
+// administrator-only, and an administrator implicitly passes every entry.
+interface StaffNavLink {
+  href: string;
+  label: string;
+  access: "anyStaff" | { anyOf: readonly OperationalRole[] };
+}
+
+const staffNavLinks: readonly StaffNavLink[] = [
+  { href: "/staff", label: "Console", access: "anyStaff" },
+  { href: "/staff/access", label: "Access", access: { anyOf: [] } },
+  { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
+  { href: "/staff/finish-line", label: "Finish line", access: { anyOf: ["RESULT_TAKER", "RACE_DIRECTOR"] } },
+  { href: "/staff/inventory-intake", label: "Inventory", access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"] } },
+];
+
+const staffNav = (
+  isSystemAdmin: boolean,
+  roles: readonly OperationalRole[],
+  current?: string,
+): string => {
+  const links = staffNavLinks
+    .filter(({ access }) =>
+      access === "anyStaff" || isSystemAdmin || access.anyOf.some((role) => roles.includes(role)))
+    .map(({ href, label }) =>
+      `<a href="${href}"${href === current ? ' aria-current="page"' : ""}>${label}</a>`)
+    .join("");
+  return `<nav class="staff-nav" aria-label="Staff pages">${links}</nav>`;
+};
+
 export const renderStaffHome = (
   displayName: string,
   isSystemAdmin: boolean,
@@ -656,6 +692,7 @@ export const renderStaffHome = (
   content: `
     <section class="page-panel operations-panel" data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</div>
+      ${staffNav(isSystemAdmin, roles, "/staff")}
       ${duck()}
       <p class="eyebrow">Staff operations</p>
       <h1 class="page-title operations-title">Race control, in one place.</h1>
@@ -663,11 +700,12 @@ export const renderStaffHome = (
       ${(canStartLine || canFinishLine) ? `<div class="actions station-links" aria-label="Race-day stations">${canStartLine ? '<a class="button station-control" href="/staff/start-line">Open start line</a>' : ""}${canFinishLine ? '<a class="button secondary station-control" href="/staff/finish-line">Open finish line</a>' : ""}</div>` : ""}
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
       <div class="actions"><a class="button secondary" href="/mock/staff/ducks/128/pair">Preview pairing layout</a></div>
-      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants">Participants</a>' : ""}${canInventory ? '<a href="#inventory">Inventory</a>' : ""}${canRaceRead ? '<a href="#heats">Heats</a>' : ""}${canReturns ? '<a href="#returns">Returns</a>' : ""}${isSystemAdmin ? '<a href="#support">Support</a><a href="#access">Access</a>' : ""}</nav>
+      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants" data-event-scoped hidden>Participants</a>' : ""}${canInventory ? '<a href="#inventory" data-event-scoped hidden>Inventory</a>' : ""}${canRaceRead ? '<a href="#heats" data-event-scoped hidden>Heats</a>' : ""}${canReturns ? '<a href="#returns" data-event-scoped hidden>Returns</a>' : ""}${isSystemAdmin ? '<a href="#support" data-event-scoped hidden>Support</a>' : ""}</nav>
       <p class="message-line muted" data-console-message aria-live="polite">Loading operations…</p>
 
       <section class="console-section" id="events" aria-labelledby="events-title"${canUseConsole ? "" : " hidden"}>
         <p class="eyebrow">Event control</p><h2 id="events-title">Event</h2>
+        <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>Create the race event to open participants, inventory, heats, and support. Until then this is the only section with anything to do.</span></div>
         ${isSystemAdmin ? `<details class="operation-card event-create-card" data-event-create-card><summary>Create event</summary>
           <form data-event-create-form>
             <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
@@ -710,7 +748,7 @@ export const renderStaffHome = (
         </div>
       </section>
 
-      <section class="console-section" id="participants" aria-labelledby="participants-title"${canRegistration ? "" : " hidden"}>
+      <section class="console-section" id="participants" aria-labelledby="participants-title" data-event-scoped data-role-allowed="${canRegistration ? "true" : "false"}" hidden>
         <p class="eyebrow">Registration desk</p><h2 id="participants-title">Participants</h2>
         <form class="operation-card" data-participant-filter-form>
           <div class="field-grid"><label>Search<input name="q" maxlength="80" placeholder="Name, code, email, or phone"></label><label>Status<select name="status"><option value="">All statuses</option><option value="SUBMITTED">Submitted</option><option value="ACTIVE">Active</option><option value="WITHDRAWN">Withdrawn</option><option value="DISQUALIFIED">Disqualified</option></select></label></div>
@@ -739,7 +777,7 @@ export const renderStaffHome = (
         </div>
       </section>
 
-      <section class="console-section" id="inventory" aria-labelledby="inventory-title"${canInventory ? "" : " hidden"}>
+      <section class="console-section" id="inventory" aria-labelledby="inventory-title" data-event-scoped data-role-allowed="${canInventory ? "true" : "false"}" hidden>
         <p class="eyebrow">Physical ducks</p><h2 id="inventory-title">Inventory</h2>
         <p class="muted">Intake reserves a new duck for the selected event. Assigning an available duck reserves it automatically; there is no separate reserve command.</p>
         ${canInventory ? '<article class="operation-card"><h3>Blank NFC provisioning station</h3><p class="muted">Use a dedicated Android Chrome device to write and register blank writable stickers, one tap per duck.</p><a class="button" href="/staff/inventory-intake">Open NFC provisioning station</a></article>' : ""}
@@ -771,7 +809,7 @@ export const renderStaffHome = (
         </div>
       </section>
 
-      <section class="console-section" id="heats" aria-labelledby="heats-title"${canRaceRead ? "" : " hidden"}>
+      <section class="console-section" id="heats" aria-labelledby="heats-title" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
         <p class="eyebrow">Race control</p><h2 id="heats-title">Heats and results</h2>
         <div class="console-grid">
           <article class="operation-card"${canDirectRace ? "" : " hidden"}><h3>Balanced round-one plan</h3><p class="muted">For post-close balanced events, preview the exact roster before committing it.</p><div class="actions"><button class="button secondary small" type="button" data-plan-preview>Preview plan</button><button class="button small" type="button" data-plan-commit disabled>Commit preview</button></div><div class="data-list" data-plan-result></div></article>
@@ -781,7 +819,7 @@ export const renderStaffHome = (
         <div class="console-grid wide"><div class="data-list" data-heat-list></div><article class="operation-card" data-heat-detail hidden><h3 data-heat-name>Heat detail</h3><dl class="facts compact-facts" data-heat-facts></dl><div data-heat-controls></div><h3>Roster</h3><ul class="roster-list" data-heat-roster></ul><h3>Published results</h3><div class="data-list" data-heat-results></div></article></div>
       </section>
 
-      <section class="console-section" id="returns" aria-labelledby="returns-title"${canReturns ? "" : " hidden"}>
+      <section class="console-section" id="returns" aria-labelledby="returns-title" data-event-scoped data-role-allowed="${canReturns ? "true" : "false"}" hidden>
         <p class="eyebrow">Physical reconciliation</p><h2 id="returns-title">Returns</h2>
         <div class="console-grid">
           <article class="operation-card" data-return-review data-system-admin="${isSystemAdmin ? "true" : "false"}" hidden>
@@ -794,25 +832,50 @@ export const renderStaffHome = (
         </div>
       </section>
 
-      ${isSystemAdmin ? `<section class="console-section" id="support" aria-labelledby="support-title" data-support>
+      ${isSystemAdmin ? `<section class="console-section" id="support" aria-labelledby="support-title" data-support data-event-scoped data-role-allowed="true" hidden>
         <p class="eyebrow">Administrator support</p><h2 id="support-title">Support and purge</h2>
         <div class="privacy"><strong>Administrator-only diagnostics.</strong><span>Notification actions, audit records, purge claims, and permanent deletion are intentionally explicit.</span></div>
         <div class="console-grid"><article class="operation-card"><h3>Operational summary</h3><button class="button secondary small" type="button" data-refresh-support>Refresh summary</button><dl class="facts compact-facts" data-support-summary></dl></article><article class="operation-card"><h3>Purge gate</h3><button class="button secondary small" type="button" data-refresh-purge-gate>Check purge gate</button><dl class="facts compact-facts" data-purge-gate></dl></article></div>
         <details class="operation-card"><summary>Notification operations</summary><form class="section-tools" data-notification-filter-form><label>Status<select name="status"><option value="">All statuses</option><option value="WAITING_FOR_SYNC">Waiting for sync</option><option value="PENDING">Pending</option><option value="QUEUED">Queued</option><option value="SENDING">Sending</option><option value="SENT">Sent</option><option value="RETRY_PENDING">Retry pending</option><option value="DELIVERED">Delivered</option><option value="FAILED">Failed</option><option value="BOUNCED">Bounced</option><option value="COMPLAINED">Complained</option><option value="SUPPRESSED">Suppressed</option><option value="CANCELLED">Cancelled</option></select></label><button class="button secondary small" type="submit">Load notifications</button></form><div class="console-grid wide"><div class="data-list" data-notification-list></div><div class="data-list" data-notification-attempts></div></div></details>
         <details class="operation-card"><summary>Redacted audit timeline</summary><button class="button secondary small" type="button" data-refresh-audit>Load audit</button><div class="data-list" data-audit-list></div></details>
         <div class="console-grid"><form class="operation-card danger-zone" data-purge-claim-form hidden><h3>Claim permanent purge</h3><p class="muted">The gate must pass. This freezes support operations for the event.</p><label>Type the required confirmation<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Claim purge</button></form><form class="operation-card danger-zone" data-final-purge-form hidden><h3>Final permanent purge</h3><label class="check"><input name="acknowledgement" type="checkbox" required><span class="label-text">I understand this permanently deletes the complete event, participant, duck, tag, result, command, browser, and audit dataset.</span></label><label>Type the required confirmation again<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Permanently delete race dataset</button></form></div>
-      </section>
-
-      <section class="console-section" id="access" aria-labelledby="access-title" data-staff-access>
-        <p class="eyebrow">Administrator</p><h2 id="access-title">Staff access</h2><p class="lede">Invite staff, combine operational roles, or disable and restore Cognito access.</p><div class="privacy"><strong>Roles are composable.</strong><span>Give regular staff every station role they need and no others. Administrators implicitly have every permission and do not have role assignments.</span></div>
-        <form class="operation-card" data-staff-access-form><div class="field-grid"><label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required></label><label>Display name<input name="displayName" autocomplete="off" maxlength="100" required></label></div><label>Account type<select name="role" required><option value="STAFF">Regular staff</option><option value="ADMIN">System administrator</option></select></label><fieldset class="role-set" data-create-role-set><legend>Operational roles</legend>${roleCheckboxes}</fieldset><button class="button" type="submit">Add staff access</button></form>
-        <p class="message-line muted" data-staff-access-message aria-live="polite">Loading authorized staff…</p><div class="staff-access-list" data-staff-access-list></div>
       </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
       ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
     </section>`,
   });
 };
+
+// Staff account and role management is event-independent, so it lives on its own
+// administrator page. The markup keeps the exact hooks the access client binds.
+// The route is administrator-only, so the flag defaults to an administrator; the
+// rendered authorization projection still carries the actor's real values so the
+// live staff-session revalidation behaves exactly as on the other staff pages.
+export const renderStaffAccess = (
+  displayName: string,
+  isSystemAdmin = true,
+  roles: readonly OperationalRole[] = [],
+): string => page({
+  title: "Staff access",
+  description: "Protected QuickDucks staff account and role management.",
+  robots: "noindex,nofollow",
+  content: `
+    <section class="page-panel operations-panel" data-staff-access data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+      <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</div>
+      ${staffNav(isSystemAdmin, roles, "/staff/access")}
+      ${duck()}
+      <p class="eyebrow">Administrator</p>
+      <h1 class="page-title operations-title">Staff access</h1>
+      <p class="lede">Invite staff, combine operational roles, or disable and restore Cognito access. This page does not depend on a race event.</p>
+      <div class="privacy"><strong>Roles are composable.</strong><span>Give regular staff every station role they need and no others. Administrators implicitly have every permission and do not have role assignments.</span></div>
+      <details class="operation-card" data-staff-access-create-card><summary>Add staff access</summary>
+        <form data-staff-access-form><div class="field-grid"><label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required></label><label>Display name<input name="displayName" autocomplete="off" maxlength="100" required></label></div><label>Account type<select name="role" required><option value="STAFF">Regular staff</option><option value="ADMIN">System administrator</option></select></label><fieldset class="role-set" data-create-role-set><legend>Operational roles</legend>${roleCheckboxes}</fieldset><button class="button" type="submit">Add staff access</button></form>
+      </details>
+      <p class="message-line muted" data-staff-access-message aria-live="polite">Loading authorized staff…</p><div class="staff-access-list" data-staff-access-list></div>
+      <script src="/assets/app-select.js" defer></script>
+      <script src="/assets/staff-access.js" defer></script>
+    </section>`,
+});
 
 export const renderStartLine = (
   displayName: string,
@@ -825,6 +888,7 @@ export const renderStartLine = (
   robots: "noindex,nofollow",
   content: `<section class="page-panel station-panel" data-start-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Start line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+    ${staffNav(isSystemAdmin, roles, "/staff/start-line")}
     <p class="eyebrow">Start-line station</p><h1 class="page-title">Prepare the next heat.</h1>
     <p class="lede" data-station-event>Finding the active event and next heat.</p>
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
@@ -846,6 +910,7 @@ export const renderFinishLine = (
   robots: "noindex,nofollow",
   content: `<section class="page-panel station-panel" data-finish-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Finish line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+    ${staffNav(isSystemAdmin, roles, "/staff/finish-line")}
     <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
     <p class="lede" data-station-event>Finding a running heat.</p>
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
@@ -873,6 +938,7 @@ export const renderInventoryIntake = (
   robots: "noindex,nofollow",
   content: `<section class="page-panel station-panel" data-inventory-intake data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
     <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · NFC provisioning</p><div class="staff-bar-actions"><a href="/staff#inventory">Staff inventory</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+    ${staffNav(isSystemAdmin, roles, "/staff/inventory-intake")}
     <div class="notice" data-intake-runtime aria-live="polite"><strong>Checking this device.</strong><span data-intake-runtime-message>The station remains unavailable until its Android NFC requirements are confirmed.</span></div>
     <div data-intake-controls hidden>
       <p class="eyebrow">Blank sticker station</p><h1 class="page-title">Tap, write, and move on.</h1>
@@ -928,6 +994,7 @@ export const renderStaffDuck = (
   content: `
     <section class="page-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
       <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Staff scan</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+      ${staffNav(isSystemAdmin, roles)}
       <p class="eyebrow">Protected duck record</p>
       <h1 class="page-title" data-staff-title>Checking this duck…</h1>
       <p class="lede" data-staff-message aria-live="polite">Verifying tag, inventory, and assignment state.</p>

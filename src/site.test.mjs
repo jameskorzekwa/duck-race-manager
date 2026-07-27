@@ -13,6 +13,7 @@ import {
   renderPublicDuck,
   renderPublicDuckNotFound,
   renderRegistration,
+  renderStaffAccess,
   renderStaffDuck,
   renderStaffHome,
   renderStaffLogin,
@@ -32,6 +33,7 @@ const renderedPages = [
   renderPublicDuckNotFound("128"),
   renderStaffLogin(),
   renderStaffHome("Administrator", true, []),
+  renderStaffAccess("Administrator"),
   renderStartLine("Start staff", false),
   renderFinishLine("Finish staff", false),
   renderInventoryIntake("Inventory staff", "https://quickducks.com"),
@@ -110,7 +112,9 @@ test("every rendered form class remains covered by the shared form constraints",
     }
   }
 
-  assert.equal(openingForms, 35);
+  // 34 on the console after staff access moved out, plus the access page's
+  // grant form and the sign-out form every staff page renders.
+  assert.equal(openingForms, 36);
   assert.equal(closingForms, openingForms);
   assert.deepEqual([...formClasses].sort(), [
     "danger-zone",

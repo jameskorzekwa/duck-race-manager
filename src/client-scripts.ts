@@ -2959,6 +2959,18 @@ const fromLocalInput = (value) => value ? new Date(value).toISOString() : null;
 const eventDetailRegion = document.querySelector("[data-event-detail]");
 const eventEmptyState = document.querySelector("[data-event-empty]");
 const eventCreateCard = document.querySelector("[data-event-create-card]");
+const noRaceState = document.querySelector("[data-no-race]");
+// Every event-scoped section and its console-nav anchor ships hidden, so the
+// console never flashes work areas that a missing event would then remove.
+// Role gating stays authoritative on top: a section the actor may not use
+// stays hidden even once an event exists.
+const eventScopedElements = document.querySelectorAll("[data-event-scoped]");
+const showEventScopedSections = (eventExists) => {
+  for (const element of eventScopedElements) {
+    element.hidden = !eventExists || element.dataset.roleAllowed === "false";
+  }
+  if (noRaceState) noRaceState.hidden = eventExists;
+};
 const eventSummary = document.querySelector("[data-event-summary]");
 const readinessList = document.querySelector("[data-event-readiness]");
 const eventConfigCard = document.querySelector("[data-event-config-card]");
@@ -3104,6 +3116,7 @@ const renderEvent = (detail, readiness) => {
   }
   if (eventEmptyState) eventEmptyState.hidden = true;
   if (eventDetailRegion) eventDetailRegion.hidden = false;
+  showEventScopedSections(true);
   return true;
 };
 
@@ -3160,11 +3173,11 @@ const loadEvents = async (preferredId) => {
     if (eventDetailRegion) eventDetailRegion.hidden = true;
     if (eventEmptyState) eventEmptyState.hidden = false;
     if (eventCreateCard) eventCreateCard.open = true;
+    showEventScopedSections(false);
     setMessage("No event dataset exists. An administrator can create one.");
     const loads = [];
     if (canInventory) loads.push(loadInventory());
     if (canReturns) loads.push(loadReturnReview());
-    if (isSystemAdmin) loads.push(loadStaffProfiles());
     await Promise.allSettled(loads);
     return;
   }
@@ -3195,7 +3208,7 @@ const loadEvent = async (eventId) => {
   }
   if (canRaceRead) loads.push(loadHeats(), loadFinalists());
   if (canReturns) loads.push(loadReturnReview());
-  if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit(), loadPurgeGate(), loadStaffProfiles());
+  if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit(), loadPurgeGate());
   const results = await Promise.allSettled(loads);
   const failed = results.filter((result) => result.status === "rejected");
   setMessage(failed.length === 0
@@ -4228,10 +4241,83 @@ if (isSystemAdmin) {
   });
 }
 
+staffLiveSubscription = globalThis.quickDucksLive.subscribe({
+  domains: ["event", "participants", "ducks", "heats", "returns", "staff", "support"],
+  root: operationsRoot,
+  refresh: () => loadEvents(currentEvent?.id),
+  isBlocked: () => staffCommandCount > 0,
+});
+`;
+
+// Staff account and role management for the standalone /staff/access page. It
+// is event-independent, so it never reads or selects an event; the DOM hooks
+// and request shapes are unchanged from when this lived inside the console.
+export const staffAccessScript = confirmationDialogScript + String.raw`
 const staffAccess = document.querySelector("[data-staff-access]");
 const staffAccessForm = document.querySelector("[data-staff-access-form]");
 const staffAccessMessage = document.querySelector("[data-staff-access-message]");
 const staffAccessList = document.querySelector("[data-staff-access-list]");
+let staffCommandCount = 0;
+let staffLiveSubscription = null;
+
+const text = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value == null ? "" : String(value);
+  if (className) element.className = className;
+  return element;
+};
+
+const setMessage = (message, isError = false, target = staffAccessMessage) => {
+  if (!target) return;
+  target.textContent = message;
+  target.classList.toggle("error-text", isError);
+};
+
+const commandOptions = (method, payload) => ({
+  method,
+  headers: { accept: "application/json", "content-type": "application/json" },
+  body: JSON.stringify(payload),
+});
+
+const api = async (url, options) => {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
+    location.assign("/staff");
+    throw new Error("signed-out");
+  }
+  let body = null;
+  if (response.status !== 204) {
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+  }
+  if (!response.ok) throw new Error(body && body.error ? body.error : "Request failed.");
+  return body;
+};
+
+const perform = async (button, loadingMessage, operation) => {
+  button.disabled = true;
+  staffCommandCount += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  setMessage(loadingMessage);
+  try {
+    const result = await operation();
+    globalThis.quickDucksLive.markClean(button.form);
+    return result;
+  } catch (error) {
+    if (error.message !== "signed-out") setMessage(error.message, true);
+    return null;
+  } finally {
+    button.disabled = false;
+    staffCommandCount = Math.max(0, staffCommandCount - 1);
+    endBusy();
+    staffLiveSubscription?.resume();
+  }
+};
+
 const staffRoleLabels = {
   REGISTRATION: "Registration",
   DUCK_MANAGER: "Duck manager",
@@ -4344,9 +4430,9 @@ if (staffAccessForm) {
 }
 
 staffLiveSubscription = globalThis.quickDucksLive.subscribe({
-  domains: ["event", "participants", "ducks", "heats", "returns", "staff", "support"],
-  root: operationsRoot,
-  refresh: () => loadEvents(currentEvent?.id),
+  domains: ["staff"],
+  root: staffAccess,
+  refresh: () => loadStaffProfiles(),
   isBlocked: () => staffCommandCount > 0,
 });
 `;

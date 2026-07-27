@@ -18,10 +18,11 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
   assert.match(staffHomeScript, /assignedRoles/);
   assert.match(staffHomeScript, /canRunHeat/);
   assert.match(staffHomeScript, /canTakeResults/);
-  assert.match(staffHomeScript, /staffRoleLabels/);
-  assert.match(staffHomeScript, /Select at least one operational role/);
   assert.match(staffHomeScript, /appConfirmationQueue/);
   assert.doesNotMatch(staffHomeScript, /\b(?:window\.)?confirm\s*\(/);
+  // Staff account and role management left the console for /staff/access.
+  assert.doesNotMatch(staffHomeScript, /staffRoleLabels|roleSetControl|loadStaffProfiles/);
+  assert.doesNotMatch(staffHomeScript, /data-staff-access/);
 
   for (const endpoint of [
     "/api/v1/staff/events",
@@ -29,7 +30,6 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
     "/api/v1/staff/inventory/ducks",
     "/heats/round-one/plan-preview",
     "/results/",
-    "/api/v1/staff/profiles/",
     "/api/v1/staff/support/events/",
     "/return-batches",
     "/purge-claim",
@@ -38,6 +38,7 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
   ]) {
     assert.ok(staffHomeScript.includes(endpoint), `missing endpoint ${endpoint}`);
   }
+  assert.ok(!staffHomeScript.includes("/api/v1/staff/profiles"), "staff profiles moved off the console");
 });
 
 test("delete event is an administrator-only danger control with a dialog and typed-name flow", () => {
@@ -286,29 +287,35 @@ test("the selected-event region ships hidden and the generated script toggles it
   const region = { hidden: true };
   const emptyState = { hidden: true };
   const createCard = { open: false };
+  const scoped = [];
+  const showEventScopedSections = (exists) => scoped.push(exists);
 
   // renderEvent's tail reveals the server-hidden region and retires the no-event guidance.
   new Function(
     "eventDetailRegion",
     "eventEmptyState",
+    "showEventScopedSections",
     sliceBetween("if (eventEmptyState) eventEmptyState.hidden = true;", "return true;"),
-  )(region, emptyState);
+  )(region, emptyState, showEventScopedSections);
   assert.equal(region.hidden, false);
   assert.equal(emptyState.hidden, true);
+  assert.deepEqual(scoped, [true], "loading an event reveals the event-scoped sections");
 
   // The no-events branch hides it again, restores the guidance, and opens the create card.
   new Function(
     "eventDetailRegion",
     "eventEmptyState",
     "eventCreateCard",
+    "showEventScopedSections",
     sliceBetween(
       "if (eventDetailRegion) eventDetailRegion.hidden = true;",
       'setMessage("No event dataset exists. An administrator can create one.");',
     ),
-  )(region, emptyState, createCard);
+  )(region, emptyState, createCard, showEventScopedSections);
   assert.equal(region.hidden, true);
   assert.equal(emptyState.hidden, false);
   assert.equal(createCard.open, true);
+  assert.deepEqual(scoped, [true, false], "the no-events branch hides them again");
 });
 
 test("the reworked event layout keeps the create card intentional and the detail cards responsive", () => {

@@ -5,6 +5,7 @@ import { appSelectHelpersScript, appSelectScript } from "./client-scripts.ts";
 import { createWorker } from "./index.ts";
 import {
   renderInventoryIntake,
+  renderStaffAccess,
   renderStaffDuck,
   renderStaffHome,
 } from "./site.ts";
@@ -435,6 +436,7 @@ test("every page with a select loads the shared enhancement script", () => {
   const pages = [
     renderStaffHome("Administrator", true, []),
     renderStaffHome("Registration Staff", false, ["REGISTRATION"]),
+    renderStaffAccess("Administrator"),
     renderInventoryIntake("Duck Manager", "https://quickducks.com"),
     renderStaffDuck("tag-token", "Return Steward"),
   ];

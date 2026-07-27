@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { staffHomeScript } from "./client-scripts.ts";
+import { staffAccessScript } from "./client-scripts.ts";
 import {
   renderInventoryIntake,
   renderMyDucks,
+  renderStaffAccess,
   renderStaffDuck,
   renderStaffHome,
 } from "./site.ts";
@@ -61,9 +62,11 @@ test("pairing, readiness, inventory, and staff-role renderers expose spacing hoo
   assert.match(css, /\.inventory-detail-panel > h3 \+ \.data-list \{ margin-top:var\(--space-sm\); \}/);
   assert.match(css, /\.staff-role-controls \{[^}]*flex:1 0 100%/);
   assert.match(css, /\.role-set \{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(10rem,1fr\)\)/);
-  assert.match(homeMarkup, /<fieldset class="role-set" data-create-role-set>/);
-  assert.match(staffHomeScript, /"actions staff-role-controls"/);
-  assert.match(staffHomeScript, /fieldset\.className = "role-set"/);
+  // The staff-role controls moved to /staff/access and keep the same hooks.
+  assert.match(renderStaffAccess("Administrator"), /<fieldset class="role-set" data-create-role-set>/);
+  assert.doesNotMatch(homeMarkup, /data-create-role-set/);
+  assert.match(staffAccessScript, /"actions staff-role-controls"/);
+  assert.match(staffAccessScript, /fieldset\.className = "role-set"/);
 });
 
 test("My Ducks sections and app dialogs keep the shared spacing rhythm", () => {

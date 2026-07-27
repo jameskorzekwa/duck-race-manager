@@ -52,6 +52,7 @@ not authorized.
 | Return review, dispositions, and return-batch create/stage/undo/finalize | `RETURN_STEWARD` or `RACE_DIRECTOR` | Yes |
 | Create/configure/delete draft; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
+| Open `/staff/access` | None | Yes |
 | Purge readiness, cancellation, claim, and permanent purge | None | Yes |
 | Force delete of the whole event dataset in any state | None | Yes |
 
@@ -558,6 +559,16 @@ pages. Hidden links are only a convenience; each page and every API it calls
 repeat authentication, active-profile, role, event-state, heat-state, and
 revision checks.
 
+Every staff page also renders one persistent staff navigation listing only the
+pages the signed-in actor may open: **Console** (`/staff`, any staff member),
+**Access** (`/staff/access`, system administrator), **Start line**
+(`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), **Finish line**
+(`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`), and **Inventory**
+(`/staff/inventory-intake`, `DUCK_MANAGER` or `RACE_DIRECTOR`). A system
+administrator sees every link. The current page is marked `aria-current="page"`.
+The navigation wraps rather than scrolling, so it never overflows a 320px
+viewport. Omitting a link is convenience only; each page repeats its own check.
+
 **Operator step:** sign in and load the console on every intended device before
 race operations. Do not assume the browser remains authorized beyond seven days.
 There is no offline session or cached staff authorization. Every authenticated
@@ -574,12 +585,43 @@ immediately; added access reloads once no form or command is in progress. The
 WebSocket signal contains no staff identifier, email, display name, or role
 mutation payload.
 
+## Staff Access Page
+
+**Implemented:** staff account and role management is event-independent, so it
+is the standalone administrator page `/staff/access` rather than a console
+section. An anonymous request receives `303` to
+`/staff?returnTo=%2Fstaff%2Faccess`; an authenticated non-administrator receives
+`403`; a system administrator receives the page. Like the other staff pages it
+is `noindex`, `no-store`, carries the Cognito form-action content-security
+policy and same-origin referrer policy, and propagates rotated session cookies.
+Its browser client is served from `/assets/staff-access.js` with `no-store`.
+
+The page lists every authorized staff account with its account type, operational
+roles, and active state, and offers one **Add staff access** card that creates a
+Cognito account and staff profile. Role, deactivation, and reactivation commands
+are unchanged; each one confirms through the shared application dialog. The page
+subscribes to the `staff` live domain and keeps the same staff-session
+revalidation as the other protected pages.
+
 ## Event Setup and Lifecycle
 
 Any operational role can load event list and event detail context needed by the
 staff console. Event readiness and heat, announcer-roster, result, and finalist
 reads are limited to announcers, heat runners, result takers, race directors,
 and system administrators.
+
+### Console Event Existence Gating
+
+The console's **Event** section is always available. **Participants**,
+**Inventory**, **Heats**, **Returns**, and **Support**, and their console
+navigation anchors, are event-scoped: they are hidden in the served markup and
+are revealed only when an event loads, so no section flashes and then vanishes.
+Role gating still applies on top of event existence, so an event-scoped section
+the actor may not use stays hidden even once an event exists.
+
+While no event row exists the console hides all five sections and their anchors
+and shows the Event section with a **No race yet** state and, for a system
+administrator, the **Create event** card already open.
 
 ### Console Event Layout
 
