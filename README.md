@@ -53,6 +53,8 @@ delivery phases, and acceptance criteria.
 - Keep continuous inventory intake online-only; never queue physical-intake
   mutations offline.
 - Host the PWA, API, and database on Cloudflare's free developer platform.
+- Push privacy-safe finite-domain invalidations through one hibernatable Durable
+  Object while keeping D1-backed APIs authoritative on every device.
 - Support immediate fixed-size or post-registration balanced heat assignment.
 - Send upcoming-heat email notifications to participants who provide email.
 - Provide a read-only duck inspection workflow for misplaced ducks.

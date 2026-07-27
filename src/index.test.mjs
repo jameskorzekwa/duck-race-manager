@@ -19,6 +19,10 @@ const env = {
   },
 };
 
+const androidChromeUserAgent = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
+const iPhoneUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
+const desktopChromeUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+
 test("redirects HTTP requests to canonical HTTPS", async () => {
   const response = await worker.fetch(
     new Request("http://quickducks.com/api/v1/events/current"),
@@ -48,9 +52,18 @@ test("renders the responsive landing page", async () => {
   assert.match(body, /Find race status by name/);
   assert.match(body, /src="\/assets\/home\.js"/);
   assert.match(body, /src="\/assets\/participant\.js"/);
+  assert.match(body, /src="\/assets\/live-ui\.js"/);
   assert.match(body, /href="\/favicon\.svg"/);
+  assert.match(body, /<div class="hero-water" aria-hidden="true"><\/div>/);
+  assert.match(body, /background-size:var\(--wave-length\) 3rem/);
+  assert.match(body, /@keyframes water-flow \{ to \{ background-position:-10rem 0/);
+  assert.match(body, /transform-box:fill-box; transform-origin:center/);
+  assert.match(body, /@keyframes duck-rock[^@]+translateY\(-12px\) rotate\(3deg\)/);
+  assert.match(body, /prefers-reduced-motion:reduce/);
+  assert.doesNotMatch(body, /radial-gradient\(ellipse|M8 61c12 5|preserveAspectRatio="none"/);
   assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
   assert.match(response.headers.get("content-security-policy") ?? "", /script-src 'self'/);
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
 });
 
 test("serves the home-page status client", async () => {
@@ -68,9 +81,11 @@ test("serves registration and staff pairing browser clients", async () => {
   const staff = await worker.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env);
   const staffHome = await worker.fetch(new Request("https://quickducks.com/assets/staff-home.js"), env);
   const live = await worker.fetch(new Request("https://quickducks.com/assets/live.js"), env);
+  const liveUi = await worker.fetch(new Request("https://quickducks.com/assets/live-ui.js"), env);
   const startLine = await worker.fetch(new Request("https://quickducks.com/assets/start-line.js"), env);
   const finishLine = await worker.fetch(new Request("https://quickducks.com/assets/finish-line.js"), env);
   const inventoryIntake = await worker.fetch(new Request("https://quickducks.com/assets/inventory-intake.js"), env);
+  const liveUiBody = await liveUi.text();
 
   assert.equal(registration.status, 200);
   assert.equal(registration.headers.get("cache-control"), "public, max-age=3600");
@@ -82,10 +97,14 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(staff.headers.get("cache-control"), "no-store");
   assert.match(await staff.text(), /\/api\/v1\/staff\/ducks/);
   assert.equal(staffHome.status, 200);
+  assert.equal(staffHome.headers.get("cache-control"), "no-store");
   assert.match(await staffHome.text(), /\/api\/v1\/staff\/events\/return-review/);
   assert.match(await live.text(), /\/api\/v1\/race-board/);
   assert.equal(live.headers.get("cache-control"), "public, max-age=3600");
-  assert.match(await startLine.text(), /\/api\/v1\/live/);
+  assert.match(liveUiBody, /\/api\/v1\/live/);
+  assert.match(liveUiBody, /\/api\/v1\/staff\/session/);
+  assert.equal(liveUi.headers.get("cache-control"), "no-store");
+  assert.match(await startLine.text(), /quickDucksLive\.subscribe/);
   assert.equal(startLine.headers.get("cache-control"), "no-store");
   assert.match(await finishLine.text(), /NDEFReader/);
   assert.equal(finishLine.headers.get("cache-control"), "no-store");
@@ -115,31 +134,48 @@ test("renders the private My Ducks page with two accessible horizontal sections"
   assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
 });
 
-test("gates the inventory intake station and renders its canonical noindex markup", async () => {
+test("gates the Android inventory intake station after authentication and role checks", async () => {
   const actor = (roles, isSystemAdmin = false) => ({
     id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Inventory Staff",
     isSystemAdmin, roles, authentication: "bearer",
   });
-  const page = (currentActor) => createWorker(async () => currentActor).fetch(
-    new Request("https://quickducks.com/staff/inventory-intake"), env,
+  const page = (currentActor, userAgent) => createWorker(async () => currentActor).fetch(
+    new Request("https://quickducks.com/staff/inventory-intake", {
+      headers: userAgent === undefined ? {} : { "user-agent": userAgent },
+    }), env,
   );
 
-  const anonymous = await page(null);
+  const anonymous = await page(null, iPhoneUserAgent);
   assert.equal(anonymous.status, 303);
   assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Finventory-intake");
 
-  const denied = await page(actor(["REGISTRATION"]));
+  const denied = await page(actor(["REGISTRATION"]), desktopChromeUserAgent);
   assert.equal(denied.status, 403);
   assert.equal(denied.headers.get("x-robots-tag"), "noindex, nofollow");
   assert.match(await denied.text(), /permission to use the inventory intake station/);
 
+  for (const userAgent of [iPhoneUserAgent, desktopChromeUserAgent, undefined]) {
+    const unsupported = await page(actor(["DUCK_MANAGER"]), userAgent);
+    const body = await unsupported.text();
+    assert.equal(unsupported.status, 400);
+    assert.equal(unsupported.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.equal(unsupported.headers.get("vary"), "User-Agent");
+    assert.match(body, /Unsupported device/);
+    assert.match(body, /Back to staff inventory/);
+    assert.match(body, /compatibility check, not an authorization control/);
+    assert.doesNotMatch(body, /data-inventory-intake|data-app-origin|inventory-intake\.js|\/api\/v1\/|\/t\//);
+  }
+
   for (const currentActor of [actor(["DUCK_MANAGER"]), actor(["RACE_DIRECTOR"]), actor([], true)]) {
-    const allowed = await page(currentActor);
+    const allowed = await page(currentActor, androidChromeUserAgent);
     const body = await allowed.text();
     assert.equal(allowed.status, 200);
     assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.equal(allowed.headers.get("vary"), "User-Agent");
     assert.match(body, /data-inventory-intake/);
     assert.match(body, /data-app-origin="https:\/\/quickducks\.com"/);
+    assert.match(body, /data-intake-controls hidden/);
+    assert.match(body, /Checking this device/);
     assert.match(body, /Reserved for race/);
     assert.match(body, /Added this session/);
     assert.match(body, /Start NFC provisioning/);
@@ -209,7 +245,11 @@ test("requires same-origin protection for cookie-authenticated provisioning", as
   const response = await createWorker(async () => cookieActor).fetch(
     new Request("https://quickducks.com/api/v1/staff/inventory/provisioning", {
       method: "POST",
-      headers: { "content-type": "application/json", origin: "https://attacker.example" },
+      headers: {
+        "content-type": "application/json",
+        origin: "https://attacker.example",
+        "user-agent": iPhoneUserAgent,
+      },
       body: JSON.stringify({ commandId: crypto.randomUUID(), eventId: "event_test" }),
     }),
     env,
@@ -374,6 +414,7 @@ test("renders working registration UI while protection remains fail-closed", asy
   assert.match(registrationBody, /data-public-name-policy/);
   assert.match(registrationBody, /visible only to logged-in authorized race staff/);
   assert.match(registrationBody, /permanently deletes the complete race/);
+  assert.doesNotMatch(registrationBody, /duck_keep_preference|plan to keep|plan to return|not sure yet/i);
   assert.match(await confirmation.text(), /DUCK8234/);
   assert.equal(confirmation.headers.get("x-robots-tag"), "noindex, nofollow");
 });
@@ -402,6 +443,11 @@ test("renders staff sign-in and protects staff duck pages", async () => {
   assert.equal(staff.status, 200);
   assert.match(staffBody, /Continue to secure sign in/);
   assert.match(staffBody, /returnTo=%2Ft%2Ftoken/);
+  assert.match(
+    staff.headers.get("content-security-policy") ?? "",
+    /form-action 'self' https:\/\/quickducks-staff\.example\.com; frame-ancestors/,
+  );
+  assert.equal(staff.headers.get("referrer-policy"), "same-origin");
   assert.equal(protectedDuck.status, 303);
   assert.match(protectedDuck.headers.get("location") ?? "", /^\/staff\?returnTo=/);
 });
@@ -501,6 +547,8 @@ test("accepts same-origin POST logout and clears cookies despite failed revocati
   assert.match(response.headers.get("set-cookie"), /__Host-quickducks_staff=;/);
   assert.match(response.headers.get("set-cookie"), /__Host-quickducks_staff_refresh=;/);
   assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+  assert.equal(response.headers.get("content-disposition"), null);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
   assert.match(response.headers.get("location"), /^https:\/\/quickducks-staff\.example\.com\/logout/);
   assert.equal(await response.text(), "");
@@ -589,7 +637,7 @@ test("renders a valid private registration status path", async () => {
               event_name: "Summer Duck Race",
               event_date: "2026-08-30",
               race_entry_id: "entry_test",
-              duck_keep_preference: "UNDECIDED",
+              duck_keep_preference: "KEEP",
             };
           }
           if (sql.includes("FROM heats")) {
@@ -632,6 +680,7 @@ test("renders a valid private registration status path", async () => {
   assert.match(body, /Round one · Heat 5/);
   assert.match(body, /Not raced/);
   assert.doesNotMatch(body, /daisy@example\.com|555-0100/);
+  assert.doesNotMatch(body, /duckKeepPreference|duck_keep_preference|plan to keep/i);
   assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
 });
 

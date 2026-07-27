@@ -161,10 +161,23 @@ const normalizedName = (value: unknown): string | null => {
   return name.length >= 1 && name.length <= 120 ? name : null;
 };
 
-const normalizedSlug = (value: unknown): string | null => {
-  if (typeof value !== "string") return null;
-  const slug = value.trim().toLowerCase();
-  return slug.length <= 80 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) ? slug : null;
+export const eventSlugFromName = (name: string): string => {
+  const source = name.trim().replace(/\s+/g, " ").normalize("NFKD");
+  const slug = source
+    .replace(/\p{M}+/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80)
+    .replace(/-+$/g, "");
+  if (slug) return slug;
+
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `event-${(hash >>> 0).toString(36)}`;
 };
 
 const normalizedDate = (value: unknown, nullable: boolean): string | null | undefined => {
@@ -202,14 +215,14 @@ const createEvent = async (
   if (payload === null) return json({ error: "A valid JSON request is required." }, 400);
   const commandId = payload.commandId;
   const name = normalizedName(payload.name);
-  const slug = normalizedSlug(payload.slug);
   const eventDate = normalizedDate(payload.eventDate, false);
   if (
     typeof commandId !== "string" || !isCommandId(commandId)
-    || name === null || slug === null || eventDate === undefined || eventDate === null
+    || name === null || eventDate === undefined || eventDate === null
   ) {
-    return json({ error: "Command, event name, slug, and event date are required." }, 400);
+    return json({ error: "Command, event name, and event date are required." }, 400);
   }
+  const slug = eventSlugFromName(name);
   const fingerprint = canonicalFingerprint({ operation: "CREATE_EVENT", slug, name, eventDate });
   const existingCommand = await findCommand(commandId, env);
   if (existingCommand !== null) {
@@ -306,7 +319,6 @@ const createEvent = async (
 };
 
 interface ConfigurationPatch {
-  slug?: string;
   name?: string;
   eventDate?: string | null;
   timezone?: string;
@@ -323,11 +335,6 @@ const parseConfigurationPatch = (
   payload: Record<string, unknown>,
 ): { patch?: ConfigurationPatch; error?: string } => {
   const patch: ConfigurationPatch = {};
-  if ("slug" in payload) {
-    const value = normalizedSlug(payload.slug);
-    if (value === null) return { error: "Enter a valid lowercase event slug." };
-    patch.slug = value;
-  }
   if ("name" in payload) {
     const value = normalizedName(payload.name);
     if (value === null) return { error: "Enter an event name between 1 and 120 characters." };
@@ -429,7 +436,9 @@ const configureEvent = async (
     return json({ error: "The event changed. Refresh and retry with its current revision.", event: eventResponse(event) }, 409);
   }
   const next = {
-    slug: patch.slug ?? event.slug,
+    slug: patch.name !== undefined && patch.name !== event.name
+      ? eventSlugFromName(patch.name)
+      : event.slug,
     name: patch.name ?? event.name,
     eventDate: patch.eventDate === undefined ? event.event_date : patch.eventDate,
     timezone: patch.timezone ?? event.timezone,
@@ -883,6 +892,95 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
   },
 };
 
+const hasCompletedLifecycleTransition = async (
+  eventId: string,
+  definition: LifecycleDefinition,
+  fingerprint: string,
+  env: Env,
+): Promise<boolean> => {
+  const command = await env.DB.prepare(
+    `SELECT rc.id
+       FROM race_commands rc
+      WHERE rc.event_id = ?
+        AND rc.command_type = ?
+        AND rc.result_id = ?
+        AND rc.request_fingerprint = ?
+        AND rc.rowid = (
+          SELECT MAX(candidate.rowid)
+            FROM race_commands candidate
+           WHERE candidate.event_id = rc.event_id
+             AND candidate.command_type IN (
+               'OPEN_REGISTRATION', 'CLOSE_REGISTRATION', 'REOPEN_REGISTRATION',
+               'START_ROUND_ONE', 'START_FINAL', 'COMPLETE_EVENT', 'START_RETURN_PROCESSING',
+               'REOPEN_HEAT_RESULT', 'RECORD_DUCK_DISPOSITION', 'FINALIZE_RETURN_BATCH',
+               'MARK_EVENT_PURGE_READY', 'CANCEL_EVENT_PURGE_READY'
+             )
+        )
+      LIMIT 1`,
+  ).bind(eventId, definition.commandType, eventId, fingerprint).first<{ id: string }>();
+  return command !== null;
+};
+
+const lifecycleResponse = (
+  event: EventRow,
+  definition: LifecycleDefinition,
+  replayed: boolean,
+  transitioned: boolean,
+  status = 200,
+): Response => json({
+  event: eventResponse(event),
+  replayed,
+  transitioned,
+  alreadyAtTarget: !transitioned && event.status === definition.to,
+}, status);
+
+const resolveLifecycleRace = async (
+  commandId: string,
+  eventId: string,
+  fingerprint: string,
+  definition: LifecycleDefinition,
+  env: Env,
+): Promise<Response | null> => {
+  const command = await findCommand(commandId, env);
+  if (command !== null) {
+    if (
+      command.event_id !== eventId
+      || command.command_type !== definition.commandType
+      || command.request_fingerprint !== fingerprint
+    ) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const event = await getEvent(eventId, env);
+    return event === null
+      ? json({ error: "Event not found." }, 404)
+      : lifecycleResponse(event, definition, true, false);
+  }
+
+  const event = await getEvent(eventId, env);
+  if (
+    event !== null
+    && event.status === definition.to
+    && await hasCompletedLifecycleTransition(eventId, definition, fingerprint, env)
+  ) {
+    return lifecycleResponse(event, definition, false, false);
+  }
+  return null;
+};
+
+const safelyResolveLifecycleRace = async (
+  commandId: string,
+  eventId: string,
+  fingerprint: string,
+  definition: LifecycleDefinition,
+  env: Env,
+): Promise<Response | null> => {
+  try {
+    return await resolveLifecycleRace(commandId, eventId, fingerprint, definition, env);
+  } catch {
+    return null;
+  }
+};
+
 const readinessFor = (
   event: EventRow,
   stats: ReadinessStats,
@@ -989,11 +1087,17 @@ const runLifecycleCommand = async (
     const replay = await getEvent(eventId, env);
     return replay === null
       ? json({ error: "Event not found." }, 404)
-      : json({ event: eventResponse(replay), replayed: true });
+      : lifecycleResponse(replay, definition, true, false);
   }
 
   const event = await getEvent(eventId, env);
   if (event === null) return json({ error: "Event not found." }, 404);
+  if (
+    event.status === definition.to
+    && await hasCompletedLifecycleTransition(eventId, definition, fingerprint, env)
+  ) {
+    return lifecycleResponse(event, definition, false, false);
+  }
   const stats = await getReadinessStats(eventId, env);
   if (stats === null) return json({ error: "Event readiness could not be calculated." }, 409);
   const readiness = readinessFor(event, stats, definition);
@@ -1031,10 +1135,14 @@ const runLifecycleCommand = async (
       ),
     ]);
   } catch {
-    return json({ error: "The event transition conflicted with another update. Refresh and try again." }, 409);
+    const resolved = await safelyResolveLifecycleRace(commandId, eventId, fingerprint, definition, env);
+    return resolved
+      ?? json({ error: "The event transition conflicted with another update. Refresh and try again." }, 409);
   }
   if (results[0]?.meta.changes === 0 || results[1]?.meta.changes === 0) {
-    return json({ error: "The event transition conflicted with another update. Refresh and try again." }, 409);
+    const resolved = await safelyResolveLifecycleRace(commandId, eventId, fingerprint, definition, env);
+    return resolved
+      ?? json({ error: "The event transition conflicted with another update. Refresh and try again." }, 409);
   }
 
   const transitioned: EventRow = {
@@ -1043,7 +1151,7 @@ const runLifecycleCommand = async (
     revision: event.revision + 1,
     updated_at: now,
   };
-  return json({ event: eventResponse(transitioned), replayed: false }, 201);
+  return lifecycleResponse(transitioned, definition, false, true, 201);
 };
 
 interface DraftSafetyRow {
@@ -1238,6 +1346,136 @@ const deleteDraft = async (
   return new Response(null, { status: 204, headers });
 };
 
+// Force delete removes the complete event dataset in any status. Unlike the
+// staged purge it has no readiness, claim, or reconciliation prerequisites; it
+// is the administrator-only escape hatch for abandoning a race outright. It
+// does share the purge's single-dataset prerequisite: several statements below
+// delete globally (ducks, duck tags, browser collections, audit events), which
+// is safe only while this event is the only race dataset.
+//
+// Idempotency semantics: the whole batch deletes command history, audit rows,
+// and the event itself, so a successful force delete leaves no replay record.
+// A surviving race command with this identifier therefore always belongs to a
+// different operation and returns 409. A well-formed retry against the now
+// missing event returns a deterministic already-deleted success instead of a
+// stored replay.
+const forceDeleteEvent = async (
+  request: Request,
+  eventId: string,
+  env: Env,
+  actor: StaffActor,
+): Promise<Response> => {
+  const denied = adminRequired(actor);
+  if (denied !== null) return denied;
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const revision = payload?.revision;
+  const confirmName = payload?.confirmName;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || !Number.isInteger(revision) || (revision as number) < 0
+    || typeof confirmName !== "string" || confirmName.length === 0 || confirmName.length > 120
+  ) {
+    return json({ error: "Command, revision, and the typed event name are required." }, 400);
+  }
+  if (await findCommand(commandId, env) !== null) {
+    return json({ error: "This command identifier was already used for another operation." }, 409);
+  }
+
+  const event = await getEvent(eventId, env);
+  if (event === null) {
+    return json({ deleted: true, alreadyDeleted: true });
+  }
+  if (event.revision !== revision) {
+    return json({ error: "The event changed. Refresh before deleting it.", event: eventResponse(event) }, 409);
+  }
+  if (confirmName !== event.name) {
+    return json({ error: "Type the exact event name to confirm permanent deletion." }, 422);
+  }
+  const otherEvent = await env.DB.prepare(
+    "SELECT id FROM events WHERE id != ? LIMIT 1",
+  ).bind(eventId).first<{ id: string }>();
+  if (otherEvent !== null) {
+    return json({ error: "Force delete requires this to be the only race dataset." }, 409);
+  }
+
+  const now = new Date().toISOString();
+  const fingerprint = canonicalFingerprint({ operation: "FORCE_DELETE_EVENT", eventId, revision });
+  // Every later statement is guarded so a stale-revision race deletes nothing.
+  const sentinel = `EXISTS (
+    SELECT 1 FROM race_commands
+     WHERE id = ? AND event_id = ? AND command_type = 'FORCE_DELETE_EVENT'
+  )`;
+  // The archived-status update satisfies the locked-roster delete trigger and
+  // the synthetic PURGING claim satisfies the archived-event delete trigger.
+  // Both sentinels vanish with the dataset inside the same atomic batch.
+  const scoped = (table: string): D1PreparedStatement =>
+    env.DB.prepare(`DELETE FROM ${table} WHERE event_id = ? AND ${sentinel}`)
+      .bind(eventId, commandId, eventId);
+  const global = (table: string): D1PreparedStatement =>
+    env.DB.prepare(`DELETE FROM ${table} WHERE ${sentinel}`).bind(commandId, eventId);
+  let results: D1Result<unknown>[];
+  try {
+    results = await env.DB.batch([
+      // The sentinel insert re-checks the single-dataset invariant inside the
+      // batch so the whole deletion no-ops if a second event appears between
+      // preflight and commit; every later statement depends on the sentinel.
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
+         SELECT ?, e.id, 'FORCE_DELETE_EVENT', e.id, ?, ?, ?
+           FROM events e
+          WHERE e.id = ? AND e.revision = ?
+            AND NOT EXISTS (SELECT 1 FROM events WHERE id != ?)`,
+      ).bind(commandId, now, now, fingerprint, eventId, revision, eventId),
+      scoped("event_purge_claims"),
+      env.DB.prepare(
+        `UPDATE events SET status = 'ARCHIVED', updated_at = ? WHERE id = ? AND ${sentinel}`,
+      ).bind(now, eventId, commandId, eventId),
+      env.DB.prepare(
+        `INSERT INTO event_purge_claims
+          (event_id, command_id, status, claimed_by_staff_profile_id, claimed_at)
+         SELECT ?, ?, 'PURGING', ?, ? WHERE ${sentinel}`,
+      ).bind(eventId, commandId, actor.id, now, commandId, eventId),
+      scoped("email_attempts"),
+      scoped("email_notifications"),
+      scoped("heat_result_history"),
+      scoped("heat_results"),
+      scoped("heat_entries"),
+      scoped("heats"),
+      scoped("return_batch_items"),
+      scoped("return_batches"),
+      scoped("duck_event_dispositions"),
+      scoped("duck_assignments"),
+      scoped("event_ducks"),
+      scoped("duck_inventory_events"),
+      global("browser_collection_registrations"),
+      global("browser_registration_collections"),
+      global("duck_tags"),
+      global("ducks"),
+      global("audit_events"),
+      scoped("race_entries"),
+      scoped("registrations"),
+      env.DB.prepare(
+        `DELETE FROM race_commands
+          WHERE event_id = ?
+            AND EXISTS (SELECT 1 FROM event_purge_claims WHERE event_id = ? AND command_id = ?)`,
+      ).bind(eventId, eventId, commandId),
+      env.DB.prepare(
+        `DELETE FROM events
+          WHERE id = ?
+            AND EXISTS (SELECT 1 FROM event_purge_claims WHERE event_id = ? AND command_id = ?)`,
+      ).bind(eventId, eventId, commandId),
+    ]);
+  } catch {
+    return json({ error: "Event deletion did not complete. No partial deletion was accepted." }, 409);
+  }
+  if (results[0]?.meta.changes === 0 || results[results.length - 1]?.meta.changes === 0) {
+    return json({ error: "Event deletion conflicted with another update. Refresh and try again." }, 409);
+  }
+  return json({ deleted: true, alreadyDeleted: false });
+};
+
 const eventIdPattern = "([A-Za-z0-9_-]{1,128})";
 
 export const handleEventOperations = async (
@@ -1276,6 +1514,13 @@ export const handleEventOperations = async (
   if (lifecycleMatch !== null && request.method === "POST") {
     const action = lifecycleMatch[2] as LifecycleAction;
     return runLifecycleCommand(request, lifecycleMatch[1], lifecycleDefinitions[action], env, actor);
+  }
+
+  const forceDeleteMatch = url.pathname.match(
+    new RegExp(`^/api/v1/staff/events/${eventIdPattern}/force-delete$`),
+  );
+  if (forceDeleteMatch !== null && request.method === "POST") {
+    return forceDeleteEvent(request, forceDeleteMatch[1], env, actor);
   }
 
   const detailMatch = url.pathname.match(new RegExp(`^/api/v1/staff/events/${eventIdPattern}$`));

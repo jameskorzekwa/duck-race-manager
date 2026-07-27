@@ -409,7 +409,7 @@ test("private registration status still keeps email and phone staff-only", async
         event_name: "Test Duck Race",
         event_date: "2026-08-30",
         race_entry_id: "entry_test",
-        duck_keep_preference: "UNDECIDED",
+        duck_keep_preference: "KEEP",
       };
     }
     if (sql.includes("FROM heats")) {
@@ -444,7 +444,7 @@ test("private registration status still keeps email and phone staff-only", async
   assert.equal(body.firstName, "Daisy");
   assert.equal(body.lastName, "Duck");
   assert.equal(body.lookupCode, "DAISY123");
-  assert.equal(body.duckKeepPreference, "UNDECIDED");
+  assert.equal("duckKeepPreference" in body, false);
   assert.deepEqual(body.raceStatus.duck, { visibleNumber: 42 });
   assert.equal(body.raceStatus.assignedHeat.roundOne.number, 8);
   assert.deepEqual(body.raceStatus.currentHeat, { round: "ROUND_ONE", number: 4, status: "RUNNING" });
@@ -452,6 +452,7 @@ test("private registration status still keeps email and phone staff-only", async
   assert.equal("email" in body, false);
   assert.equal("phone" in body, false);
   assert.ok(db.statements.every((statement) => !/email|phone/i.test(statement.sql)));
+  assert.ok(db.statements.every((statement) => !statement.sql.includes("duck_keep_preference")));
 });
 
 test("rejects cross-origin registration before touching the database", async () => {
@@ -525,6 +526,7 @@ test("creates registration, race-entry, command, and audit records atomically", 
   const db = makeDb((sql) => sql.includes("status = 'REGISTRATION_OPEN'") ? openEvent : null);
   let publicationCalls = 0;
   let publicationTask;
+  let publicationFrame;
   context.mock.method(globalThis, "fetch", async () => Response.json({
     success: true,
     hostname: "quickducks.com",
@@ -545,7 +547,7 @@ test("creates registration, race-entry, command, and audit records atomically", 
         lastName: "Duck",
         email: "DAISY@example.com",
         emailNotificationsEnabled: true,
-        duckKeepPreference: "RETURN",
+        duckKeepPreference: "KEEP",
         turnstileToken: "verified-test-token",
       }),
     }),
@@ -555,8 +557,9 @@ test("creates registration, race-entry, command, and audit records atomically", 
         idFromName() { return "race-updates"; },
         get() {
           return {
-            async fetch() {
+            async fetch(_url, init) {
               publicationCalls += 1;
+              publicationFrame = init.body;
               throw new Error("notification unavailable");
             },
           };
@@ -578,7 +581,10 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.match(db.batches[0][0].sql, /INSERT INTO race_commands/);
   assert.match(db.batches[0][1].sql, /INSERT INTO registrations/);
   assert.match(db.batches[0][2].sql, /INSERT INTO race_entries/);
+  assert.doesNotMatch(db.batches[0][2].sql, /duck_keep_preference/);
+  assert.equal(db.batches[0][2].args.length, 3);
   assert.match(db.batches[0][3].sql, /INSERT INTO audit_events/);
+  assert.equal(db.batches[0][3].args.at(-1), JSON.stringify({ created_via: "PUBLIC" }));
   assert.match(db.batches[0][4].sql, /INSERT INTO browser_registration_collections/);
   assert.match(db.batches[0][5].sql, /INSERT OR IGNORE INTO browser_collection_registrations/);
   assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
@@ -586,6 +592,7 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.ok(publicationTask);
   await assert.doesNotReject(publicationTask);
   assert.equal(publicationCalls, 1);
+  assert.deepEqual(JSON.parse(publicationFrame).domains, ["participants"]);
 });
 
 test("rejects a Turnstile result for a different hostname", async (context) => {

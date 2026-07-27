@@ -17,7 +17,7 @@ const validForm = () => {
   form.set("email", "DAISY@example.com");
   form.set("phone", "555-0100");
   form.set("email_notifications_enabled", "on");
-  form.set("duck_keep_preference", "RETURN");
+  form.set("duck_keep_preference", "KEEP");
   return form;
 };
 
@@ -31,8 +31,8 @@ test("validates and normalizes a registration", () => {
     email: "daisy@example.com",
     phone: "555-0100",
     emailNotificationsEnabled: true,
-    duckKeepPreference: "RETURN",
   });
+  assert.equal("duckKeepPreference" in result.value, false);
 });
 
 test("enforces required names and event email policy", () => {

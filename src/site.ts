@@ -13,7 +13,6 @@ const escapeHtml = (value: string): string =>
 
 const duck = (className = "duck-mark"): string => `
 <svg class="${className}" viewBox="0 0 96 76" role="img" aria-label="Rubber duck">
-  <path d="M8 61c12 5 22 5 34 0 12-5 22-5 34 0 6 3 11 3 16 1" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
   <ellipse cx="42" cy="47" rx="31" ry="20" fill="#ffd43b" stroke="#112b3c" stroke-width="3"/>
   <circle cx="61" cy="28" r="20" fill="#ffd43b" stroke="#112b3c" stroke-width="3"/>
   <circle cx="68" cy="23" r="3" fill="#112b3c"/>
@@ -31,23 +30,23 @@ export const faviconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 </svg>`;
 
 const styles = `
-:root { color-scheme: light; --ink:#112b3c; --cream:#fff7d6; --paper:#fffdf3; --yellow:#ffd43b; --orange:#ff7132; --water:#3294b0; --water-dark:#146780; --muted:#607078; font-family:ui-rounded,"Avenir Next Rounded","Arial Rounded MT Bold",system-ui,sans-serif; }
+:root { color-scheme: light; --ink:#112b3c; --cream:#fff7d6; --paper:#fffdf3; --yellow:#ffd43b; --orange:#ff7132; --water:#3294b0; --water-dark:#146780; --muted:#607078; --space-xs:.45rem; --space-sm:.75rem; --space-md:1rem; --space-lg:1.4rem; font-family:ui-rounded,"Avenir Next Rounded","Arial Rounded MT Bold",system-ui,sans-serif; }
 * { box-sizing:border-box; }
 [hidden] { display:none !important; }
 html { scroll-behavior:smooth; }
-body { margin:0; min-width:320px; min-height:100vh; background:var(--cream); color:var(--ink); }
+body { margin:0; min-height:100vh; background:var(--cream); color:var(--ink); overflow-wrap:anywhere; }
 a { color:inherit; }
 .shell { width:min(70rem,calc(100% - 2rem)); margin:0 auto; }
-.site-head { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:1rem 0; }
+.site-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; padding:1rem 0; }
 .brand { display:inline-flex; align-items:center; gap:.55rem; color:var(--ink); text-decoration:none; font-size:1.12rem; font-weight:950; letter-spacing:-.03em; }
 .brand svg { width:3rem; height:2.35rem; color:var(--water-dark); }
 .nav { display:flex; gap:.35rem; }
 .nav a { padding:.7rem .9rem; border:2px solid transparent; border-radius:999px; font-weight:850; text-decoration:none; }
 .nav a:hover,.nav a:focus-visible { border-color:var(--ink); outline:none; }
 .hero { position:relative; overflow:hidden; display:grid; align-items:center; min-height:34rem; padding:clamp(2rem,6vw,5rem); border:3px solid var(--ink); border-radius:2rem; background:var(--paper); box-shadow:9px 9px 0 var(--ink); }
-.hero::before { content:""; position:absolute; z-index:1; right:-20%; bottom:1rem; left:-20%; height:1.4rem; background-image:radial-gradient(ellipse 3.4rem .32rem at 3.4rem 50%,rgba(255,255,255,.92) 96%,transparent 100%); background-position:0 50%; background-repeat:repeat-x; background-size:10rem 1.4rem; opacity:.9; pointer-events:none; }
-.hero-water { position:absolute; z-index:0; right:-2px; bottom:-1px; left:-2px; width:calc(100% + 4px); height:10.5rem; color:var(--water); pointer-events:none; transform:translateY(0); }
-.hero-water path { fill:currentColor; }
+.hero-water { --wave-length:10rem; position:absolute; z-index:0; right:-2px; bottom:-1px; left:-2px; width:calc(100% + 4px); height:10.5rem; overflow:hidden; pointer-events:none; }
+.hero-water::before { content:""; position:absolute; top:0; right:0; left:0; height:3rem; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='48' viewBox='0 0 160 48'%3E%3Cpath fill='%233294b0' d='M0 24 C20 0 60 0 80 24 S140 48 160 24 V48 H0 Z'/%3E%3C/svg%3E"); background-position:0 0; background-repeat:repeat-x; background-size:var(--wave-length) 3rem; }
+.hero-water::after { content:""; position:absolute; top:calc(3rem - 1px); right:0; bottom:0; left:0; background:var(--water); }
 .hero-copy { position:relative; z-index:3; max-width:42rem; }
 .eyebrow { display:inline-flex; margin:0 0 1rem; padding:.48rem .78rem; border:2px solid var(--ink); border-radius:999px; background:var(--yellow); font-size:.8rem; font-weight:950; letter-spacing:.09em; text-transform:uppercase; }
 h1,h2,h3,p { margin-top:0; }
@@ -56,13 +55,22 @@ h2 { font-size:clamp(2rem,6vw,3.7rem); line-height:.95; letter-spacing:-.055em; 
 h3 { font-size:1.3rem; letter-spacing:-.03em; }
 .lede { max-width:38rem; margin-bottom:1.5rem; color:#314a57; font-size:clamp(1.05rem,2.5vw,1.35rem); line-height:1.55; }
 .actions { display:flex; flex-wrap:wrap; gap:.8rem; }
-.button { display:inline-flex; min-height:3.25rem; align-items:center; justify-content:center; padding:.85rem 1.15rem; border:3px solid var(--ink); border-radius:.8rem; background:var(--yellow); box-shadow:4px 4px 0 var(--ink); color:var(--ink); font:inherit; font-weight:950; text-decoration:none; cursor:pointer; }
+.actions > * { min-width:0; max-width:100%; }
+button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal; }
+.button { display:inline-flex; min-width:0; max-width:100%; min-height:3.25rem; align-items:center; justify-content:center; padding:.85rem 1.15rem; border:3px solid var(--ink); border-radius:.8rem; background:var(--yellow); box-shadow:4px 4px 0 var(--ink); color:var(--ink); font:inherit; font-weight:950; overflow-wrap:anywhere; text-align:center; text-decoration:none; white-space:normal; cursor:pointer; }
 .button:hover,.button:focus-visible { outline:none; box-shadow:2px 2px 0 var(--ink); transform:translate(2px,2px); }
 .button.secondary { background:var(--paper); }
 .button.danger { background:#ffd8d2; }
 .button.small { min-height:2.55rem; padding:.55rem .75rem; border-width:2px; box-shadow:2px 2px 0 var(--ink); font-size:.88rem; }
 .button:disabled { opacity:.55; box-shadow:none; cursor:not-allowed; transform:none; }
-.hero-duck { --duck-center:0%; position:absolute; z-index:2; right:clamp(1rem,5vw,4rem); bottom:2.5rem; width:clamp(12rem,37vw,25rem); color:#fff; filter:drop-shadow(5px 7px 0 rgba(17,43,60,.22)); pointer-events:none; transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); }
+.app-confirmation-backdrop { position:fixed; z-index:99; inset:0; background:rgba(17,43,60,.68); }
+.app-confirmation { width:min(34rem,calc(100% - 2rem)); max-height:calc(100vh - 2rem); padding:clamp(1.2rem,4vw,2rem); overflow:auto; border:3px solid var(--ink); border-radius:1.2rem; background:var(--paper); box-shadow:8px 8px 0 var(--ink); color:var(--ink); }
+.app-confirmation::backdrop { background:rgba(17,43,60,.68); }
+.app-confirmation.fallback { position:fixed; z-index:100; top:50%; left:50%; margin:0; transform:translate(-50%,-50%); }
+.app-confirmation h2 { margin-bottom:.75rem; font-size:clamp(1.8rem,6vw,2.5rem); }
+.app-confirmation-message { margin-bottom:1.5rem; overflow-wrap:anywhere; line-height:1.55; white-space:pre-wrap; }
+.app-confirmation-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:.8rem; }
+.hero-duck { --duck-center:0%; position:absolute; z-index:2; right:clamp(1rem,5vw,4rem); bottom:2.5rem; width:clamp(12rem,37vw,25rem); filter:drop-shadow(5px 7px 0 rgba(17,43,60,.22)); pointer-events:none; transform:translateX(var(--duck-center)) translateY(-3px) rotate(-3deg); transform-box:fill-box; transform-origin:center; }
 .ticker { display:flex; flex-wrap:wrap; justify-content:center; gap:.2rem .7rem; padding:1.35rem 0; color:var(--water-dark); font-size:.8rem; font-weight:950; letter-spacing:.1em; text-transform:uppercase; }
 .ticker span::after { content:"•"; margin-left:.7rem; color:var(--orange); }
 .ticker span:last-child::after { content:""; margin:0; }
@@ -95,37 +103,57 @@ h3 { font-size:1.3rem; letter-spacing:-.03em; }
 .page-title { max-width:12ch; font-size:clamp(2.7rem,10vw,5.4rem); }
 .muted { color:var(--muted); line-height:1.55; }
 .notice { margin:1.2rem 0; padding:1rem; border-left:.5rem solid var(--orange); background:#fff0df; line-height:1.5; }
-form { display:grid; gap:1.15rem; clear:both; }
-.field-grid { display:grid; gap:1rem; }
+form { display:grid; width:100%; min-width:0; max-width:100%; gap:1.15rem; clear:both; }
+.field-grid { display:grid; min-width:0; max-width:100%; gap:1rem; }
+.field-grid > *,form > *,label,fieldset { min-width:0; max-width:100%; }
 label,legend { font-weight:900; }
 label span,legend span { display:block; margin-top:.25rem; color:var(--muted); font-size:.86rem; font-weight:650; line-height:1.4; }
 .label-text { display:inline; margin:0; color:var(--ink); font-size:inherit; font-weight:900; }
-input,select,textarea { width:100%; min-height:3.2rem; margin-top:.45rem; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; }
+input,select,textarea { width:100%; min-width:0; max-width:100%; min-height:3.2rem; margin-top:.45rem; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; }
 textarea { min-height:6rem; resize:vertical; }
 input:focus,select:focus,textarea:focus { outline:4px solid #83d8ec; outline-offset:1px; }
 fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
-.check { display:grid; grid-template-columns:1.4rem 1fr; gap:.7rem; align-items:start; font-weight:750; }
+.check { display:grid; grid-template-columns:1.4rem minmax(0,1fr); gap:.7rem; align-items:start; font-weight:750; }
 .check input { width:1.25rem; min-height:1.25rem; margin:.15rem 0 0; }
+.cf-turnstile,.turnstile-mock { width:100%; min-width:0; max-width:100%; }
 .turnstile-mock { display:grid; min-height:4.4rem; place-items:center; padding:.8rem; border:2px dashed #8da0a6; border-radius:.7rem; background:#f4f7f7; color:var(--muted); font-size:.82rem; font-weight:800; text-align:center; }
 .error-text { color:#9f261c; font-weight:850; }
 .field-error { min-height:1.2em; color:#9f261c; font-size:.8rem; font-weight:800; }
 .staff-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.8rem; margin-bottom:1.2rem; padding:.8rem 1rem; border:2px solid var(--ink); border-radius:.8rem; background:#e4f4f8; }
-.staff-bar p { margin:0; }
-.staff-bar-actions { display:inline-flex; flex-wrap:wrap; align-items:center; gap:.45rem; }
+.staff-bar p { min-width:0; margin:0; overflow-wrap:anywhere; }
+.staff-bar-actions { display:inline-flex; max-width:100%; flex-wrap:wrap; align-items:center; gap:var(--space-xs); }
+.staff-bar-actions > a,.staff-logout button { display:inline-flex; min-height:2.75rem; align-items:center; padding:var(--space-xs); overflow-wrap:anywhere; }
 .staff-logout { display:inline; clear:none; }
-.staff-logout button { padding:.15rem; border:0; background:transparent; color:inherit; font:inherit; text-decoration:underline; cursor:pointer; }
+.staff-logout button { border:0; background:transparent; color:inherit; font:inherit; text-decoration:underline; cursor:pointer; }
 .staff-logout button:hover,.staff-logout button:focus-visible { border-radius:.2rem; outline:2px solid var(--ink); outline-offset:2px; }
 .result-list { display:grid; gap:.6rem; margin:.8rem 0; }
-.result-button { width:100%; padding:.8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; font-weight:850; text-align:left; cursor:pointer; }
+.result-list:empty { display:none; }
+.result-button { width:100%; padding:.8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; font-weight:850; overflow-wrap:anywhere; text-align:left; cursor:pointer; }
+.result-button > * { display:block; }
+.result-button > * + * { margin-top:var(--space-xs); }
 .result-button:hover,.result-button:focus-visible { outline:4px solid #83d8ec; outline-offset:1px; }
 .result-button:disabled { opacity:.55; cursor:not-allowed; }
 .pairing-review { margin:1rem 0; padding:1rem; border:2px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; }
+.pairing-review > * { margin-bottom:0; overflow-wrap:anywhere; }
+.pairing-review > * + * { margin-top:var(--space-xs); }
+.work-area { margin-top:var(--space-lg); }
+.work-area > * { margin-bottom:0; }
+.work-area > * + * { margin-top:var(--space-md); }
+.work-area > .result-list,.work-area > .pairing-review { margin-bottom:0; }
 .staff-access-list { display:grid; gap:.75rem; margin-top:1rem; }
-.staff-access-card { display:flex; flex-wrap:wrap; justify-content:space-between; gap:1rem; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
-.staff-access-card p { margin:0; }
-.role-tag { align-self:flex-start; padding:.3rem .55rem; border:2px solid var(--ink); border-radius:999px; background:var(--cream); font-size:.75rem; font-weight:950; letter-spacing:.06em; text-transform:uppercase; }
+.staff-access-card { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:var(--space-md); padding:var(--space-md); border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
+.staff-access-card > * { min-width:0; max-width:100%; }
+.staff-access-card > div:first-child { min-width:0; flex:1 1 14rem; }
+.staff-access-card p { margin:0; overflow-wrap:anywhere; }
+.staff-role-controls { flex:1 0 100%; align-items:flex-end; gap:var(--space-sm); padding-top:var(--space-xs); }
+.staff-role-controls > select,.staff-role-controls > fieldset { min-width:0; flex:1 1 100%; margin-top:0; }
+.role-set { display:grid; grid-template-columns:repeat(auto-fit,minmax(10rem,1fr)); gap:var(--space-xs) var(--space-md); }
+.role-set > legend { grid-column:1 / -1; }
+.role-set > .check { min-height:2rem; align-items:center; }
+.role-tag { max-width:100%; align-self:flex-start; padding:.3rem .55rem; border:2px solid var(--ink); border-radius:.7rem; background:var(--cream); font-size:.75rem; font-weight:950; letter-spacing:.06em; line-height:1.35; overflow-wrap:anywhere; text-transform:uppercase; }
 .code { display:inline-block; margin:.5rem 0; padding:.65rem .85rem; border:2px dashed var(--ink); border-radius:.6rem; background:var(--cream); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:clamp(1.4rem,7vw,2.4rem); font-weight:950; letter-spacing:.12em; }
 .facts { display:grid; gap:.8rem; margin:1.5rem 0; }
+.facts:empty { display:none; }
 .fact { padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
 .fact dt { color:var(--muted); font-size:.75rem; font-weight:950; letter-spacing:.08em; text-transform:uppercase; }
 .fact dd { margin:.25rem 0 0; font-size:1.08rem; font-weight:850; }
@@ -140,20 +168,32 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .console-section { scroll-margin-top:6rem; margin:1.4rem 0; padding:clamp(1rem,3vw,1.5rem); border:3px solid var(--ink); border-radius:1rem; background:#fffdf8; }
 .console-section > * + * { margin-top:1rem; }
 .console-section > h2 { margin-bottom:0; font-size:clamp(1.8rem,5vw,2.7rem); }
-.console-grid { display:grid; gap:1rem; }
+.console-grid { display:grid; align-items:start; gap:1rem; }
 .console-grid.wide { grid-template-columns:minmax(0,1fr); }
-.operation-card { min-width:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
+.operation-card { min-width:0; padding:var(--space-md); border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
 .operation-card > * + * { margin-top:.85rem; }
 .operation-card > label { display:block; }
 .operation-card > :last-child { margin-bottom:0; }
-.operation-card h3 { margin-bottom:0; }
+.operation-card > h2,.operation-card > h3,.operation-card > p { margin-bottom:0; }
+.operation-card > h2,.operation-card > h3 { overflow-wrap:anywhere; }
 .operation-card form + form { margin-top:1rem; }
+form.operation-card > * + * { margin-top:0; }
 .section-tools { display:flex; flex-wrap:wrap; gap:.65rem; align-items:end; margin:1rem 0; }
-.section-tools > label { flex:1 1 15rem; }
+.section-tools > label { flex:1 1 15rem; min-width:0; max-width:100%; }
 .section-tools .button { flex:0 0 auto; }
 .data-list { display:grid; gap:.7rem; margin-top:1rem; }
+.data-list:empty { display:none; }
+.inventory-layout { display:grid; gap:1rem; align-items:start; }
+.inventory-card-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr)); grid-auto-rows:minmax(3.75rem,1fr); align-content:start; align-items:stretch; margin-top:0; }
+.inventory-card-grid .result-button { height:100%; min-height:3.75rem; }
+.inventory-card-grid .result-button[aria-expanded="true"] { background:var(--cream); outline:3px solid var(--water-dark); outline-offset:1px; }
+.inventory-detail-panel { min-width:0; max-height:none; overflow:visible; }
+.inventory-detail-heading { display:flex; align-items:start; justify-content:space-between; gap:1rem; }
+.inventory-detail-heading .button { flex:none; }
 .data-card { padding:.9rem; border:2px solid #b8c6c9; border-radius:.75rem; background:#fff; }
 .data-card > * + * { margin-top:.55rem; }
+.data-card > :last-child { margin-bottom:0; }
+.data-card h3 { margin-bottom:0; overflow-wrap:anywhere; }
 .data-card p { margin-bottom:0; overflow-wrap:anywhere; }
 .data-card .actions { margin-top:.65rem; }
 .status-chip { display:inline-block; margin:0 .35rem .35rem 0; padding:.25rem .5rem; border:2px solid var(--ink); border-radius:999px; background:var(--cream); font-size:.72rem; font-weight:950; letter-spacing:.04em; text-transform:uppercase; }
@@ -162,17 +202,20 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .compact-facts { grid-template-columns:repeat(auto-fit,minmax(9rem,1fr)); margin:.8rem 0; }
 .compact-facts .fact { min-width:0; }
 .compact-facts .fact dd { overflow-wrap:anywhere; font-size:.95rem; }
+.inventory-detail-panel > .facts { margin-block:var(--space-sm) var(--space-md); }
+.inventory-detail-panel > .actions { align-items:center; }
+.inventory-detail-panel > h3 + .data-list { margin-top:var(--space-sm); }
 .danger-zone { border-color:#9f261c; background:#fff3f1; }
 .message-line { min-height:1.5rem; margin:.65rem 0; font-weight:800; }
 .empty-state { padding:1rem; border:2px dashed #8da0a6; border-radius:.7rem; color:var(--muted); text-align:center; }
 details.operation-card > summary { cursor:pointer; font-size:1.05rem; font-weight:950; }
-details.operation-card[open] > summary { margin-bottom:1rem; }
+details.operation-card[open] > summary { margin-bottom:0; }
 .roster-list { display:grid; gap:.45rem; padding:0; list-style:none; }
 .roster-list li { padding:.65rem; border-left:.35rem solid var(--water); background:#eaf7fa; }
 .private-result { overflow-wrap:anywhere; }
 .live-board { border-width:4px; background:#fff; box-shadow:7px 7px 0 var(--ink); }
 .live-board-title { max-width:none; margin-bottom:.5rem; }
-.freshness { display:inline-block; margin:.2rem 0 1rem; padding:.45rem .7rem; border:2px solid var(--water-dark); border-radius:999px; background:#e4f4f8; color:#245264; font-weight:900; }
+.freshness { display:inline-block; max-width:100%; margin:.2rem 0 1rem; padding:.45rem .7rem; border:2px solid var(--water-dark); border-radius:999px; background:#e4f4f8; color:#245264; font-weight:900; line-height:1.4; overflow-wrap:anywhere; }
 .board-round { margin-top:1.5rem; }
 .board-round h3 { font-size:1.65rem; }
 .board-grid { display:grid; gap:.8rem; }
@@ -195,11 +238,25 @@ details.operation-card[open] > summary { margin-bottom:1rem; }
 .station-counter { padding:1rem; border:3px solid var(--ink); border-radius:.8rem; background:var(--cream); text-align:center; }
 .station-counter strong { display:block; color:var(--ink); font-size:clamp(2rem,10vw,4rem); line-height:1; }
 .station-history { display:grid; gap:.55rem; padding:0; list-style:none; }
-.station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; }
+.station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; overflow-wrap:anywhere; }
+.station-panel > h2,.station-panel > h3,[data-intake-controls] > h2 { margin-bottom:0; overflow-wrap:anywhere; }
+.station-panel > h2 + *,.station-panel > h3 + *,[data-intake-controls] > h2 + * { margin-top:var(--space-sm); }
+[data-intake-controls] > label,.station-panel > label { display:block; }
+.station-panel > .notice + label,.station-panel > label + label,.station-panel > label + .button,.station-panel > .button + .operation-card,.station-panel > .operation-card + .operation-card,.station-panel > .operation-card + .station-counters,.station-panel > .station-counters + h2,[data-intake-controls] > .notice + label,[data-intake-controls] > label + label,[data-intake-controls] > label + .actions,[data-intake-controls] > .actions + .operation-card,[data-intake-controls] > .operation-card + .operation-card,[data-intake-controls] > .operation-card + .station-counters,[data-intake-controls] > .station-counters + h2 { margin-top:var(--space-lg); }
+.station-panel > .muted + .station-history,[data-intake-controls] > .muted + .station-history { margin-top:var(--space-md); }
+.station-state .message-line { min-height:0; }
+.station-counter { min-width:0; }
+.station-counter span { display:block; line-height:1.25; overflow-wrap:anywhere; }
+[data-event-readiness] .data-card { display:flex; flex-wrap:wrap; align-items:center; gap:var(--space-sm); }
+[data-event-readiness] .data-card > * { margin:0; }
+[data-event-readiness] .data-card > h3,[data-event-readiness] .data-card > p { flex-basis:100%; }
+[data-event-readiness] .status-chip { margin:0; }
+[data-event-readiness] .button { margin-top:var(--space-xs); }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
-@media (min-width:44rem) { .cards { grid-template-columns:repeat(3,1fr); } .field-grid { grid-template-columns:1fr 1fr; } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .hero::before { bottom:1.3rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .search-form { grid-template-columns:1fr; } .staff-access-card .actions { width:100%; } }
-@media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-glide 3.1s ease-in-out infinite; } .hero-water { animation:water-swell 4.2s ease-in-out infinite; } .hero::before { animation:current 2.8s linear infinite; } @keyframes duck-glide { 0%,100% { transform:translateX(var(--duck-center)) translateY(0) rotate(-4deg); } 50% { transform:translateX(calc(var(--duck-center) + 6px)) translateY(-9px) rotate(1deg); } } @keyframes water-swell { 0%,100% { transform:translateY(0); } 50% { transform:translateY(4px); } } @keyframes current { to { background-position:-10rem 50%; } } }
+@media (min-width:44rem) { .cards { grid-template-columns:repeat(3,minmax(0,1fr)); } .field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .inventory-layout { grid-template-columns:minmax(0,1.15fr) minmax(20rem,.85fr); } .inventory-detail-panel { position:sticky; top:5.75rem; max-height:calc(100vh - 6.75rem); overflow:auto; } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .search-form { grid-template-columns:1fr; } .staff-bar { align-items:flex-start; } .staff-bar-actions { width:100%; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
+@media (prefers-reduced-motion:no-preference) { .hero-duck { animation:duck-rock 3.1s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-rock { 0%,100% { transform:translateX(var(--duck-center)) translateY(-3px) rotate(-3deg); } 25% { transform:translateX(var(--duck-center)) translateY(-8px) rotate(0deg); } 50% { transform:translateX(var(--duck-center)) translateY(-12px) rotate(3deg); } 75% { transform:translateX(var(--duck-center)) translateY(-7px) rotate(-1deg); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
+@media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } .hero-water::before { background-position:-2.5rem 0; } }
 `;
 
 interface PageOptions {
@@ -221,6 +278,7 @@ const page = ({ title, description, content, robots = "index,follow" }: PageOpti
     <link rel="manifest" href="/site.webmanifest">
     <title>${escapeHtml(title)} · QuickDucks</title>
     <style>${styles}</style>
+    <script src="/assets/live-ui.js" defer></script>
   </head>
   <body>
     <header class="shell site-head">
@@ -253,9 +311,7 @@ export const renderHome = (): string => page({
         <p class="lede">A fast, friendly home for community duck races. Register, keep your private code, and follow your duck from check-in to finish.</p>
         <div class="actions"><a class="button" href="/register">Register</a><a class="button secondary" href="#how-it-works">How it works</a></div>
       </div>
-      <svg class="hero-water" viewBox="0 0 1200 200" preserveAspectRatio="none" aria-hidden="true" focusable="false">
-        <path d="M0 55 C75 10 150 10 225 55 C300 100 375 100 450 55 C525 10 600 10 675 55 C750 100 825 100 900 55 C975 10 1050 10 1200 55 V200 H0 Z"/>
-      </svg>
+      <div class="hero-water" aria-hidden="true"></div>
       ${duck("hero-duck")}
     </section>
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
@@ -346,10 +402,9 @@ export const renderRegistration = (turnstileSiteKey?: string): string => page({
           <label><span class="label-text" data-email-label>Email (optional)</span><input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>Used only for operational race updates.</span><span class="field-error" data-field-error="email"></span></label>
           <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="32" placeholder="(555) 010-2040"><span class="field-error" data-field-error="phone"></span></label>
         </div>
-        <label>After the race<select name="duck_keep_preference"><option value="UNDECIDED">I’m not sure yet</option><option value="RETURN">I plan to return the duck</option><option value="KEEP">I plan to keep the duck</option></select><span>This preference helps staff plan. Physical return processing remains authoritative.</span></label>
         ${turnstileSiteKey === undefined
           ? '<div class="turnstile-mock">Registration protection is still being configured.</div>'
-          : `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`}
+          : `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-size="flexible"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`}
         <p class="muted" data-form-message aria-live="polite">Loading registration availability…</p>
         <button class="button" type="submit" disabled>Register participant</button>
       </form>
@@ -392,8 +447,8 @@ export const renderStatus = (
     <section class="page-panel">
       ${duck()}
       <p class="eyebrow">Private registration status</p>
-      <h1 class="page-title">${escapeHtml(heading)}</h1>
-      <p class="lede">Keep this page private. This is your status link for ${escapeHtml(eventName)}.</p>
+      <h1 class="page-title" data-private-status-heading>${escapeHtml(heading)}</h1>
+      <p class="lede" data-private-status-event>Keep this page private. This is your status link for ${escapeHtml(eventName)}.</p>
       <div class="notice"><strong>Staff lookup code</strong><br><span class="code">${escapeHtml(lookupCode)}</span><br><span class="muted">Save this code or bookmark this page.</span></div>
       <div data-live-personal="private"><dl class="facts"><div class="fact"><dt>Participant</dt><dd>${escapeHtml(participantName)}</dd></div><div class="fact"><dt>Status</dt><dd>${registrationStatus}</dd></div><div class="fact"><dt>Race date</dt><dd>${escapeHtml(raceDate)}</dd></div></dl>
         ${raceStatus === undefined ? "" : raceStatus === null
@@ -515,7 +570,7 @@ export const renderStaffHome = (
   description: "Protected QuickDucks staff race operations.",
   robots: "noindex,nofollow",
   content: `
-    <section class="page-panel operations-panel" data-operations-root data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+    <section class="page-panel operations-panel" data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</div>
       ${duck()}
       <p class="eyebrow">Staff operations</p>
@@ -538,14 +593,14 @@ export const renderStaffHome = (
           ${isSystemAdmin ? `<details class="operation-card" data-event-create-card><summary>Create event</summary>
             <form data-event-create-form>
               <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
-              <label>URL slug<input name="slug" maxlength="80" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" required placeholder="annual-duck-race"><span>Lowercase letters, numbers, and hyphens.</span></label>
+              <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
               <label>Event date<input name="eventDate" type="date" required></label>
               <button class="button" type="submit">Create draft event</button>
             </form>
           </details>
           <details class="operation-card" data-event-config-card hidden><summary>Configure draft</summary>
             <form data-event-config-form>
-              <div class="field-grid"><label>Event name<input name="name" maxlength="120" required></label><label>URL slug<input name="slug" maxlength="80" required></label></div>
+              <div class="field-grid"><label>Event name<input name="name" maxlength="120" required></label><label>URL slug preview<input data-event-config-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Changes automatically when the event name changes.</span></label></div>
               <div class="field-grid"><label>Event date<input name="eventDate" type="date"></label><label>Timezone<input name="timezone" maxlength="64" required placeholder="America/Denver"></label></div>
               <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="datetime-local"></label><label>Registration closes<input name="registrationClosesAt" type="datetime-local"></label></div>
               <label class="check"><input name="emailRequired" type="checkbox"><span class="label-text">Require participant email</span></label>
@@ -558,6 +613,10 @@ export const renderStaffHome = (
           ${isSystemAdmin ? `<details class="operation-card danger-zone" data-delete-draft-card hidden><summary>Delete empty draft</summary>
             <p class="muted">Only a revision-matched draft with no race data or operational history can be deleted.</p>
             <form data-delete-draft-form><label>Type the required confirmation<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Delete empty draft</button></form>
+          </details>
+          <details class="operation-card danger-zone" data-force-delete-card hidden><summary>Delete event</summary>
+            <p class="muted">Administrator-only. Permanently deletes this event and every record for it — registrations, ducks, tags, heats, results, returns, notifications, commands, and audit history — in any state. This cannot be undone.</p>
+            <form data-force-delete-form><label>Type the exact event name to confirm<input name="confirmName" maxlength="120" required autocomplete="off"></label><button class="button danger" type="submit">Delete event</button></form>
           </details>` : ""}
         </div>
       </section>
@@ -574,7 +633,6 @@ export const renderStaffHome = (
             <form data-walkup-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
               <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
-              <label>Duck preference<select name="duckKeepPreference"><option value="UNDECIDED">Undecided</option><option value="RETURN">Return</option><option value="KEEP">Keep</option></select></label>
               <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
               <button class="button" type="submit">Create walk-up</button>
             </form><p class="private-result muted" data-walkup-result aria-live="polite"></p>
@@ -584,7 +642,6 @@ export const renderStaffHome = (
             <form data-participant-edit-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
               <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
-              <label>Duck preference<select name="duckKeepPreference"><option value="UNDECIDED">Undecided</option><option value="RETURN">Return</option><option value="KEEP">Keep</option></select></label>
               <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
               <button class="button secondary" type="submit">Save participant details</button>
             </form>
@@ -607,9 +664,9 @@ export const renderStaffHome = (
           </form>
         </details>
         <div class="section-tools"><button class="button secondary small" type="button" data-refresh-inventory>Refresh inventory</button></div>
-        <div class="console-grid wide"><div class="data-list" data-inventory-list></div>
-          <article class="operation-card" data-inventory-detail hidden>
-            <h3 data-inventory-name>Duck detail</h3><dl class="facts compact-facts" data-inventory-facts></dl>
+        <div class="inventory-layout"><div class="data-list inventory-card-grid" data-inventory-list></div>
+          <aside class="operation-card inventory-detail-panel" id="inventory-detail-panel" role="region" aria-labelledby="inventory-detail-title" data-inventory-detail hidden>
+            <div class="inventory-detail-heading"><h3 id="inventory-detail-title" data-inventory-name>Duck detail</h3><button class="button secondary small" type="button" data-close-inventory-detail>Close</button></div><dl class="facts compact-facts" data-inventory-facts></dl>
             <div class="actions"><button class="button secondary small" type="button" data-print-label>Open label data</button><span class="muted" data-label-result></span></div>
             <details class="operation-card"><summary>Edit pre-race inventory</summary><form data-inventory-edit-form>
               <div class="field-grid"><label>Visible number<input name="visibleNumber" type="number" min="1" max="999999999" required></label><label>Condition<select name="condition"><option value="GOOD">Good</option><option value="NEEDS_TAG">Needs tag</option><option value="DAMAGED">Damaged</option><option value="RETIRED">Retired</option></select></label></div>
@@ -621,7 +678,7 @@ export const renderStaffHome = (
             <form class="operation-card" data-inventory-unassign-form hidden><h3>Unassign duck</h3><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><label class="check"><input name="releaseReservation" type="checkbox"><span class="label-text">Also release this duck from the event</span></label><button class="button danger" type="submit">Unassign duck</button></form>
             <form class="operation-card" data-reservation-release-form hidden><h3>Release event reservation</h3><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><button class="button danger" type="submit">Release reservation</button></form>
             <h3>History</h3><div class="data-list" data-inventory-history></div>
-          </article>
+          </aside>
         </div>
       </section>
 
@@ -659,7 +716,7 @@ export const renderStaffHome = (
 
       <section class="console-section" id="access" aria-labelledby="access-title" data-staff-access>
         <p class="eyebrow">Administrator</p><h2 id="access-title">Staff access</h2><p class="lede">Invite staff, combine operational roles, or disable and restore Cognito access.</p><div class="privacy"><strong>Roles are composable.</strong><span>Give regular staff every station role they need and no others. Administrators implicitly have every permission and do not have role assignments.</span></div>
-        <form class="operation-card" data-staff-access-form><div class="field-grid"><label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required></label><label>Display name<input name="displayName" autocomplete="off" maxlength="100" required></label></div><label>Account type<select name="role" required><option value="STAFF">Regular staff</option><option value="ADMIN">System administrator</option></select></label><fieldset data-create-role-set><legend>Operational roles</legend>${roleCheckboxes}</fieldset><button class="button" type="submit">Add staff access</button></form>
+        <form class="operation-card" data-staff-access-form><div class="field-grid"><label>Email address<input name="email" type="email" autocomplete="off" maxlength="254" required></label><label>Display name<input name="displayName" autocomplete="off" maxlength="100" required></label></div><label>Account type<select name="role" required><option value="STAFF">Regular staff</option><option value="ADMIN">System administrator</option></select></label><fieldset class="role-set" data-create-role-set><legend>Operational roles</legend>${roleCheckboxes}</fieldset><button class="button" type="submit">Add staff access</button></form>
         <p class="message-line muted" data-staff-access-message aria-live="polite">Loading authorized staff…</p><div class="staff-access-list" data-staff-access-list></div>
       </section>` : ""}
       ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
@@ -667,11 +724,16 @@ export const renderStaffHome = (
   });
 };
 
-export const renderStartLine = (displayName: string, interactive = true): string => page({
+export const renderStartLine = (
+  displayName: string,
+  interactive = true,
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+): string => page({
   title: "Start line",
   description: "Focused protected QuickDucks start-line station.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel station-panel" data-start-line>
+  content: `<section class="page-panel station-panel" data-start-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Start line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     <p class="eyebrow">Start-line station</p><h1 class="page-title">Prepare the next heat.</h1>
     <p class="freshness" data-station-freshness aria-live="polite">Checking the race…</p>
@@ -684,11 +746,16 @@ export const renderStartLine = (displayName: string, interactive = true): string
   </section>`,
 });
 
-export const renderFinishLine = (displayName: string, interactive = true): string => page({
+export const renderFinishLine = (
+  displayName: string,
+  interactive = true,
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+): string => page({
   title: "Finish line",
   description: "Focused protected QuickDucks finish-line station.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel station-panel" data-finish-line>
+  content: `<section class="page-panel station-panel" data-finish-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Finish line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
     <p class="freshness" data-station-freshness aria-live="polite">Checking the race…</p>
@@ -707,50 +774,76 @@ export const renderFinishLine = (displayName: string, interactive = true): strin
   </section>`,
 });
 
-export const renderInventoryIntake = (displayName: string, appOrigin: string): string => page({
+export const renderInventoryIntake = (
+  displayName: string,
+  appOrigin: string,
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+): string => page({
   title: "NFC provisioning",
   description: "Focused protected QuickDucks blank NFC provisioning station.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel station-panel" data-inventory-intake data-app-origin="${escapeHtml(appOrigin)}">
+  content: `<section class="page-panel station-panel" data-inventory-intake data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
     <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · NFC provisioning</p><div class="staff-bar-actions"><a href="/staff#inventory">Staff inventory</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
-    <p class="eyebrow">Blank sticker station</p><h1 class="page-title">Tap, write, and move on.</h1>
-    <p class="lede">Choose the race and press Start once. Then hold one blank writable NFC sticker to this Android device until success, remove it, and present the next duck.</p>
-    <div class="notice"><strong>Android Chrome over HTTPS only.</strong> Keep this top-level page visible and online. QuickDucks generates the duck UUID, internal number, and permanent URL automatically; there is no offline queue or manual token fallback.</div>
-    <label>Race event<select data-intake-event aria-describedby="intake-event-help"><option value="">Loading available events…</option></select><span id="intake-event-help">Only draft or registration-stage events accept inventory intake.</span></label>
-    <label>Station location (optional)<input data-intake-location maxlength="100" autocomplete="off" placeholder="Intake table"><span>This one location is applied automatically to stickers provisioned during this station run.</span></label>
-    <div class="actions">
-      <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
-      <button class="button secondary station-control" type="button" data-end-intake-nfc hidden disabled>End NFC provisioning</button>
+    <div class="notice" data-intake-runtime aria-live="polite"><strong>Checking this device.</strong><span data-intake-runtime-message>The station remains unavailable until its Android NFC requirements are confirmed.</span></div>
+    <div data-intake-controls hidden>
+      <p class="eyebrow">Blank sticker station</p><h1 class="page-title">Tap, write, and move on.</h1>
+      <p class="lede">Choose the race and press Start once. Then hold one blank writable NFC sticker to this Android device until success, remove it, and present the next duck.</p>
+      <div class="notice"><strong>Android Chrome over HTTPS only.</strong> Keep this top-level page visible and online. QuickDucks generates the duck UUID, internal number, and permanent URL automatically; there is no offline queue or manual token fallback.</div>
+      <label>Race event<select data-intake-event aria-describedby="intake-event-help"><option value="">Loading available events…</option></select><span id="intake-event-help">Only draft or registration-stage events accept inventory intake.</span></label>
+      <label>Station location (optional)<input data-intake-location maxlength="100" autocomplete="off" placeholder="Intake table"><span>This one location is applied automatically to stickers provisioned during this station run.</span></label>
+      <div class="actions">
+        <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
+        <button class="button secondary station-control" type="button" data-end-intake-nfc hidden disabled>End NFC provisioning</button>
+      </div>
+      <article class="operation-card danger-zone" data-intake-takeover hidden>
+        <h2>Abandoned sticker recovery</h2>
+        <p class="muted" data-intake-takeover-message></p>
+        <p>Race directors and administrators can explicitly take ownership. Do this only after confirming the previous station is no longer working on the sticker.</p>
+        <button class="button danger" type="button" data-takeover-provisioning>Take over pending sticker</button>
+      </article>
+      <article class="operation-card station-state" role="status" aria-live="polite" aria-atomic="true"><p class="eyebrow">Station state</p><h2 data-intake-state>Not started</h2><p class="message-line muted" data-intake-message>Select a race, then press Start once.</p></article>
+      <div class="station-counters" aria-label="Inventory counts">
+        <div class="station-counter"><span>Reserved for race</span><strong data-reserved-count>0</strong></div>
+        <div class="station-counter"><span>Added this session</span><strong data-session-count>0</strong></div>
+      </div>
+      <h2>Session history</h2><p class="muted">Only provisioning outcomes appear here. Permanent URLs and tokens are never displayed or stored by the browser.</p>
+      <ul class="station-history" data-intake-history><li>No ducks added in this page session.</li></ul>
     </div>
-    <article class="operation-card danger-zone" data-intake-takeover hidden>
-      <h2>Abandoned sticker recovery</h2>
-      <p class="muted" data-intake-takeover-message></p>
-      <p>Race directors and administrators can explicitly take ownership. Do this only after confirming the previous station is no longer working on the sticker.</p>
-      <button class="button danger" type="button" data-takeover-provisioning>Take over pending sticker</button>
-    </article>
-    <article class="operation-card" role="status" aria-live="polite" aria-atomic="true"><p class="eyebrow">Station state</p><h2 data-intake-state>Not started</h2><p class="message-line muted" data-intake-message>Select a race, then press Start once.</p></article>
-    <div class="station-counters" aria-label="Inventory counts">
-      <div class="station-counter"><span>Reserved for race</span><strong data-reserved-count>0</strong></div>
-      <div class="station-counter"><span>Added this session</span><strong data-session-count>0</strong></div>
-    </div>
-    <h2>Session history</h2><p class="muted">Only provisioning outcomes appear here. Permanent URLs and tokens are never displayed or stored by the browser.</p>
-    <ul class="station-history" data-intake-history><li>No ducks added in this page session.</li></ul>
     <script src="/assets/inventory-intake.js" defer></script>
   </section>`,
 });
 
-export const renderStaffDuck = (token: string, displayName: string): string => page({
+export const renderInventoryIntakeUnsupported = (displayName: string): string => page({
+  title: "Unsupported NFC device",
+  description: "QuickDucks NFC provisioning requires a supported Android device.",
+  robots: "noindex,nofollow",
+  content: `<section class="page-panel station-panel">
+    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · NFC provisioning</p><div class="staff-bar-actions"><a href="/staff#inventory">Staff inventory</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+    <p class="eyebrow">Unsupported device</p><h1 class="page-title">Open this station on Android.</h1>
+    <p class="lede">This page is available only on an NFC-capable Android device using current Chrome. Return to staff inventory, then open this station on that device.</p>
+    <div class="notice"><strong>This is a compatibility check, not an authorization control.</strong><span>Staff authentication and inventory permissions are checked before this device message.</span></div>
+    <a class="button secondary" href="/staff#inventory">Back to staff inventory</a>
+  </section>`,
+});
+
+export const renderStaffDuck = (
+  token: string,
+  displayName: string,
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+): string => page({
   title: "Staff duck scan",
   description: "Protected QuickDucks duck pairing and inspection.",
   robots: "noindex,nofollow",
   content: `
-    <section class="page-panel" data-staff-duck data-token="${escapeHtml(token)}">
+    <section class="page-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
       <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Staff scan</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
       <p class="eyebrow">Protected duck record</p>
       <h1 class="page-title" data-staff-title>Checking this duck…</h1>
       <p class="lede" data-staff-message aria-live="polite">Verifying tag, inventory, and assignment state.</p>
       <dl class="facts" data-duck-summary></dl>
-      <section data-pairing-work hidden>
+      <section class="work-area" data-pairing-work hidden>
         <div class="privacy"><strong>Current event</strong><span data-pairing-event></span></div>
         <form method="post" action="/staff" data-registration-search>
           <label>Participant code, name, phone, or email<input name="query" autocomplete="off" minlength="2" maxlength="80" required placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com"><span>Contact details are visible only to authorized registration staff.</span></label>
@@ -760,7 +853,7 @@ export const renderStaffDuck = (token: string, displayName: string): string => p
         <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
         <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
       </section>
-      <section data-disposition-work hidden>
+      <section class="work-area" data-disposition-work hidden>
         <div class="privacy"><strong>Physical return</strong><span data-disposition-event></span></div>
         <form data-disposition-form>
           <label>Confirmed disposition
@@ -782,11 +875,14 @@ export const renderStaffDuck = (token: string, displayName: string): string => p
     </section>`,
 });
 
-export const renderStaffAuthError = (message: string): string => page({
+export const renderStaffAuthError = (
+  message: string,
+  access?: { isSystemAdmin: boolean; roles: readonly OperationalRole[] },
+): string => page({
   title: "Staff sign-in problem",
   description: "QuickDucks staff authentication could not be completed.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel">${duck()}<p class="eyebrow">Sign-in problem</p><h1 class="page-title">We couldn’t finish signing you in.</h1><div class="notice">${escapeHtml(message)}</div><div class="actions"><a class="button" href="/staff">Try staff sign in again</a><a class="button secondary" href="/">Back to public site</a></div></section>`,
+  content: `<section class="page-panel"${access === undefined ? "" : ` data-live-staff data-system-admin="${access.isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(access.roles.join(","))}"`}>${duck()}<p class="eyebrow">Sign-in problem</p><h1 class="page-title">We couldn’t finish signing you in.</h1><div class="notice">${escapeHtml(message)}</div><div class="actions"><a class="button" href="/staff">Try staff sign in again</a><a class="button secondary" href="/">Back to public site</a></div></section>`,
 });
 
 export const renderStaffPairing = (): string => page({
@@ -845,11 +941,12 @@ const appendStatusCard = (container, title, status, lookupCode) => {
 const searchForm = document.querySelector("[data-status-search]");
 const searchMessage = document.querySelector("[data-search-message]");
 const searchResults = document.querySelector("[data-search-results]");
-searchForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
+let lastSearchName = null;
+let searchBusy = false;
+const runStatusSearch = async (name) => {
+  searchBusy = true;
   searchResults.replaceChildren();
   searchMessage.textContent = "Searching…";
-  const name = new FormData(searchForm).get("name");
   try {
     const eventResponse = await fetch("/api/v1/events/current", { headers: { accept: "application/json" } });
     if (!eventResponse.ok) throw new Error();
@@ -874,6 +971,22 @@ searchForm.addEventListener("submit", async (event) => {
     searchMessage.textContent = results.length === 1 ? "1 match found." : results.length + " matches found.";
   } catch {
     searchMessage.textContent = "Status search is temporarily unavailable. Please try again.";
+  } finally {
+    searchBusy = false;
   }
+};
+searchForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  lastSearchName = String(new FormData(searchForm).get("name"));
+  await runStatusSearch(lastSearchName);
+  globalThis.quickDucksLive.markClean(searchForm);
+});
+globalThis.quickDucksLive.subscribe({
+  domains: ["event", "participants", "ducks", "heats", "returns"],
+  root: searchForm,
+  refresh: async () => {
+    if (lastSearchName !== null) await runStatusSearch(lastSearchName);
+  },
+  isBlocked: () => searchBusy,
 });
 `;

@@ -215,9 +215,11 @@ test("staff can filter an event registration list and inspect assignment detail"
   assert.equal(body.registrations.length, 1);
   assert.equal(body.registrations[0].email, "daisy@example.com");
   assert.equal(body.registrations[0].assignment.duck.visibleNumber, 41);
+  assert.equal("duckKeepPreference" in body.registrations[0], false);
   assert.equal(JSON.stringify(body).includes("private_token_hash"), false);
   const listStatement = DB.statements.find((statement) => statement.sql.includes("ORDER BY r.last_name"));
   assert.equal(listStatement.sql.includes("Daisy"), false);
+  assert.equal(listStatement.sql.includes("duck_keep_preference"), false);
   assert.equal(listStatement.args.includes("%Daisy%"), true);
 
   const detail = await handleParticipantOperations(
@@ -229,6 +231,7 @@ test("staff can filter an event registration list and inspect assignment detail"
   assert.equal(detailBody.registration.notes, "Needs a wide lane");
   assert.equal(detailBody.registration.raceEntryId, "entry-one");
   assert.equal(detailBody.registration.assignment.id, "assignment-one");
+  assert.equal("duckKeepPreference" in detailBody.registration, false);
   database.close();
 });
 
@@ -244,7 +247,6 @@ test("staff walk-up creation is event-guarded, audited, and idempotent", async (
     email: "DELLA@example.com",
     phone: "555-0110",
     emailNotificationsEnabled: true,
-    duckKeepPreference: "RETURN",
     notes: "Call guardian before racing",
   };
   const create = await handleParticipantOperations(
@@ -257,7 +259,11 @@ test("staff walk-up creation is event-guarded, audited, and idempotent", async (
   assert.equal(created.registration.firstName, "Della");
   assert.equal(created.registration.email, "della@example.com");
   assert.equal(created.registration.createdVia, "STAFF");
+  assert.equal("duckKeepPreference" in created.registration, false);
   assert.equal(created.privateStatusPath, `/r/${privateToken}`);
+  assert.equal(database.prepare(
+    "SELECT duck_keep_preference FROM race_entries WHERE registration_id = ?",
+  ).get(created.registration.registrationId).duck_keep_preference, "UNDECIDED");
 
   const replay = await handleParticipantOperations(
     jsonRequest("https://quickducks.com/api/v1/staff/events/event-open/registrations", "POST", payload),
@@ -287,17 +293,17 @@ test("staff walk-up creation is event-guarded, audited, and idempotent", async (
   database.close();
 });
 
-test("partial participant edits require the current revision and omit PII from audit details", async () => {
+test("partial participant edits ignore legacy preference data and omit PII from audit details", async () => {
   const { database, env } = makeContext();
   const commandId = crypto.randomUUID();
   const edit = await handleParticipantOperations(
-    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-two", "PATCH", {
+    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one", "PATCH", {
       commandId,
       expectedRevision: 0,
-      firstName: "Don",
-      email: "don@example.com",
-      emailNotificationsEnabled: true,
-      duckKeepPreference: "KEEP",
+      firstName: "Daisy Updated",
+      email: "updated@example.com",
+      emailNotificationsEnabled: false,
+      duckKeepPreference: "RETURN",
       notes: "Uses accessible starting area",
     }),
     env,
@@ -305,25 +311,30 @@ test("partial participant edits require the current revision and omit PII from a
   );
   const edited = await edit.json();
   assert.equal(edit.status, 200);
-  assert.equal(edited.registration.firstName, "Don");
+  assert.equal(edited.registration.firstName, "Daisy Updated");
   assert.equal(edited.registration.lastName, "Duck");
   assert.equal(edited.registration.revision, 1);
-  assert.equal(edited.registration.raceEntryRevision, 1);
+  assert.equal(edited.registration.raceEntryRevision, 0);
+  assert.equal("duckKeepPreference" in edited.registration, false);
+  const legacyEntry = database.prepare(
+    "SELECT duck_keep_preference, revision FROM race_entries WHERE id = 'entry-one'",
+  ).get();
+  assert.equal(legacyEntry.duck_keep_preference, "KEEP");
+  assert.equal(legacyEntry.revision, 0);
   const audit = database.prepare("SELECT details_json FROM audit_events WHERE command_id = ?").get(commandId);
   const details = JSON.parse(audit.details_json);
   assert.deepEqual(details.changed_fields, [
     "first_name",
     "email",
     "email_notifications_enabled",
-    "duck_keep_preference",
     "staff_notes",
   ]);
-  assert.equal(audit.details_json.includes("Don"), false);
+  assert.equal(audit.details_json.includes("Daisy Updated"), false);
   assert.equal(audit.details_json.includes("example.com"), false);
   assert.equal(audit.details_json.includes("accessible"), false);
 
   const stale = await handleParticipantOperations(
-    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-two", "PATCH", {
+    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one", "PATCH", {
       commandId: crypto.randomUUID(),
       expectedRevision: 0,
       phone: "555-0199",

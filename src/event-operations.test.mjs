@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { handleEventOperations } from "./event-operations.ts";
+import { eventSlugFromName, handleEventOperations } from "./event-operations.ts";
 
 const staff = {
   id: "staff_test",
@@ -129,6 +129,20 @@ const jsonRequest = (path, method, body) => new Request(`https://quickducks.com$
   body: JSON.stringify(body),
 });
 
+test("generates bounded ASCII URL-safe event slugs from names", () => {
+  assert.equal(eventSlugFromName("  Crème   Brûlée / Duck---Race!  "), "creme-brulee-duck-race");
+  assert.equal(eventSlugFromName("A...B -- C"), "a-b-c");
+
+  const fallback = eventSlugFromName("東京 🦆");
+  assert.equal(fallback, "event-o05wec");
+  assert.match(fallback, /^event-[a-z0-9]+$/);
+  assert.ok(fallback.length <= 80);
+
+  const bounded = eventSlugFromName("Long event name ".repeat(20));
+  assert.ok(bounded.length <= 80);
+  assert.match(bounded, /^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+});
+
 test("returns null for unrelated routes so a shared router can continue", async () => {
   const db = makeDb(() => null);
   const response = await handleEventOperations(
@@ -207,8 +221,8 @@ test("an administrator creates one draft from retained organization defaults", a
   const response = await handleEventOperations(
     jsonRequest("/api/v1/staff/events", "POST", {
       commandId,
-      slug: "annual-race",
-      name: "Annual Duck Race",
+      slug: "../../CLIENT-CONTROLLED",
+      name: "Ànnual Duck Race!!!",
       eventDate: "2026-09-01",
     }),
     makeEnv(db),
@@ -218,6 +232,7 @@ test("an administrator creates one draft from retained organization defaults", a
 
   assert.equal(response.status, 201);
   assert.equal(body.event.status, "DRAFT");
+  assert.equal(body.event.slug, "annual-duck-race");
   assert.equal(body.event.timezone, defaults.timezone);
   assert.equal(body.event.emailRequired, true);
   const sql = db.batches[0].map((statement) => statement.sql).join("\n");
@@ -226,6 +241,7 @@ test("an administrator creates one draft from retained organization defaults", a
   assert.match(sql, /'EVENT_CREATED'/);
   assert.equal(sql.includes("Annual Duck Race"), false);
   assert.ok(db.batches[0].every((statement) => statement.args.length > 0));
+  assert.equal(db.batches[0][0].args[1], "annual-duck-race");
 });
 
 test("event creation refuses to create a second race dataset", async () => {
@@ -237,7 +253,6 @@ test("event creation refuses to create a second race dataset", async () => {
   const response = await handleEventOperations(
     jsonRequest("/api/v1/staff/events", "POST", {
       commandId: crypto.randomUUID(),
-      slug: "second-race",
       name: "Second Race",
       eventDate: "2027-09-01",
     }),
@@ -282,6 +297,8 @@ test("revision-checked configuration updates the event, retained defaults, comma
     jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
       commandId: crypto.randomUUID(),
       revision: 0,
+      name: "Café & Duck Dash",
+      slug: "UNSAFE/client/value",
       timezone: "UTC",
       registrationOpensAt: "2026-08-01T12:00:00-06:00",
       registrationClosesAt: "2026-08-29T12:00:00-06:00",
@@ -294,6 +311,7 @@ test("revision-checked configuration updates the event, retained defaults, comma
 
   assert.equal(response.status, 200);
   assert.equal(body.event.revision, 1);
+  assert.equal(body.event.slug, "cafe-duck-dash");
   assert.equal(body.event.timezone, "UTC");
   assert.equal(body.event.registrationOpensAt, "2026-08-01T18:00:00.000Z");
   assert.match(db.batches[0][0].sql, /'CONFIGURE_EVENT'.*revision = \?/s);
@@ -303,6 +321,27 @@ test("revision-checked configuration updates the event, retained defaults, comma
   assert.match(sql, /UPDATE organization_event_defaults/);
   assert.match(sql, /'CONFIGURE_EVENT'/);
   assert.match(sql, /'EVENT_CONFIGURED'/);
+  assert.equal(db.batches[0][1].args[0], "cafe-duck-dash");
+});
+
+test("configuration ignores submitted slugs and preserves a persisted slug when the name is unchanged", async () => {
+  const legacyEvent = { ...draftEvent, slug: "Legacy_Slug" };
+  const db = makeDb((sql) => sql.includes("FROM race_commands") ? null : legacyEvent);
+  const response = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
+      commandId: crypto.randomUUID(),
+      revision: 0,
+      slug: "../../unsafe-client-slug",
+      timezone: "UTC",
+    }),
+    makeEnv(db),
+    admin,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.event.slug, "Legacy_Slug");
+  assert.equal(db.batches[0][1].args[0], "Legacy_Slug");
 });
 
 test("readiness reports actionable blockers without changing the event", async () => {
@@ -552,6 +591,122 @@ test("a lifecycle command replay returns the saved result without a second write
   assert.equal(response.status, 200);
   assert.equal((await response.json()).replayed, true);
   assert.equal(db.batches.length, 0);
+});
+
+test("a new lifecycle command reports an already-completed transition without writing", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("SELECT event_id, command_type")) return null;
+    if (sql.includes("SELECT rc.id")) return { id: "open-command" };
+    if (sql.includes("submitted_registration_count")) return readyStats;
+    return { ...draftEvent, status: "REGISTRATION_OPEN", revision: 1 };
+  });
+  const response = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/open-registration", "POST", {
+      commandId: crypto.randomUUID(),
+    }),
+    makeEnv(db),
+    staff,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.event.status, "REGISTRATION_OPEN");
+  assert.equal(body.event.revision, 1);
+  assert.equal(body.replayed, false);
+  assert.equal(body.transitioned, false);
+  assert.equal(body.alreadyAtTarget, true);
+  assert.equal(db.batches.length, 0);
+});
+
+test("migrated SQLite makes concurrent, replayed, and stale lifecycle commands idempotent", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  database.exec("PRAGMA foreign_keys = ON");
+  const migrationsUrl = new URL("../db/migrations/", import.meta.url);
+  for (const name of readdirSync(migrationsUrl).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
+    database.exec(readFileSync(new URL(name, migrationsUrl), "utf8"));
+  }
+  database.exec(`
+    INSERT INTO events (id, slug, name, event_date, timezone, status)
+    VALUES ('event_test', 'test-race', 'Test Duck Race', '2026-08-30', 'America/Denver', 'DRAFT');
+  `);
+  const env = makeEnv(sqliteD1(database));
+  const firstCommandId = crypto.randomUUID();
+  const secondCommandId = crypto.randomUUID();
+
+  const concurrent = await Promise.all([
+    handleEventOperations(
+      jsonRequest("/api/v1/staff/events/event_test/open-registration", "POST", { commandId: firstCommandId }),
+      env,
+      staff,
+    ),
+    handleEventOperations(
+      jsonRequest("/api/v1/staff/events/event_test/open-registration", "POST", { commandId: secondCommandId }),
+      env,
+      staff,
+    ),
+  ]);
+  const concurrentBodies = await Promise.all(concurrent.map((response) => response.json()));
+  assert.deepEqual(concurrent.map((response) => response.status).sort(), [200, 201]);
+  assert.equal(concurrentBodies.filter((body) => body.transitioned).length, 1);
+  assert.equal(concurrentBodies.filter((body) => body.alreadyAtTarget).length, 1);
+  const openedEvent = database.prepare("SELECT status, revision FROM events WHERE id = 'event_test'").get();
+  assert.equal(openedEvent.status, "REGISTRATION_OPEN");
+  assert.equal(openedEvent.revision, 1);
+  const savedOpenCommandId = database.prepare(
+    "SELECT id FROM race_commands WHERE event_id = 'event_test' AND command_type = 'OPEN_REGISTRATION'",
+  ).get().id;
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE event_id = 'event_test' AND command_type = 'OPEN_REGISTRATION'",
+  ).get().count, 1);
+
+  const replay = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/open-registration", "POST", { commandId: savedOpenCommandId }),
+    env,
+    staff,
+  );
+  const replayBody = await replay.json();
+  assert.equal(replay.status, 200);
+  assert.equal(replayBody.replayed, true);
+  assert.equal(replayBody.alreadyAtTarget, true);
+
+  const staleNewCommand = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/open-registration", "POST", { commandId: crypto.randomUUID() }),
+    env,
+    staff,
+  );
+  const staleNewBody = await staleNewCommand.json();
+  assert.equal(staleNewCommand.status, 200);
+  assert.equal(staleNewBody.replayed, false);
+  assert.equal(staleNewBody.transitioned, false);
+  assert.equal(staleNewBody.alreadyAtTarget, true);
+
+  assert.equal((await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/close-registration", "POST", { commandId: crypto.randomUUID() }),
+    env,
+    staff,
+  )).status, 201);
+  assert.equal((await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/reopen-registration", "POST", { commandId: crypto.randomUUID() }),
+    env,
+    admin,
+  )).status, 201);
+
+  const wrongInboundTransition = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/open-registration", "POST", { commandId: crypto.randomUUID() }),
+    env,
+    staff,
+  );
+  const wrongInboundBody = await wrongInboundTransition.json();
+  assert.equal(wrongInboundTransition.status, 409);
+  assert.match(wrongInboundBody.readiness.blockers.join(" "), /Event status must be DRAFT/);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE event_id = 'event_test' AND command_type = 'OPEN_REGISTRATION'",
+  ).get().count, 1);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM audit_events WHERE event_id = 'event_test' AND action = 'REGISTRATION_OPENED'",
+  ).get().count, 1);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 test("only an administrator can reopen registration", async () => {

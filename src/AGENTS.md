@@ -55,9 +55,10 @@ review, scan-first pairing, single dispositions, and final purge.
   credentials/tokens.
 - An administrator implicitly passes role checks. Regular actors must have
   explicit validated roles; do not add a broad missing-role fallback.
-- `RaceUpdates` accepts same-origin WebSockets and broadcasts refresh/version
-  signals only. Successful mutations schedule best-effort publication; a
-  publication failure must never replace the committed API response.
+- `RaceUpdates` accepts same-origin WebSockets and broadcasts only finite-domain
+  refresh signals with a random version. Successful mutations schedule
+  best-effort publication; a publication failure must never replace the
+  committed API response.
 - Live clients use WebSockets for prompt refresh and polling for recovery. D1
   API responses, not socket order or delivery, decide every displayed state.
 

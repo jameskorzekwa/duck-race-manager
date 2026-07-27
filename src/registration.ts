@@ -1,12 +1,9 @@
-export type DuckKeepPreference = "KEEP" | "RETURN" | "UNDECIDED";
-
 export interface RegistrationInput {
   firstName: string;
   lastName: string;
   email: string | null;
   phone: string | null;
   emailNotificationsEnabled: boolean;
-  duckKeepPreference: DuckKeepPreference;
 }
 
 export interface RegistrationValidation {
@@ -34,7 +31,6 @@ export const validateRegistration = (
   const lastName = cleanName(form.get("last_name"));
   const email = cleanOptional(form.get("email"))?.toLowerCase() ?? null;
   const phone = cleanOptional(form.get("phone"));
-  const preference = form.get("duck_keep_preference");
   const errors: Record<string, string> = {};
 
   if (firstName.length === 0) errors.first_name = "Enter a first name.";
@@ -49,11 +45,6 @@ export const validateRegistration = (
 
   if (phone !== null && phone.length > 32) errors.phone = "Use 32 characters or fewer.";
 
-  const duckKeepPreference: DuckKeepPreference =
-    preference === "KEEP" || preference === "RETURN" || preference === "UNDECIDED"
-      ? preference
-      : "UNDECIDED";
-
   if (Object.keys(errors).length > 0) return { errors };
 
   return {
@@ -64,7 +55,6 @@ export const validateRegistration = (
       email,
       phone,
       emailNotificationsEnabled: email !== null && form.get("email_notifications_enabled") === "on",
-      duckKeepPreference,
     },
   };
 };

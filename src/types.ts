@@ -35,7 +35,6 @@ export interface RegistrationStatusRecord {
   submitted_at: string;
   event_name: string;
   event_date: string | null;
-  duck_keep_preference: string;
 }
 
 export interface DuckRecord {

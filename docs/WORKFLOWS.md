@@ -53,6 +53,7 @@ not authorized.
 | Create/configure/delete draft; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
 | Purge readiness, cancellation, claim, and permanent purge | None | Yes |
+| Force delete of the whole event dataset in any state | None | Yes |
 
 All staff APIs still require an active profile. Authentication loads and
 validates current assignment rows from D1 on every request. A regular account
@@ -132,7 +133,34 @@ The supported complete sequence is:
 12. The race director completes the event and return stewards reconcile every
     physical duck.
 13. A system administrator marks the event purge-ready, checks and claims the
-   final purge gate, then permanently purges the race dataset.
+    final purge gate, then permanently purges the race dataset.
+
+### Lifecycle Command Retry and Refresh
+
+Every lifecycle endpoint requires a UUID command ID. A fresh transition writes
+the command, guarded event update, and audit record in one atomic D1 batch and
+returns `201` with `transitioned: true`. Source-state and readiness predicates
+remain authoritative, so commands cannot skip states.
+
+An exact retry with the same command ID and fingerprint returns `200`,
+`replayed: true`, and the event's current state without another write. Reusing
+that ID for another event or command remains a `409` conflict. A new command ID
+sent from a stale control after the event has already reached the requested
+target also returns `200` without writing only when command history proves that
+the same transition completed and is the latest event-state command. The check
+therefore distinguishes all alternate inbound paths, including the two paths to
+`REGISTRATION_OPEN`: an old `OPEN_REGISTRATION` command does not make another
+open command valid after `REOPEN_REGISTRATION`. Missing history, a different
+inbound transition, or a state beyond the requested target remains blocked.
+
+The staff console assigns one command ID to each rendered lifecycle control and
+disables it before the request, preventing double submission. It applies the
+authoritative event in a successful mutation response immediately, removes the
+stale controls, and then refetches all event operations. An overlapping refresh
+with a lower event revision cannot replace that response. If the mutation
+response is lost, the console first refetches: a changed state remains disabled,
+while an event still in the source state re-enables the same control with the
+same command ID for a safe retry.
 
 ## Participant Registration
 
@@ -152,7 +180,6 @@ The participant enters:
 - Phone, optional, maximum 32 characters.
 - Email for staff contact when supplied. The routine UI does not offer an email
   notification preference while outbound delivery remains non-operational.
-- Keep, return, or undecided duck preference.
 - A successful Turnstile response.
 
 The safe current-event response includes the configured public-name policy. The
@@ -161,8 +188,14 @@ also stating that email and phone remain private.
 
 Duplicate names, email addresses, phone numbers, and shared browsers are
 allowed. Every submission creates an independent registration and stable race
-entry. The keep preference is planning information only; a staff-recorded
-physical disposition is authoritative after the race.
+entry. Registration does not ask whether the participant plans to keep or return
+the duck. Staff record only the actual physical disposition after the race.
+
+The database retains the legacy `race_entries.duck_keep_preference` column for
+compatibility. New entries use its existing default, and the application does
+not read, explicitly write, expose, or make decisions from that column. Stored
+values on existing rows are ignored and are removed with the race entry during
+the final purge.
 
 **Implemented security checks:** the API requires JSON, limits the request to
 16 KiB, rejects a non-matching `Origin` header, validates the event and fields,
@@ -257,7 +290,8 @@ cross-origin, absolute, malformed, mismatched, unreadable, or non-removable
 handoffs are never exposed. Full collection and presence responses never return
 the private path or token.
 
-The page refreshes after a live race signal. While the live connection is
+The page refreshes through the shared live-update hub after a matching
+event, participant, duck, heat, or return signal. While the live connection is
 healthy, an approximately 30-second integrity refresh covers missed signals;
 while it is unavailable or disconnected, polling increases to approximately
 every five seconds. Polling and rendering pause in a hidden tab and resume with
@@ -277,15 +311,17 @@ code, and registration status remain until purge.
 **Implemented:** possession of the high-entropy `/r/<private-token>` URL is the
 authorization credential. D1 stores only its SHA-256 hash. The HTML page shows
 the full participant name, registration state, staff lookup code, event name,
-and event date. The JSON endpoint also returns submission time and keep
-preference. The endpoint includes, and the HTML renders, the same
+and event date. The JSON endpoint also returns submission time. The endpoint
+includes, and the HTML renders, the same
 privacy-filtered race-status facts used by the browser collection and public
 status: current duck, assigned round-one and final heat, current event heat, and
 race outcome. Neither response returns email or phone.
 
 The private HTML page refreshes these registration and race facts after live
 signals and through the same polling fallback. The private token remains the
-credential and is never sent through the live signal channel.
+credential and is never sent through the live signal channel. A missing private
+record clears the rendered participant facts instead of leaving stale data on
+screen; a complete purge revalidates the server route immediately.
 
 **Operator step:** tell participants to bookmark the private link and separately
 save the short lookup code. The short code is not authorization for the private
@@ -308,6 +344,9 @@ inventory state, location, or audit data.
 
 Name search restores public status only. It does not restore the private link or
 browser collection and does not show withdrawn or disqualified registrations.
+After a submitted search, relevant event, participant, duck, heat, and return
+signals rerun that same authoritative search automatically. Unsaved edits in the
+search control are not replaced.
 
 ## Duck Tag Scans
 
@@ -363,6 +402,24 @@ starts one `NDEFReader.scan()` in current Android Chrome over HTTPS; the top-lev
 page must remain visible. Each subsequent physical reading writes and confirms
 one sticker without a per-duck form, printed number, pasted URL, condition,
 presence checkbox, or desktop fallback.
+
+Authentication and the inventory-role check run before the page's Android
+compatibility gate. An authorized request with a missing or non-Android user
+agent receives a noindex unsupported-device response with only a link back to
+staff inventory; it does not receive station markup, configuration, or
+provisioning data. User-agent detection is an advisory compatibility check, not
+an authentication, authorization, or security boundary. A user agent can be
+spoofed.
+
+On the accepted Android page, provisioning controls remain hidden and no station
+API is called until browser runtime checks confirm Android Chrome, `NDEFReader`,
+a secure context, a top-level tab, and a visible document. The same conditions
+are checked again on Start. iPhone, iPad, desktop, Android WebView, alternate
+Android browsers, spoofed clients without Web NFC, embedded pages, insecure
+contexts, and hidden documents receive no provisioning API user experience.
+Provisioning APIs do not trust or require a user agent: they continue to enforce
+live staff authentication, inventory roles, and same-origin provenance for
+cookie-authenticated mutations, including for automated API clients.
 
 QuickDucks generates the UUID, next globally unique positive internal number,
 and random 32-byte base64url token. The number remains an internal inventory
@@ -428,6 +485,15 @@ request loads the active staff profile live; deactivation blocks access.
 Cognito revocation or global sign-out prevents further refresh but does not make
 offline verification of an already issued access token observe revocation.
 
+Every rendered staff page also carries only its current administrator flag and
+operational-role names. A generic `staff` invalidation makes the browser call
+`GET /api/v1/staff/session`, which returns only that authorization projection.
+If the profile was deactivated, the page removes rendered protected data before
+returning to staff sign-in. If access was reduced, it clears and server-reloads
+immediately; added access reloads once no form or command is in progress. The
+WebSocket signal contains no staff identifier, email, display name, or role
+mutation payload.
+
 ## Event Setup and Lifecycle
 
 Any operational role can load event list and event detail context needed by the
@@ -438,12 +504,16 @@ and system administrators.
 ### Create and Configure
 
 **System administrator only:** create one event when no event row exists. Event
-creation requires a name, lowercase hyphenated slug, and date, then copies the
-retained organization defaults into a `DRAFT` event.
+creation requires a name and date, then copies the retained organization
+defaults into a `DRAFT` event. The server derives the URL slug from the name as
+lowercase ASCII letters, numbers, and hyphens; the staff form shows the same
+read-only preview as the name changes. Diacritics are removed where possible,
+unsafe-character runs become one hyphen, and names without safe characters use
+a deterministic bounded fallback. Client-supplied slug values are ignored.
 
 Only a draft can be configured. Configuration includes:
 
-- Name, slug, date, and IANA-style timezone.
+- Name, automatically derived slug preview, date, and IANA-style timezone.
 - Optional registration-open and registration-close timestamps.
 - Optional or required email.
 - `IMMEDIATE_FIXED` or `POST_CLOSE_BALANCED` heat assignment.
@@ -453,6 +523,8 @@ Only a draft can be configured. Configuration includes:
 Saving configuration also updates the retained organization defaults used by
 the next event. Configuration is revision-checked; a stale form is rejected.
 After registration opens, there is no supported configuration edit route.
+Changing a draft's name regenerates its slug on the server. Saving other draft
+settings leaves an existing persisted slug unchanged for compatibility.
 
 An administrator may delete a mistaken draft only when its revision matches,
 the typed text is exactly `DELETE <event name>`, it contains no race data, and
@@ -523,7 +595,7 @@ the first disposition or finalizing the first return batch also changes a
 
 Registration staff, race directors, and administrators can list and filter
 participants, inspect details, and edit name, email, phone, email-notification
-preference, keep preference, and staff notes. Edits are allowed while the event is `REGISTRATION_OPEN`,
+preference, and staff notes. Edits are allowed while the event is `REGISTRATION_OPEN`,
 `REGISTRATION_CLOSED`, `ROUND_ONE`, or `FINAL` and require the currently loaded
 registration revision.
 
@@ -563,7 +635,10 @@ staff console still exposes the older explicit inventory form for supervised
 administrative work, but it is not a fallback inside the dedicated station.
 `/staff/inventory-intake` has no per-duck number, token, URL, condition, notes,
 or physical-presence inputs. The operator selects the event and may set one
-station-level storage location of at most 100 characters.
+station-level storage location of at most 100 characters. The dedicated page is
+served only after authentication, role authorization, and an Android user-agent
+compatibility check; its client does not reveal or initialize the station until
+all Android Chrome Web NFC and page-context requirements pass.
 
 Blank-sticker provisioning uses a durable two-phase protocol:
 
@@ -981,22 +1056,51 @@ The outcome gives withdrawal/disqualification priority, then podium, final
 completion/finalist state, round-one winner/elimination, running state, pairing,
 and heat assignment.
 
-The board and participant pages connect to same-origin `/api/v1/live`. Admission
-requires the exact application `Origin`. The single `RaceUpdates` Durable Object
-accepts at most 1,000 simultaneous sockets, rejects upgrades over that cap, and
-closes any client-sent frame with WebSocket policy code `1008`. It broadcasts
-only a small random-version refresh signal and stores no race state or client
-network identifier.
+Every rendered application page loads one shared browser live-update hub. The
+hub connects to same-origin `/api/v1/live` lazily when its first live
+subscriber registers; a page with no live subscribers opens no socket and keeps
+the polling scheduler idle. Admission requires the exact application
+`Origin`. The single `RaceUpdates` Durable Object accepts at most 1,000
+simultaneous sockets, rejects upgrades over that cap, and closes any client-sent
+frame with WebSocket policy code `1008`.
 
-A successful signal causes clients to refetch. Reconnect uses bounded jitter.
-While disconnected or when WebSocket is unavailable, clients poll approximately
-every five seconds; while connected they perform an approximately 30-second
-integrity refresh. Refresh requests are coalesced, hidden tabs pause polling and
-rendering, and station controls/rosters are replaced only when heat ID, revision,
-or state changed, with focus restored when possible. Public freshness text says
-plainly when the board refreshed but private status or `My ducks` did not.
-D1/API data is always authoritative, and a failed live publication never
-changes a committed mutation response.
+After a successful mutating API handler has committed, the Worker classifies its
+fixed route into one or more finite domains: `event`, `participants`, `ducks`,
+`heats`, `returns`, `staff`, or `support`. Permanent purge uses `all`.
+Publication runs best-effort through `ExecutionContext.waitUntil`.
+Read-only GETs, round-one plan preview, and provisioning tag classification do
+not publish. Replayed successful mutation responses may publish a harmless
+duplicate invalidation.
+
+The object accepts and broadcasts only a validated bounded
+`{type:"refresh", domains:[...], version:<random UUID>}` frame. It stores no race
+state or client network identifier. Frames cannot contain IDs, names, contact
+details, lookup codes, tokens, tag URLs, event or duck labels, command material,
+or mutation payloads. Domain names only decide which open surfaces need an
+authoritative refetch; they are never data or proof that a command succeeded.
+
+A successful signal causes matching public, private, `My Ducks`, station,
+inventory, scan, and staff-console subscribers to refetch D1-backed APIs.
+Reconnect uses bounded jitter and triggers an integrity refetch to close the
+missed-signal gap. While disconnected or when WebSocket is unavailable,
+subscribers poll approximately every five seconds; while connected they perform
+an approximately 30-second integrity refresh. Refresh requests are coalesced and
+hidden tabs pause polling and rendering. Ordinary refreshes wait while a form is
+dirty, an NFC/scan/result selection is unresolved, or a command is in flight;
+the queued refresh runs when that protected work is clean. Dirty-form deferral
+is scoped to each subscriber's own page region, so an unfinished edit in one
+region never blocks another region's refreshes, and it is bounded: an edit
+abandoned for more than five minutes stops deferring and the next authoritative
+refresh proceeds. Station controls and
+rosters are replaced only when heat ID, revision, or state changed, with focus
+restored when possible.
+
+An `all` signal is exceptional: every page removes its rendered main content and
+server-reloads immediately so purge cannot leave participant or staff data on
+screen. Staff deactivation and reduced roles use the authorization revalidation
+path above and likewise override dirty-form deferral. D1/API data is always
+authoritative, and a failed live publication never changes a committed mutation
+response.
 
 Public race status is available only through `COMPLETED`. Starting return
 processing removes tag and name-search race status from public access before
@@ -1028,9 +1132,9 @@ disposition for the same event duck is an explicit correction and updates the
 authoritative outcome.
 
 **Operator step:** visually confirm the physical duck and select the actual
-outcome. The participant's earlier keep preference does not set the disposition.
-Use visible-number entry for missing/unreadable tags. Disposition does not
-change the duck's stored physical-condition field; it changes inventory state.
+outcome. There is no advance participant preference to consult. Use
+visible-number entry for missing/unreadable tags. Disposition does not change
+the duck's stored physical-condition field; it changes inventory state.
 
 ### Bulk Return Batch
 
@@ -1152,7 +1256,7 @@ result commands never create `email_notifications` rows. `wrangler.jsonc`
 declares only an `EMAIL_QUEUE` producer. There is no Worker queue consumer, SES
 template/send path, delivery callback, or automatic retry processor. Therefore
 no registration, assignment, upcoming-heat, finalist, or result email is
-currently delivered, regardless of the participant's stored preference.
+currently delivered, regardless of the stored email-notification setting.
 Notification support controls operate only on records inserted by some external
 or future process and must not be presented as proof that delivery exists.
 
@@ -1221,6 +1325,42 @@ The application purge deletes the primary D1 rows it manages. It does not
 operate Cloudflare account-level recovery systems, D1 time-travel retention,
 external exports, third-party logs, or backups. Operators must manage those
 systems consistently with the stated privacy policy.
+
+## Administrator Force Delete (Any State)
+
+`POST /api/v1/staff/events/{id}/force-delete` is a separate administrator-only
+escape hatch that permanently deletes an event and its complete dataset in any
+event status, including mid-race. It does not replace the staged purge and has
+no readiness, reconciliation, or claim prerequisites; the staged purge workflow
+is unchanged. Like the staged purge, it does require the event to be the only
+race dataset: force delete works from any state, but only while its event is
+the only event row. If another event exists, the request returns `409` and
+deletes nothing, and the same only-event guard is re-checked inside the atomic
+batch so a concurrently created second event makes the batch delete nothing.
+
+The request requires an RFC 4122 v4 `commandId`, the event's current
+`revision`, and `confirmName` typed exactly as the event name. The staff
+console shows the control to system administrators only, confirms through the
+application danger dialog, and then requires the typed event name; the API
+enforces the administrator requirement regardless of the console. A stale
+revision returns `409` without deleting anything; a wrong typed name returns
+`422`.
+
+One atomic D1 batch deletes the same complete dataset as the final purge:
+registrations, race entries, duck assignments, event duck reservations,
+dispositions, duck inventory events, ducks and tags, heats, heat entries,
+current and superseded heat results, return batches and items, email
+notifications and attempts, browser collection links and collections, any purge
+claim, race commands, audit events, and the event row itself. Staff profiles,
+staff access/lifecycle history, and organization event defaults remain.
+
+Because the deletion removes its own command and audit history, a successful
+force delete records nothing afterward. A surviving command record with the
+same identifier always belongs to a different operation and returns `409`; a
+well-formed retry against the now-missing event returns a deterministic
+already-deleted success (`deleted: true, alreadyDeleted: true`) instead of a
+stored replay. This is irreversible, and connected consoles receive an `all`
+refresh signal exactly as they do for permanent purge.
 
 ## Failure, Retry, Idempotency, and Concurrency
 

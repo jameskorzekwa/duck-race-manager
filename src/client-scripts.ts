@@ -1,3 +1,130 @@
+export const confirmationDialogScript = String.raw`
+const appConfirmationQueue = [];
+let appConfirmationActive = false;
+
+const appConfirmationBackdrop = document.createElement("div");
+appConfirmationBackdrop.className = "app-confirmation-backdrop";
+appConfirmationBackdrop.hidden = true;
+
+const appConfirmationDialog = document.createElement("dialog");
+appConfirmationDialog.className = "app-confirmation";
+appConfirmationDialog.setAttribute("role", "dialog");
+appConfirmationDialog.setAttribute("aria-modal", "true");
+appConfirmationDialog.setAttribute("aria-labelledby", "app-confirmation-title");
+appConfirmationDialog.setAttribute("aria-describedby", "app-confirmation-message");
+appConfirmationDialog.hidden = true;
+
+const appConfirmationTitle = document.createElement("h2");
+appConfirmationTitle.id = "app-confirmation-title";
+appConfirmationTitle.textContent = "Confirm action";
+const appConfirmationMessage = document.createElement("p");
+appConfirmationMessage.id = "app-confirmation-message";
+appConfirmationMessage.className = "app-confirmation-message";
+const appConfirmationActions = document.createElement("div");
+appConfirmationActions.className = "app-confirmation-actions";
+const appConfirmationCancel = document.createElement("button");
+appConfirmationCancel.type = "button";
+appConfirmationCancel.className = "button secondary";
+appConfirmationCancel.textContent = "Cancel";
+const appConfirmationSubmit = document.createElement("button");
+appConfirmationSubmit.type = "button";
+appConfirmationSubmit.className = "button";
+appConfirmationSubmit.textContent = "Confirm";
+appConfirmationActions.append(appConfirmationCancel, appConfirmationSubmit);
+appConfirmationDialog.append(appConfirmationTitle, appConfirmationMessage, appConfirmationActions);
+document.body.append(appConfirmationBackdrop, appConfirmationDialog);
+
+const appConfirmationShowNext = () => {
+  if (appConfirmationActive || appConfirmationQueue.length === 0) return;
+  appConfirmationActive = true;
+  const request = appConfirmationQueue.shift();
+  const returnFocus = document.activeElement;
+  let settled = false;
+  let nativeDialog = false;
+
+  appConfirmationMessage.textContent = request.message;
+  appConfirmationSubmit.textContent = request.confirmLabel;
+  appConfirmationSubmit.className = request.danger ? "button danger" : "button";
+  appConfirmationDialog.classList.toggle("danger-zone", request.danger);
+
+  const finish = (confirmed) => {
+    if (settled) return;
+    settled = true;
+    appConfirmationCancel.removeEventListener("click", handleCancel);
+    appConfirmationSubmit.removeEventListener("click", handleConfirm);
+    appConfirmationDialog.removeEventListener("cancel", handleCancel);
+    appConfirmationDialog.removeEventListener("click", handleDialogClick);
+    appConfirmationDialog.removeEventListener("keydown", handleKeydown);
+    appConfirmationBackdrop.removeEventListener("click", handleCancel);
+    document.removeEventListener("focusin", handleFocusIn);
+    if (nativeDialog && appConfirmationDialog.open) appConfirmationDialog.close();
+    appConfirmationDialog.removeAttribute("open");
+    appConfirmationDialog.classList.remove("fallback");
+    appConfirmationDialog.hidden = true;
+    appConfirmationBackdrop.hidden = true;
+    appConfirmationActive = false;
+    if (returnFocus && returnFocus.isConnected && typeof returnFocus.focus === "function") returnFocus.focus();
+    request.resolve(confirmed);
+    appConfirmationShowNext();
+  };
+  const handleCancel = (event) => {
+    if (event) event.preventDefault();
+    finish(false);
+  };
+  const handleConfirm = () => finish(true);
+  const handleDialogClick = (event) => {
+    if (nativeDialog && event.target === appConfirmationDialog) handleCancel(event);
+  };
+  const handleKeydown = (event) => {
+    if (event.key === "Escape") {
+      handleCancel(event);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    const controls = [appConfirmationCancel, appConfirmationSubmit];
+    const current = controls.indexOf(document.activeElement);
+    const direction = event.shiftKey ? -1 : 1;
+    const next = current === -1 ? 0 : (current + direction + controls.length) % controls.length;
+    controls[next].focus();
+  };
+  const handleFocusIn = (event) => {
+    if (!appConfirmationDialog.contains(event.target)) appConfirmationCancel.focus();
+  };
+
+  appConfirmationCancel.addEventListener("click", handleCancel);
+  appConfirmationSubmit.addEventListener("click", handleConfirm);
+  appConfirmationDialog.addEventListener("cancel", handleCancel);
+  appConfirmationDialog.addEventListener("click", handleDialogClick);
+  appConfirmationDialog.addEventListener("keydown", handleKeydown);
+  appConfirmationBackdrop.addEventListener("click", handleCancel);
+  document.addEventListener("focusin", handleFocusIn);
+  appConfirmationDialog.hidden = false;
+  if (typeof appConfirmationDialog.showModal === "function") {
+    try {
+      appConfirmationDialog.showModal();
+      nativeDialog = true;
+    } catch {}
+  }
+  if (!nativeDialog) {
+    appConfirmationDialog.classList.add("fallback");
+    appConfirmationDialog.setAttribute("open", "");
+    appConfirmationBackdrop.hidden = false;
+  }
+  appConfirmationCancel.focus();
+};
+
+const appConfirm = (message, options = {}) => new Promise((resolve) => {
+  appConfirmationQueue.push({
+    message: String(message),
+    danger: options.danger === true,
+    confirmLabel: typeof options.confirmLabel === "string" && options.confirmLabel ? options.confirmLabel : "Confirm",
+    resolve,
+  });
+  appConfirmationShowNext();
+});
+`;
+
 export const registrationHandoffHelpersScript = String.raw`
 const registrationHandoffKey = "quickducks.registration-handoff";
 const registrationIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -36,6 +163,7 @@ const lastNameInput = form.elements.last_name;
 const protectionReady = form.dataset.protectionReady === "true";
 let currentEvent = null;
 let pendingCommand = null;
+let registrationInFlight = false;
 
 const randomToken = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -86,9 +214,14 @@ const updatePublicNamePolicy = () => {
 firstNameInput.addEventListener("input", updatePublicNamePolicy);
 lastNameInput.addEventListener("input", updatePublicNamePolicy);
 
-fetch("/api/v1/events/current", { headers: { accept: "application/json" } })
-  .then((response) => response.ok ? response.json() : Promise.reject())
-  .then(({ event }) => {
+const loadRegistrationEvent = async () => {
+  try {
+    const response = await fetch("/api/v1/events/current", {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error();
+    const { event } = await response.json();
     currentEvent = event;
     if (!event) {
       eventName.textContent = "The next race is being prepared";
@@ -116,12 +249,19 @@ fetch("/api/v1/events/current", { headers: { accept: "application/json" } })
     }
     submitButton.disabled = false;
     setMessage("Ready when you are.");
-  })
-  .catch(() => {
+  } catch {
     eventName.textContent = "Race details unavailable";
     eventDate.textContent = "Please refresh and try again.";
     submitButton.disabled = true;
-  });
+  }
+};
+
+globalThis.quickDucksLive.subscribe({
+  domains: ["event"],
+  root: form,
+  refresh: loadRegistrationEvent,
+  isBlocked: () => registrationInFlight || pendingCommand !== null,
+});
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -147,12 +287,13 @@ form.addEventListener("submit", async (event) => {
     email: data.get("email"),
     phone: data.get("phone"),
     emailNotificationsEnabled: false,
-    duckKeepPreference: data.get("duck_keep_preference"),
     turnstileToken,
     clientTimestamp: new Date().toISOString(),
   };
 
   submitButton.disabled = true;
+  registrationInFlight = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
   setMessage("Saving your registration…");
   try {
     const response = await fetch("/api/v1/registrations", {
@@ -179,6 +320,9 @@ form.addEventListener("submit", async (event) => {
   } catch {
     setMessage("The network interrupted registration. Try again; the same request will be retried safely.", true);
     submitButton.disabled = false;
+  } finally {
+    registrationInFlight = false;
+    endBusy();
   }
 });
 `;
@@ -238,13 +382,6 @@ let participantCurrentId = null;
 let participantPrivateStatusPath = null;
 let participantHasLoaded = false;
 let participantVersion = null;
-let participantRefreshRunning = null;
-let participantRefreshQueued = false;
-let participantPollTimer = null;
-let participantReconnectTimer = null;
-let participantReconnectAttempt = 0;
-let participantSocket = null;
-let participantConnected = false;
 
 const participantText = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -456,97 +593,24 @@ const participantRefreshWork = async () => {
   }
 };
 
-const participantRefresh = () => {
-  if (document.hidden) return Promise.resolve(false);
-  if (participantRefreshRunning) {
-    participantRefreshQueued = true;
-    return participantRefreshRunning;
-  }
-  participantRefreshRunning = (async () => {
-    try {
-      do {
-        participantRefreshQueued = false;
-        await participantRefreshWork();
-      } while (participantRefreshQueued && !document.hidden);
-      return true;
-    } finally {
-      participantRefreshRunning = null;
-    }
-  })();
-  return participantRefreshRunning;
-};
-
-const participantPausePolling = () => {
-  if (participantPollTimer !== null) clearTimeout(participantPollTimer);
-  participantPollTimer = null;
-};
-
-const participantSchedulePolling = (connected = participantConnected) => {
-  participantConnected = connected;
-  participantPausePolling();
-  if (document.hidden) return;
-  participantPollTimer = setTimeout(async () => {
-    participantPollTimer = null;
-    try {
-      if (!document.hidden) await participantRefresh();
-    } finally {
-      participantSchedulePolling();
-    }
-  }, participantConnected ? 30000 : 5000);
-};
-
-const participantReconnectDelay = () => {
-  const base = Math.min(1000 * (2 ** participantReconnectAttempt), 15000);
-  participantReconnectAttempt = Math.min(participantReconnectAttempt + 1, 4);
-  return Math.round(Math.min(15000, base * (0.8 + (0.4 * Math.random()))));
-};
-
-const participantConnect = () => {
-  if (!("WebSocket" in globalThis) || document.hidden) {
-    participantConnected = false;
-    participantSchedulePolling(false);
-    return;
-  }
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(protocol + "//" + location.host + "/api/v1/live");
-  participantSocket = socket;
-  socket.addEventListener("open", () => {
-    participantReconnectAttempt = 0;
-    participantConnected = true;
-    participantSchedulePolling(true);
-    if (participantHasLoaded) participantFreshness.textContent = "Updates are arriving live.";
-  });
-  socket.addEventListener("message", () => { participantRefresh(); });
-  socket.addEventListener("close", () => {
-    if (participantSocket === socket) participantSocket = null;
-    participantConnected = false;
-    participantSchedulePolling(false);
-    participantFreshness.textContent = participantHasLoaded
-      ? "Reconnecting; this page is still checking for updates."
-      : "Saved registrations are temporarily unavailable. This page will keep checking.";
-    clearTimeout(participantReconnectTimer);
-    if (!document.hidden) participantReconnectTimer = setTimeout(participantConnect, participantReconnectDelay());
-  });
-  socket.addEventListener("error", () => { socket.close(); });
-};
-
 if (participantRoot) {
   if (participantRegisteredId && !participantRegistrationIdPattern.test(participantRegisteredId)) {
     participantRegisteredId = null;
     participantCleanRegisteredQuery();
   }
-  participantRefresh();
-  participantSchedulePolling(false);
-  participantConnect();
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      participantPausePolling();
-      clearTimeout(participantReconnectTimer);
-      return;
-    }
-    participantRefresh();
-    participantSchedulePolling(participantConnected);
-    if (participantSocket === null) participantConnect();
+  globalThis.quickDucksLive.subscribe({
+    domains: ["event", "participants", "ducks", "heats", "returns"],
+    root: participantRoot,
+    refresh: participantRefreshWork,
+    status: (status) => {
+      if (status === "connected") {
+        if (participantHasLoaded) participantFreshness.textContent = "Updates are arriving live.";
+        return;
+      }
+      participantFreshness.textContent = participantHasLoaded
+        ? "Reconnecting; this page is still checking for updates."
+        : "Saved registrations are temporarily unavailable. This page will keep checking.";
+    },
   });
 } else {
   participantFetch().catch(() => {});
@@ -554,7 +618,9 @@ if (participantRoot) {
 `;
 
 export const liveRuntimeHelpersScript = String.raw`
+const liveAllowedDomains = new Set(["all", "event", "participants", "ducks", "heats", "returns", "staff", "support"]);
 const livePollDelay = (connected) => connected ? 30000 : 5000;
+const liveDirtyDeferralMs = 300000;
 const liveReconnectDelay = (attempt, randomValue = Math.random()) => {
   const base = Math.min(1000 * (2 ** attempt), 15000);
   return Math.round(Math.min(15000, base * (0.8 + (0.4 * randomValue))));
@@ -562,21 +628,39 @@ const liveReconnectDelay = (attempt, randomValue = Math.random()) => {
 const liveSuccessfulFreshness = (secondaryResults) => secondaryResults.some((result) => result.status === "rejected")
   ? "The public race board is current, but personal details are delayed. This page will keep checking."
   : "Updated just now.";
-const liveCreateRefreshQueue = (work, isHidden) => {
+const liveParseRefreshSignal = (value) => {
+  if (typeof value !== "string" || value.length === 0 || value.length > 512) return null;
+  try {
+    const signal = JSON.parse(value);
+    if (!signal || Array.isArray(signal) || typeof signal !== "object") return null;
+    if (Object.keys(signal).sort().join(",") !== "domains,type,version") return null;
+    if (signal.type !== "refresh" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(signal.version)) return null;
+    if (!Array.isArray(signal.domains) || signal.domains.length === 0 || signal.domains.length > liveAllowedDomains.size) return null;
+    if (signal.domains.some((domain) => typeof domain !== "string" || !liveAllowedDomains.has(domain))) return null;
+    if (new Set(signal.domains).size !== signal.domains.length) return null;
+    if (signal.domains.includes("all") && signal.domains.length !== 1) return null;
+    return signal;
+  } catch {
+    return null;
+  }
+};
+const liveSignalMatches = (signal, domains) => signal.domains.includes("all")
+  || domains.some((domain) => signal.domains.includes(domain));
+const liveCreateRefreshQueue = (work, isBlocked) => {
   let running = null;
   let queued = false;
-  return () => {
-    if (isHidden()) return Promise.resolve(false);
+  const refresh = () => {
+    queued = true;
+    if (isBlocked()) return Promise.resolve(false);
     if (running) {
-      queued = true;
       return running;
     }
     running = (async () => {
       try {
-        do {
+        while (queued && !isBlocked()) {
           queued = false;
           await work();
-        } while (queued && !isHidden());
+        }
         return true;
       } finally {
         running = null;
@@ -584,6 +668,8 @@ const liveCreateRefreshQueue = (work, isHidden) => {
     })();
     return running;
   };
+  refresh.hasQueued = () => queued;
+  return refresh;
 };
 const liveCreatePollScheduler = (work, isHidden, setTimer = setTimeout, clearTimer = clearTimeout) => {
   let timer = null;
@@ -607,6 +693,217 @@ const liveCreatePollScheduler = (work, isHidden, setTimer = setTimeout, clearTim
   };
   return { pause, schedule };
 };
+const liveCreateHub = ({
+  WebSocketClass = globalThis.WebSocket,
+  documentObject = document,
+  locationObject = location,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  now = () => Date.now(),
+} = {}) => {
+  const subscribers = new Set();
+  let socket = null;
+  let reconnectAttempt = 0;
+  let reconnectTimer = null;
+  let busyCount = 0;
+  let pendingAccessReload = false;
+  let accessCheck = null;
+  let startRequested = false;
+  let active = false;
+
+  const isDirty = (root = documentObject) => Boolean(root.querySelector?.("[data-live-dirty='true']"));
+  const pageBlocked = () => busyCount > 0 || isDirty();
+  // Dirty tracking is scoped to each subscriber's root and bounded: an edit
+  // abandoned in one root defers only that subscriber's refreshes, and after
+  // five minutes the authoritative refetch proceeds anyway.
+  const dirtyDeferred = (subscriber) => {
+    if (!isDirty(subscriber.root)) {
+      subscriber.dirtySince = null;
+      return false;
+    }
+    if (subscriber.dirtySince === null) subscriber.dirtySince = now();
+    return now() - subscriber.dirtySince < liveDirtyDeferralMs;
+  };
+  const clearPrivatePage = () => {
+    const main = documentObject.querySelector?.("main");
+    if (main) main.replaceChildren();
+  };
+  const tryPendingAccessReload = () => {
+    if (!pendingAccessReload || pageBlocked()) return;
+    pendingAccessReload = false;
+    locationObject.reload();
+  };
+  const markClean = (root) => {
+    if (!root) return;
+    delete root.dataset.liveDirty;
+    for (const control of root.querySelectorAll?.("[data-live-dirty='true']") || []) delete control.dataset.liveDirty;
+    tryPendingAccessReload();
+    for (const subscriber of subscribers) subscriber.queue();
+  };
+  const beginBusy = () => {
+    busyCount += 1;
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      busyCount = Math.max(0, busyCount - 1);
+      tryPendingAccessReload();
+      for (const subscriber of subscribers) subscriber.queue();
+    };
+  };
+  const refreshAll = () => {
+    for (const subscriber of subscribers) subscriber.queue();
+  };
+  const setStatus = (status) => {
+    for (const subscriber of subscribers) subscriber.status?.(status);
+  };
+  const verifyStaffAccess = () => {
+    const root = documentObject.querySelector?.("[data-live-staff]");
+    if (!root) return Promise.resolve(true);
+    if (accessCheck) return accessCheck;
+    accessCheck = (async () => {
+      let response;
+      try {
+        response = await fetch("/api/v1/staff/session", { headers: { accept: "application/json" }, cache: "no-store" });
+      } catch {
+        return true;
+      }
+      if (response.status === 401) {
+        clearPrivatePage();
+        locationObject.replace("/staff");
+        return false;
+      }
+      if (!response.ok) return true;
+      let body;
+      try { body = await response.json(); } catch { return true; }
+      const access = body && body.access;
+      if (!access || typeof access.isSystemAdmin !== "boolean" || !Array.isArray(access.roles)) return true;
+      const previousAdmin = root.dataset.systemAdmin === "true";
+      const previousRoles = new Set((root.dataset.roles || "").split(",").filter(Boolean));
+      const currentRoles = new Set(access.roles.filter((role) => typeof role === "string"));
+      const unchanged = previousAdmin === access.isSystemAdmin
+        && previousRoles.size === currentRoles.size
+        && [...previousRoles].every((role) => currentRoles.has(role));
+      if (unchanged) return true;
+      const reduced = (previousAdmin && !access.isSystemAdmin)
+        || [...previousRoles].some((role) => !currentRoles.has(role));
+      if (reduced) {
+        clearPrivatePage();
+        locationObject.reload();
+        return false;
+      }
+      pendingAccessReload = true;
+      tryPendingAccessReload();
+      return false;
+    })().finally(() => { accessCheck = null; });
+    return accessCheck;
+  };
+  const emit = async (signal) => {
+    if (signal.domains.includes("all")) {
+      clearPrivatePage();
+      locationObject.reload();
+      return;
+    }
+    if (signal.domains.includes("staff") && !await verifyStaffAccess()) return;
+    for (const subscriber of subscribers) {
+      if (!liveSignalMatches(signal, subscriber.domains)) continue;
+      if (subscriber.signal?.(signal) === false) continue;
+      subscriber.queue();
+    }
+  };
+  const poller = liveCreatePollScheduler(refreshAll, () => documentObject.hidden, setTimer, clearTimer);
+  const connect = () => {
+    if (typeof WebSocketClass !== "function" || documentObject.hidden) {
+      poller.schedule(false);
+      return;
+    }
+    const protocol = locationObject.protocol === "https:" ? "wss:" : "ws:";
+    const candidate = new WebSocketClass(protocol + "//" + locationObject.host + "/api/v1/live");
+    socket = candidate;
+    candidate.addEventListener("open", () => {
+      if (socket !== candidate) return;
+      reconnectAttempt = 0;
+      poller.schedule(true);
+      setStatus("connected");
+      refreshAll();
+    });
+    candidate.addEventListener("message", (event) => {
+      const signal = liveParseRefreshSignal(event.data);
+      if (signal !== null) void emit(signal);
+    });
+    candidate.addEventListener("close", () => {
+      if (socket !== candidate) return;
+      socket = null;
+      poller.schedule(false);
+      setStatus("disconnected");
+      const delay = liveReconnectDelay(reconnectAttempt);
+      reconnectAttempt = Math.min(reconnectAttempt + 1, 4);
+      clearTimer(reconnectTimer);
+      if (!documentObject.hidden) reconnectTimer = setTimer(connect, delay);
+    });
+    candidate.addEventListener("error", () => { candidate.close(); });
+  };
+  documentObject.addEventListener("input", (event) => {
+    if (event.target?.matches?.("input, select, textarea")) event.target.dataset.liveDirty = "true";
+  });
+  documentObject.addEventListener("change", (event) => {
+    if (event.target?.matches?.("input, select, textarea")) event.target.dataset.liveDirty = "true";
+  });
+  documentObject.addEventListener("visibilitychange", () => {
+    if (documentObject.hidden) {
+      poller.pause();
+      clearTimer(reconnectTimer);
+      return;
+    }
+    if (!active) return;
+    refreshAll();
+    poller.schedule(socket !== null);
+    if (socket === null) connect();
+  });
+  // The socket and polling scheduler start lazily on the first subscriber:
+  // pages without live subscribers open no connection and schedule no polls.
+  const activate = () => {
+    if (active || !startRequested || subscribers.size === 0) return;
+    active = true;
+    poller.schedule(false);
+    connect();
+  };
+  return {
+    beginBusy,
+    isDirty,
+    markClean,
+    start() {
+      startRequested = true;
+      activate();
+    },
+    subscribe({ domains, refresh, isBlocked = () => false, signal, status, root }) {
+      const subscriber = {
+        domains,
+        signal,
+        status,
+        root: root ?? documentObject,
+        dirtySince: null,
+      };
+      subscriber.queue = liveCreateRefreshQueue(
+        refresh,
+        () => documentObject.hidden || busyCount > 0 || dirtyDeferred(subscriber) || isBlocked(),
+      );
+      subscribers.add(subscriber);
+      activate();
+      subscriber.queue();
+      return {
+        refresh: subscriber.queue,
+        resume: subscriber.queue,
+        unsubscribe() { subscribers.delete(subscriber); },
+      };
+    },
+  };
+};
+`;
+
+export const liveUiScript = liveRuntimeHelpersScript + String.raw`
+globalThis.quickDucksLive = liveCreateHub();
+globalThis.quickDucksLive.start();
 `;
 
 export const stationStateHelpersScript = String.raw`
@@ -628,16 +925,12 @@ const stationHeatRenderKey = (event, detail) => [
 ].join(":");
 `;
 
-export const liveScript = liveRuntimeHelpersScript + String.raw`
+export const liveScript = String.raw`
 const liveBoardRoot = document.querySelector("[data-live-board]");
 const liveBoardTitle = document.querySelector("[data-live-board-title]");
 const liveBoardSummary = document.querySelector("[data-live-board-summary]");
 const liveBoardContent = document.querySelector("[data-live-board-content]");
 const liveFreshness = document.querySelector("[data-live-freshness]");
-let liveReconnectAttempt = 0;
-let liveReconnectTimer = null;
-let liveSocket = null;
-let liveConnected = false;
 let liveBoardVersion = null;
 
 const liveText = (tag, value, className) => {
@@ -758,7 +1051,11 @@ const liveRenderBoard = (board) => {
 
 const liveFetchJson = async (url) => {
   const response = await fetch(url, { headers: { accept: "application/json" }, cache: "no-store" });
-  if (!response.ok) throw new Error("refresh failed");
+  if (!response.ok) {
+    const error = new Error("refresh failed");
+    error.status = response.status;
+    throw error;
+  }
   return response.json();
 };
 
@@ -768,23 +1065,44 @@ const liveRefreshPersonal = async () => {
   const pathParts = location.pathname.split("/");
   const token = pathParts.length === 3 ? pathParts[2] : "";
   if (!token) return;
-  if (personal.dataset.livePersonal === "private") {
-    const body = await liveFetchJson("/api/v1/registrations/" + encodeURIComponent(token));
+  try {
+    if (personal.dataset.livePersonal === "private") {
+      const body = await liveFetchJson("/api/v1/registrations/" + encodeURIComponent(token));
+      if (document.hidden) return;
+      personal.replaceChildren();
+      const facts = liveText("dl", "", "facts");
+      liveAddFact(facts, "Participant", body.firstName + " " + body.lastName);
+      liveAddFact(facts, "Registration", liveHumanize(body.status));
+      liveAddFact(facts, "Race date", body.eventDate || "To be announced");
+      personal.append(facts);
+      liveRaceFacts(personal, body.raceStatus, false);
+      const heading = document.querySelector("[data-private-status-heading]");
+      const event = document.querySelector("[data-private-status-event]");
+      if (heading) heading.textContent = body.status === "ACTIVE"
+        ? "Your duck is assigned, " + body.firstName + "."
+        : body.status === "WITHDRAWN"
+          ? "Registration withdrawn, " + body.firstName + "."
+          : body.status === "DISQUALIFIED"
+            ? "Race status updated, " + body.firstName + "."
+            : "You’re in the queue, " + body.firstName + ".";
+      if (event) event.textContent = "Keep this page private. This is your status link for " + body.eventName + ".";
+      return;
+    }
+    const body = await liveFetchJson("/api/v1/ducks/" + encodeURIComponent(token));
     if (document.hidden) return;
     personal.replaceChildren();
-    const facts = liveText("dl", "", "facts");
-    liveAddFact(facts, "Participant", body.firstName + " " + body.lastName);
-    liveAddFact(facts, "Registration", liveHumanize(body.status));
-    liveAddFact(facts, "Race date", body.eventDate || "To be announced");
-    personal.append(facts);
-    liveRaceFacts(personal, body.raceStatus, false);
-    return;
+    if (body.destination === "RACE_STATUS") liveRaceFacts(personal, body.raceStatus, true);
+    else {
+      document.querySelector("main")?.replaceChildren();
+      location.replace("/");
+    }
+  } catch (error) {
+    if (error.status === 404) {
+      document.querySelector("main")?.replaceChildren();
+      location.reload();
+    }
+    throw error;
   }
-  const body = await liveFetchJson("/api/v1/ducks/" + encodeURIComponent(token));
-  if (document.hidden) return;
-  personal.replaceChildren();
-  if (body.destination === "RACE_STATUS") liveRaceFacts(personal, body.raceStatus, true);
-  else personal.append(liveText("p", "This duck does not have public race status right now.", "muted"));
 };
 
 const liveRefreshWork = async () => {
@@ -800,56 +1118,21 @@ const liveRefreshWork = async () => {
     liveFreshness.textContent = "Updates are delayed. This page will keep checking.";
   }
 };
-const liveRefresh = liveCreateRefreshQueue(liveRefreshWork, () => document.hidden);
-const livePoller = liveCreatePollScheduler(liveRefresh, () => document.hidden);
-
-const liveConnect = () => {
-  if (!("WebSocket" in globalThis) || document.hidden) {
-    liveConnected = false;
-    livePoller.schedule(false);
-    return;
-  }
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(protocol + "//" + location.host + "/api/v1/live");
-  liveSocket = socket;
-  socket.addEventListener("open", () => {
-    liveReconnectAttempt = 0;
-    liveConnected = true;
-    livePoller.schedule(true);
-    liveFreshness.textContent = "Updates are arriving live.";
-  });
-  socket.addEventListener("message", () => { liveRefresh(); });
-  socket.addEventListener("close", () => {
-    if (liveSocket === socket) liveSocket = null;
-    liveConnected = false;
-    livePoller.schedule(false);
-    liveFreshness.textContent = "Reconnecting; this page is still checking for updates.";
-    const delay = liveReconnectDelay(liveReconnectAttempt);
-    liveReconnectAttempt = Math.min(liveReconnectAttempt + 1, 4);
-    clearTimeout(liveReconnectTimer);
-    if (!document.hidden) liveReconnectTimer = setTimeout(liveConnect, delay);
-  });
-  socket.addEventListener("error", () => { socket.close(); });
-};
-
 if (liveBoardRoot) {
-  liveRefresh();
-  livePoller.schedule(false);
-  liveConnect();
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      livePoller.pause();
-      clearTimeout(liveReconnectTimer);
-      return;
-    }
-    liveRefresh();
-    livePoller.schedule(liveConnected);
-    if (liveSocket === null) liveConnect();
+  globalThis.quickDucksLive.subscribe({
+    domains: ["event", "participants", "ducks", "heats", "returns"],
+    root: liveBoardRoot,
+    refresh: liveRefreshWork,
+    status: (status) => {
+      liveFreshness.textContent = status === "connected"
+        ? "Updates are arriving live."
+        : "Reconnecting; this page is still checking for updates.";
+    },
   });
 }
 `;
 
-export const startLineScript = liveRuntimeHelpersScript + stationStateHelpersScript + String.raw`
+export const startLineScript = confirmationDialogScript + stationStateHelpersScript + String.raw`
 const startRoot = document.querySelector("[data-start-line]");
 const startFreshness = document.querySelector("[data-station-freshness]");
 const startEvent = document.querySelector("[data-station-event]");
@@ -858,11 +1141,9 @@ const startFacts = document.querySelector("[data-station-facts]");
 const startRoster = document.querySelector("[data-station-roster]");
 const startAction = document.querySelector("[data-station-action]");
 const startMessage = document.querySelector("[data-station-message]");
-let startReconnectAttempt = 0;
-let startReconnectTimer = null;
-let startSocket = null;
-let startConnected = false;
 let startRenderKey = null;
+let startCommandBusy = false;
+let startSubscription = null;
 
 const startText = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -874,6 +1155,7 @@ const startHumanize = (value) => String(value || "").replaceAll("_", " ").toLowe
 const startApi = async (url, options) => {
   const response = await fetch(url, options);
   if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
     location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
     throw new Error("signed-out");
   }
@@ -886,11 +1168,21 @@ const startAddFact = (label, value) => {
   fact.append(startText("dt", label), startText("dd", value));
   startFacts.append(fact);
 };
-const startCommand = (path, revision) => startApi(path, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({ commandId: crypto.randomUUID(), revision }),
-});
+const startCommand = async (path, revision) => {
+  startCommandBusy = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    return await startApi(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId: crypto.randomUUID(), revision }),
+    });
+  } finally {
+    startCommandBusy = false;
+    endBusy();
+    startSubscription?.resume();
+  }
+};
 const startRender = (event, detail) => {
   const renderKey = stationHeatRenderKey(event, detail);
   if (renderKey === startRenderKey) return;
@@ -930,7 +1222,7 @@ const startRender = (event, detail) => {
       const readback = "Start " + round + " Heat " + detail.heat.number + " now? Read back: "
         + detail.roster.length + " racer" + (detail.roster.length === 1 ? "" : "s")
         + " in this heat. No next heat can start until its official result is published.";
-      if (!confirm(readback)) return;
+      if (!await appConfirm(readback, { danger: true })) return;
     }
     button.disabled = true;
     startMessage.textContent = transition[1] + "…";
@@ -985,49 +1277,18 @@ const startLoadWork = async () => {
     }
   }
 };
-const startLoad = liveCreateRefreshQueue(startLoadWork, () => document.hidden);
-const startPoller = liveCreatePollScheduler(startLoad, () => document.hidden);
-const startConnect = () => {
-  if (!("WebSocket" in globalThis) || document.hidden) {
-    startConnected = false;
-    startPoller.schedule(false);
-    return;
-  }
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(protocol + "//" + location.host + "/api/v1/live");
-  startSocket = socket;
-  socket.addEventListener("open", () => {
-    startReconnectAttempt = 0;
-    startConnected = true;
-    startPoller.schedule(true);
-    startFreshness.textContent = "Updates are arriving live.";
-  });
-  socket.addEventListener("message", () => { startLoad(); });
-  socket.addEventListener("close", () => {
-    if (startSocket === socket) startSocket = null;
-    startConnected = false;
-    startPoller.schedule(false);
-    startFreshness.textContent = "Reconnecting; this station is still checking for updates.";
-    const delay = liveReconnectDelay(startReconnectAttempt);
-    startReconnectAttempt = Math.min(startReconnectAttempt + 1, 4);
-    clearTimeout(startReconnectTimer);
-    if (!document.hidden) startReconnectTimer = setTimeout(startConnect, delay);
-  });
-  socket.addEventListener("error", () => { socket.close(); });
-};
+const startLoad = startLoadWork;
 if (startRoot) {
-  startLoad();
-  startPoller.schedule(false);
-  startConnect();
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      startPoller.pause();
-      clearTimeout(startReconnectTimer);
-      return;
-    }
-    startLoad();
-    startPoller.schedule(startConnected);
-    if (startSocket === null) startConnect();
+  startSubscription = globalThis.quickDucksLive.subscribe({
+    domains: ["event", "participants", "ducks", "heats"],
+    root: startRoot,
+    refresh: startLoadWork,
+    isBlocked: () => startCommandBusy,
+    status: (status) => {
+      startFreshness.textContent = status === "connected"
+        ? "Updates are arriving live."
+        : "Reconnecting; this station is still checking for updates.";
+    },
   });
 }
 `;
@@ -1178,7 +1439,7 @@ const finishCreateNfcScanner = ({ createReader, createController, decode, onValu
 };
 `;
 
-export const finishLineScript = liveRuntimeHelpersScript + stationStateHelpersScript
+export const finishLineScript = confirmationDialogScript + stationStateHelpersScript
   + finishSelectionValidationScript + finishHandoffHelpersScript + finishScanSerializationScript
   + finishNfcHelpersScript + String.raw`
 const finishRoot = document.querySelector("[data-finish-line]");
@@ -1198,12 +1459,11 @@ let finishEvent = null;
 let finishHeat = null;
 let finishRosterEntries = [];
 let finishSelected = [];
-let finishReconnectAttempt = 0;
-let finishReconnectTimer = null;
-let finishSocket = null;
-let finishConnected = false;
 let finishRenderKey = null;
 let finishScanBusy = false;
+let finishScanEndBusy = null;
+let finishCommandBusy = false;
+let finishSubscription = null;
 const finishInitialSearch = location.search;
 let finishPendingHandoff = finishParseHandoff(finishInitialSearch);
 let finishPendingHandoffProblem = finishInitialSearch && finishPendingHandoff === null ? "invalid" : null;
@@ -1233,6 +1493,7 @@ const finishClearContext = () => { try { localStorage.removeItem(finishStorageKe
 const finishApi = async (url, options) => {
   const response = await fetch(url, options);
   if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
     location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname + location.search));
     throw new Error("signed-out");
   }
@@ -1249,6 +1510,12 @@ const finishAddFact = (label, value) => {
 const finishRequiredPlaces = () => !finishHeat ? 0 : finishHeat.round === "ROUND_ONE" ? 1 : Math.min(3, finishRosterEntries.length);
 const finishSetScanBusy = (busy) => {
   finishScanBusy = busy;
+  if (busy && finishScanEndBusy === null) finishScanEndBusy = globalThis.quickDucksLive.beginBusy();
+  if (!busy && finishScanEndBusy !== null) {
+    finishScanEndBusy();
+    finishScanEndBusy = null;
+    finishSubscription?.resume();
+  }
   for (const control of finishScanForm.querySelectorAll("input, button")) control.disabled = busy;
   finishNfcButton.disabled = busy;
   for (const control of finishSelections.querySelectorAll("button")) control.disabled = busy;
@@ -1275,6 +1542,7 @@ const finishRenderSelections = () => {
         .map((item, index) => ({ ...item, place: index + 1 }));
       finishRenderSelections();
       finishMessage.textContent = "Selection removed. Scan or enter the correct duck.";
+      finishSubscription?.resume();
     });
     card.append(remove);
     finishSelections.append(card);
@@ -1319,6 +1587,7 @@ const finishRunSerializedSelection = finishCreateSerializedSelector({
     finishSelected.push({ ...selection, place: captured.intendedPlace });
     finishRenderSelections();
     finishScanForm.elements.duck.value = "";
+    globalThis.quickDucksLive.markClean(finishScanForm);
     finishMessage.textContent = selection.participantDisplayName + " · Duck #" + selection.visibleNumber
       + " selected for " + finishPlaceLabel(captured.intendedPlace) + ". Review before submitting.";
     return true;
@@ -1376,6 +1645,8 @@ const finishRender = (event, detail) => {
     button.type = "button";
     button.addEventListener("click", async () => {
       button.disabled = true;
+      finishCommandBusy = true;
+      const endBusy = globalThis.quickDucksLive.beginBusy();
       finishMessage.textContent = "Marking the heat finished…";
       try {
         await finishApi("/api/v1/staff/events/" + encodeURIComponent(finishEvent.id) + "/heats/" + encodeURIComponent(finishHeat.id) + "/finish", {
@@ -1388,6 +1659,10 @@ const finishRender = (event, detail) => {
       } catch (error) {
         if (error.message !== "signed-out") finishMessage.textContent = error.message;
         button.disabled = false;
+      } finally {
+        finishCommandBusy = false;
+        endBusy();
+        finishSubscription?.resume();
       }
     });
     finishAction.append(button);
@@ -1472,8 +1747,7 @@ const finishLoadWork = async () => {
     }
   }
 };
-const finishLoad = liveCreateRefreshQueue(finishLoadWork, () => document.hidden);
-const finishPoller = liveCreatePollScheduler(finishLoad, () => document.hidden);
+const finishLoad = finishLoadWork;
 finishScanForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   await finishSelectValue(finishScanForm.elements.duck.value);
@@ -1482,7 +1756,7 @@ finishSubmit.addEventListener("click", async () => {
   if (!finishEvent || !finishHeat || finishScanBusy || finishSelected.length !== finishRequiredPlaces()) return;
   const readback = finishSelected.map((selection) => finishPlaceLabel(selection.place) + ": "
     + selection.participantDisplayName + ", Duck #" + selection.visibleNumber).join("; ");
-  if (!confirm("Submit this official result now? Read back: " + readback + ". This publishes immediately.")) return;
+  if (!await appConfirm("Submit this official result now? Read back: " + readback + ". This publishes immediately.", { danger: true })) return;
   const captured = {
     eventId: finishEvent.id,
     heatId: finishHeat.id,
@@ -1490,6 +1764,8 @@ finishSubmit.addEventListener("click", async () => {
     results: finishSelected.map((selection) => ({ raceEntryId: selection.raceEntryId, place: selection.place })),
   };
   finishSubmit.disabled = true;
+  finishCommandBusy = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
   finishMessage.textContent = "Submitting the reviewed official result…";
   try {
     await finishApi("/api/v1/staff/events/" + encodeURIComponent(captured.eventId) + "/heats/" + encodeURIComponent(captured.heatId) + "/results/finalize", {
@@ -1508,6 +1784,10 @@ finishSubmit.addEventListener("click", async () => {
   } catch (error) {
     if (error.message !== "signed-out") finishMessage.textContent = error.message;
     finishSubmit.disabled = false;
+  } finally {
+    finishCommandBusy = false;
+    endBusy();
+    finishSubscription?.resume();
   }
 });
 if ("NDEFReader" in globalThis) {
@@ -1533,54 +1813,38 @@ if ("NDEFReader" in globalThis) {
   });
   finishNfcButton.addEventListener("click", finishStartNfcScan);
 }
-const finishConnect = () => {
-  if (!("WebSocket" in globalThis) || document.hidden) {
-    finishConnected = false;
-    finishPoller.schedule(false);
-    return;
-  }
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(protocol + "//" + location.host + "/api/v1/live");
-  finishSocket = socket;
-  socket.addEventListener("open", () => {
-    finishReconnectAttempt = 0;
-    finishConnected = true;
-    finishPoller.schedule(true);
-    finishFreshness.textContent = "Updates are arriving live.";
-  });
-  socket.addEventListener("message", () => { finishLoad(); });
-  socket.addEventListener("close", () => {
-    if (finishSocket === socket) finishSocket = null;
-    finishConnected = false;
-    finishPoller.schedule(false);
-    finishFreshness.textContent = "Reconnecting; this station is still checking for updates.";
-    const delay = liveReconnectDelay(finishReconnectAttempt);
-    finishReconnectAttempt = Math.min(finishReconnectAttempt + 1, 4);
-    clearTimeout(finishReconnectTimer);
-    if (!document.hidden) finishReconnectTimer = setTimeout(finishConnect, delay);
-  });
-  socket.addEventListener("error", () => { socket.close(); });
-};
 if (finishRoot) {
   finishKeepContext();
-  finishLoad();
-  finishPoller.schedule(false);
-  finishConnect();
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      finishPoller.pause();
-      clearTimeout(finishReconnectTimer);
-      return;
-    }
-    finishLoad();
-    finishPoller.schedule(finishConnected);
-    if (finishSocket === null) finishConnect();
+  finishSubscription = globalThis.quickDucksLive.subscribe({
+    domains: ["event", "participants", "ducks", "heats"],
+    root: finishRoot,
+    refresh: finishLoadWork,
+    isBlocked: () => finishScanBusy || finishCommandBusy || finishSelected.length > 0,
+    status: (status) => {
+      finishFreshness.textContent = status === "connected"
+        ? "Updates are arriving live."
+        : "Reconnecting; this station is still checking for updates.";
+    },
   });
 }
 `;
 
 export const inventoryIntakeHelpersScript = String.raw`
 const intakePreRaceStatuses = new Set(["DRAFT", "REGISTRATION_OPEN", "REGISTRATION_CLOSED"]);
+
+const intakeProvisioningRuntimeIssue = ({ userAgent, hasNdefReader, secureContext, topLevel, visible }) => {
+  if (
+    typeof userAgent !== "string" || !/\bAndroid\b/i.test(userAgent)
+    || !/\bChrome\/\d+(?:\.\d+)*/.test(userAgent)
+    || /\b(?:EdgA|OPR|SamsungBrowser)\//.test(userAgent)
+    || /;\s*wv\)/i.test(userAgent)
+  ) return "android-chrome";
+  if (!hasNdefReader) return "web-nfc";
+  if (!secureContext) return "secure-context";
+  if (!topLevel) return "top-level";
+  if (!visible) return "visible";
+  return null;
+};
 
 const intakeParseCanonicalTagUrl = (value, appOrigin) => {
   if (typeof value !== "string") return null;
@@ -1631,10 +1895,11 @@ const intakeSafeTakeoverCandidate = (record) => {
 };
 
 const intakeCreateProvisioningMachine = ({
-  eventId, location, recover, start, classify, write, confirm, refresh,
+  eventId, location, recover, start, classify, write, confirm: confirmProvisioning, refresh,
   accepted, message, state, feedback, changed = () => {},
   commandId = () => crypto.randomUUID(),
   scheduleReady = (callback) => setTimeout(callback, 900),
+  beginBusy = () => () => {},
 }) => {
   let pending = null;
   let inFlight = false;
@@ -1712,6 +1977,7 @@ const intakeCreateProvisioningMachine = ({
     }
     lastSerial = transientSerial;
     inFlight = true;
+    const endBusy = beginBusy();
     try {
       const selectedEventId = eventId();
       if (!selectedEventId) {
@@ -1846,7 +2112,7 @@ const intakeCreateProvisioningMachine = ({
       state("confirming");
       message("The sticker was written. Confirming its race reservation online.", false);
       try {
-        await confirm({
+        await confirmProvisioning({
           commandId: pending.confirmCommandId,
           eventId: selectedEventId,
           duckId: pending.duckId,
@@ -1872,6 +2138,7 @@ const intakeCreateProvisioningMachine = ({
       return { accepted: true, outcome: "added" };
     } finally {
       inFlight = false;
+      endBusy();
       changed();
     }
   };
@@ -1970,7 +2237,7 @@ const intakeCreateNfcStation = ({ createReader, decode, appOrigin, onReading, on
 };
 `;
 
-export const inventoryIntakeScript = inventoryIntakeHelpersScript + String.raw`
+export const inventoryIntakeScript = confirmationDialogScript + inventoryIntakeHelpersScript + String.raw`
 const intakeRoot = document.querySelector("[data-inventory-intake]");
 const intakeEventSelect = document.querySelector("[data-intake-event]");
 const intakeLocation = document.querySelector("[data-intake-location]");
@@ -1984,21 +2251,54 @@ const intakeHistory = document.querySelector("[data-intake-history]");
 const intakeTakeoverPanel = document.querySelector("[data-intake-takeover]");
 const intakeTakeoverMessage = document.querySelector("[data-intake-takeover-message]");
 const intakeTakeoverButton = document.querySelector("[data-takeover-provisioning]");
+const intakeRuntimeNotice = document.querySelector("[data-intake-runtime]");
+const intakeRuntimeMessage = document.querySelector("[data-intake-runtime-message]");
+const intakeControls = document.querySelector("[data-intake-controls]");
+let intakeTopLevel = false;
+try { intakeTopLevel = window.top === window.self; } catch {}
+const intakeRuntimeIssue = () => intakeProvisioningRuntimeIssue({
+  userAgent: navigator.userAgent,
+  hasNdefReader: typeof globalThis.NDEFReader === "function",
+  secureContext: isSecureContext === true,
+  topLevel: intakeTopLevel,
+  visible: document.visibilityState === "visible",
+});
+const intakeShowRuntimeIssue = (issue) => {
+  const messages = {
+    "android-chrome": "Use current Chrome on an NFC-capable Android device. This station is not available on desktop, iPhone, iPad, Android WebView, or another Android browser.",
+    "web-nfc": "This Android Chrome runtime does not expose Web NFC. Update Chrome or use another NFC-capable Android device.",
+    "secure-context": "Open the HTTPS QuickDucks site directly before using NFC provisioning.",
+    "top-level": "Open QuickDucks in a top-level browser tab, not an embedded frame.",
+    visible: "Bring this page into view and reload it before using NFC provisioning.",
+  };
+  intakeControls.hidden = true;
+  intakeRuntimeNotice.hidden = false;
+  intakeRuntimeMessage.textContent = messages[issue] || "This device cannot run the NFC provisioning station.";
+};
+
+const intakeInitialRuntimeIssue = intakeRuntimeIssue();
+if (intakeInitialRuntimeIssue !== null) {
+  intakeShowRuntimeIssue(intakeInitialRuntimeIssue);
+} else {
+intakeRuntimeNotice.hidden = true;
+intakeControls.hidden = false;
 const intakeAppOrigin = intakeRoot.dataset.appOrigin;
 let intakeAddedCount = 0;
 let intakeSelectedEvent = null;
 let intakeStarted = false;
 let intakeStarting = false;
-let intakeSupported = false;
+let intakeSupported = true;
 let intakeEventsAvailable = false;
 let intakeAudio = null;
 let intakeTakeoverCandidate = null;
 let intakeNfcStation = null;
 let intakeMachine = null;
+let intakeSubscription = null;
 
 const intakeApi = async (url, options) => {
   const response = await fetch(url, { ...options, cache: "no-store" });
   if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
     location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
     throw new Error("signed-out");
   }
@@ -2127,16 +2427,19 @@ intakeMachine = intakeCreateProvisioningMachine({
   },
   feedback: intakeFeedback,
   changed: intakeUpdateControls,
+  beginBusy: () => globalThis.quickDucksLive.beginBusy(),
 });
 
 intakeTakeoverButton.addEventListener("click", async () => {
   const candidate = intakeTakeoverCandidate;
   if (candidate === null || intakeMachine.isBusy() || intakeMachine.hasPending()) return;
-  if (!window.confirm(
+  if (!await appConfirm(
     "Take over pending Duck #" + candidate.visibleNumber
-    + "? Continue only if the previous provisioning station has been abandoned."
+    + "? Continue only if the previous provisioning station has been abandoned.",
+    { danger: true },
   )) return;
   intakeTakeoverButton.disabled = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
   intakeSetMessage("Taking ownership of the abandoned pending sticker.", false);
   try {
     const recovered = await intakePost("/api/v1/staff/inventory/provisioning/takeover", {
@@ -2155,6 +2458,8 @@ intakeTakeoverButton.addEventListener("click", async () => {
     intakeSetMessage("The pending sticker could not be taken over. Refresh its status before trying again.", true);
   } finally {
     intakeTakeoverButton.disabled = false;
+    endBusy();
+    intakeSubscription?.resume();
   }
 });
 
@@ -2213,22 +2518,24 @@ intakeEventSelect.addEventListener("change", async () => {
   if (intakeStarted) return;
   try {
     await intakeRecoverSelected();
+    globalThis.quickDucksLive.markClean(intakeEventSelect);
   } catch {
     intakeSetMessage("The selected event could not be refreshed. Stay online and try again.", true);
   }
 });
 
-let intakeTopLevel = false;
-try { intakeTopLevel = window.top === window.self; } catch {}
-intakeSupported = "NDEFReader" in globalThis && isSecureContext && intakeTopLevel;
-if (!intakeSupported) {
-  intakeSetState("error");
-  intakeSetMessage("This station requires current Android Chrome, an NFC-capable device, HTTPS, a top-level tab, and a visible page. There is no manual fallback.", true);
-}
 intakeUpdateControls();
 
 intakeNfcButton.addEventListener("click", async () => {
   if (!intakeSupported || intakeStarted || intakeStarting) return;
+  const runtimeIssue = intakeRuntimeIssue();
+  if (runtimeIssue !== null) {
+    intakeSupported = false;
+    intakeSetState("error");
+    intakeSetMessage("This station no longer has a supported visible Android Chrome Web NFC context. Reload it after correcting the device or browser context.", true);
+    intakeUpdateControls();
+    return;
+  }
   if (
     !intakeSelectedEvent
     || intakeSelectedEvent.id !== intakeEventSelect.value
@@ -2260,6 +2567,8 @@ intakeNfcButton.addEventListener("click", async () => {
   }
   intakeStarted = true;
   intakeUpdateControls();
+  globalThis.quickDucksLive.markClean(intakeRoot);
+  intakeSubscription?.resume();
 });
 
 intakeEndNfcButton.addEventListener("click", () => {
@@ -2280,10 +2589,119 @@ intakeEndNfcButton.addEventListener("click", () => {
   intakeUpdateControls();
 });
 
-intakeLoadEvents().catch(() => intakeSetMessage("The station could not load events. Stay online, then refresh this page.", true));
+const intakeLiveRefresh = async () => {
+  try {
+    if (intakeStarted) await intakeRefreshStation();
+    else await intakeLoadEvents();
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      intakeSetMessage("The station could not refresh authoritative inventory. Stay online and try again.", true);
+    }
+  }
+};
+intakeSubscription = globalThis.quickDucksLive.subscribe({
+  domains: ["event", "ducks", "returns"],
+  root: intakeRoot,
+  refresh: intakeLiveRefresh,
+  isBlocked: () => intakeMachine.isBusy() || intakeMachine.hasPending(),
+});
+}
 `;
 
-export const staffHomeScript = String.raw`
+export const eventLifecycleHelpersScript = String.raw`
+const lifecycleCreateAttempt = (commandId = crypto.randomUUID()) => {
+  let state = "READY";
+  return {
+    begin() {
+      if (state !== "READY") return null;
+      state = "IN_FLIGHT";
+      return commandId;
+    },
+    fail() {
+      if (state === "IN_FLIGHT") state = "READY";
+    },
+    complete() {
+      state = "COMPLETE";
+    },
+    disabled() {
+      return state !== "READY";
+    },
+  };
+};
+
+const lifecycleShouldRenderEvent = (selectedEventId, current, incoming) => {
+  if (selectedEventId !== incoming.id) return false;
+  if (current === null || current.id !== incoming.id) return true;
+  if (incoming.revision !== current.revision) return incoming.revision > current.revision;
+  return !current.updatedAt || !incoming.updatedAt || incoming.updatedAt >= current.updatedAt;
+};
+`;
+
+export const eventSlugHelpersScript = String.raw`
+const eventSlugFromName = (name) => {
+  const source = String(name).trim().replace(/\s+/g, " ").normalize("NFKD");
+  const slug = source
+    .replace(/\p{M}+/gu, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80)
+    .replace(/-+$/g, "");
+  if (slug) return slug;
+
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return "event-" + (hash >>> 0).toString(36);
+};
+`;
+
+export const inventoryDetailHelpersScript = String.raw`
+const createInventoryDetailController = ({ detail, list, closeButton, clear }) => {
+  let returnTarget = null;
+  let selectedDuckId = null;
+  let requestVersion = 0;
+
+  const buttons = () => list.querySelectorAll("[data-duck-id]");
+  const currentButton = () => Array.from(buttons())
+    .find((button) => button.dataset.duckId === selectedDuckId) || null;
+  const syncButtons = () => {
+    for (const button of buttons()) {
+      button.setAttribute("aria-expanded", String(!detail.hidden && button.dataset.duckId === selectedDuckId));
+    }
+  };
+  const open = (duckId, trigger, focusDetail = true) => {
+    selectedDuckId = duckId;
+    returnTarget = trigger || currentButton();
+    detail.hidden = false;
+    syncButtons();
+    if (focusDetail) closeButton.focus();
+  };
+  const close = ({ restoreFocus = true } = {}) => {
+    const target = returnTarget && returnTarget.isConnected ? returnTarget : currentButton();
+    requestVersion += 1;
+    selectedDuckId = null;
+    detail.hidden = true;
+    syncButtons();
+    clear();
+    returnTarget = null;
+    if (restoreFocus && target) target.focus();
+  };
+
+  closeButton.addEventListener("click", () => close());
+  return {
+    open,
+    close,
+    syncButtons,
+    beginRequest: () => ++requestVersion,
+    isCurrentRequest: (version) => version === requestVersion,
+  };
+};
+`;
+
+export const staffHomeScript = confirmationDialogScript + eventLifecycleHelpersScript + eventSlugHelpersScript + inventoryDetailHelpersScript + String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
 const assignedRoles = new Set((operationsRoot.dataset.roles || "").split(",").filter(Boolean));
@@ -2304,6 +2722,8 @@ let selectedDuck = null;
 let selectedHeat = null;
 let pendingHeatPlan = null;
 let reviewEvent = null;
+let staffCommandCount = 0;
+let staffLiveSubscription = null;
 
 const text = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -2343,6 +2763,7 @@ const commandOptions = (method, payload) => ({
 const api = async (url, options) => {
   const response = await fetch(url, options);
   if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
     location.assign("/staff");
     throw new Error("signed-out");
   }
@@ -2360,9 +2781,12 @@ const api = async (url, options) => {
 
 const perform = async (button, loadingMessage, operation) => {
   button.disabled = true;
+  staffCommandCount += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
   setMessage(loadingMessage);
   try {
     const result = await operation();
+    globalThis.quickDucksLive.markClean(button.form);
     setMessage("Saved. Current data has been refreshed.");
     return result;
   } catch (error) {
@@ -2370,6 +2794,9 @@ const perform = async (button, loadingMessage, operation) => {
     return null;
   } finally {
     button.disabled = false;
+    staffCommandCount = Math.max(0, staffCommandCount - 1);
+    endBusy();
+    staffLiveSubscription?.resume();
   }
 };
 
@@ -2397,8 +2824,21 @@ const eventSummary = document.querySelector("[data-event-summary]");
 const readinessList = document.querySelector("[data-event-readiness]");
 const eventConfigCard = document.querySelector("[data-event-config-card]");
 const eventConfigForm = document.querySelector("[data-event-config-form]");
+const eventConfigSlugPreview = document.querySelector("[data-event-config-slug-preview]");
 const deleteDraftCard = document.querySelector("[data-delete-draft-card]");
 const deleteDraftForm = document.querySelector("[data-delete-draft-form]");
+const forceDeleteCard = document.querySelector("[data-force-delete-card]");
+const forceDeleteForm = document.querySelector("[data-force-delete-form]");
+
+const updateEventSlugPreview = (form, preview, persistedEvent = null) => {
+  if (!form || !preview) return;
+  const name = String(form.elements.name.value).trim().replace(/\s+/g, " ");
+  preview.value = !name
+    ? ""
+    : persistedEvent && name === persistedEvent.name
+      ? persistedEvent.slug
+      : eventSlugFromName(name);
+};
 
 const lifecycleLabels = {
   "open-registration": "Open registration",
@@ -2411,6 +2851,7 @@ const lifecycleLabels = {
 };
 
 const renderReadiness = (readiness) => {
+  const event = currentEvent;
   readinessList.replaceChildren();
   for (const [action, state] of Object.entries(readiness)) {
     const card = text("div", "", "data-card");
@@ -2422,15 +2863,61 @@ const renderReadiness = (readiness) => {
       const button = text("button", lifecycleLabels[action] || humanize(action), "button small");
       button.type = "button";
       button.disabled = !state.allowed;
+      const attempt = lifecycleCreateAttempt();
       button.addEventListener("click", async () => {
-        if (!confirm("Run “" + button.textContent + "” for " + currentEvent.name + "?")) return;
-        await perform(button, "Running event transition…", async () => {
-          await api(
-            "/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/" + action,
-            commandOptions("POST", { commandId: crypto.randomUUID() }),
+        if (
+          event === null
+          || eventSelect.value !== event.id
+          || currentEvent === null
+          || currentEvent.id !== event.id
+          || currentEvent.status !== state.fromStatus
+        ) {
+          button.disabled = true;
+          setMessage("This lifecycle action is stale. Refreshing the current event.", true);
+          loadEvents(event && event.id).catch(() => undefined);
+          return;
+        }
+        if (!await appConfirm("Run “" + button.textContent + "” for " + event.name + "?")) return;
+        const commandId = attempt.begin();
+        if (commandId === null) return;
+        button.disabled = true;
+        setMessage("Running event transition…");
+        try {
+          const result = await api(
+            "/api/v1/staff/events/" + encodeURIComponent(event.id) + "/" + action,
+            commandOptions("POST", { commandId }),
           );
-          await loadEvents(currentEvent.id);
-        });
+          attempt.complete();
+          renderLifecycleResult(result.event);
+          const savedMessage = result.replayed || result.alreadyAtTarget
+            ? "This transition was already saved. Current state: " + humanize(result.event.status) + "."
+            : "Transition saved. Current state: " + humanize(result.event.status) + ".";
+          setMessage(savedMessage);
+          try {
+            await loadEvents(event.id);
+            setMessage(savedMessage);
+          } catch {
+            setMessage(savedMessage + " Other operation areas could not refresh; refresh when the connection returns.", true);
+          }
+        } catch (error) {
+          attempt.fail();
+          try {
+            await loadEvents(event.id);
+          } catch {}
+          const stateChanged = currentEvent !== null
+            && currentEvent.id === event.id
+            && currentEvent.status !== state.fromStatus;
+          if (stateChanged) {
+            attempt.complete();
+            button.disabled = true;
+            setMessage(currentEvent.status === state.toStatus
+              ? "This transition is already saved. Current state: " + humanize(currentEvent.status) + "."
+              : "Current state: " + humanize(currentEvent.status) + ". The stale action was not retried.");
+            return;
+          }
+          button.disabled = attempt.disabled();
+          if (error.message !== "signed-out") setMessage(error.message, true);
+        }
       });
       card.append(button);
     }
@@ -2439,6 +2926,7 @@ const renderReadiness = (readiness) => {
 };
 
 const renderEvent = (detail, readiness) => {
+  if (!lifecycleShouldRenderEvent(eventSelect.value, currentEvent, detail.event)) return false;
   currentEvent = detail.event;
   currentEventDetail = detail;
   showFacts(eventSummary, [
@@ -2465,11 +2953,24 @@ const renderEvent = (detail, readiness) => {
     eventConfigForm.elements.roundOneHeatCapacity.value = currentEvent.roundOneHeatCapacity;
     eventConfigForm.elements.finalHeatCapacity.value = currentEvent.finalHeatCapacity;
     eventConfigForm.elements.publicNamePolicy.value = currentEvent.publicNamePolicy;
+    updateEventSlugPreview(eventConfigForm, eventConfigSlugPreview, currentEvent);
   }
   if (deleteDraftCard) {
     deleteDraftCard.hidden = currentEvent.status !== "DRAFT";
     deleteDraftForm.elements.confirmation.placeholder = "DELETE " + currentEvent.name;
   }
+  if (forceDeleteCard) {
+    forceDeleteCard.hidden = false;
+    forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;
+  }
+  return true;
+};
+
+const renderLifecycleResult = (event) => {
+  if (currentEventDetail === null || currentEventDetail.event.id !== event.id) return false;
+  const rendered = renderEvent({ ...currentEventDetail, event }, { readiness: {} });
+  if (rendered) readinessList.replaceChildren(empty("Refreshing lifecycle actions…"));
+  return rendered;
 };
 
 const loadEvents = async (preferredId) => {
@@ -2478,8 +2979,43 @@ const loadEvents = async (preferredId) => {
   if (body.events.length === 0) {
     eventSelect.append(new Option("No event exists", ""));
     currentEvent = null;
+    currentEventDetail = null;
+    selectedRegistration = null;
+    selectedDuck = null;
+    selectedHeat = null;
+    pendingHeatPlan = null;
+    reviewEvent = null;
     eventSummary.replaceChildren(empty("Create a draft event to begin."));
     readinessList.replaceChildren(empty("No lifecycle is available."));
+    for (const selector of [
+      "[data-participant-list]", "[data-inventory-list]", "[data-heat-list]",
+      "[data-finalist-list]", "[data-return-summary]", "[data-support-summary]",
+      "[data-notification-list]", "[data-notification-attempts]", "[data-audit-list]",
+      "[data-purge-gate]", "[data-walkup-result]", "[data-label-result]",
+      "[data-participant-name]", "[data-participant-facts]", "[data-participant-actions]",
+      "[data-inventory-name]", "[data-inventory-facts]", "[data-inventory-history]",
+      "[data-heat-name]", "[data-heat-facts]", "[data-heat-roster]",
+      "[data-heat-results]", "[data-heat-controls]",
+    ]) document.querySelector(selector)?.replaceChildren();
+    for (const selector of ["[data-participant-detail]", "[data-inventory-detail]", "[data-heat-detail]", "[data-return-review]"]) {
+      const element = document.querySelector(selector);
+      if (element) element.hidden = true;
+    }
+    inventoryDetailController.beginRequest();
+    participantEditForm.reset();
+    inventoryEditForm.reset();
+    if (eventConfigForm) {
+      eventConfigForm.reset();
+      eventConfigCard.hidden = true;
+    }
+    if (deleteDraftForm) {
+      deleteDraftForm.reset();
+      deleteDraftCard.hidden = true;
+    }
+    if (forceDeleteForm) {
+      forceDeleteForm.reset();
+      forceDeleteCard.hidden = true;
+    }
     setMessage("No event dataset exists. An administrator can create one.");
     const loads = [];
     if (canInventory) loads.push(loadInventory());
@@ -2506,10 +3042,13 @@ const loadEvent = async (eventId) => {
   const readiness = canRaceRead
     ? await api("/api/v1/staff/events/" + encodeURIComponent(eventId) + "/readiness")
     : { readiness: {} };
-  renderEvent(detail, readiness);
+  if (!renderEvent(detail, readiness)) return;
   const loads = [];
   if (canRegistration) loads.push(loadParticipants());
-  if (canInventory) loads.push(loadInventory());
+  if (canInventory) {
+    loads.push(loadInventory());
+    if (selectedDuck && !inventoryDetail.hidden) loads.push(loadDuckDetail(selectedDuck.id));
+  }
   if (canRaceRead) loads.push(loadHeats(), loadFinalists());
   if (canReturns) loads.push(loadReturnReview());
   if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit(), loadPurgeGate(), loadStaffProfiles());
@@ -2521,13 +3060,26 @@ const loadEvent = async (eventId) => {
 };
 
 eventSelect.addEventListener("change", () => {
-  if (eventSelect.value) loadEvent(eventSelect.value).catch((error) => setMessage(error.message, true));
+  if (eventSelect.value) loadEvent(eventSelect.value)
+    .then(() => globalThis.quickDucksLive.markClean(eventSelect))
+    .catch((error) => setMessage(error.message, true));
 });
 document.querySelector("[data-refresh-event]").addEventListener("click", () => {
   if (eventSelect.value) loadEvent(eventSelect.value).catch((error) => setMessage(error.message, true));
 });
 
 const eventCreateForm = document.querySelector("[data-event-create-form]");
+const eventCreateSlugPreview = document.querySelector("[data-event-create-slug-preview]");
+if (eventCreateForm) {
+  eventCreateForm.elements.name.addEventListener("input", () => {
+    updateEventSlugPreview(eventCreateForm, eventCreateSlugPreview);
+  });
+}
+if (eventConfigForm) {
+  eventConfigForm.elements.name.addEventListener("input", () => {
+    updateEventSlugPreview(eventConfigForm, eventConfigSlugPreview, currentEvent);
+  });
+}
 if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -2537,10 +3089,10 @@ if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) =>
     const result = await api("/api/v1/staff/events", commandOptions("POST", {
       commandId: crypto.randomUUID(),
       name: String(values.get("name")),
-      slug: String(values.get("slug")),
       eventDate: String(values.get("eventDate")),
     }));
     form.reset();
+    updateEventSlugPreview(form, eventCreateSlugPreview);
     await loadEvents(result.event.id);
   });
 });
@@ -2557,7 +3109,6 @@ if (eventConfigForm) eventConfigForm.addEventListener("submit", async (event) =>
         commandId: crypto.randomUUID(),
         revision: currentEvent.revision,
         name: String(values.get("name")),
-        slug: String(values.get("slug")),
         eventDate: String(values.get("eventDate")) || null,
         timezone: String(values.get("timezone")),
         registrationOpensAt: fromLocalInput(String(values.get("registrationOpensAt"))),
@@ -2578,7 +3129,7 @@ if (deleteDraftForm) deleteDraftForm.addEventListener("submit", async (event) =>
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const confirmation = String(new FormData(form).get("confirmation"));
-  if (!confirm("Delete this empty draft? This cannot be undone.")) return;
+  if (!await appConfirm("Delete this empty draft? This cannot be undone.", { danger: true })) return;
   await perform(button, "Checking and deleting empty draft…", async () => {
     await api(
       "/api/v1/staff/events/" + encodeURIComponent(currentEventId()),
@@ -2586,6 +3137,21 @@ if (deleteDraftForm) deleteDraftForm.addEventListener("submit", async (event) =>
     );
     currentEvent = null;
     await loadEvents();
+  });
+});
+
+if (forceDeleteForm) forceDeleteForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const confirmName = String(new FormData(form).get("confirmName"));
+  if (!await appConfirm("Permanently delete this event and every record for it, in any state? This cannot be undone.", { danger: true })) return;
+  await perform(button, "Permanently deleting event…", async () => {
+    await api(
+      "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/force-delete",
+      commandOptions("POST", { commandId: crypto.randomUUID(), revision: currentEvent.revision, confirmName }),
+    );
+    location.assign("/staff");
   });
 });
 
@@ -2636,7 +3202,7 @@ const addParticipantAction = (label, className, action) => {
 };
 
 const changeParticipantStatus = async (operation, label, dangerous, button) => {
-  if (dangerous && !confirm(label + " for " + selectedRegistration.firstName + " " + selectedRegistration.lastName + "?")) return;
+  if (dangerous && !await appConfirm(label + " for " + selectedRegistration.firstName + " " + selectedRegistration.lastName + "?", { danger: true })) return;
   await perform(button, label + "…", async () => {
     const result = await api(
       "/api/v1/staff/registrations/" + encodeURIComponent(selectedRegistration.registrationId) + "/" + operation,
@@ -2666,7 +3232,6 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.lastName.value = registration.lastName;
   participantEditForm.elements.email.value = registration.email || "";
   participantEditForm.elements.phone.value = registration.phone || "";
-  participantEditForm.elements.duckKeepPreference.value = registration.duckKeepPreference;
   participantEditForm.elements.notes.value = registration.notes || "";
   participantActions.replaceChildren();
   if (canInventory) {
@@ -2680,9 +3245,9 @@ const renderParticipantDetail = (registration) => {
     if (canDirectRace) addParticipantAction("Disqualify", "button danger small", (event) => changeParticipantStatus("disqualify", "Disqualify participant", true, event.currentTarget));
   }
   if (canDirectRace && ["WITHDRAWN", "DISQUALIFIED"].includes(registration.status)) {
-    addParticipantAction("Reactivate", "button small", (event) => {
+    addParticipantAction("Reactivate", "button small", async (event) => {
       const button = event.currentTarget;
-      if (!confirm("Reactivate this participant?")) return;
+      if (!await appConfirm("Reactivate this participant?")) return;
       perform(button, "Reactivating participant…", async () => {
         const result = await api(
           "/api/v1/staff/registrations/" + encodeURIComponent(selectedRegistration.registrationId) + "/reactivate",
@@ -2703,7 +3268,9 @@ const loadParticipantDetail = async (registrationId) => {
 
 participantFilterForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  loadParticipants().catch((error) => setMessage(error.message, true));
+  loadParticipants()
+    .then(() => globalThis.quickDucksLive.markClean(participantFilterForm))
+    .catch((error) => setMessage(error.message, true));
 });
 
 document.querySelector("[data-walkup-form]").addEventListener("submit", async (event) => {
@@ -2724,7 +3291,6 @@ document.querySelector("[data-walkup-form]").addEventListener("submit", async (e
         email: String(values.get("email")) || null,
         phone: String(values.get("phone")) || null,
         emailNotificationsEnabled: false,
-        duckKeepPreference: String(values.get("duckKeepPreference")),
         notes: String(values.get("notes")) || null,
         clientTimestamp: new Date().toISOString(),
       }),
@@ -2756,7 +3322,6 @@ participantEditForm.addEventListener("submit", async (event) => {
         email: String(values.get("email")) || null,
         phone: String(values.get("phone")) || null,
         emailNotificationsEnabled: false,
-        duckKeepPreference: String(values.get("duckKeepPreference")),
         notes: String(values.get("notes")) || null,
       }),
     );
@@ -2772,6 +3337,27 @@ const inventoryHistory = document.querySelector("[data-inventory-history]");
 const inventoryEditForm = document.querySelector("[data-inventory-edit-form]");
 const unassignForm = document.querySelector("[data-inventory-unassign-form]");
 const releaseReservationForm = document.querySelector("[data-reservation-release-form]");
+const inventoryCloseButton = document.querySelector("[data-close-inventory-detail]");
+
+const clearInventoryDetail = () => {
+  selectedDuck = null;
+  document.querySelector("[data-inventory-name]").textContent = "Duck detail";
+  inventoryFacts.replaceChildren();
+  inventoryHistory.replaceChildren();
+  document.querySelector("[data-label-result]").replaceChildren();
+  for (const form of inventoryDetail.querySelectorAll("form")) form.reset();
+  for (const disclosure of inventoryDetail.querySelectorAll("details")) disclosure.open = false;
+  unassignForm.hidden = true;
+  releaseReservationForm.hidden = true;
+  globalThis.quickDucksLive.markClean(inventoryDetail);
+};
+
+const inventoryDetailController = createInventoryDetailController({
+  detail: inventoryDetail,
+  list: inventoryList,
+  closeButton: inventoryCloseButton,
+  clear: clearInventoryDetail,
+});
 
 const loadInventory = async () => {
   const body = await api("/api/v1/staff/inventory/ducks");
@@ -2781,9 +3367,14 @@ const loadInventory = async () => {
     const eventLabel = duck.reservation && !duck.reservation.releasedAt ? " · " + duck.reservation.event.name : "";
     const button = text("button", "Duck #" + duck.visibleNumber + " · " + humanize(duck.inventoryStatus) + eventLabel, "result-button");
     button.type = "button";
-    button.addEventListener("click", () => loadDuckDetail(duck.id).catch((error) => setMessage(error.message, true)));
+    button.dataset.duckId = duck.id;
+    button.setAttribute("aria-controls", "inventory-detail-panel");
+    button.setAttribute("aria-expanded", "false");
+    button.addEventListener("click", () => loadDuckDetail(duck.id, button, true)
+      .catch((error) => setMessage(error.message, true)));
     inventoryList.append(button);
   }
+  inventoryDetailController.syncButtons();
 };
 
 const historyCard = (title, detail) => {
@@ -2795,7 +3386,6 @@ const historyCard = (title, detail) => {
 const renderDuckDetail = (body) => {
   selectedDuck = body.duck;
   const duck = body.duck;
-  inventoryDetail.hidden = false;
   document.querySelector("[data-inventory-name]").textContent = "Duck #" + duck.visibleNumber;
   showFacts(inventoryFacts, [
     ["Inventory", humanize(duck.inventoryStatus)],
@@ -2836,14 +3426,18 @@ const renderDuckDetail = (body) => {
   if (!inventoryHistory.childElementCount) inventoryHistory.append(empty("No inventory history is recorded."));
 };
 
-const loadDuckDetail = async (duckId) => {
+const loadDuckDetail = async (duckId, trigger = null, focusDetail = false) => {
+  const requestVersion = inventoryDetailController.beginRequest();
   const body = await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(duckId));
+  if (!inventoryDetailController.isCurrentRequest(requestVersion)) return;
   renderDuckDetail(body);
+  inventoryDetailController.open(duckId, trigger, focusDetail);
 };
 
 const refreshSelectedDuck = async () => {
-  const duckId = selectedDuck.id;
-  const loads = [loadInventory(), loadDuckDetail(duckId)];
+  const duckId = selectedDuck && !inventoryDetail.hidden ? selectedDuck.id : null;
+  const loads = [loadInventory()];
+  if (duckId) loads.push(loadDuckDetail(duckId));
   if (canRegistration) loads.push(loadParticipants());
   await Promise.all(loads);
 };
@@ -2865,7 +3459,7 @@ document.querySelector("[data-inventory-intake-form]").addEventListener("submit"
     }));
     form.reset();
     await loadInventory();
-    await loadDuckDetail(result.duck.id);
+    await loadDuckDetail(result.duck.id, null, true);
   });
 });
 
@@ -2889,7 +3483,7 @@ document.querySelector("[data-tag-replace-form]").addEventListener("submit", asy
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const values = new FormData(form);
-  if (!confirm("Retire the current tag and activate this verified replacement?")) return;
+  if (!await appConfirm("Retire the current tag and activate this verified replacement?", { danger: true })) return;
   await perform(button, "Replacing active tag…", async () => {
     await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/tags/replace", commandOptions("POST", {
       commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision,
@@ -2905,7 +3499,7 @@ document.querySelector("[data-tag-retire-form]").addEventListener("submit", asyn
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const values = new FormData(form);
-  if (!confirm("Retire this tag without a replacement? The duck will be quarantined.")) return;
+  if (!await appConfirm("Retire this tag without a replacement? The duck will be quarantined.", { danger: true })) return;
   await perform(button, "Retiring active tag…", async () => {
     await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/tags/retire", commandOptions("POST", {
       commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision,
@@ -2937,7 +3531,7 @@ document.querySelector("[data-inventory-assign-form]").addEventListener("submit"
     setMessage("Select an inventory duck first.", true);
     return;
   }
-  if (!confirm("Assign Duck #" + selectedDuck.visibleNumber + " to this race entry?")) return;
+  if (!await appConfirm("Assign Duck #" + selectedDuck.visibleNumber + " to this race entry?")) return;
   await perform(button, "Assigning duck…", async () => {
     await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/assignments", commandOptions("POST", {
       commandId: crypto.randomUUID(), eventId: currentEventId(), raceEntryId: String(values.get("raceEntryId")),
@@ -2952,7 +3546,7 @@ unassignForm.addEventListener("submit", async (event) => {
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const values = new FormData(form);
-  if (!confirm("Unassign Duck #" + selectedDuck.visibleNumber + " from its participant?")) return;
+  if (!await appConfirm("Unassign Duck #" + selectedDuck.visibleNumber + " from its participant?", { danger: true })) return;
   await perform(button, "Unassigning duck…", async () => {
     await api("/api/v1/staff/inventory/assignments/" + encodeURIComponent(selectedDuck.assignment.id) + "/unassign", commandOptions("POST", {
       commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision,
@@ -2968,7 +3562,7 @@ releaseReservationForm.addEventListener("submit", async (event) => {
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const reason = String(new FormData(form).get("reason"));
-  if (!confirm("Release Duck #" + selectedDuck.visibleNumber + " from this event?")) return;
+  if (!await appConfirm("Release Duck #" + selectedDuck.visibleNumber + " from this event?", { danger: true })) return;
   await perform(button, "Releasing reservation…", async () => {
     await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/reservations/release", commandOptions("POST", {
       commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision, reason,
@@ -3081,7 +3675,7 @@ const resultForm = (body, mode) => {
       return label + ": " + (select.selectedOptions[0]?.textContent || "not selected");
     }).join("; ");
     const action = mode === "finalize" ? "Publish this official result now" : "Replace the official result now";
-    if (!confirm(action + "? Read back: " + readback + ". This changes the public result immediately.")) return;
+    if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;
     const payload = {
       commandId: crypto.randomUUID(), revision: selectedHeat.revision,
       results: selects.map(([place, select]) => ({ raceEntryId: select.value, place })),
@@ -3114,7 +3708,7 @@ const renderHeatControls = (body) => {
           + body.roster.length + " racer" + (body.roster.length === 1 ? "" : "s")
           + ". No next heat can start until this heat's official result is published."
         : transition[1] + "?";
-      if (!confirm(confirmation)) return;
+      if (!await appConfirm(confirmation)) return;
       await perform(button, transition[1] + "…", async () => {
         await api(
           "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/" + encodeURIComponent(selectedHeat.id) + "/" + transition[0],
@@ -3153,7 +3747,7 @@ const renderHeatControls = (body) => {
     reopenForm.append(label, button);
     reopenForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!confirm("Reopen this published result and remove downstream finalist promotion when applicable?")) return;
+      if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;
       await perform(button, "Reopening result…", async () => {
         await api(
           "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/" + encodeURIComponent(selectedHeat.id) + "/results/reopen",
@@ -3197,7 +3791,8 @@ document.querySelector("[data-plan-preview]").addEventListener("click", async (e
 });
 
 planCommitButton.addEventListener("click", async () => {
-  if (!pendingHeatPlan || !confirm("Commit this exact balanced plan? Rosters become operational race data.")) return;
+  if (!pendingHeatPlan) return;
+  if (!await appConfirm("Commit this exact balanced plan? Rosters become operational race data.")) return;
   await perform(planCommitButton, "Committing balanced heat plan…", async () => {
     await api(
       "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/round-one/plan-commit",
@@ -3276,7 +3871,7 @@ numberedDispositionForm.addEventListener("submit", async (event) => {
 purgeReadyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.currentTarget.querySelector("button");
-  if (!confirm("Mark this event purge-ready and disable normal race changes?")) return;
+  if (!await appConfirm("Mark this event purge-ready and disable normal race changes?", { danger: true })) return;
   await perform(button, "Validating final return gates…", async () => {
     await api("/api/v1/staff/events/" + encodeURIComponent(reviewEvent.id) + "/purge-ready", commandOptions("POST", {
       commandId: crypto.randomUUID(), returnReviewCompleted: true, permanentDeletionAcknowledged: true,
@@ -3344,7 +3939,7 @@ document.querySelector("[data-finalize-return-batch]").addEventListener("click",
     setMessage("Start a batch or enter its ID first.", true, returnBatchMessage);
     return;
   }
-  if (!confirm("Finalize this return batch? Every staged disposition will become authoritative.")) return;
+  if (!await appConfirm("Finalize this return batch? Every staged disposition will become authoritative.")) return;
   await perform(event.currentTarget, "Finalizing return batch…", async () => {
     const result = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/return-batches/" + encodeURIComponent(batchId) + "/finalize", commandOptions("POST", { commandId: crypto.randomUUID() }));
     setMessage("Finalized " + result.batch.itemCount + " return items.", false, returnBatchMessage);
@@ -3375,7 +3970,7 @@ const loadSupportSummary = async () => {
 
 const notificationAction = async (notification, action, reason, button) => {
   const label = action === "retry" ? "Retry" : action === "suppress" ? "Suppress" : "Cancel";
-  if (!confirm(label + " this notification?")) return;
+  if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;
   await perform(button, label + " notification…", async () => {
     const payload = { commandId: crypto.randomUUID() };
     if (action !== "retry") payload.reason = reason;
@@ -3456,14 +4051,19 @@ const loadPurgeGate = async () => {
 if (isSystemAdmin) {
   document.querySelector("[data-refresh-support]").addEventListener("click", () => loadSupportSummary().catch((error) => setMessage(error.message, true)));
   document.querySelector("[data-refresh-purge-gate]").addEventListener("click", () => loadPurgeGate().catch((error) => setMessage(error.message, true)));
-  document.querySelector("[data-notification-filter-form]").addEventListener("submit", (event) => { event.preventDefault(); loadNotifications().catch((error) => setMessage(error.message, true)); });
+  document.querySelector("[data-notification-filter-form]").addEventListener("submit", (event) => {
+    event.preventDefault();
+    loadNotifications()
+      .then(() => globalThis.quickDucksLive.markClean(event.currentTarget))
+      .catch((error) => setMessage(error.message, true));
+  });
   document.querySelector("[data-refresh-audit]").addEventListener("click", () => loadAudit().catch((error) => setMessage(error.message, true)));
   purgeClaimForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector("button");
     const confirmation = String(new FormData(form).get("confirmation"));
-    if (!confirm("Claim this event for permanent purge? Support mutations will be frozen.")) return;
+    if (!await appConfirm("Claim this event for permanent purge? Support mutations will be frozen.", { danger: true })) return;
     await perform(button, "Claiming permanent purge…", async () => {
       await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/purge-claim", commandOptions("POST", { commandId: crypto.randomUUID(), confirmation }));
       await loadPurgeGate();
@@ -3474,7 +4074,7 @@ if (isSystemAdmin) {
     const form = event.currentTarget;
     const button = form.querySelector("button");
     const confirmation = String(new FormData(form).get("confirmation"));
-    if (!confirm("Permanently delete the complete race dataset now? This cannot be undone.")) return;
+    if (!await appConfirm("Permanently delete the complete race dataset now? This cannot be undone.", { danger: true })) return;
     await perform(button, "Permanently deleting race dataset…", async () => {
       await api("/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/purge", commandOptions("POST", { confirmation }));
       location.assign("/staff");
@@ -3498,6 +4098,7 @@ const staffRoleLabels = {
 
 const roleSetControl = (selectedRoles) => {
   const fieldset = document.createElement("fieldset");
+  fieldset.className = "role-set";
   const legend = text("legend", "Operational roles");
   fieldset.append(legend);
   for (const [value, label] of Object.entries(staffRoleLabels)) {
@@ -3517,7 +4118,7 @@ const selectedRoleSet = (fieldset) => [...fieldset.querySelectorAll('input[type=
 
 const staffLifecycle = async (profile, action, roleChange, button) => {
   const description = action === "role" ? "change this account role" : action + " this staff account";
-  if (!confirm("Really " + description + "?")) return;
+  if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;
   await perform(button, "Updating staff access…", async () => {
     const payload = { commandId: crypto.randomUUID() };
     if (action === "role") {
@@ -3541,7 +4142,7 @@ const loadStaffProfiles = async () => {
     const card = text("article", "", "staff-access-card");
     const identity = text("div", "");
     identity.append(text("p", profile.displayName || profile.email), text("p", profile.email + " · " + (profile.active === false ? "Inactive" : "Active"), "muted"));
-    const controls = text("div", "", "actions");
+    const controls = text("div", "", "actions staff-role-controls");
     const role = document.createElement("select");
     role.setAttribute("aria-label", "Account type for " + (profile.displayName || profile.email));
     role.append(new Option("Regular staff", "STAFF"), new Option("System administrator", "ADMIN"));
@@ -3596,8 +4197,11 @@ if (staffAccessForm) {
   updateRoleSet();
 }
 
-loadEvents().catch((error) => {
-  if (error.message !== "signed-out") setMessage(error.message, true);
+staffLiveSubscription = globalThis.quickDucksLive.subscribe({
+  domains: ["event", "participants", "ducks", "heats", "returns", "staff", "support"],
+  root: operationsRoot,
+  refresh: () => loadEvents(currentEvent?.id),
+  isBlocked: () => staffCommandCount > 0,
 });
 `;
 
@@ -3631,6 +4235,8 @@ const dispositionMessage = document.querySelector("[data-disposition-message]");
 const message = document.querySelector("[data-staff-message]");
 let currentEvent = null;
 let selectedRegistration = null;
+let staffDuckBusy = 0;
+let staffDuckSubscription = null;
 
 const text = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -3642,11 +4248,16 @@ const text = (tag, value, className) => {
 const fetchJson = async (url, options) => {
   const response = await fetch(url, options);
   if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
     location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
     throw new Error("signed-out");
   }
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error || "Request failed.");
+  if (!response.ok) {
+    const error = new Error(body.error || "Request failed.");
+    error.status = response.status;
+    throw error;
+  }
   return body;
 };
 
@@ -3737,7 +4348,18 @@ const load = async () => {
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
   } catch (error) {
-    if (error.message !== "signed-out") message.textContent = error.message;
+    if (error.message !== "signed-out") {
+      if (error.status === 403 || error.status === 404) {
+        selectedRegistration = null;
+        currentEvent = null;
+        summary.replaceChildren();
+        workArea.hidden = true;
+        dispositionArea.hidden = true;
+        document.querySelector("[data-registration-results]").replaceChildren();
+        document.querySelector("[data-pairing-review]").replaceChildren();
+      }
+      message.textContent = error.message;
+    }
   }
 };
 
@@ -3752,6 +4374,7 @@ document.querySelector("[data-registration-search]").addEventListener("submit", 
   try {
     const parameters = new URLSearchParams({ eventId: currentEvent.id, q: String(query) });
     const body = await fetchJson("/api/v1/staff/registrations/search?" + parameters);
+    globalThis.quickDucksLive.markClean(event.currentTarget);
     if (body.registrations.length === 0) {
       results.append(text("p", "No matching registration was found.", "muted"));
       return;
@@ -3779,6 +4402,8 @@ document.querySelector("[data-registration-search]").addEventListener("submit", 
 document.querySelector("[data-confirm-pairing]").addEventListener("click", async (event) => {
   if (!selectedRegistration || !currentEvent) return;
   event.currentTarget.disabled = true;
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
   message.textContent = "Pairing duck and participant…";
   try {
     const result = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/assignments", {
@@ -3797,11 +4422,17 @@ document.querySelector("[data-confirm-pairing]").addEventListener("click", async
     addFact("Heat", result.heat ? "Round one · Heat " + result.heat.number : "Assignment pending");
     pageTitle.textContent = "Duck #" + result.duck.visibleNumber + " paired";
     message.textContent = result.replayed ? "This pairing was already saved." : "Duck paired successfully.";
+    selectedRegistration = null;
+    globalThis.quickDucksLive.markClean(root);
   } catch (error) {
     if (error.message !== "signed-out") {
       message.textContent = error.message;
       event.currentTarget.disabled = false;
     }
+  } finally {
+    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
+    endBusy();
+    staffDuckSubscription?.resume();
   }
 });
 
@@ -3810,6 +4441,8 @@ dispositionForm.addEventListener("submit", async (event) => {
   const button = document.querySelector("[data-confirm-disposition]");
   const disposition = new FormData(event.currentTarget).get("disposition");
   button.disabled = true;
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
   dispositionMessage.textContent = "Saving physical disposition…";
   try {
     const result = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/dispositions", {
@@ -3825,12 +4458,22 @@ dispositionForm.addEventListener("submit", async (event) => {
     dispositionMessage.textContent = result.replayed
       ? "This disposition was already saved."
       : "Disposition saved. Inventory is now " + result.inventoryStatus.replaceAll("_", " ").toLowerCase() + ".";
+    globalThis.quickDucksLive.markClean(event.currentTarget);
   } catch (error) {
     if (error.message !== "signed-out") dispositionMessage.textContent = error.message;
     button.disabled = false;
+  } finally {
+    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
+    endBusy();
+    staffDuckSubscription?.resume();
   }
 });
 
-load();
+staffDuckSubscription = globalThis.quickDucksLive.subscribe({
+  domains: ["event", "participants", "ducks", "heats", "returns"],
+  root,
+  refresh: load,
+  isBlocked: () => staffDuckBusy > 0 || selectedRegistration !== null,
+});
 }
 `;

@@ -92,21 +92,12 @@ each physical duck, confirm or enter its visible number, verify the attached
 NFC/QR tag, and create a new duck/tag mapping for the new race. Ducks that were
 kept, missing, damaged, or not physically presented simply are not registered.
 
-## Participant Keep Preference
-
-Registration or pairing can record:
-
-```text
-After the race:
-( ) I plan to keep my duck
-( ) I plan to return my duck for a future race
-( ) I am not sure yet
-```
-
-This is planning information only. It never changes permanent inventory.
-Physical disposition requires a staff-confirmed return workflow.
-
 ## End-of-Race Duck Reconciliation
+
+Registration and pairing do not ask whether a participant plans to keep or
+return a duck. Return staff record only the actual observed disposition. The
+legacy `race_entries.duck_keep_preference` database column is retained for
+compatibility but is ignored, and its rows are deleted in the final purge.
 
 ### Returned for Reuse
 
