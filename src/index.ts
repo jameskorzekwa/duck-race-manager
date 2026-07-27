@@ -22,6 +22,7 @@ import {
   staffHomeScript,
   startLineScript,
 } from "./client-scripts.ts";
+import { isLocalPreviewOrigin } from "./local-preview.ts";
 import { publicPhaseForRender, type PublicPhase } from "./public-phase.ts";
 import {
   faviconSvg,
@@ -149,8 +150,7 @@ export const createWorker = (
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const appOrigin = new URL(env.APP_ORIGIN);
-    const localHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
-    const localPreview = appOrigin.protocol === "http:" && localHosts.has(appOrigin.hostname);
+    const localPreview = isLocalPreviewOrigin(env.APP_ORIGIN);
     const staffHtml = (body: string, status = 200): Response =>
       html(body, status, true, new URL(env.COGNITO_DOMAIN).origin);
     // One lightweight current-event query per HTML request. Every page renders
@@ -276,11 +276,16 @@ export const createWorker = (
     }
     if (url.pathname === "/register" && request.method === "GET") {
       const siteKey = env.TURNSTILE_SITE_KEY?.trim();
-      return html(
-        renderRegistration(siteKey && env.TURNSTILE_SECRET_KEY ? siteKey : undefined, await publicPhase()),
-        200,
-        true,
-      );
+      const configuredSiteKey = siteKey && env.TURNSTILE_SECRET_KEY ? siteKey : undefined;
+      // A local preview has no Turnstile keys and no route to Cloudflare's
+      // siteverify endpoint, which would otherwise leave the public form
+      // permanently unsubmittable. This must be the exact condition
+      // `createRegistration` uses to waive verification — the secret alone, not
+      // the pair of keys. Deriving it from the site key instead would offer a
+      // bypass form on a preview that has only a secret, and the API would then
+      // reject every submission it invited.
+      const protectionWaived = env.TURNSTILE_SECRET_KEY === undefined && localPreview;
+      return html(renderRegistration(configuredSiteKey, await publicPhase(), protectionWaived), 200, true);
     }
     // Race Status. Public for the five post-DRAFT statuses and the shared
     // preparing message before that.

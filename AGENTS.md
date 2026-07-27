@@ -20,6 +20,8 @@ docs/                # Current workflows, infrastructure runbooks, design histor
 infra/aws/           # Cognito, SES, and IAM CloudFormation
 .github/workflows/   # Credential-free CI and main/tag production CD
 wrangler.jsonc       # Production Worker, D1, queue, rate-limit, and domain bindings
+wrangler.local.jsonc # Local-only Worker entry and loopback origin; never deployed
+scripts/             # Release, validation, and local seeding tools
 ```
 
 ## WHERE TO LOOK
@@ -36,7 +38,9 @@ wrangler.jsonc       # Production Worker, D1, queue, rate-limit, and domain bind
 | HTML/CSS and browser behavior | `src/site.ts`, `src/client-scripts.ts` | No frontend build pipeline |
 | Current product behavior | `docs/WORKFLOWS.md` | Canonical over older design documents |
 | Deployment and rollback | `docs/INFRASTRUCTURE.md` | Covers GitHub, AWS, Cloudflare, and D1 |
+| Running and seeding the site locally | `docs/LOCAL_DEVELOPMENT.md` | Offline Cognito and Turnstile stand-ins, lifecycle seed states |
 | Production bindings | `wrangler.jsonc` | Names and IDs are deployment contracts |
+| Local-only Worker entry and bindings | `src/local-dev.ts`, `wrangler.local.jsonc` | Never referenced by the deployed configuration |
 
 ## COMMANDS
 
@@ -46,6 +50,9 @@ npm run typecheck
 npm test
 npm run wrangler:validate
 npm run db:migrate:local
+
+npm run dev:local                        # whole site on http://localhost:8787, no network
+npm run seed:local -- --state=round-one  # fill it with a race at a chosen lifecycle state
 ```
 
 `npm run check` runs TypeScript and Wrangler validation only. It does not run

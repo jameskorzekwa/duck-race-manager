@@ -81,8 +81,23 @@ delivery phases, and acceptance criteria.
 - Public heat results and final podium
 - Administrative correction and audit tools
 
+## Running it locally
+
+The whole site runs on one machine with no network access, and seeds itself with
+a race at any lifecycle state:
+
+```sh
+npm ci
+npm run dev:local                          # http://localhost:8787
+npm run seed:local -- --state=round-one    # in a second terminal
+```
+
+See [local development](docs/LOCAL_DEVELOPMENT.md) for the seed states, the
+offline sign-in accounts, and what is deliberately still not local.
+
 ## Documentation
 
+- [Local development](docs/LOCAL_DEVELOPMENT.md)
 - [Project plan](docs/PROJECT_PLAN.md)
 - [Domain and hosting setup](docs/DOMAIN_SETUP.md)
 - [Heat assignment, notifications, and duck inspection](docs/HEAT_ASSIGNMENT_AND_NOTIFICATIONS.md)
