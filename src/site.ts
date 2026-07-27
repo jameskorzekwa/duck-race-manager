@@ -1,4 +1,5 @@
 import { operationalRoles, type OperationalRole } from "./authorization.ts";
+import { localPreviewTurnstileToken } from "./local-preview.ts";
 import {
   homePhaseCta,
   phaseAllowsRaceStatus,
@@ -19,7 +20,7 @@ import {
 } from "./race-status.ts";
 import type { RegistrationStatusRecord } from "./types.ts";
 
-const escapeHtml = (value: string): string =>
+export const escapeHtml = (value: string): string =>
   value.replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;",
     "<": "&lt;",
@@ -572,6 +573,7 @@ ${nameSearchSection()}
 export const renderRegistration = (
   turnstileSiteKey?: string,
   phase: PublicPhase = "PREPARING",
+  localPreviewWithoutProtection = false,
 ): string => {
   if (phase === "PREPARING") {
     return page({
@@ -612,7 +614,7 @@ export const renderRegistration = (
       <p class="lede" data-event-date>Registration takes about one minute.</p>
       <div class="privacy"><strong>Private by design.</strong><span>Your email and phone number are visible only to logged-in authorized race staff. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
       <div class="notice"><strong>Registering more than one participant?</strong> Finish this form once for each person. You can use the same phone, email, or browser, and QuickDucks will keep their codes together on this device.</div>
-      <form method="post" action="/api/v1/registrations" data-registration-form data-protection-ready="${turnstileSiteKey === undefined ? "false" : "true"}">
+      <form method="post" action="/api/v1/registrations" data-registration-form data-protection-ready="${turnstileSiteKey === undefined && !localPreviewWithoutProtection ? "false" : "true"}">
         <div class="field-grid">
           <label>First name<input name="first_name" autocomplete="given-name" maxlength="80" required placeholder="Jamie"><span class="field-error" data-field-error="first_name"></span></label>
           <label>Last name<input name="last_name" autocomplete="family-name" maxlength="80" required placeholder="Rivera"><span class="field-error" data-field-error="last_name"></span></label>
@@ -622,9 +624,11 @@ export const renderRegistration = (
           <label><span class="label-text" data-email-label>Email (optional)</span><input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>Used only for operational race updates.</span><span class="field-error" data-field-error="email"></span></label>
           <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="32" placeholder="(555) 010-2040"><span class="field-error" data-field-error="phone"></span></label>
         </div>
-        ${turnstileSiteKey === undefined
-          ? '<div class="turnstile-mock">Registration protection is still being configured.</div>'
-          : `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-size="flexible"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`}
+        ${turnstileSiteKey !== undefined
+          ? `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-size="flexible"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
+          : localPreviewWithoutProtection
+            ? `<div class="turnstile-mock">Local preview — registration protection is bypassed.</div><input type="hidden" name="cf-turnstile-response" value="${escapeHtml(localPreviewTurnstileToken)}">`
+            : '<div class="turnstile-mock">Registration protection is still being configured.</div>'}
         <p class="muted" data-form-message aria-live="polite">Loading registration availability…</p>
         <button class="button" type="submit" disabled>Register participant</button>
       </form>

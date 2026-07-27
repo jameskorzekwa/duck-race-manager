@@ -37,6 +37,20 @@ scan-first pairing.
 | Inventory/tags/assignments | `duck-operations.ts`, `staff-api.ts` |
 | Heats/results | `heat-operations.ts` |
 | Support diagnostics | `support-operations.ts` |
+| Local development entry | `local-dev.ts`, `local-preview.ts` |
+
+## LOCAL DEVELOPMENT
+
+`local-dev.ts` is the entry point for `wrangler.local.jsonc` only. It is never
+imported by a deployed module and never bundled by `wrangler.jsonc`. It stands in
+for the Cognito hosted UI and token endpoints so the whole site, including staff
+surfaces, runs offline; see `docs/LOCAL_DEVELOPMENT.md`.
+
+Any behaviour that must differ locally is gated on `isLocalPreviewOrigin` from
+`local-preview.ts`, which is true only for an http loopback `APP_ORIGIN`.
+Production configures an https origin, so those branches are unreachable there.
+Never widen that predicate, and never gate a local affordance on anything else —
+an environment variable or a build flag can be set by mistake in production.
 
 ## CODING CONVENTIONS
 
