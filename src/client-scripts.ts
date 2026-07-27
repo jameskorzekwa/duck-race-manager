@@ -2971,7 +2971,6 @@ const renderEvent = (detail, readiness) => {
   if (eventConfigCard) {
     eventConfigCard.hidden = currentEvent.status !== "DRAFT";
     eventConfigForm.elements.name.value = currentEvent.name;
-    eventConfigForm.elements.slug.value = currentEvent.slug;
     eventConfigForm.elements.eventDate.value = currentEvent.eventDate || "";
     eventConfigForm.elements.timezone.value = currentEvent.timezone;
     eventConfigForm.elements.registrationOpensAt.value = toLocalInput(currentEvent.registrationOpensAt);
