@@ -3374,7 +3374,117 @@ const createInventoryDetailController = ({ detail, list, closeButton, clear }) =
 };
 `;
 
-export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + inventoryDetailHelpersScript + String.raw`
+// Inventory sectioning. The grouping is derived from the states the inventory
+// API already reports for every duck — its `inventoryStatus`, its most recent
+// event reservation, and its open participant assignment — so the console never
+// invents an inventory state of its own.
+//
+// A duck is "in use" when it is committed to a race: it holds an unreleased
+// reservation, it is paired with a participant, or its status is already
+// IN_USE. It is "ready to be reserved" when it is not committed and its status
+// is AVAILABLE, which is exactly the state the assign and pairing paths accept.
+// Everything else (NEW mid-provisioning, QUARANTINED, DAMAGED, RETIRED,
+// MISSING, UNACCOUNTED_FOR, KEPT) cannot be reserved and is kept visible in a
+// third group rather than dropped from the list.
+export const inventoryGroupHelpersScript = String.raw`
+const inventoryGroupDefinitions = [
+  {
+    key: "IN_USE",
+    title: "In use",
+    description: "Reserved to a race, paired with a participant, or racing now.",
+    emptyMessage: "No ducks are reserved or paired yet.",
+    alwaysRender: true,
+  },
+  {
+    key: "READY",
+    title: "Ready to be reserved",
+    description: "Available ducks with no live reservation. Assigning one reserves it automatically.",
+    emptyMessage: "No ducks are ready to be reserved.",
+    alwaysRender: true,
+  },
+  {
+    key: "UNAVAILABLE",
+    title: "Not ready to reserve",
+    description: "Ducks that cannot be reserved until their inventory state changes.",
+    emptyMessage: "No ducks are held out of the race.",
+    alwaysRender: false,
+  },
+];
+
+const inventoryDuckReserved = (duck) => Boolean(duck && duck.reservation && !duck.reservation.releasedAt);
+const inventoryDuckPaired = (duck) => Boolean(duck && (duck.assignment || duck.participant));
+
+const inventoryDuckGroupKey = (duck) => {
+  if (inventoryDuckReserved(duck) || inventoryDuckPaired(duck)) return "IN_USE";
+  if (duck && duck.inventoryStatus === "IN_USE") return "IN_USE";
+  return duck && duck.inventoryStatus === "AVAILABLE" ? "READY" : "UNAVAILABLE";
+};
+
+// Groups keep the server's visible-number ordering. The two primary groups are
+// always rendered, with an explicit empty message instead of a blank area; the
+// exception bucket is rendered only when it actually holds ducks.
+const groupInventoryDucks = (ducks) => inventoryGroupDefinitions
+  .map((group) => ({
+    key: group.key,
+    title: group.title,
+    description: group.description,
+    emptyMessage: group.emptyMessage,
+    alwaysRender: group.alwaysRender,
+    ducks: (ducks || []).filter((duck) => inventoryDuckGroupKey(duck) === group.key),
+  }))
+  .filter((group) => group.alwaysRender || group.ducks.length > 0);
+`;
+
+// Heat roster deep links. A roster entry names the racer, shows the race-entry
+// UUID that identifies it everywhere else in the console, and offers the two
+// in-page navigations the actor's roles allow. The caller passes the element
+// factory and the already role-checked actions, so this helper never decides
+// permissions and never touches the network itself.
+export const heatRosterHelpersScript = String.raw`
+const heatRosterParticipantName = (entry) => entry.participant.firstName + " " + entry.participant.lastName;
+
+const heatRosterLinkButton = (text, label, action) => {
+  const button = text("button", label, "button secondary small");
+  button.type = "button";
+  button.addEventListener("click", action);
+  return button;
+};
+
+const createHeatRosterEntry = ({ entry, text, openParticipant, openDuck }) => {
+  const participantName = heatRosterParticipantName(entry);
+  const item = text("li", "", "roster-entry");
+  item.append(text(
+    "p",
+    "Slot " + entry.slotNumber + " · " + participantName
+      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · No duck"),
+    "roster-entry-line",
+  ));
+  item.append(text("p", "Race entry " + entry.raceEntryId, "roster-entry-id"));
+  const actions = text("div", "", "actions");
+  let linkCount = 0;
+  if (openParticipant) {
+    const button = heatRosterLinkButton(text, "Participant details · " + participantName, openParticipant);
+    button.dataset.rosterParticipantLink = entry.raceEntryId;
+    actions.append(button);
+    linkCount += 1;
+  }
+  // A roster entry with no assigned duck offers no duck link at all.
+  if (openDuck && entry.duck) {
+    const button = heatRosterLinkButton(
+      text,
+      "Duck #" + entry.duck.visibleNumber + " in inventory",
+      openDuck,
+    );
+    button.dataset.rosterDuckLink = entry.duck.id;
+    actions.append(button);
+    linkCount += 1;
+  }
+  if (linkCount > 0) item.append(actions);
+  return item;
+};
+`;
+
+export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + inventoryDetailHelpersScript + inventoryGroupHelpersScript + heatRosterHelpersScript + String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
 const assignedRoles = new Set((operationsRoot.dataset.roles || "").split(",").filter(Boolean));
@@ -4081,21 +4191,52 @@ const inventoryDetailController = createInventoryDetailController({
   clear: clearInventoryDetail,
 });
 
+const inventoryCard = (duck) => {
+  const eventLabel = duck.reservation && !duck.reservation.releasedAt ? " · " + duck.reservation.event.name : "";
+  const button = text("button", "Duck #" + duck.visibleNumber + " · " + humanize(duck.inventoryStatus) + eventLabel, "result-button");
+  button.type = "button";
+  button.dataset.duckId = duck.id;
+  button.setAttribute("aria-controls", "inventory-detail-panel");
+  button.setAttribute("aria-expanded", "false");
+  button.addEventListener("click", () => loadDuckDetail(duck.id, button, true)
+    .catch((error) => setMessage(error.message, true)));
+  return button;
+};
+
+// The cards stay one grid of the same buttons; each group is a labelled band
+// across that grid so the detail controller still finds every [data-duck-id]
+// card and selection, focus, and live refresh behave exactly as before.
+const inventoryGroupSection = (group) => {
+  const section = text("section", "", "inventory-group");
+  section.dataset.inventoryGroup = group.key;
+  const heading = text("h3", group.title, "inventory-group-title");
+  heading.id = "inventory-group-" + group.key.toLowerCase().replaceAll("_", "-");
+  section.setAttribute("aria-labelledby", heading.id);
+  section.append(heading);
+  if (group.ducks.length === 0) {
+    section.append(empty(group.emptyMessage));
+    return section;
+  }
+  section.append(text(
+    "p",
+    group.ducks.length + (group.ducks.length === 1 ? " duck · " : " ducks · ") + group.description,
+    "muted",
+  ));
+  const cards = text("div", "", "data-list inventory-card-grid");
+  for (const duck of group.ducks) cards.append(inventoryCard(duck));
+  section.append(cards);
+  return section;
+};
+
 const loadInventory = async () => {
   const body = await api("/api/v1/staff/inventory/ducks");
   inventoryList.replaceChildren();
-  if (body.ducks.length === 0) inventoryList.append(empty("No ducks are in inventory."));
-  for (const duck of body.ducks) {
-    const eventLabel = duck.reservation && !duck.reservation.releasedAt ? " · " + duck.reservation.event.name : "";
-    const button = text("button", "Duck #" + duck.visibleNumber + " · " + humanize(duck.inventoryStatus) + eventLabel, "result-button");
-    button.type = "button";
-    button.dataset.duckId = duck.id;
-    button.setAttribute("aria-controls", "inventory-detail-panel");
-    button.setAttribute("aria-expanded", "false");
-    button.addEventListener("click", () => loadDuckDetail(duck.id, button, true)
-      .catch((error) => setMessage(error.message, true)));
-    inventoryList.append(button);
+  if (body.ducks.length === 0) {
+    inventoryList.append(empty("No ducks are in inventory."));
+    inventoryDetailController.syncButtons();
+    return;
   }
+  for (const group of groupInventoryDucks(body.ducks)) inventoryList.append(inventoryGroupSection(group));
   inventoryDetailController.syncButtons();
 };
 
@@ -4294,6 +4435,28 @@ releaseReservationForm.addEventListener("submit", async (event) => {
   });
 });
 
+// The console is one page of anchored sections, so a roster deep link is an
+// in-page navigation: bring the target section into view, then run the same
+// selection code path the section's own list buttons run.
+const revealConsoleSection = (selector) => {
+  const section = document.querySelector(selector);
+  if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+  return section;
+};
+
+const openRosterParticipant = async (registrationId) => {
+  revealConsoleSection("#participants");
+  await loadParticipantDetail(registrationId);
+  participantDetail.focus();
+};
+
+// loadDuckDetail owns the detail request versioning, so a link click that is
+// overtaken by another selection resolves without opening a stale panel.
+const openRosterDuck = async (duckId) => {
+  revealConsoleSection("#inventory");
+  await loadDuckDetail(duckId, null, true);
+};
+
 const heatList = document.querySelector("[data-heat-list]");
 const heatDetail = document.querySelector("[data-heat-detail]");
 const heatFacts = document.querySelector("[data-heat-facts]");
@@ -4477,7 +4640,21 @@ const loadHeatDetail = async (heatId) => {
   document.querySelector("[data-heat-name]").textContent = humanize(body.heat.round) + " · Heat " + body.heat.number;
   showFacts(heatFacts, [["Status", humanize(body.heat.status)], ["Roster", body.heat.rosterSize], ["Published results", body.heat.publishedResultCount], ["Revision", body.heat.revision]]);
   heatRoster.replaceChildren();
-  for (const entry of body.roster) heatRoster.append(text("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · No duck")));
+  // Each link is offered only to an actor whose roles can open that section,
+  // which is the same gating the target APIs enforce.
+  for (const entry of body.roster) {
+    heatRoster.append(createHeatRosterEntry({
+      entry,
+      text,
+      openParticipant: canRegistration && entry.participant.registrationId
+        ? () => openRosterParticipant(entry.participant.registrationId)
+          .catch((error) => setMessage(error.message, true))
+        : null,
+      openDuck: canInventory && entry.duck && entry.duck.id
+        ? () => openRosterDuck(entry.duck.id).catch((error) => setMessage(error.message, true))
+        : null,
+    }));
+  }
   if (body.roster.length === 0) heatRoster.append(empty("This heat has no roster entries."));
   heatResults.replaceChildren();
   for (const result of body.results) heatResults.append(historyCard("Place " + result.place + " · Duck #" + result.duck.visibleNumber, result.participant.firstName + " " + result.participant.lastName));

@@ -240,6 +240,10 @@ form.operation-card > * + * { margin-top:0; }
 .inventory-card-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr)); grid-auto-rows:minmax(3.75rem,1fr); align-content:start; align-items:stretch; margin-top:0; }
 .inventory-card-grid .result-button { height:100%; min-height:3.75rem; }
 .inventory-card-grid .result-button[aria-expanded="true"] { background:var(--cream); outline:3px solid var(--water-dark); outline-offset:1px; }
+.inventory-group { grid-column:1/-1; display:grid; gap:.5rem; }
+.inventory-group-title { margin:0; font-size:1.05rem; overflow-wrap:anywhere; }
+.inventory-group > .muted { margin:0; }
+.inventory-group > .inventory-card-grid { margin-top:0; }
 .inventory-detail-panel { min-width:0; max-height:none; overflow:visible; }
 .inventory-detail-heading { display:flex; align-items:start; justify-content:space-between; gap:1rem; }
 .inventory-detail-heading .button { flex:none; }
@@ -265,6 +269,11 @@ details.operation-card > summary { cursor:pointer; font-size:1.05rem; font-weigh
 details.operation-card[open] > summary { margin-bottom:0; }
 .roster-list { display:grid; gap:.45rem; padding:0; list-style:none; }
 .roster-list li { padding:.65rem; border-left:.35rem solid var(--water); background:#eaf7fa; }
+.roster-entry { display:grid; gap:.4rem; }
+.roster-entry p { margin:0; overflow-wrap:anywhere; }
+.roster-entry-line { font-weight:800; }
+.roster-entry-id { font-size:.78rem; color:var(--muted); }
+.roster-entry .actions { gap:.5rem; }
 .private-result { overflow-wrap:anywhere; }
 .page-title.message-title { max-width:26ch; font-size:clamp(1.9rem,5vw,3.2rem); line-height:1.05; letter-spacing:-.04em; }
 .my-ducks-flow { display:flex; flex-direction:column; }
@@ -946,7 +955,7 @@ export const renderStaffHome = (
               <button class="button" type="submit">Create walk-up</button>
             </form><p class="private-result muted" data-walkup-result aria-live="polite"></p>
           </details><div class="data-list" data-participant-list></div></div>
-          <article class="operation-card" data-participant-detail hidden>
+          <article class="operation-card" tabindex="-1" data-participant-detail hidden>
             <h3 data-participant-name>Participant detail</h3><dl class="facts compact-facts" data-participant-facts></dl>
             <form data-participant-edit-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>

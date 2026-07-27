@@ -588,6 +588,52 @@ test("heat station rosters retain unassigned and withdrawn entries without expos
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE heat_id = 'heat-roster'").get().count, 2);
 });
 
+// The staff console links a roster entry back to the participant and the duck,
+// so the detail projection has to name the identifiers those two sections
+// select on. They are internal identifiers, never participant contact data.
+test("heat roster entries carry the registration and duck identifiers the console selects on", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-links', 'event', 'ROUND_ONE', 1, 'PLANNED', 2);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES
+      ('link-entry-1', 'event', 'heat-links', 'entry-1', 'ROUND_ONE', 1,
+       'BALANCED_DRAW', '2026-07-26T11:00:00Z'),
+      ('link-entry-2', 'event', 'heat-links', 'entry-2', 'ROUND_ONE', 2,
+       'BALANCED_DRAW', '2026-07-26T11:00:00Z');
+    UPDATE duck_assignments
+       SET valid_to = '2026-07-26T11:05:00Z', end_reason = 'UNASSIGNED'
+     WHERE race_entry_id = 'entry-2';
+  `);
+
+  const detail = await handleHeatOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event/heats/heat-links"),
+    { DB: d1(database) },
+    actor,
+  );
+  assert.equal(detail.status, 200);
+  const body = await detail.json();
+
+  assert.deepEqual(body.roster.map((entry) => ({
+    raceEntryId: entry.raceEntryId,
+    registrationId: entry.participant.registrationId,
+    duck: entry.duck,
+  })), [
+    { raceEntryId: "entry-1", registrationId: "registration-1", duck: { id: "duck-1", visibleNumber: 1 } },
+    // An unassigned entry exposes no duck at all, so no duck link can be built.
+    { raceEntryId: "entry-2", registrationId: "registration-2", duck: null },
+  ]);
+  // The existing projection is unchanged around the new fields.
+  assert.equal(body.roster[0].participant.firstName, "Daisy");
+  assert.equal(body.roster[0].participant.registrationStatus, "ACTIVE");
+  assert.equal(JSON.stringify(body).includes("email"), false);
+});
+
 test("the retired balanced round-one planner is unroutable and writes nothing", async (context) => {
   const database = createDatabase();
   context.after(() => database.close());
