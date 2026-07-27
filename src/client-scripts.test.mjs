@@ -432,7 +432,14 @@ const confirmationCallsites = [
   [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Commit this exact balanced plan? Rosters become operational race data.")) return;'],
   [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
+  [staffHomeScript, 'if (!await appConfirm("Permanently delete the registration for " + registration.firstName + " " + registration.lastName + "? This removes the participant and their race entry. This cannot be undone.", { danger: true })) return;'],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
+  [participantScript, `  const confirmed = await appConfirm(
+    "Delete the registration for " + participantDisplayName(registration)
+    + "? It will be removed from the race and cannot be brought back.",
+    { danger: true, confirmLabel: "Delete registration" },
+  );
+  if (!confirmed) return;`],
 ];
 
 test("every confirmation callsite preserves its warning and returns before mutation on cancel", async () => {
@@ -442,9 +449,27 @@ test("every confirmation callsite preserves its warning and returns before mutat
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((inventoryIntakeScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // 19 minus the four retired returns/purge confirmations.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 15);
+  // 19 minus the four retired returns/purge confirmations, plus participant
+  // deletion.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 16);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  // My Ducks has exactly one destructive action: self-service deletion.
+  assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  // The dialog is defined once, by the one bundle every page loads first, so
+  // no page client can redeclare it into a broken shared global scope.
+  assert.match(liveUiScript, /const appConfirm = /);
+  for (const script of [
+    participantScript,
+    registrationScript,
+    searchScript,
+    staffAccessScript,
+    staffDuckScript,
+    staffHomeScript,
+    startLineScript,
+    finishLineScript,
+    inventoryIntakeScript,
+    liveScript,
+  ]) assert.doesNotMatch(script, /const appConfirm = |appConfirmationQueue/);
 
   let mutations = 0;
   const harness = confirmationHarness();
@@ -1454,7 +1479,7 @@ const participantSection = (document, kind) => {
   return { controls, section, track };
 };
 
-const myDucksHarness = (route, search = "") => {
+const myDucksHarness = (route, search = "", confirmResult = true) => {
   const document = new QuickDocument("#document");
   const navigation = document.createElement("a");
   navigation.dataset.myDucksNav = "";
@@ -1476,26 +1501,56 @@ const myDucksHarness = (route, search = "") => {
   document.append(navigation, page);
 
   const requests = [];
-  const fetchStub = async (url) => {
-    requests.push(String(url));
-    return route(String(url));
+  const fetchStub = async (url, options = {}) => {
+    requests.push({ url: String(url), options });
+    return route(String(url), options);
   };
   const subscriptions = [];
+  // `appConfirm` ships in live-ui.js, which My Ducks loads first, so the page
+  // client receives it from the shared global scope rather than defining it.
+  const confirmations = [];
+  const busy = [];
+  const appConfirm = async (message, options) => {
+    confirmations.push({ message, options });
+    return confirmResult;
+  };
 
   new Function(
     "document", "location", "window", "globalThis", "requestAnimationFrame", "history", "fetch",
+    "appConfirm",
     participantScript,
   )(
     document,
     { search, pathname: "/my-ducks", hash: "", origin: "https://quickducks.com" },
     { addEventListener() {} },
-    { quickDucksLive: { subscribe(subscriber) { subscriptions.push(subscriber); } } },
+    {
+      quickDucksLive: {
+        beginBusy() {
+          busy.push("begin");
+          return () => busy.push("end");
+        },
+        subscribe(subscriber) { subscriptions.push(subscriber); },
+      },
+    },
     (callback) => callback(),
     { replaceState() {}, state: null },
     fetchStub,
+    appConfirm,
   );
 
-  return { awaiting, document, empty, error, navigation, paired, requests, subscriptions, success };
+  return {
+    awaiting,
+    busy,
+    confirmations,
+    document,
+    empty,
+    error,
+    navigation,
+    paired,
+    requests,
+    subscriptions,
+    success,
+  };
 };
 
 const collected = (registrationId, paired, overrides = {}) => ({
@@ -1517,6 +1572,9 @@ const renderMyDucks = async (registrations) => {
   await harness.subscriptions[0].refresh();
   return harness;
 };
+
+const deleteButton = (card) => card.descendants()
+  .find((node) => node.tagName === "BUTTON" && node.dataset.deleteRegistration !== undefined) ?? null;
 
 test("an empty participant group hides its whole section instead of an empty state", async () => {
   const awaitingOnly = await renderMyDucks([collected("11111111-1111-4111-8111-111111111111", false)]);
@@ -1600,6 +1658,115 @@ test("a followed card shows the policy display name and never a lookup code", as
   assert.doesNotMatch(followed.text(), /null/);
   assert.equal(followed.children[0].className, "success-tag");
   assert.equal(followed.children[0].textContent, "Following");
+});
+
+test("the delete action appears only on an own removable entry, never on a followed one", async () => {
+  const harness = await renderMyDucks([
+    collected("11111111-1111-4111-8111-111111111111", false, { deletable: true }),
+    // Own and unpaired, but the server did not mark it removable.
+    collected("22222222-2222-4222-8222-222222222222", false, { deletable: false }),
+    // Followed entries never carry a delete, even if `deletable` were wrong.
+    collected("33333333-3333-4333-8333-333333333333", false, {
+      firstName: null,
+      lastName: null,
+      displayName: "Donald M.",
+      lookupCode: null,
+      followed: true,
+      deletable: true,
+    }),
+    // Paired entries live in the other section and are never removable.
+    collected("44444444-4444-4444-8444-444444444444", true, { deletable: false }),
+  ]);
+
+  const [removable, notRemovable, followed] = harness.awaiting.track.children;
+  const [paired] = harness.paired.track.children;
+  assert.ok(deleteButton(removable), "an own removable entry offers deletion");
+  assert.equal(deleteButton(removable).className, "button danger small");
+  assert.equal(deleteButton(removable).textContent, "Delete registration");
+  assert.equal(deleteButton(notRemovable), null);
+  assert.equal(deleteButton(followed), null, "a followed entry is someone else's registration");
+  assert.equal(deleteButton(paired), null);
+  // No delete action is silently repurposed into an unfollow.
+  assert.doesNotMatch(followed.text(), /Delete|Remove|Unfollow/);
+  assert.equal(harness.confirmations.length, 0);
+});
+
+test("deleting confirms with danger styling, posts the guarded command, and refetches", async () => {
+  const registrationId = "11111111-1111-4111-8111-111111111111";
+  let registrations = [collected(registrationId, false, { deletable: true })];
+  const harness = myDucksHarness((url) => url.endsWith("/mine/delete")
+    ? Response.json({ deleted: true, replayed: false })
+    : Response.json({ registrations }));
+  await harness.subscriptions[0].refresh();
+
+  const button = deleteButton(harness.awaiting.track.children[0]);
+  registrations = [];
+  await button.dispatch("click");
+
+  assert.equal(harness.confirmations.length, 1);
+  assert.match(harness.confirmations[0].message, /Delete the registration for Daisy Duck\?/);
+  assert.match(harness.confirmations[0].message, /cannot be brought back/);
+  assert.deepEqual(harness.confirmations[0].options, {
+    danger: true,
+    confirmLabel: "Delete registration",
+  });
+
+  const request = harness.requests.find((item) => item.url.endsWith("/mine/delete"));
+  assert.ok(request, "the delete must reach the public endpoint");
+  assert.equal(request.options.method, "POST");
+  assert.equal(request.options.headers["content-type"], "application/json");
+  const payload = JSON.parse(request.options.body);
+  assert.deepEqual(Object.keys(payload).sort(), ["commandId", "registrationId"]);
+  assert.equal(payload.registrationId, registrationId);
+  assert.match(payload.commandId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+
+  // The card is removed by refetching the authoritative collection, not by
+  // trusting the mutation response.
+  assert.equal(harness.requests.at(-1).url, "/api/v1/registrations/mine");
+  assert.equal(harness.awaiting.track.children.length, 0);
+  assert.equal(harness.empty.hidden, false);
+  assert.deepEqual(harness.busy, ["begin", "end"]);
+  assert.equal(harness.error.hidden, true);
+});
+
+test("a cancelled delete confirmation never calls the endpoint", async () => {
+  const registrationId = "11111111-1111-4111-8111-111111111111";
+  const harness = myDucksHarness(
+    () => Response.json({ registrations: [collected(registrationId, false, { deletable: true })] }),
+    "",
+    false,
+  );
+  await harness.subscriptions[0].refresh();
+
+  const button = deleteButton(harness.awaiting.track.children[0]);
+  await button.dispatch("click");
+
+  assert.equal(harness.confirmations.length, 1);
+  assert.equal(harness.requests.some((item) => item.url.includes("/delete")), false);
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Delete registration");
+  assert.equal(harness.awaiting.track.children.length, 1);
+});
+
+test("a refused delete restores the action and reports the refusal on that card", async () => {
+  const registrationId = "11111111-1111-4111-8111-111111111111";
+  const harness = myDucksHarness((url) => url.endsWith("/mine/delete")
+    ? Response.json({ error: "This registration already has a race duck." }, { status: 409 })
+    : Response.json({ registrations: [collected(registrationId, false, { deletable: true })] }));
+  await harness.subscriptions[0].refresh();
+
+  const card = harness.awaiting.track.children[0];
+  const button = deleteButton(card);
+  await button.dispatch("click");
+
+  assert.equal(button.disabled, false);
+  assert.equal(button.textContent, "Delete registration");
+  const feedback = card.children.at(-1);
+  assert.equal(feedback.hidden, false);
+  assert.match(feedback.textContent, /could not be deleted/);
+  assert.match(feedback.textContent, /ask race staff/);
+  assert.equal(harness.awaiting.track.children.length, 1, "the card stays until the server removes it");
+  assert.deepEqual(harness.busy, ["begin", "end"]);
 });
 
 test("the just-registered highlight survives the section-visibility change", async () => {

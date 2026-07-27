@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { eventLifecycleHelpersScript, inventoryDetailHelpersScript, staffHomeScript } from "./client-scripts.ts";
+import {
+  eventLifecycleHelpersScript,
+  inventoryDetailHelpersScript,
+  liveUiScript,
+  staffHomeScript,
+} from "./client-scripts.ts";
 import {
   renderFinishLine,
   renderInventoryIntake,
@@ -18,7 +23,12 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
   assert.match(staffHomeScript, /assignedRoles/);
   assert.match(staffHomeScript, /canRunHeat/);
   assert.match(staffHomeScript, /canTakeResults/);
-  assert.match(staffHomeScript, /appConfirmationQueue/);
+  // The shared confirmation dialog now ships once in `live-ui.js`, which every
+  // page loads first, so the console uses `appConfirm` without redeclaring it.
+  assert.doesNotMatch(staffHomeScript, /appConfirmationQueue/);
+  assert.match(liveUiScript, /appConfirmationQueue/);
+  assert.match(staffHomeScript, /await appConfirm\(/);
+  assert.match(renderStaffHome("Administrator", true, []), /<script src="\/assets\/live-ui\.js" defer><\/script>/);
   assert.doesNotMatch(staffHomeScript, /\b(?:window\.)?confirm\s*\(/);
   // Staff account and role management left the console for /staff/access.
   assert.doesNotMatch(staffHomeScript, /staffRoleLabels|roleSetControl|loadStaffProfiles/);
@@ -78,6 +88,30 @@ test("delete event is an administrator-only danger control with a dialog and typ
   assert.ok(staffHomeScript.includes('forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;'));
   assert.ok(staffHomeScript.includes("forceDeleteCard.hidden = false;"));
   assert.doesNotMatch(staffHomeScript, /\b(?:window\.)?confirm\s*\(/);
+});
+
+test("participant deletion is a confirmed danger action that clears the detail pane", () => {
+  // The action ships with the participant detail, which is already gated to the
+  // registration and race-director roles server side and in the console markup.
+  assert.ok(staffHomeScript.includes(
+    'addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));',
+  ));
+  assert.ok(staffHomeScript.includes(
+    'if (!await appConfirm("Permanently delete the registration for " + registration.firstName + " " + registration.lastName + "? This removes the participant and their race entry. This cannot be undone.", { danger: true })) return;',
+  ));
+  assert.ok(staffHomeScript.includes(
+    'commandOptions("DELETE", { commandId: crypto.randomUUID(), expectedRevision: registration.revision })',
+  ));
+  const submitPath = staffHomeScript.indexOf('commandOptions("DELETE", { commandId: crypto.randomUUID(), expectedRevision: registration.revision })');
+  assert.ok(submitPath >= 0);
+  // The removed participant is cleared from the console before the list reloads,
+  // so no stale detail can be acted on again.
+  assert.ok(staffHomeScript.indexOf("clearParticipantDetail();", submitPath) > submitPath);
+  assert.ok(staffHomeScript.indexOf("await loadParticipants();", submitPath) > submitPath);
+  assert.ok(staffHomeScript.includes("selectedRegistration = null;\n  participantDetail.hidden = true;"));
+  // The console is not the authority on the unassign-first rule; it surfaces the
+  // server's actionable refusal through the shared message line.
+  assert.doesNotMatch(staffHomeScript, /Unassign the duck from inventory first/);
 });
 
 const inventoryDetailController = () => new Function(

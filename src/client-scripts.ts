@@ -483,6 +483,76 @@ const participantDisplayName = (registration) => {
   return [registration.firstName, registration.lastName].filter(Boolean).join(" ");
 };
 
+// Deleting is offered only for a registration this browser created and that the
+// server still reports as removable: a followed entry belongs to someone else,
+// and an entry that already has a duck or a heat place belongs to the race. The
+// server recomputes both conditions inside its guarded write, so this flag is
+// presentation only.
+const participantCanDelete = (registration) =>
+  registration.deletable === true && registration.followed !== true;
+
+const participantDelete = async (registration, button, feedback) => {
+  const confirmed = await appConfirm(
+    "Delete the registration for " + participantDisplayName(registration)
+    + "? It will be removed from the race and cannot be brought back.",
+    { danger: true, confirmLabel: "Delete registration" },
+  );
+  if (!confirmed) return;
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Deleting…";
+  feedback.textContent = "";
+  feedback.hidden = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    let deleted = false;
+    try {
+      const response = await fetch("/api/v1/registrations/mine/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          registrationId: registration.registrationId,
+        }),
+      });
+      deleted = response.ok;
+    } catch {
+      deleted = false;
+    }
+    if (!deleted) {
+      button.disabled = false;
+      button.textContent = label;
+      feedback.textContent = "That registration could not be deleted. It may already have a duck. Try again, or ask race staff for help.";
+      feedback.hidden = false;
+      return;
+    }
+    if (participantCurrentId === registration.registrationId) {
+      participantCurrentId = null;
+      participantSuccess.hidden = true;
+    }
+    // The card disappears only when the authoritative collection says so, and
+    // a failed refetch reports itself on the page's own error line rather than
+    // being mistaken for a failed deletion.
+    participantVersion = null;
+    await participantRefreshWork();
+  } finally {
+    endBusy();
+  }
+};
+
+const participantDeleteControls = (registration) => {
+  const actions = participantText("div", "", "actions");
+  const feedback = participantText("p", "", "message-line muted");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
+  const button = participantText("button", "Delete registration", "button danger small");
+  button.type = "button";
+  button.dataset.deleteRegistration = registration.registrationId;
+  button.addEventListener("click", () => participantDelete(registration, button, feedback));
+  actions.append(button);
+  return [actions, feedback];
+};
+
 const participantCard = (registration) => {
   const current = registration.registrationId === participantCurrentId;
   const card = participantText("article", "", "duck-card participant-card" + (current ? " is-current" : ""));
@@ -500,6 +570,7 @@ const participantCard = (registration) => {
     : participantText("p", "Staff lookup code: " + registration.lookupCode));
   card.append(participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"));
   participantAddRaceFacts(card, registration.raceStatus);
+  if (participantCanDelete(registration)) card.append(...participantDeleteControls(registration));
   return card;
 };
 
@@ -1048,7 +1119,13 @@ if (navIsLive) {
 }
 `;
 
-export const liveUiScript = liveRuntimeHelpersScript + duckDetailHelpersScript + String.raw`
+// `live-ui.js` is the one bundle every page loads, and it loads first because it
+// is the only deferred head script. The shared confirmation dialog therefore
+// ships here rather than in each page client: page clients are classic scripts
+// sharing one global scope, and `participant.js` rides on every page too, so a
+// second copy of the dialog in any page client would redeclare these bindings
+// and break the whole scope.
+export const liveUiScript = confirmationDialogScript + liveRuntimeHelpersScript + duckDetailHelpersScript + String.raw`
 globalThis.quickDucksLive = liveCreateHub();
 globalThis.quickDucksLive.start();
 ` + sitePhaseNavScript;
@@ -1394,7 +1471,8 @@ if (liveBoardRoot || liveSummaryRoot) {
 }
 `;
 
-export const startLineScript = confirmationDialogScript + stationStateHelpersScript + String.raw`
+// `appConfirm` is defined once by `live-ui.js`, which every page loads first.
+export const startLineScript = stationStateHelpersScript + String.raw`
 const startRoot = document.querySelector("[data-start-line]");
 const startEvent = document.querySelector("[data-station-event]");
 const startHeatTitle = document.querySelector("[data-station-heat]");
@@ -1690,7 +1768,7 @@ const finishCreateNfcScanner = ({ createReader, createController, decode, onValu
 };
 `;
 
-export const finishLineScript = confirmationDialogScript + stationStateHelpersScript
+export const finishLineScript = stationStateHelpersScript
   + finishSelectionValidationScript + finishHandoffHelpersScript + finishScanSerializationScript
   + finishNfcHelpersScript + String.raw`
 const finishRoot = document.querySelector("[data-finish-line]");
@@ -2477,7 +2555,7 @@ const intakeCreateNfcStation = ({ createReader, decode, appOrigin, onReading, on
 };
 `;
 
-export const inventoryIntakeScript = confirmationDialogScript + inventoryIntakeHelpersScript + String.raw`
+export const inventoryIntakeScript = inventoryIntakeHelpersScript + String.raw`
 const intakeRoot = document.querySelector("[data-inventory-intake]");
 const intakeEventSelect = document.querySelector("[data-intake-event]");
 const intakeLocation = document.querySelector("[data-intake-location]");
@@ -3084,7 +3162,7 @@ const createInventoryDetailController = ({ detail, list, closeButton, clear }) =
 };
 `;
 
-export const staffHomeScript = confirmationDialogScript + eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + inventoryDetailHelpersScript + String.raw`
+export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + inventoryDetailHelpersScript + String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
 const assignedRoles = new Set((operationsRoot.dataset.roles || "").split(",").filter(Boolean));
@@ -3624,6 +3702,31 @@ const changeParticipantStatus = async (operation, label, dangerous, button) => {
   });
 };
 
+// Deletion is offered unconditionally because the server owns the race-integrity
+// rule: it refuses while a duck is assigned or a heat place exists and returns
+// the unassign-first instruction, which is more useful than a hidden button.
+const clearParticipantDetail = () => {
+  selectedRegistration = null;
+  participantDetail.hidden = true;
+  participantFacts.replaceChildren();
+  participantActions.replaceChildren();
+  document.querySelector("[data-participant-name]").textContent = "Participant detail";
+  participantEditForm.reset();
+};
+
+const deleteParticipant = async (button) => {
+  const registration = selectedRegistration;
+  if (!await appConfirm("Permanently delete the registration for " + registration.firstName + " " + registration.lastName + "? This removes the participant and their race entry. This cannot be undone.", { danger: true })) return;
+  await perform(button, "Deleting registration…", async () => {
+    await api(
+      "/api/v1/staff/registrations/" + encodeURIComponent(registration.registrationId),
+      commandOptions("DELETE", { commandId: crypto.randomUUID(), expectedRevision: registration.revision }),
+    );
+    clearParticipantDetail();
+    await loadParticipants();
+  });
+};
+
 const renderParticipantDetail = (registration) => {
   selectedRegistration = registration;
   participantDetail.hidden = false;
@@ -3669,6 +3772,7 @@ const renderParticipantDetail = (registration) => {
       });
     });
   }
+  addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));
 };
 
 const loadParticipantDetail = async (registrationId) => {
@@ -4328,7 +4432,7 @@ staffLiveSubscription = globalThis.quickDucksLive.subscribe({
 // Staff account and role management for the standalone /staff/access page. It
 // is event-independent, so it never reads or selects an event; the DOM hooks
 // and request shapes are unchanged from when this lived inside the console.
-export const staffAccessScript = confirmationDialogScript + String.raw`
+export const staffAccessScript = String.raw`
 const staffAccess = document.querySelector("[data-staff-access]");
 const staffAccessForm = document.querySelector("[data-staff-access-form]");
 const staffAccessMessage = document.querySelector("[data-staff-access-message]");

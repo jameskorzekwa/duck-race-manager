@@ -38,6 +38,7 @@ not authorized.
 | Capability | Required regular-staff role | System administrator |
 | --- | --- | --- |
 | Participant list/detail/search, walk-up, edits, withdrawal, scan-first search and pairing | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
+| Delete an unpaired registration | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Participant disqualification/reactivation | `RACE_DIRECTOR` | Yes |
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Duck inventory intake/edit, tag, assignment, unassignment, reservation, and inspection | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
@@ -226,6 +227,18 @@ Every unmatched path reaches it, including bot and scanner traffic, so it runs
 no current-event query and always renders the minimal Home and Staff
 navigation.
 
+Navigation chrome is never worth an outage. If the phase query itself fails —
+D1 unavailable, degraded, or a transient error — the page still renders and
+falls back to the Preparing phase instead of returning a server error. Preparing
+is the conservative fallback: it is the same phase "no public event" produces,
+and it advertises neither Register nor Race Status, so a database hiccup can
+never invite a visitor into a flow that is not open. The degraded first paint
+self-corrects, because `live-ui.js` rebuilds the navigation from
+`GET /api/v1/events/current` on the next live signal or poll. The fallback is
+limited to HTML page renders; the API routes that report authoritative state,
+including `GET /api/v1/events/current` itself, keep surfacing database failures
+rather than answering with a guess.
+
 ## Participant Registration
 
 ### Public Registration
@@ -350,6 +363,8 @@ for each collected registration:
 - Registration status.
 - Privacy-filtered race status, including duck, heat, current heat, and outcome
   when public race status is available.
+- A `deletable` flag, which is `true` only for an entry this browser created and
+  that can still be removed. See **Deleting Your Own Registration**.
 
 Cards are grouped into separate horizontally swipeable **Awaiting Participants**
 and paired **My Ducks** sections with keyboard and previous/next controls. A live
@@ -381,12 +396,70 @@ an authoritative refresh when the tab becomes visible.
 
 The collection cookie does not contain names, contact details, lookup codes, or
 private status tokens. Clearing or expiring the cookie removes the shortcut but
-does not withdraw or delete registrations. There is no current control to
-remove one registration from the collection.
+does not withdraw or delete registrations.
 
 Public race status in a collection stays available through `COMPLETED`. It
 becomes `null` only when an administrator deletes the event, which also removes
 the collection's registration entries.
+
+### Deleting Your Own Registration
+
+**Implemented:** a My Ducks card can offer one **Delete registration** action for
+a registration created by mistake. The action removes the registration for real;
+it is not a withdrawal and not an unfollow.
+
+The button is rendered only when the collection response marks that entry
+`deletable: true`, which requires all of the following at once:
+
+- The collection link for this browser is `REGISTRATION`, meaning the
+  registration was created on this device. A `FOLLOWED` entry is someone else's
+  registration and is **never** deletable here.
+- The race entry has no duck assignment at all, current or already ended. In
+  practice this means the card is in **Awaiting Participants**; an entry that was
+  paired and later unassigned is still not deletable.
+- The race entry appears on no heat roster.
+- The event is `REGISTRATION_OPEN`, `REGISTRATION_CLOSED`, `ROUND_ONE`, `FINAL`,
+  or `COMPLETED`. A registration that has no duck and no heat place never entered
+  the race, so removing it cannot affect any published heat or result.
+
+The action opens the shared danger confirmation dialog in plain wording, then
+posts `{ commandId, registrationId }` to
+`POST /api/v1/registrations/mine/delete`. The endpoint requires
+`application/json`, a bounded body, and the exact application `Origin`, because
+the browser collection cookie is its only credential. It validates the RFC 4122
+v4 command identifier and the registration identifier before any database
+access, and applies the same public rate limiter as the name search and follow.
+
+Command replay is resolved before anything else, from command history alone:
+deleting the same registration twice with the same command identifier returns
+`{ deleted: true, replayed: true }` rather than failing, because the registration
+and its collection link no longer exist to be re-read. Reusing that identifier
+for a different registration is `409`.
+
+A caller that does not own the registration as `REGISTRATION`, a caller with no
+collection cookie, and an unknown identifier all receive the same `404`, so the
+endpoint never reveals whether an unrelated registration exists. A registration
+that already has a duck or a heat place receives `409` with plain guidance to ask
+race staff.
+
+Ownership, link kind, event status, and unpaired state are re-checked inside the
+guarded `race_commands` insert that opens the write batch, not only in the
+preflight read. Every child delete in the batch is conditional on that command
+row existing, so a refused attempt writes nothing.
+
+A successful delete removes the registration, its race entry, its collection
+links in every browser including followers, and any email notification and
+attempt rows, in one atomic batch. The `race_commands` and redacted
+`REGISTRATION_DELETED` audit rows deliberately outlive the subject; the audit
+records the registration identifier and `deleted_via`, never a name, contact
+value, lookup code, or token. The mutation publishes the `participants` refresh
+domain, and the page rerenders from the authoritative collection endpoint rather
+than from the delete response.
+
+**Known gap:** a `FOLLOWED` entry has no removal control at all. Following
+someone is currently permanent for that browser until the cookie is cleared or
+the event is deleted. An explicit unfollow action would be a separate, non
+destructive change to the collection link only.
 
 ### Private Status Link
 
@@ -842,6 +915,53 @@ replace the unlocked roster if necessary. Unassignment itself preserves an
 existing heat entry. There is no current operation to replace a roster with zero
 entries or cancel an empty heat, so operators must resolve these cases before
 locking and avoid creating a stranded empty heat.
+
+### Delete Registration
+
+Registration staff, race directors, and administrators can permanently delete a
+registration from the participant detail pane with
+`DELETE /api/v1/staff/registrations/<registrationId>`. Use it for a duplicate or
+mistaken entry. It is not a substitute for withdrawal or disqualification, which
+are the correct tools for someone who registered legitimately and then stopped
+racing.
+
+The request follows the other staff participant mutations: an RFC 4122 v4
+`commandId`, the currently loaded `expectedRevision`, the exact application
+`Origin` for cookie-authenticated sessions, and a confirmed danger dialog in the
+console. A matching retry returns `{ deleted: true, replayed: true }` from
+command history, because the registration no longer exists to be re-read;
+reusing the identifier for another operation is `409`.
+
+**Unassign first.** Deletion protects race integrity instead of tearing it down.
+It is refused with `409` and an actionable message when either of the two
+race-integrity relationships still exists:
+
+- The participant has any duck assignment, current or already ended. The message
+  directs staff to the existing inventory unassignment workflow. Note that
+  unassigning is not by itself enough for this path: an ended assignment row
+  still exists and still blocks deletion, because that participant genuinely was
+  paired.
+- The participant appears on any heat roster. The message directs staff to
+  unassign the duck and remove the participant from the heat first.
+
+Because a participant with any heat entry is refused outright, deletion can never
+reach the roster-lock trigger and can never remove a locked, running, or
+finalized roster row. The duck assignment and heat entry are left exactly as they
+were on a refusal.
+
+Deletion is also refused with `409` while the event is `DRAFT`, and `404` for an
+unknown registration.
+
+A successful delete runs as one atomic batch that removes the registration, its
+race entry, its browser collection links, and its email notification and attempt
+rows. Every child delete is conditional on the guarded `race_commands` insert
+that opens the batch and re-checks revision, event status, and the unpaired
+conditions, so a refused write leaves the database untouched and
+`PRAGMA foreign_key_check` stays clean. The command row and a redacted
+`REGISTRATION_DELETED` audit event survive the subject; the audit records the
+staff profile identifier, `created_via`, and the previous revision, never a name,
+contact value, lookup code, or token. The mutation publishes the `participants`,
+`ducks`, and `heats` refresh domains.
 
 ## Duck Intake, Tags, and Assignment
 
