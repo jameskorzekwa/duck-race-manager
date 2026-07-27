@@ -1,5 +1,17 @@
 import { operationalRoles, type OperationalRole } from "./authorization.ts";
 import {
+  homePhaseCta,
+  phaseAllowsRaceStatus,
+  phaseAllowsRegistration,
+  phaseShowsMyDucks,
+  phaseShowsRaceStatusNav,
+  phaseShowsRegisterNav,
+  racePreparingMessage,
+  registrationClosedMessage,
+  registrationPreparingMessage,
+  type PublicPhase,
+} from "./public-phase.ts";
+import {
   publicHeatStatusLabel,
   publicOfficialResult,
   type PublicRaceStatus,
@@ -250,6 +262,10 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .roster-list { display:grid; gap:.45rem; padding:0; list-style:none; }
 .roster-list li { padding:.65rem; border-left:.35rem solid var(--water); background:#eaf7fa; }
 .private-result { overflow-wrap:anywhere; }
+.page-title.message-title { max-width:26ch; font-size:clamp(1.9rem,5vw,3.2rem); line-height:1.05; letter-spacing:-.04em; }
+.my-ducks-flow { display:flex; flex-direction:column; }
+.my-ducks-flow > * { min-width:0; max-width:100%; }
+.my-ducks-flow[data-my-ducks-flow="empty"] > .my-ducks-search { order:-1; }
 .live-board { border-width:4px; background:#fff; box-shadow:7px 7px 0 var(--ink); }
 .live-board-title { max-width:none; margin-bottom:.5rem; }
 .live-board-stage { max-width:100%; margin:.2rem 0 .6rem; padding:.4rem .8rem; background:var(--yellow); font-size:.85rem; line-height:1.4; overflow-wrap:anywhere; }
@@ -301,9 +317,39 @@ interface PageOptions {
   description: string;
   content: string;
   robots?: string;
+  phase?: PublicPhase;
+  liveNav?: boolean;
 }
 
-const page = ({ title, description, content, robots = "index,follow" }: PageOptions): string => `<!doctype html>
+// Register and Race Status strictly swap, so the nav renders exactly one of
+// them. My Ducks is always in the document but starts hidden outside the
+// Registration-or-later phases: the saved-registration presence probe in
+// `participant.js` may still reveal it, and the phase half of that rule is
+// carried by `data-phase-visible` so neither client can fight the other.
+// Staff stays in every phase.
+//
+// `data-live-nav` is the admission marker for the live navigation subscriber in
+// `live-ui.js`. Only public content pages set it. The live hub starts its socket
+// and pollers lazily on the first subscriber, so a page without this marker and
+// without any other live surface holds no connection at all — which matters
+// because `RaceUpdates` admits a bounded number of sockets. Those pages keep the
+// server-rendered nav for the life of the document.
+const siteNav = (phase: PublicPhase, liveNav: boolean): string => {
+  const myDucksVisible = phaseShowsMyDucks(phase);
+  const swap = phaseShowsRegisterNav(phase)
+    ? '<a href="/register" data-nav-register>Register</a>'
+    : phaseShowsRaceStatusNav(phase) ? '<a href="/race" data-nav-race>Race Status</a>' : "";
+  return `<nav class="nav" aria-label="Primary" data-site-nav${liveNav ? " data-live-nav" : ""} data-phase="${phase}"><a href="/" data-nav-home>Home</a>${swap}<a href="/my-ducks" data-my-ducks-nav data-phase-visible="${myDucksVisible ? "true" : "false"}"${myDucksVisible ? "" : " hidden"}>My Ducks</a><a href="/staff" data-nav-staff>Staff</a></nav>`;
+};
+
+const page = ({
+  title,
+  description,
+  content,
+  robots = "index,follow",
+  phase = "PREPARING",
+  liveNav = false,
+}: PageOptions): string => `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -320,7 +366,7 @@ const page = ({ title, description, content, robots = "index,follow" }: PageOpti
   <body>
     <header class="shell site-head">
       <a class="brand" href="/">${duck("brand-duck")}<span>QuickDucks</span></a>
-      <nav class="nav" aria-label="Primary"><a href="/">Home</a><a href="/register">Register</a><a href="/my-ducks" data-my-ducks-nav hidden>My Ducks</a><a href="/staff">Staff</a></nav>
+      ${siteNav(phase, liveNav)}
     </header>
     <main class="shell">${content}</main>
     <footer class="shell site-foot">Built for quick check-ins, clear heats, and happy ducks.</footer>
@@ -338,46 +384,103 @@ const liveBoard = (): string => `
     <div data-live-board-content><p class="empty-state">The board will appear here when race information is available.</p></div>
   </section>`;
 
-export const renderHome = (): string => page({
-  title: "Race-day registration and results",
-  description: "Register for the next QuickDucks race, check your heat, and follow race-day results.",
-  content: `
+// The compact home summary. It carries the stage chip and a single current-heat
+// line and sends anyone who wants detail to `/race`; the full board lives there.
+const happeningNow = (): string => `
+  <section class="status-section" data-live-summary aria-labelledby="happening-now-title">
+    <p class="eyebrow">Happening now</p>
+    <p class="status-chip live-board-stage" data-live-summary-stage aria-live="polite">Loading race stage…</p>
+    <h2 class="live-board-title" id="happening-now-title" data-live-summary-title>Checking the race…</h2>
+    <p class="lede" data-live-summary-line>Loading the latest official race information.</p>
+    <p class="message-line muted" data-live-summary-error role="alert" hidden></p>
+    <div class="actions"><a class="button secondary" href="/race">Open the full race board</a></div>
+  </section>`;
+
+// Preparing is deliberately terminal and bare: no form, no privacy block, no
+// notice, and no multi-registration hint, only the one approved sentence for
+// that page. `/register` and `/race` pass different sentences because only
+// `/register` may tell a visitor to come back and register.
+const preparingPanel = (marker: string, message: string): string => `
+    <section class="page-panel" ${marker}>
+      ${duck()}
+      <h1 class="page-title message-title">${escapeHtml(message)}</h1>
+    </section>`;
+
+export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
+  const cta = homePhaseCta[phase];
+  return page({
+    title: "Race-day registration and results",
+    description: "Register for the next QuickDucks race, check your heat, and follow race-day results.",
+    phase,
+    liveNav: true,
+    content: `
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">Race-day, simplified</p>
         <h1>Find your duck. Follow the race.</h1>
         <p class="lede">A fast, friendly home for community duck races. Register, keep your private code, and follow your duck from check-in to finish.</p>
-        <div class="actions"><a class="button" href="/register">Register</a><a class="button secondary" href="#how-it-works">How it works</a></div>
+        ${cta === null ? '<p class="lede" data-home-preparing>The next race is being prepared. Check back soon for the next QuickDucks race.</p>' : ""}
+        <div class="actions">${cta === null ? "" : `<a class="button" href="${cta.href}" data-home-cta>${escapeHtml(cta.label)}</a>`}<a class="button secondary" href="#how-it-works">How it works</a></div>
       </div>
       <div class="hero-water" aria-hidden="true"></div>
       ${duck("hero-duck")}
     </section>
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
-    ${liveBoard()}
+    ${cta === null ? "" : happeningNow()}
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p></article>
       <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p></article>
       <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p></article>
-    </section>
-    <section class="status-section" aria-labelledby="find-status-title">
-      <p class="eyebrow">Lost your saved list?</p>
-      <h2 id="find-status-title">Find race status by name</h2>
-      <p class="muted">Enter an exact first name, last name, or full name. Results show race status only, never email, phone, private links, lookup codes, or staff data.</p>
-      <form class="search-form" data-status-search>
-        <label>Participant name<input name="name" autocomplete="name" minlength="2" maxlength="161" required></label>
-        <button class="button" type="submit">Find status</button>
-      </form>
-      <p class="search-message muted" data-search-message aria-live="polite"></p>
-      <div class="duck-list" data-search-results></div>
-      <div class="privacy"><strong>Your data is temporary.</strong><span>After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
-    </section>
-    <script src="/assets/live.js" defer></script><script src="/assets/home.js" defer></script>`,
+    </section>${cta === null ? "" : '\n    <script src="/assets/live.js" defer></script>'}`,
+  });
+};
+
+// The full live board. It is public for the five post-DRAFT statuses and falls
+// back to its own preparing message before that: this is a race-status page, so
+// it says what will appear here and never repeats the `/register` call to action.
+export const renderRace = (phase: PublicPhase = "PREPARING"): string => page({
+  title: "Race status",
+  description: phase === "PREPARING"
+    ? "Live QuickDucks race status will appear here once the next race begins."
+    : "Live QuickDucks race status: stage, heats, the current heat, and official results.",
+  robots: "noindex,nofollow",
+  phase,
+  liveNav: true,
+  content: phase === "PREPARING"
+    ? preparingPanel("data-race-preparing", racePreparingMessage)
+    : `
+    <section class="page-panel">
+      ${duck()}
+      <p class="eyebrow">Live race status</p>
+      <h1 class="page-title">Race status</h1>
+      <p class="lede">The race stage, every heat, the heat running right now, and the official podium once results are final.</p>
+    </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
 });
 
-export const renderMyDucks = (): string => page({
+// The public name search lives here rather than on the home page: it is the
+// recovery path for a device that lost its saved list. Results carry public
+// race status only, never a lookup code or a private link.
+const nameSearchSection = (): string => `
+      <section class="status-section my-ducks-search" data-status-search-section aria-labelledby="find-status-title">
+        <p class="eyebrow">Lost your saved list?</p>
+        <h2 id="find-status-title">Find race status by name</h2>
+        <p class="muted" data-search-lead hidden>Nothing is saved on this device yet. Search for a participant below to follow their race status here.</p>
+        <p class="muted">Enter an exact first name, last name, or full name. Results show race status only, never email, phone, private links, lookup codes, or staff data.</p>
+        <form class="search-form" data-status-search>
+          <label>Participant name<input name="name" autocomplete="name" minlength="2" maxlength="161" required></label>
+          <button class="button" type="submit">Find status</button>
+        </form>
+        <p class="search-message muted" data-search-message aria-live="polite"></p>
+        <div class="duck-list" data-search-results></div>
+        <div class="privacy"><strong>Your data is temporary.</strong><span>QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data, when an administrator deletes the event.</span></div>
+      </section>`;
+
+export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page({
   title: "My Ducks",
   description: "Registrations and race status saved on this browser.",
   robots: "noindex,nofollow",
+  phase,
+  liveNav: true,
   content: `
     <section class="page-panel my-ducks-panel" data-my-ducks-page>
       ${duck()}
@@ -387,7 +490,9 @@ export const renderMyDucks = (): string => page({
       <div class="privacy"><strong>Private by design.</strong><span>Email and phone never appear here. Immediately after registration, this tab can show the one-time private status link so you can bookmark it; saved collection responses never include that link.</span></div>
       <div class="notice" data-registration-success aria-live="polite" hidden></div>
       <p class="message-line muted" data-my-ducks-error role="alert" hidden></p>
-      <p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet. Register a participant, or add someone from the race status search on the home page.</p>
+      <div class="my-ducks-flow" data-my-ducks-flow>
+      <div class="my-ducks-saved">
+      <p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet. Register a participant, or follow someone from the race status search on this page.</p>
 
       <section class="participant-section" data-participant-section="awaiting" aria-labelledby="awaiting-participants-title" hidden>
         <div class="participant-section-head">
@@ -412,16 +517,49 @@ export const renderMyDucks = (): string => page({
         <p class="muted">Participants already paired with their race duck.</p>
         <div class="participant-track" id="paired-participants" data-participant-track tabindex="0" aria-label="Paired participant registrations" hidden></div>
       </section>
-
-      <div class="actions"><a class="button" href="/register">Register another participant</a></div>
-    </section>`,
+${phaseAllowsRegistration(phase) ? '\n      <div class="actions"><a class="button" href="/register">Register another participant</a></div>\n' : ""}      </div>
+${nameSearchSection()}
+      </div>
+    </section>
+    <script src="/assets/search.js" defer></script>`,
 });
 
-export const renderRegistration = (turnstileSiteKey?: string): string => page({
-  title: "Register for the duck race",
-  description: "Register a participant for the current QuickDucks race.",
-  robots: "noindex,nofollow",
-  content: `
+export const renderRegistration = (
+  turnstileSiteKey?: string,
+  phase: PublicPhase = "PREPARING",
+): string => {
+  if (phase === "PREPARING") {
+    return page({
+      title: "Register for the duck race",
+      description: "Registration for the next QuickDucks race is not open yet.",
+      robots: "noindex,nofollow",
+      phase,
+      liveNav: true,
+      content: preparingPanel("data-registration-preparing", registrationPreparingMessage),
+    });
+  }
+  if (!phaseAllowsRegistration(phase)) {
+    return page({
+      title: "Register for the duck race",
+      description: "Registration for the current QuickDucks race is closed.",
+      robots: "noindex,nofollow",
+      phase,
+      liveNav: true,
+      content: `
+    <section class="page-panel" data-registration-closed>
+      ${duck()}
+      <h1 class="page-title message-title">${escapeHtml(registrationClosedMessage)}</h1>
+      <div class="actions"><a class="button" href="/race">View race status</a></div>
+    </section>`,
+    });
+  }
+  return page({
+    title: "Register for the duck race",
+    description: "Register a participant for the current QuickDucks race.",
+    robots: "noindex,nofollow",
+    phase,
+    liveNav: true,
+    content: `
     <section class="page-panel">
       ${duck()}
       <p class="eyebrow">Participant registration</p>
@@ -447,10 +585,12 @@ export const renderRegistration = (turnstileSiteKey?: string): string => page({
       </form>
       <script src="/assets/register.js" defer></script>
     </section>`,
-});
+  });
+};
 
 export const renderStatus = (
   registration?: RegistrationStatusRecord & { raceStatus?: PublicRaceStatus | null },
+  phase: PublicPhase = "PREPARING",
 ): string => {
   const firstName = registration?.first_name ?? "Jamie";
   const lookupCode = registration?.lookup_code ?? "DUCK8234";
@@ -480,6 +620,8 @@ export const renderStatus = (
   title: "Registration status",
   description: "Private QuickDucks participant registration status.",
   robots: "noindex,nofollow",
+  phase,
+  liveNav: true,
   content: `
     <section class="page-panel">
       ${duck()}
@@ -492,7 +634,7 @@ export const renderStatus = (
           ? '<p class="muted">Race status is not currently public.</p>'
           : publicStatusFacts(raceStatus, false)}</div>
       <p class="muted">Duck, heat, and result facts match public race status. Email and phone stay staff-only, and the complete race dataset is deleted after return processing.</p>
-      <div class="actions"><a class="button" href="/register">Register another participant</a><a class="button secondary" href="/">Back to home</a></div>
+      <div class="actions">${phaseAllowsRegistration(phase) ? '<a class="button" href="/register">Register another participant</a>' : ""}<a class="button secondary" href="/">Back to home</a></div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
   });
 };
@@ -536,10 +678,15 @@ const publicStatusFacts = (status: PublicRaceStatus, showParticipant = true): st
   return `<dl class="facts">${participant}<div class="fact"><dt>Duck</dt><dd>${assignment}</dd></div><div class="fact"><dt>Assigned heat</dt><dd>${heatLabel}</dd></div><div class="fact"><dt>Currently running</dt><dd>${running}</dd></div><div class="fact"><dt>Race status</dt><dd>${outcomeLabel(status.outcome)}</dd></div></dl>`;
 };
 
-export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string => page({
+export const renderDuck = (
+  status: PublicRaceStatus = mockRaceStatus,
+  phase: PublicPhase = "PREPARING",
+): string => page({
   title: status.duck === null ? "Race status" : `Duck #${status.duck.visibleNumber}`,
   description: "Public QuickDucks NFC duck race status.",
   robots: "noindex,nofollow",
+  phase,
+  liveNav: true,
   content: `
     <section class="page-panel">
       ${duck()}
@@ -551,6 +698,13 @@ export const renderDuck = (status: PublicRaceStatus = mockRaceStatus): string =>
       <div class="actions"><a class="button secondary" href="/">Visit QuickDucks</a></div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
 });
+
+// The board moved to `/race`, so a "back to the board" action has to follow it —
+// and fall back to the home page in the one phase where `/race` has no board.
+const boardLink = (phase: PublicPhase, variant = ""): string =>
+  phaseAllowsRaceStatus(phase)
+    ? `<a class="button${variant === "" ? "" : ` ${variant}`}" href="/race">Back to the race board</a>`
+    : `<a class="button${variant === "" ? "" : ` ${variant}`}" href="/">Back to QuickDucks</a>`;
 
 const heatFact = (heat: { number: number; status: string } | null, missing: string): string =>
   heat === null ? missing : `Heat ${heat.number} · ${publicHeatStatusLabel(heat.status)}`;
@@ -575,12 +729,17 @@ const duckDetailFacts = (status: PublicRaceStatus): string => {
     .join("")}</dl>`;
 };
 
-export const renderPublicDuck = (status: PublicRaceStatus = mockRaceStatus): string => {
+export const renderPublicDuck = (
+  status: PublicRaceStatus = mockRaceStatus,
+  phase: PublicPhase = "PREPARING",
+): string => {
   const heading = status.duck === null ? "This duck" : `Duck #${status.duck.visibleNumber}`;
   return page({
     title: heading,
     description: "Public QuickDucks race status for one duck number.",
     robots: "noindex,nofollow",
+    phase,
+    liveNav: true,
     content: `
     <section class="page-panel">
       ${duck()}
@@ -589,18 +748,23 @@ export const renderPublicDuck = (status: PublicRaceStatus = mockRaceStatus): str
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
       <div data-live-personal="number">${duckDetailFacts(status)}</div>
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, private links, or the duck’s tag.</span></div>
-      <div class="actions"><a class="button secondary" href="/">Back to the race board</a></div>
+      <div class="actions">${boardLink(phase, "secondary")}</div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
   });
 };
 
 // Unknown numbers, inventory ducks that are not paired, and ducks outside the
 // current public event all render this identical page.
-export const renderPublicDuckNotFound = (visibleNumber?: string): string => page({
+export const renderPublicDuckNotFound = (
+  visibleNumber?: string,
+  phase: PublicPhase = "PREPARING",
+): string => page({
   title: "Duck not racing",
   description: "The requested QuickDucks duck number is not in the current race.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel">${duck()}<p class="eyebrow">Public duck detail</p><h1 class="page-title">${visibleNumber === undefined ? "That duck isn’t racing." : `Duck #${escapeHtml(visibleNumber)} isn’t racing.`}</h1><p class="lede">No duck with this number is paired with a participant in the current race. Check the number printed on the duck, or find it on the live race board.</p><a class="button" href="/">Back to the race board</a></section>`,
+  phase,
+  liveNav: true,
+  content: `<section class="page-panel">${duck()}<p class="eyebrow">Public duck detail</p><h1 class="page-title">${visibleNumber === undefined ? "That duck isn’t racing." : `Duck #${escapeHtml(visibleNumber)} isn’t racing.`}</h1><p class="lede">No duck with this number is paired with a participant in the current race. Check the number printed on the duck, or find it on the live race board.</p>${boardLink(phase)}</section>`,
 });
 
 export const renderStaffLogin = (returnTo = "/staff"): string => page({
@@ -1015,6 +1179,10 @@ export const renderStaffPairing = (): string => page({
   content: `<section class="page-panel"><p class="eyebrow">Protected staff preview</p><h1 class="page-title">Pair Duck #128</h1><p class="lede">This duck is available. Find the participant before confirming the assignment.</p><div class="privacy"><strong>Staff authentication required.</strong><span>Live scans verify the Cognito session and matching staff profile before showing codes or accepting a pairing command.</span></div><div class="facts"><div class="fact"><dt>Duck</dt><dd>#128 · Available</dd></div><div class="fact"><dt>Event</dt><dd>Summer Duck Race</dd></div></div><form><label>Participant code, name, phone, or email<input name="query" autocomplete="off" maxlength="80" placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com"></label><button class="button secondary" type="button">Find participant</button></form><div class="notice"><strong>Final confirmation required.</strong> Pairing shows participant and duck together before an authenticated command changes race data.</div></section>`,
 });
 
+// Deliberately phase-free. Every unmatched path reaches this page, including
+// bot and scanner traffic, so it runs no current-event query and takes the
+// minimal Home-and-Staff navigation of the default Preparing phase. It carries
+// no live surface and no `data-live-nav` marker either, so it opens no socket.
 export const renderNotFound = (): string => page({
   title: "Not found",
   description: "The requested QuickDucks page was not found.",
@@ -1032,7 +1200,10 @@ export const manifestJson = JSON.stringify({
   icons: [{ src: "/favicon.svg", sizes: "any", type: "image/svg+xml" }],
 });
 
-export const homeScript = String.raw`
+// The public name-search client. It ships with `/my-ducks`, which is where the
+// search now lives: it is the recovery path for a device that lost its saved
+// list, not a home-page feature.
+export const searchScript = String.raw`
 const createText = (tag, text, className) => {
   const element = document.createElement(tag);
   element.textContent = text;
@@ -1068,7 +1239,16 @@ const addToMyDucks = async (followId, actions, button, feedback) => {
     });
     if (!response.ok) throw new Error("follow failed");
     actions.replaceChildren(addedTag());
-    if (myDucksNav) myDucksNav.hidden = false;
+    // The device now has a saved registration, so record the presence half of
+    // the My Ducks nav rule and reveal the link immediately.
+    if (myDucksNav) {
+      myDucksNav.dataset.hasRegistrations = "true";
+      myDucksNav.hidden = false;
+    }
+    // The search now shares the My Ducks page, so ask the hub to rerun every
+    // subscriber's authoritative refetch; the saved list picks the new entry up
+    // from the collection API rather than from this response.
+    globalThis.quickDucksLive.markClean(searchForm);
   } catch {
     button.disabled = false;
     button.textContent = "Add to My Ducks";

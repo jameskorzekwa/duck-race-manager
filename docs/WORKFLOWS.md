@@ -180,11 +180,63 @@ upcoming transitions. The backward reopen-registration control shows a neutral
 reopening is genuinely unavailable (wrong state or heats already exist) it
 keeps the blocked treatment and reasons.
 
+## Public Site Phases
+
+**Implemented:** every public page derives one phase from the single current
+event, using one lightweight status query per HTML request. The phase drives
+navigation, the home call to action, and what `/register` and `/race` render.
+
+| Phase | Event state | Navigation | Home CTA |
+| --- | --- | --- | --- |
+| Preparing | no event, or `DRAFT` | Home, Staff | none; the hero says the next race is being prepared |
+| Registration | `REGISTRATION_OPEN` | Home, Register, My Ducks, Staff | Register |
+| Locked in | `REGISTRATION_CLOSED` | Home, Race Status, My Ducks, Staff | View race status |
+| Racing | `ROUND_ONE`, `FINAL` | Home, Race Status, My Ducks, Staff | View live race |
+| Results | `COMPLETED` | Home, Race Status, My Ducks, Staff | View results |
+
+Register and Race Status strictly swap: the navigation offers exactly one of
+them after `DRAFT` and neither while a race is being prepared. `/race` itself
+stays reachable for all five post-`DRAFT` statuses, including while registration
+is open, even though the navigation does not advertise it then. Staff stays in
+the top navigation in every phase.
+
+My Ducks appears whenever the phase is Registration or later, or when the saved
+registration presence probe reports that this device has saved registrations.
+The phase half of that rule is server-rendered; the presence half is applied by
+`participant.js`, and neither can hide a link the other grants.
+
+Navigation is correct on first paint and does not need a refresh to stay
+correct: `live-ui.js` subscribes to the `event` domain of the live hub and
+re-renders the navigation from `GET /api/v1/events/current`, the same
+authoritative projection the server used, whenever the race advances.
+
+That subscription is admitted per page. The live hub opens its WebSocket and
+starts its polling fallback only once a page has a subscriber, and the
+`RaceUpdates` object admits a limited number of connections, so pages with no
+live need must not spend one. The server marks public content pages — the home
+page, `/race`, `/my-ducks`, `/register`, `/duck/<number>`, `/r/<token>`, and
+`/t/<token>` — with `data-live-nav` on the navigation element, and only those
+pages register the navigation subscriber. The staff sign-in page, the not-found
+page, the unsupported-device page, and staff error pages carry no marker and no
+other live surface, so they open no socket and schedule no polls, and they keep
+the navigation exactly as the server painted it.
+
+The not-found page is the one public response that resolves no phase at all.
+Every unmatched path reaches it, including bot and scanner traffic, so it runs
+no current-event query and always renders the minimal Home and Staff
+navigation.
+
 ## Participant Registration
 
 ### Public Registration
 
-**Implemented:** `/register` loads the current public event and enables the form
+**Implemented:** `/register` renders by phase. While a race is being prepared it
+shows only "The next race is being prepared. Registration is not open yet, please
+come back later to register!" with no form, privacy block, notice, or
+multi-registration hint. From `REGISTRATION_CLOSED` through `COMPLETED` it shows
+"Registration is closed." and a link to `/race`, and nothing else.
+
+During `REGISTRATION_OPEN` it loads the current public event and enables the form
 only when its lifecycle status is `REGISTRATION_OPEN` and Turnstile is configured
 in the rendered page. The server is authoritative and accepts a registration
 only when the event is still open and the current server time is inside the
@@ -359,8 +411,11 @@ page and staff cannot regenerate its private token.
 
 ### Public Name Search
 
-**Implemented:** the home page can search the current public event by an exact,
-case-insensitive first name, last name, or full name. Partial matching is not
+**Implemented:** the `/my-ducks` page can search the current public event by an
+exact, case-insensitive first name, last name, or full name. The search is the
+recovery path for a device that lost its saved list, so it leads the page while
+nothing is saved on that device and sits below the saved ducks otherwise.
+Partial matching is not
 performed. The query must contain 2 to 161 characters, returns at most ten
 matches, and is limited to 20 requests per minute for each event and Cloudflare
 client network key.
@@ -1177,7 +1232,12 @@ Historical result revisions remain until the event is deleted.
 
 **Implemented:** `GET /api/v1/race-board` publishes the one current event only
 from `REGISTRATION_OPEN` through `COMPLETED`. The prominent board appears on the
-home page, private status pages, and public duck-tag status pages. It includes:
+noindex `/race` page, private status pages, and public duck-tag status pages.
+The home page instead carries a compact "happening now" summary, the stage chip
+plus one current-heat line, that links to `/race`. While there is no public
+event, `/race` shows only "The next race is being prepared. Live race status
+will appear here once the race begins." — its own wording, because a race-status
+page must not carry the `/register` call to action. The board includes:
 
 - Safe event lifecycle status and date. The board turns that status into a
   prominent plain-language stage chip and summary line beside the event name:

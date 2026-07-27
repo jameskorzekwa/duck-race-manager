@@ -20,6 +20,21 @@ const env = {
   },
 };
 
+// The public phase comes from one lightweight current-event status query, so a
+// page test only has to say which lifecycle status the single event is in. The
+// base `env` above returns no status at all, which is the "no public event"
+// Preparing case. `ok: 1` keeps `/health` working through the same stub.
+const phaseEnv = (status) => ({
+  ...env,
+  DB: {
+    prepare: () => ({
+      async first() {
+        return { ok: 1, status };
+      },
+    }),
+  },
+});
+
 const androidChromeUserAgent = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
 const iPhoneUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
 const desktopChromeUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
@@ -42,16 +57,17 @@ test("redirects alternate hosts to the canonical origin", async () => {
 });
 
 test("renders the responsive landing page", async () => {
-  const response = await worker.fetch(new Request("https://quickducks.com/"), env);
+  const response = await worker.fetch(new Request("https://quickducks.com/"), phaseEnv("REGISTRATION_OPEN"));
   const body = await response.text();
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
   assert.match(body, /Find your duck\. Follow the race\./);
-  assert.match(body, /<a href="\/my-ducks" data-my-ducks-nav hidden>My Ducks<\/a>/);
+  assert.match(body, /<a href="\/my-ducks" data-my-ducks-nav data-phase-visible="true">My Ducks<\/a>/);
   assert.doesNotMatch(body, /Saved on this device|data-my-ducks-list/);
-  assert.match(body, /Find race status by name/);
-  assert.match(body, /src="\/assets\/home\.js"/);
+  // The name search moved to My Ducks and the full board moved to /race.
+  assert.doesNotMatch(body, /Find race status by name/);
+  assert.doesNotMatch(body, /src="\/assets\/search\.js"/);
   assert.match(body, /src="\/assets\/participant\.js"/);
   assert.match(body, /src="\/assets\/live-ui\.js"/);
   assert.match(body, /href="\/favicon\.svg"/);
@@ -67,18 +83,20 @@ test("renders the responsive landing page", async () => {
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
 });
 
-test("serves the home-page status client", async () => {
-  const response = await worker.fetch(new Request("https://quickducks.com/assets/home.js"), env);
+test("serves the name-search client that ships with My Ducks", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/assets/search.js"), env);
+  const legacy = await worker.fetch(new Request("https://quickducks.com/assets/home.js"), env);
   const body = await response.text();
 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
   assert.match(body, /\/api\/v1\/race-status\/search/);
   assert.match(body, /\/api\/v1\/registrations\/mine\/follow/);
+  assert.equal(legacy.status, 404);
 });
 
 test("the public home page explains the race without linking out of its cards", async () => {
-  const response = await worker.fetch(new Request("https://quickducks.com/"), env);
+  const response = await worker.fetch(new Request("https://quickducks.com/"), phaseEnv("REGISTRATION_OPEN"));
   const body = await response.text();
   const explainers = body.match(/<section id="how-it-works"[\s\S]*?<\/section>/)?.[0];
 
@@ -137,7 +155,10 @@ test("serves registration and staff pairing browser clients", async () => {
 });
 
 test("renders the private My Ducks page with two accessible horizontal sections", async () => {
-  const response = await worker.fetch(new Request("https://quickducks.com/my-ducks"), env);
+  const response = await worker.fetch(
+    new Request("https://quickducks.com/my-ducks"),
+    phaseEnv("REGISTRATION_OPEN"),
+  );
   const body = await response.text();
 
   assert.equal(response.status, 200);
@@ -556,8 +577,9 @@ test("serves the rubber-duck favicon", async () => {
 });
 
 test("renders working registration UI while protection remains fail-closed", async () => {
-  const registration = await worker.fetch(new Request("https://quickducks.com/register"), env);
-  const confirmation = await worker.fetch(new Request("https://quickducks.com/r/mock"), env);
+  const open = phaseEnv("REGISTRATION_OPEN");
+  const registration = await worker.fetch(new Request("https://quickducks.com/register"), open);
+  const confirmation = await worker.fetch(new Request("https://quickducks.com/r/mock"), open);
   const registrationBody = await registration.text();
 
   assert.match(registrationBody, /Register participant/);
@@ -574,7 +596,7 @@ test("renders working registration UI while protection remains fail-closed", asy
 
 test("renders the Turnstile widget only when its public key is configured", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/register"), {
-    ...env,
+    ...phaseEnv("REGISTRATION_OPEN"),
     TURNSTILE_SITE_KEY: "site-key-test",
     TURNSTILE_SECRET_KEY: "secret-key-test",
   });

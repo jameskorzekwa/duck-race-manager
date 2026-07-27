@@ -1,3 +1,4 @@
+import { publicPhaseByStatus } from "./public-phase.ts";
 import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
 
 export const confirmationDialogScript = String.raw`
@@ -378,6 +379,8 @@ const participantError = document.querySelector("[data-my-ducks-error]");
 const participantSuccess = document.querySelector("[data-registration-success]");
 const participantSections = Array.from(document.querySelectorAll("[data-participant-section]"));
 const participantEmpty = document.querySelector("[data-my-ducks-empty]");
+const participantFlow = document.querySelector("[data-my-ducks-flow]");
+const participantSearchLead = document.querySelector("[data-search-lead]");
 let participantRegisteredId = participantRoot
   ? new URLSearchParams(location.search).get("registered")
   : null;
@@ -399,6 +402,22 @@ const participantShowError = (message) => {
   if (!participantError) return;
   participantError.textContent = message === null ? "" : message;
   participantError.hidden = message === null;
+};
+
+// The My Ducks nav link is shown when the public phase allows it OR when this
+// device has saved registrations. This client owns only the presence half, so it
+// records it on the element and never hides a link the phase already grants.
+const participantSetNavPresence = (hasRegistrations) => {
+  if (!participantNav) return;
+  participantNav.dataset.hasRegistrations = hasRegistrations ? "true" : "false";
+  participantNav.hidden = !hasRegistrations && participantNav.dataset.phaseVisible !== "true";
+};
+
+// The name search leads the page while nothing is saved on this device, and
+// drops below the saved ducks once there is something to show.
+const participantSetSearchPlacement = (hasRegistrations) => {
+  if (participantFlow) participantFlow.dataset.myDucksFlow = hasRegistrations ? "saved" : "empty";
+  if (participantSearchLead) participantSearchLead.hidden = hasRegistrations;
 };
 
 const participantHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase()
@@ -610,11 +629,12 @@ const participantFetch = async () => {
   const body = await response.json();
   if (!participantRoot) {
     if (!body || typeof body.hasRegistrations !== "boolean") throw new Error("invalid presence response");
-    if (participantNav) participantNav.hidden = !body.hasRegistrations;
+    participantSetNavPresence(body.hasRegistrations);
     return;
   }
   if (!body || !Array.isArray(body.registrations)) throw new Error("invalid collection response");
-  if (participantNav) participantNav.hidden = body.registrations.length === 0;
+  participantSetNavPresence(body.registrations.length > 0);
+  participantSetSearchPlacement(body.registrations.length > 0);
   if (!document.hidden) participantRender(body.registrations);
 };
 
@@ -879,6 +899,10 @@ const liveCreateHub = ({
   });
   // The socket and polling scheduler start lazily on the first subscriber:
   // pages without live subscribers open no connection and schedule no polls.
+  // The RaceUpdates object admits a bounded number of sockets, so purely
+  // informational pages must not spend one. Every subscriber, including the
+  // phase-driven navigation subscriber, is registered conditionally to keep
+  // that guarantee.
   const activate = () => {
     if (active || !startRequested || subscribers.size === 0) return;
     active = true;
@@ -945,10 +969,89 @@ const duckDetailLink = (documentObject, duckNumber) => {
 };
 `;
 
+// Public navigation is phase-driven. The server paints the correct nav from one
+// lightweight current-event query, and this client keeps it correct without a
+// refresh by re-reading the same authoritative projection whenever the live hub
+// signals an event change. The phase map is serialized from the server module so
+// the two can never drift.
+//
+// Register and Race Status strictly swap: exactly one of them is in the nav for
+// every post-DRAFT phase, and neither is present while a race is being prepared.
+//
+// This runtime ships inside `live-ui.js`, which every rendered page loads, so it
+// must not subscribe unconditionally: a subscriber is what makes the lazy hub
+// open its socket and start its pollers. The server marks public content pages
+// with `data-live-nav` on the nav, and only those pages register the subscriber.
+// A staff sign-in page, a not-found page, an unsupported-device page, or a staff
+// error page therefore keeps its server-rendered nav and holds no connection.
+export const sitePhaseNavScript = String.raw`
+const navPhaseByStatus = ${JSON.stringify(publicPhaseByStatus)};
+const navPhaseForStatus = (status) => Object.prototype.hasOwnProperty.call(navPhaseByStatus, status)
+  ? navPhaseByStatus[status]
+  : "PREPARING";
+const navRoot = document.querySelector("[data-site-nav]");
+// Admission marker, server-rendered on public content pages only. Its absence
+// means this page has no live need, so it must not subscribe and must stay
+// socket-free.
+const navIsLive = navRoot !== null && navRoot.dataset.liveNav !== undefined;
+const navMyDucks = document.querySelector("[data-my-ducks-nav]");
+const navBuildLink = (href, label, marker) => {
+  const link = document.createElement("a");
+  link.href = href;
+  link.textContent = label;
+  link.dataset[marker] = "";
+  return link;
+};
+const navSwapLink = (phase) => {
+  if (phase === "REGISTRATION") {
+    return navRoot.querySelector("[data-nav-register]") || navBuildLink("/register", "Register", "navRegister");
+  }
+  if (phase === "PREPARING") return null;
+  return navRoot.querySelector("[data-nav-race]") || navBuildLink("/race", "Race Status", "navRace");
+};
+// My Ducks is shown when the phase allows it OR when this device has saved
+// registrations. The presence half lives in participant.js and is carried on the
+// same element, so neither client can overwrite the other's condition.
+const navApplyMyDucks = (phase) => {
+  if (!navMyDucks) return;
+  navMyDucks.dataset.phaseVisible = phase === "PREPARING" ? "false" : "true";
+  navMyDucks.hidden = navMyDucks.dataset.phaseVisible !== "true"
+    && navMyDucks.dataset.hasRegistrations !== "true";
+};
+const navRender = (phase) => {
+  if (!navRoot) return;
+  navRoot.dataset.phase = phase;
+  const links = [];
+  const home = navRoot.querySelector("[data-nav-home]");
+  if (home) links.push(home);
+  const swap = navSwapLink(phase);
+  if (swap) links.push(swap);
+  navApplyMyDucks(phase);
+  if (navMyDucks) links.push(navMyDucks);
+  const staff = navRoot.querySelector("[data-nav-staff]");
+  if (staff) links.push(staff);
+  navRoot.replaceChildren(...links);
+};
+const navRefresh = async () => {
+  try {
+    const response = await fetch("/api/v1/events/current", {
+      headers: { accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return;
+    const body = await response.json();
+    navRender(navPhaseForStatus(body && body.event ? body.event.status : null));
+  } catch {}
+};
+if (navIsLive) {
+  globalThis.quickDucksLive.subscribe({ domains: ["event"], root: navRoot, refresh: navRefresh });
+}
+`;
+
 export const liveUiScript = liveRuntimeHelpersScript + duckDetailHelpersScript + String.raw`
 globalThis.quickDucksLive = liveCreateHub();
 globalThis.quickDucksLive.start();
-`;
+` + sitePhaseNavScript;
 
 export const stationStateHelpersScript = String.raw`
 const startPickHeat = (heats, round) => {
@@ -1001,8 +1104,16 @@ const liveBoardStageChip = document.querySelector("[data-live-board-stage]");
 const liveBoardTitle = document.querySelector("[data-live-board-title]");
 const liveBoardSummary = document.querySelector("[data-live-board-summary]");
 const liveBoardContent = document.querySelector("[data-live-board-content]");
-const liveBoardError = document.querySelector("[data-live-board-error]");
+// The board and the compact home summary each own one error-only line, and
+// exactly one of them is on any given page.
+const liveBoardError = document.querySelector("[data-live-board-error]")
+  || document.querySelector("[data-live-summary-error]");
+const liveSummaryRoot = document.querySelector("[data-live-summary]");
+const liveSummaryStage = document.querySelector("[data-live-summary-stage]");
+const liveSummaryTitle = document.querySelector("[data-live-summary-title]");
+const liveSummaryLine = document.querySelector("[data-live-summary-line]");
 let liveBoardVersion = null;
+let liveSummaryVersion = null;
 
 // Error-only line: hidden while the board loads, shown only when the
 // authoritative board request fails, and cleared on the next success. It never
@@ -1172,6 +1283,28 @@ const liveRenderBoard = (board) => {
   }
 };
 
+// The home page carries this compact summary instead of the full board: one
+// stage chip and one current-heat line, with the detail a link away at /race.
+const liveRenderSummary = (board) => {
+  if (!liveSummaryRoot) return;
+  const version = JSON.stringify(board);
+  if (version === liveSummaryVersion) return;
+  liveSummaryVersion = version;
+  if (!board.event) {
+    liveSummaryStage.textContent = "No race scheduled";
+    liveSummaryTitle.textContent = "No race is live right now.";
+    liveSummaryLine.textContent = "The next race will appear here when registration opens.";
+    return;
+  }
+  const event = board.event;
+  liveSummaryStage.textContent = liveEventStage(event.status).label;
+  liveSummaryTitle.textContent = event.name;
+  liveSummaryLine.textContent = event.currentHeat
+    ? "Running now: " + liveRoundLabel(event.currentHeat.round) + " · Heat " + event.currentHeat.number
+      + " · " + liveHeatStatus(event.currentHeat.status) + "."
+    : liveEventStage(event.status).summary;
+};
+
 const liveFetchJson = async (url) => {
   const response = await fetch(url, { headers: { accept: "application/json" }, cache: "no-store" });
   if (!response.ok) {
@@ -1245,16 +1378,17 @@ const liveRefreshWork = async () => {
       liveRefreshPersonal(),
     ]);
     if (document.hidden) return;
-    liveRenderBoard(board);
+    if (liveBoardRoot) liveRenderBoard(board);
+    liveRenderSummary(board);
     liveShowBoardError(null);
   } catch {
     liveShowBoardError("The race board could not be loaded. This page keeps trying automatically.");
   }
 };
-if (liveBoardRoot) {
+if (liveBoardRoot || liveSummaryRoot) {
   globalThis.quickDucksLive.subscribe({
     domains: ["event", "participants", "ducks", "heats"],
-    root: liveBoardRoot,
+    root: liveBoardRoot || liveSummaryRoot,
     refresh: liveRefreshWork,
   });
 }
