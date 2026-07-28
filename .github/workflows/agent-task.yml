@@ -104,12 +104,14 @@ jobs:
   implement:
     needs: prepare
     if: needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, macOS, ARM64, quickducks-model]
     timeout-minutes: 90
+    concurrency:
+      group: quickducks-local-oauth-model
+      cancel-in-progress: false
     permissions:
       contents: read
       issues: read
-      models: read
       pull-requests: read
     env:
       EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
@@ -186,7 +188,8 @@ jobs:
                   .map(({ user, body, created_at }) => ({ author: user.login, body, createdAt: created_at })),
               });
             }
-            fs.writeFileSync("/tmp/quickducks-task-context.json", JSON.stringify({
+            const contextPath = `/tmp/quickducks-task-context-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}.json`;
+            fs.writeFileSync(contextPath, JSON.stringify({
               repository: `${owner}/${repo}`,
               baseSha: process.env.EXPECTED_BASE,
               issue: {
@@ -205,26 +208,39 @@ jobs:
               })),
               relatedPulls,
             }, null, 2));
+            core.exportVariable("PIPELINE_CONTEXT_PATH", contextPath);
 
-      - name: Install pinned OpenCode
-        run: npm install --global opencode-ai@1.18.8
+      - name: Verify local OpenChamber model control plane
+        run: |
+          command -v openchamber > /dev/null
+          openchamber status --json | node -e '
+            let body = "";
+            process.stdin.on("data", (chunk) => body += chunk);
+            process.stdin.on("end", () => {
+              const status = JSON.parse(body);
+              if (status.status !== "ok" || status.runningCount < 1) {
+                throw new Error("OpenChamber is not running locally.");
+              }
+            });'
 
-      - name: Run unprivileged implementation orchestrator
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          NO_COLOR: "1"
+      - name: Run local OAuth implementation team in OpenChamber
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/agent-task"
           set +e
-          opencode run \
+          openchamber session create \
+            --dir "$GITHUB_WORKSPACE" \
+            --title "QuickDucks issue #${PIPELINE_ISSUE} implementation" \
+            --prompt "Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot at ${PIPELINE_CONTEXT_PATH}. Follow the pipeline-orchestrator contract and emit exactly one final task marker." \
+            --model openai/gpt-5.6-sol \
             --agent pipeline-orchestrator \
-            --format json \
-            --model github-models/openai/gpt-4.1 \
-            --share=false \
-            "Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot. Follow the pipeline-orchestrator contract and emit exactly one final task marker." \
-            > "$RUNNER_TEMP/agent-task/task.jsonl"
+            --variant xhigh \
+            --wait \
+            --last-assistant \
+            --timeout 5400 \
+            --json \
+            > "$RUNNER_TEMP/agent-task/session-result.json"
           status=$?
           set -e
           printf '%s\n' "$status" > "$RUNNER_TEMP/agent-task/task-exit-status.txt"
@@ -243,18 +259,12 @@ jobs:
           const issue = Number(process.env.PIPELINE_ISSUE);
           const artifactDir = `${process.env.RUNNER_TEMP}/agent-task`;
           const exitStatus = Number(fs.readFileSync(`${artifactDir}/task-exit-status.txt`, "utf8").trim());
-          const texts = fs.readFileSync(`${artifactDir}/task.jsonl`, "utf8")
-            .split(/\r?\n/)
-            .filter(Boolean)
-            .flatMap((line) => {
-              try {
-                const event = JSON.parse(line);
-                return event.type === "text" && typeof event.part?.text === "string" ? [event.part.text] : [];
-              } catch {
-                return [];
-              }
-            });
-          const report = texts.at(-1)?.trim() ?? "Implementation produced no final report.";
+          let sessionResult = {};
+          try {
+            sessionResult = JSON.parse(fs.readFileSync(`${artifactDir}/session-result.json`, "utf8"));
+          } catch {}
+          const report = sessionResult.lastAssistantMessage?.text?.trim()
+            ?? "Implementation produced no final report.";
           const marker = report.split(/\r?\n/).at(-1)?.trim() ?? "";
           const patch = fs.readFileSync(`${artifactDir}/task.patch`);
           let decision = { type: "failed", numbers: [] };

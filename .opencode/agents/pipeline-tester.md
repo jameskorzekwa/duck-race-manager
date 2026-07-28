@@ -1,7 +1,7 @@
 ---
 description: Independently verifies integrated QuickDucks changes and required test coverage without modifying code.
 mode: subagent
-model: github-models/openai/gpt-4.1-mini
+model: openai/gpt-5.6-sol
 temperature: 0
 steps: 25
 permission:

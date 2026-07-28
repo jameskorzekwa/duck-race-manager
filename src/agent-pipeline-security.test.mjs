@@ -11,7 +11,10 @@ test("implementation keeps models and candidate execution outside OIDC publicati
   const publish = workflow.slice(workflow.indexOf("  publish:"));
 
   assert.doesNotMatch(implement, /id-token: write/);
-  assert.match(implement, /models: read/);
+  assert.doesNotMatch(implement, /models: read|OPENCODE_AUTH_CONTENT|GITHUB_TOKEN:/);
+  assert.match(implement, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
+  assert.match(implement, /openchamber session create/);
+  assert.match(implement, /openai\/gpt-5\.6-sol/);
   assert.doesNotMatch(verify, /id-token: write|models: read/);
   assert.match(publish, /id-token: write/);
   assert.doesNotMatch(publish, /opencode run|npm test|npm run test:e2e/);
@@ -25,7 +28,10 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   const gate = workflow.slice(workflow.indexOf("  gate:"), workflow.indexOf("  queue-merge:"));
 
   assert.doesNotMatch(validate, /id-token: write|models: read|cache: npm/);
-  assert.match(review, /models: read/);
+  assert.doesNotMatch(review, /models: read|OPENCODE_AUTH_CONTENT|GITHUB_TOKEN:/);
+  assert.match(review, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
+  assert.match(review, /openchamber session create/);
+  assert.match(review, /anthropic\/claude-opus-4-8/);
   assert.doesNotMatch(review, /id-token: write|issues: write|pull-requests: write/);
   assert.match(gate, /Agent Review \/ Exact SHA/);
   assert.doesNotMatch(gate, /actions\/checkout|npm test|opencode run/);

@@ -36,13 +36,14 @@ General labels such as `bug`, `enhancement`, `documentation`, and `duplicate` ma
 7. `CI / Validate`, candidate-head `Agent Review / Exact SHA`, current-head approval, and the merge slot must all pass before auto-merge.
 8. Only one `agent:merge-slot` exists. It remains until production succeeds or a failure is resolved.
 9. Production credentials remain solely in the `production` GitHub environment.
-10. Reconciliation is deterministic, idempotent, bounded, and based on current GitHub state; it never calls a model.
+10. Paid-provider OAuth remains inside the local OpenChamber runtime; it is never copied into GitHub Actions, artifacts, or repository files.
+11. Reconciliation is deterministic, idempotent, bounded, and based on current GitHub state; it never calls a model.
 
 ## GitHub Operations
 
 Use `gh` only for the current repository. Never print authentication state or token values. Before mutating a label or dispatching work, query current state and make the operation idempotent.
 
-Never execute candidate code or load candidate OpenCode configuration in a job with write authority. The trusted `pull_request_target` workflow isolates candidate validation and model review in read-only-token jobs; only a later deterministic job can mutate labels or dispatch retries. Do not weaken required checks, bypass environment approval, or enable a merge while another merge slot or non-completed Release run exists.
+Never execute candidate code or load candidate OpenCode configuration in a job with write authority. The trusted `pull_request_target` workflow isolates hosted candidate validation from a read-only local OpenChamber review session; only a later deterministic hosted job can mutate labels or dispatch retries. Do not weaken required checks, bypass environment approval, or enable a merge while another merge slot or non-completed Release run exists.
 
 ## Verification
 

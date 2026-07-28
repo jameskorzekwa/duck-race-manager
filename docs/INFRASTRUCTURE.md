@@ -118,16 +118,19 @@ recovered from GitHub state rather than treated as durable jobs.
 Only issues created by James with `agent:inbox`, explicit James `/agent` or
 `/oc` issue comments, and trusted workflow dispatches run code agents. Public
 issue or PR content never receives an automatic privileged execution path.
-GitHub Models uses the job's short-lived token with `models: read`; repository
-writes use the OpenCode GitHub App's short-lived installation token so resulting
-branch and PR events still trigger CI. Agent jobs do not receive production
-credentials.
+Model jobs run on the repository-scoped `quickducks-model` runner and submit
+sessions to James's local OpenChamber runtime, which already owns the paid
+OpenAI and Anthropic OAuth credentials. Those credentials are never copied into
+GitHub secrets or the Actions environment. Repository writes use the OpenCode
+GitHub App's short-lived installation token so resulting branch and PR events
+still trigger CI. Agent jobs do not receive production credentials.
 
 Agent Review uses `pull_request_target` only as a trusted control plane. Candidate
-tests and model review run in separate jobs with read-only repository authority;
-the model loads agents and plugins from the trusted base checkout, candidate code
-is not executed in the model job, and the write-capable gate never checks out or
-executes candidate code. The gate rechecks the current PR head before mutation.
+tests and local OpenChamber model review run in separate jobs with read-only
+repository authority; the model loads agents and plugins from the trusted base
+checkout, candidate code is not executed in the model job, and the write-capable
+hosted gate never checks out or executes candidate code. The gate rechecks the
+current PR head before mutation.
 
 The merge lane is deliberately narrower than implementation concurrency. One PR
 holds `agent:merge-slot` until its exact merge commit completes the Release

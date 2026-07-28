@@ -1,7 +1,7 @@
 ---
 description: Implements a bounded QuickDucks feature or fix with required integration coverage in an isolated worktree.
 mode: subagent
-model: github-models/openai/gpt-4.1
+model: anthropic/claude-opus-4-8
 temperature: 0.1
 steps: 45
 permission:
