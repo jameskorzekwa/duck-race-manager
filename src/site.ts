@@ -147,6 +147,8 @@ label span,legend span { display:block; margin-top:.25rem; color:var(--muted); f
 input,select,textarea { width:100%; min-width:0; max-width:100%; min-height:3.2rem; margin-top:.45rem; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; }
 textarea { min-height:6rem; resize:vertical; }
 input:focus,select:focus,textarea:focus { outline:4px solid #83d8ec; outline-offset:1px; }
+input[type="number"] { appearance:textfield; }
+input[type="number"]::-webkit-inner-spin-button,input[type="number"]::-webkit-outer-spin-button { margin:0; appearance:none; }
 .app-select { position:relative; display:block; min-width:0; max-width:100%; margin-top:.45rem; }
 select.app-select-native { position:absolute; width:1px; height:1px; min-height:0; margin:0; padding:0; border:0; clip-path:inset(50%); opacity:0; overflow:hidden; pointer-events:none; }
 .app-select-trigger { display:flex; width:100%; min-width:0; max-width:100%; min-height:3.2rem; align-items:center; justify-content:space-between; gap:.6rem; margin:0; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; font-weight:750; text-align:left; cursor:pointer; }
@@ -168,9 +170,45 @@ select.app-select-native { position:absolute; width:1px; height:1px; min-height:
 .app-select-option[aria-selected="true"]:hover { background:var(--yellow); }
 .app-select-option[aria-disabled="true"] { color:var(--muted); cursor:not-allowed; }
 .staff-role-controls > .app-select { flex:1 1 100%; margin-top:0; }
+.app-date-picker { position:relative; display:block; min-width:0; max-width:100%; margin-top:.45rem; }
+input.app-date-native { position:absolute; width:1px; height:1px; min-height:0; margin:0; padding:0; border:0; clip-path:inset(50%); opacity:0; overflow:hidden; pointer-events:none; }
+.app-date-trigger { display:flex; width:100%; min-width:0; max-width:100%; min-height:3.2rem; align-items:center; justify-content:space-between; gap:.6rem; margin:0; padding:.7rem .8rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; color:var(--ink); font:inherit; font-weight:750; text-align:left; cursor:pointer; }
+.app-date-trigger:focus-visible { outline:4px solid #83d8ec; outline-offset:1px; }
+.app-date-trigger[aria-expanded="true"] { background:var(--cream); }
+.app-date-trigger:disabled { opacity:.55; cursor:not-allowed; }
+.app-date-value { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.app-date-icon { position:relative; flex:none; width:1rem; height:.9rem; border:2px solid var(--ink); border-radius:.18rem; }
+.app-date-icon::before { content:""; position:absolute; top:-.35rem; left:.12rem; width:.15rem; height:.42rem; border-right:2px solid var(--ink); border-left:2px solid var(--ink); }
+.app-date-icon::after { content:""; position:absolute; top:.18rem; right:0; left:0; border-top:2px solid var(--ink); }
+.app-date-panel { position:absolute; z-index:70; top:calc(100% + .35rem); left:0; width:min(24rem,calc(100vw - 2rem)); max-height:min(34rem,calc(100vh - 2rem)); padding:var(--space-md); overflow:auto; overscroll-behavior:contain; border:3px solid var(--ink); border-radius:.9rem; background:var(--paper); box-shadow:5px 5px 0 var(--ink); }
+.app-date-header { display:grid; grid-template-columns:2.75rem minmax(0,1fr) 2.75rem; gap:var(--space-sm); align-items:center; }
+.app-date-heading { margin:0; font-size:1.12rem; text-align:center; }
+.app-date-month-button { display:grid; width:2.75rem; min-height:2.75rem; place-items:center; padding:0; border:2px solid var(--ink); border-radius:.55rem; background:#fff; color:var(--ink); font:inherit; font-size:1.25rem; font-weight:950; cursor:pointer; }
+.app-date-month-button:hover,.app-date-month-button:focus-visible { background:var(--yellow); outline:3px solid #83d8ec; outline-offset:1px; }
+.app-date-weekdays,.app-date-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:.25rem; }
+.app-date-weekdays { margin-top:var(--space-sm); color:var(--muted); font-size:.72rem; font-weight:950; text-align:center; text-transform:uppercase; }
+.app-date-weekday { padding:.3rem 0; }
+.app-date-grid { margin-top:.15rem; }
+.app-date-day,.app-date-blank { min-width:0; min-height:2.6rem; }
+.app-date-day { display:grid; place-items:center; padding:.25rem; border:2px solid transparent; border-radius:.5rem; background:transparent; color:var(--ink); font:inherit; font-weight:850; cursor:pointer; }
+.app-date-day:hover,.app-date-day:focus-visible { border-color:var(--ink); background:var(--cream); outline:none; }
+.app-date-day.is-today { border-color:var(--water-dark); }
+.app-date-day[aria-pressed="true"] { border-color:var(--ink); background:var(--yellow); box-shadow:2px 2px 0 var(--ink); }
+.app-date-time { margin-top:var(--space-md); padding-top:var(--space-md); border-top:2px solid #b8c6c9; }
+.app-date-time-fields { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1fr); gap:var(--space-sm); margin-top:var(--space-xs); }
+.app-date-time-field { min-width:0; }
+.app-date-time-field > span { display:block; color:var(--muted); font-size:.72rem; font-weight:950; letter-spacing:.05em; text-transform:uppercase; }
+.app-date-time-field .app-select { margin-top:.25rem; }
+.app-date-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:var(--space-sm); margin-top:var(--space-md); padding-top:var(--space-md); border-top:2px solid #b8c6c9; }
+.app-date-actions .button { flex:1 1 7rem; }
 fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem; }
 .check { display:grid; grid-template-columns:1.4rem minmax(0,1fr); gap:.7rem; align-items:start; font-weight:750; }
-.check input { width:1.25rem; min-height:1.25rem; margin:.15rem 0 0; }
+.check input[type="checkbox"] { display:grid; width:1.4rem; height:1.4rem; min-height:1.4rem; place-content:center; margin:.05rem 0 0; padding:0; appearance:none; border:2px solid var(--ink); border-radius:.3rem; background:#fff; color:var(--ink); cursor:pointer; }
+.check input[type="checkbox"]::before { content:""; width:.7rem; height:.38rem; border-bottom:3px solid currentColor; border-left:3px solid currentColor; transform:translateY(-.08rem) rotate(-45deg) scale(0); transform-origin:center; }
+.check input[type="checkbox"]:checked { background:var(--yellow); }
+.check input[type="checkbox"]:checked::before { transform:translateY(-.08rem) rotate(-45deg) scale(1); }
+.check input[type="checkbox"]:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
+.check input[type="checkbox"]:disabled { opacity:.5; cursor:not-allowed; }
 .cf-turnstile,.turnstile-mock { width:100%; min-width:0; max-width:100%; }
 .turnstile-mock { display:grid; min-height:4.4rem; place-items:center; padding:.8rem; border:2px dashed #8da0a6; border-radius:.7rem; background:#f4f7f7; color:var(--muted); font-size:.82rem; font-weight:800; text-align:center; }
 .error-text { color:#9f261c; font-weight:850; }
@@ -219,7 +257,7 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .duck-number-link:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
 .duck-number-note { display:block; margin-top:.2rem; color:var(--muted); font-size:.8rem; font-weight:800; letter-spacing:.04em; }
 .duck-name-note { color:var(--water-dark); font-weight:850; }
-.duck-name-toggle { margin-top:.7rem; font-size:.85rem; }
+.duck-name-toggle { display:flex; width:max-content; margin-top:.7rem; font-size:.85rem; }
 .duck-name-form { gap:.6rem; margin-top:.9rem; padding-top:.9rem; border-top:2px dashed #b8c6c9; font-size:.95rem; font-weight:750; }
 .duck-name-form .actions { gap:.5rem; }
 .duck-name-form .message-line { margin:0; }
@@ -227,8 +265,8 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
 .privacy strong { flex:none; }
 .page-panel > .privacy + .actions { margin-top:1rem; }
-.operations-panel { max-width:70rem; padding:clamp(1rem,3vw,2.2rem); }
-.operations-title { max-width:none; margin-bottom:.6rem; font-size:clamp(2.5rem,8vw,5rem); line-height:.92; }
+.operations-panel,.station-panel { max-width:70rem; padding:clamp(1rem,3vw,2.2rem); background:var(--paper); }
+.operations-title,.staff-panel > .page-title { max-width:none; margin-bottom:.6rem; font-size:clamp(2.5rem,8vw,5rem); line-height:.92; }
 .console-nav { position:sticky; z-index:5; top:.5rem; display:flex; gap:.45rem; margin:1.3rem 0; padding:.65rem; overflow-x:auto; border:2px solid var(--ink); border-radius:.9rem; background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
 .console-nav a { flex:none; padding:.55rem .7rem; border-radius:.55rem; font-size:.85rem; font-weight:900; text-decoration:none; }
 .console-nav a:hover,.console-nav a:focus-visible { background:var(--yellow); outline:2px solid var(--ink); }
@@ -251,7 +289,7 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 form.operation-card > * + * { margin-top:0; }
 .section-tools { display:flex; flex-wrap:wrap; gap:.65rem; align-items:end; margin:1rem 0; }
 .section-tools > label { flex:1 1 15rem; min-width:0; max-width:100%; }
-.section-tools .button { flex:0 0 auto; }
+.section-tools > .button { flex:0 0 auto; min-height:3.2rem; }
 .event-create-card { border-color:var(--ink); background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
 .event-detail { min-width:0; max-width:100%; padding:clamp(.7rem,2.5vw,1rem); border:2px solid var(--water-dark); border-radius:.9rem; background:#f4fbfd; }
 .event-detail > * + * { margin-top:var(--space-md); }
@@ -288,7 +326,11 @@ form.operation-card > * + * { margin-top:0; }
 .danger-zone { border-color:#9f261c; background:#fff3f1; }
 .message-line { min-height:1.5rem; margin:.65rem 0; font-weight:800; }
 .empty-state { padding:1rem; border:2px dashed #8da0a6; border-radius:.7rem; color:var(--muted); text-align:center; }
-details.operation-card > summary { cursor:pointer; font-size:1.05rem; font-weight:950; }
+details.operation-card > summary { display:flex; min-height:2.75rem; align-items:center; gap:.6rem; list-style:none; cursor:pointer; font-size:1.05rem; font-weight:950; }
+details.operation-card > summary::-webkit-details-marker { display:none; }
+details.operation-card > summary::before { content:""; flex:none; width:.65rem; height:.65rem; border-right:3px solid var(--ink); border-bottom:3px solid var(--ink); transform:rotate(-45deg); transform-origin:center; }
+details.operation-card[open] > summary::before { transform:rotate(45deg); }
+details.operation-card > summary:focus-visible { border-radius:.3rem; outline:4px solid #83d8ec; outline-offset:2px; }
 details.operation-card[open] > summary { margin-bottom:0; }
 .roster-list { display:grid; gap:.45rem; padding:0; list-style:none; }
 .roster-list li { padding:.65rem; border-left:.35rem solid var(--water); background:#eaf7fa; }
@@ -302,7 +344,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .my-ducks-flow { display:flex; flex-direction:column; }
 .my-ducks-flow > * { min-width:0; max-width:100%; }
 .my-ducks-flow[data-my-ducks-flow="empty"] > .my-ducks-search { order:-1; }
-.live-board { border-width:4px; background:#fff; box-shadow:7px 7px 0 var(--ink); }
+.live-board { border-width:4px; background:var(--paper); box-shadow:7px 7px 0 var(--ink); }
 .live-board-title { max-width:none; margin-bottom:.5rem; }
 .live-board-stage { max-width:100%; margin:.2rem 0 .6rem; padding:.4rem .8rem; background:var(--yellow); font-size:.85rem; line-height:1.4; overflow-wrap:anywhere; }
 .board-round { margin-top:1.5rem; }
@@ -320,7 +362,6 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .winner-action .button { width:100%; min-height:4rem; }
 .podium { display:grid; gap:.65rem; margin:1rem 0; }
 .podium-place { padding:.8rem 1rem; border:3px solid var(--ink); border-radius:.75rem; background:var(--yellow); font-size:1.1rem; font-weight:950; }
-.station-panel { max-width:62rem; background:#fff; }
 .station-panel h1 { max-width:none; }
 .station-panel h2 { font-size:clamp(2rem,8vw,4rem); }
 .station-control { min-height:4rem; padding:1rem 1.3rem; font-size:clamp(1.15rem,4vw,1.45rem); }
@@ -334,7 +375,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .station-history { display:grid; gap:.55rem; padding:0; list-style:none; }
 .station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; overflow-wrap:anywhere; }
 .announcer-panel h2 { font-size:clamp(1.8rem,7vw,3.2rem); overflow-wrap:anywhere; }
-.announcer-section { margin:1.6rem 0; padding:1.1rem; border:3px solid var(--ink); border-radius:1rem; background:var(--paper); box-shadow:4px 4px 0 var(--ink); }
+.announcer-section { margin:1.4rem 0; padding:clamp(1rem,3vw,1.5rem); border:3px solid var(--ink); border-radius:1rem; background:#fffdf8; }
 .announcer-section > :last-child { margin-bottom:0; }
 .announcer-cue { margin:0 0 1rem; font-size:clamp(1.05rem,3.6vw,1.4rem); font-weight:900; overflow-wrap:anywhere; }
 .announcer-roster,.announcer-results { display:grid; gap:.65rem; margin:0; padding:0; list-style:none; }
@@ -363,7 +404,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 [data-event-readiness] .button { margin-top:var(--space-xs); }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,minmax(0,1fr)); } .field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .inventory-layout { grid-template-columns:minmax(0,1.15fr) minmax(20rem,.85fr); } .inventory-detail-panel { position:sticky; top:5.75rem; max-height:calc(100vh - 6.75rem); overflow:auto; } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
 @media (prefers-reduced-motion:no-preference) { .button,.result-button { transition:transform 80ms ease-out,box-shadow 80ms ease-out,filter 80ms ease-out,background-color 80ms ease-out; } .hero-duck { animation:duck-rock 3.1s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-rock { 0%,100% { transform:translateX(var(--duck-center)) translateY(-3px) rotate(-3deg); } 25% { transform:translateX(var(--duck-center)) translateY(-8px) rotate(0deg); } 50% { transform:translateX(var(--duck-center)) translateY(-12px) rotate(3deg); } 75% { transform:translateX(var(--duck-center)) translateY(-7px) rotate(-1deg); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
 @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } .hero-water::before { background-position:-2.5rem 0; } }
 `;
@@ -971,7 +1012,7 @@ export const renderStaffHome = (
   robots: "noindex,nofollow",
   phase,
   content: `
-    <section class="page-panel operations-panel" data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+    <section class="page-panel operations-panel staff-panel" data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff")}
       ${duck()}
       <p class="eyebrow">Staff operations</p>
@@ -988,7 +1029,7 @@ export const renderStaffHome = (
           <form data-event-create-form>
             <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
             <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
-            <label>Event date<input name="eventDate" type="date" required></label>
+            <label>Event date<input name="eventDate" type="text" inputmode="none" autocomplete="off" data-app-date-picker="date" required placeholder="Choose date"></label>
             <label>Timezone<select name="timezone" data-timezone-select data-timezone-detect="true" data-app-select-search="true" required><option value="UTC">UTC</option></select><span>Detected from this device. Open the list and type to search every zone.</span></label>
             <label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="3" max="10000" step="1" required placeholder="10"><span>How many ducks race together in each round-one heat, at least 3. Ducks are placed into heats in pairing order, and this can change only while the event is still a draft.</span></label>
             <button class="button" type="submit">Create draft event</button>
@@ -1006,8 +1047,8 @@ export const renderStaffHome = (
             ${isSystemAdmin ? `<details class="operation-card" data-event-config-card hidden><summary>Configure draft</summary>
               <form data-event-config-form>
                 <div class="field-grid"><label>Event name<input name="name" maxlength="120" required></label><label>URL slug preview<input data-event-config-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Changes automatically when the event name changes.</span></label></div>
-                <div class="field-grid"><label>Event date<input name="eventDate" type="date"></label><label>Timezone<select name="timezone" data-timezone-select data-app-select-search="true" required><option value="UTC">UTC</option></select></label></div>
-                <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="datetime-local"></label><label>Registration closes<input name="registrationClosesAt" type="datetime-local"></label></div>
+                 <div class="field-grid"><label>Event date<input name="eventDate" type="text" inputmode="none" autocomplete="off" data-app-date-picker="date" placeholder="Choose date"></label><label>Timezone<select name="timezone" data-timezone-select data-app-select-search="true" required><option value="UTC">UTC</option></select></label></div>
+                 <div class="field-grid"><label>Registration opens<input name="registrationOpensAt" type="text" inputmode="none" autocomplete="off" data-app-date-picker="datetime" placeholder="Choose date and time"></label><label>Registration closes<input name="registrationClosesAt" type="text" inputmode="none" autocomplete="off" data-app-date-picker="datetime" placeholder="Choose date and time"></label></div>
                 <label class="check"><input name="emailRequired" type="checkbox"><span class="label-text">Require participant email</span></label>
                 <label>Public names<select name="publicNamePolicy"><option value="FIRST_NAME_ONLY">First name</option><option value="FIRST_NAME_LAST_INITIAL">First name and last initial</option><option value="FULL_NAME">Full name</option></select></label>
                 <div class="field-grid"><label>Ducks per heat<input name="roundOneHeatCapacity" type="number" min="3" max="10000" required><span>At least 3, so every heat is a real race.</span></label><label>Final capacity<input name="finalHeatCapacity" type="number" min="1" max="10000" required></label></div>
@@ -1019,10 +1060,19 @@ export const renderStaffHome = (
               <p class="muted">Only a revision-matched draft with no race data or operational history can be deleted.</p>
               <form data-delete-draft-form><label>Type the required confirmation<input name="confirmation" required autocomplete="off"></label><button class="button danger" type="submit">Delete empty draft</button></form>
             </details>
-            <details class="operation-card danger-zone" data-force-delete-card hidden><summary>Delete event</summary>
-              <p class="muted">Administrator-only. This is the only way to clear a race. It permanently deletes this event and every record for it — registrations, ducks, tags, heats, results, notifications, commands, and audit history — in any state. This cannot be undone.</p>
-              <form data-force-delete-form><label>Type the exact event name to confirm<input name="confirmName" maxlength="120" required autocomplete="off"></label><button class="button danger" type="submit">Delete event</button></form>
-            </details>` : ""}
+            <article class="operation-card danger-zone" data-force-delete-card hidden>
+              <h3>Delete event</h3><p class="muted">Administrator-only. Permanently deletes this event and every record for it in any state.</p>
+              <button class="button danger" type="button" data-open-force-delete>Delete event</button>
+            </article>
+            <dialog class="app-confirmation event-delete-dialog" data-force-delete-dialog aria-labelledby="force-delete-title">
+              <form data-force-delete-form>
+                <p class="eyebrow">Administrator only</p><h2 id="force-delete-title">Permanently delete this event?</h2>
+                <p class="app-confirmation-message">This is the only way to clear a race. It permanently deletes the event and every registration, duck, tag, heat, result, notification, command, and audit record. This cannot be undone.</p>
+                <label>Type <strong data-force-delete-event-name></strong> to confirm<input name="confirmName" maxlength="120" required autocomplete="off"></label>
+                <p class="message-line muted" data-force-delete-message aria-live="polite"></p>
+                <div class="app-confirmation-actions"><button class="button secondary" type="button" data-cancel-force-delete>Cancel</button><button class="button danger" type="submit" disabled>Delete event</button></div>
+              </form>
+            </dialog>` : ""}
           </div>
         </div>
       </section>
@@ -1074,6 +1124,7 @@ export const renderStaffHome = (
         <details class="operation-card"><summary>Redacted audit timeline</summary><button class="button secondary small" type="button" data-refresh-audit>Load audit</button><div class="data-list" data-audit-list></div></details>
       </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
+      <script src="/assets/app-date-picker.js" defer></script>
       ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
       ${staffFooter(displayName)}
     </section>`,
@@ -1096,7 +1147,7 @@ export const renderStaffAccess = (
   robots: "noindex,nofollow",
   phase,
   content: `
-    <section class="page-panel operations-panel" data-staff-access data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+    <section class="page-panel operations-panel staff-panel" data-staff-access data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff/access")}
       ${duck()}
       <p class="eyebrow">Administrator</p>
@@ -1124,7 +1175,7 @@ export const renderStartLine = (
   description: "Focused protected QuickDucks start-line station.",
   robots: "noindex,nofollow",
   phase,
-  content: `<section class="page-panel station-panel" data-start-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+  content: `<section class="page-panel station-panel staff-panel" data-start-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     ${staffNav(isSystemAdmin, roles, "/staff/start-line")}
     <p class="eyebrow">Start-line station</p><h1 class="page-title">Prepare the next heat.</h1>
     <p class="lede" data-station-event>Finding the active event and next heat.</p>
@@ -1152,7 +1203,7 @@ export const renderAnnouncer = (
   description: "Focused protected QuickDucks announcer station.",
   robots: "noindex,nofollow",
   phase,
-  content: `<section class="page-panel station-panel announcer-panel" data-announcer${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+  content: `<section class="page-panel station-panel staff-panel announcer-panel" data-announcer${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     ${staffNav(isSystemAdmin, roles, "/staff/announcer")}
     <p class="eyebrow">Announcer station</p><h1 class="page-title">Read this out loud.</h1>
     <p class="lede" data-station-event>Finding the active event.</p>
@@ -1191,7 +1242,7 @@ export const renderFinishLine = (
   description: "Focused protected QuickDucks finish-line station.",
   robots: "noindex,nofollow",
   phase,
-  content: `<section class="page-panel station-panel" data-finish-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+  content: `<section class="page-panel station-panel staff-panel" data-finish-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     ${staffNav(isSystemAdmin, roles, "/staff/finish-line")}
     <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
     <p class="lede" data-station-event>Finding a running heat.</p>
@@ -1231,7 +1282,7 @@ export const renderStaffInventory = (
   robots: "noindex,nofollow",
   phase,
   content: `
-    <section class="page-panel operations-panel" data-staff-inventory data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
+    <section class="page-panel operations-panel staff-panel" data-staff-inventory data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
       ${staffNav(isSystemAdmin, roles, "/staff/inventory")}
       <p class="eyebrow">Physical ducks</p>
       <h1 class="page-title operations-title">Inventory</h1>
@@ -1320,7 +1371,7 @@ export const renderStaffDuck = (
   robots: "noindex,nofollow",
   phase,
   content: `
-    <section class="page-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
+    <section class="page-panel operations-panel staff-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
       ${staffNav(isSystemAdmin, roles)}
       <section class="winner-action" data-winner-action hidden aria-live="polite"></section>
       <p class="eyebrow">Protected duck record</p>

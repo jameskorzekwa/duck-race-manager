@@ -3,11 +3,14 @@ import test from "node:test";
 
 import { staffAccessScript } from "./client-scripts.ts";
 import {
+  renderAnnouncer,
+  renderFinishLine,
   renderStaffInventory,
   renderMyDucks,
   renderStaffAccess,
   renderStaffDuck,
   renderStaffHome,
+  renderStartLine,
 } from "./site.ts";
 
 const stylesheetFrom = (markup) => {
@@ -117,4 +120,47 @@ test("mobile staff controls retain touch targets and wrapping containment", () =
   assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.role-set > \.check \{ min-height:2\.75rem; \}/);
   assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.site-head \{ flex-wrap:wrap; \}[\s\S]*\.nav \{ width:100%; \}[\s\S]*\.nav a \{ flex:1 1 0;/);
   assert.match(css, /\.staff-role-controls > select,\.staff-role-controls > fieldset \{ min-width:0;/);
+});
+
+test("every primary staff view uses one shared panel size, color, padding, and title scale", () => {
+  const pages = [
+    renderStaffHome("Administrator", true, []),
+    renderAnnouncer("Administrator", false, true, []),
+    renderStartLine("Administrator", false, true, []),
+    renderFinishLine("Administrator", false, true, []),
+    renderStaffInventory("Administrator", "https://quickducks.com", true, []),
+    renderStaffAccess("Administrator", true, []),
+    renderStaffDuck("tag-token", "Administrator", true, []),
+  ];
+  for (const markup of pages) assert.match(markup, /class="page-panel [^"]*staff-panel[^"]*"/);
+
+  const css = stylesheetFrom(pages[0]);
+  assert.match(
+    css,
+    /\.operations-panel,\.station-panel \{ max-width:70rem; padding:clamp\(1rem,3vw,2\.2rem\); background:var\(--paper\); \}/,
+  );
+  assert.match(
+    css,
+    /\.operations-title,\.staff-panel > \.page-title \{ max-width:none; margin-bottom:\.6rem; font-size:clamp\(2\.5rem,8vw,5rem\); line-height:\.92; \}/,
+  );
+  assert.doesNotMatch(css, /\.station-panel \{[^}]*max-width:62rem|\.station-panel \{[^}]*background:#fff/);
+});
+
+test("shared controls replace system affordances and keep adjacent actions aligned", () => {
+  const css = stylesheetFrom(renderStaffHome("Administrator", true, []));
+
+  assert.match(css, /input\[type="number"\] \{ appearance:textfield; \}/);
+  assert.match(css, /\.check input\[type="checkbox"\] \{[^}]*appearance:none;[^}]*background:#fff;/);
+  assert.match(css, /\.check input\[type="checkbox"\]:checked \{ background:var\(--yellow\); \}/);
+  assert.match(css, /details\.operation-card > summary \{[^}]*min-height:2\.75rem;[^}]*list-style:none;/);
+  assert.match(css, /details\.operation-card > summary::before \{[^}]*border-right:3px solid var\(--ink\);/);
+  assert.match(css, /\.section-tools > \.button \{ flex:0 0 auto; min-height:3\.2rem; \}/);
+});
+
+test("public primary surfaces share the paper color and naming controls always start a new row", () => {
+  const css = stylesheetFrom(renderMyDucks());
+
+  assert.match(css, /\.page-panel \{[^}]*background:var\(--paper\);/);
+  assert.match(css, /\.live-board \{ border-width:4px; background:var\(--paper\);/);
+  assert.match(css, /\.duck-name-toggle \{ display:flex; width:max-content; margin-top:\.7rem;/);
 });

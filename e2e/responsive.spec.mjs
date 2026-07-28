@@ -42,6 +42,7 @@ test.describe("responsive race surfaces", () => {
       "/staff/finish-line",
       "/staff/announcer",
       "/staff/inventory",
+      "/staff/access",
     ]);
     expect(errors).toEqual([]);
   });

@@ -70,16 +70,22 @@ test("delete event is an administrator-only danger control with a dialog and typ
 
   assert.match(
     adminMarkup,
-    /<details class="operation-card danger-zone" data-force-delete-card hidden><summary>Delete event<\/summary>/,
+    /<article class="operation-card danger-zone" data-force-delete-card hidden>[\s\S]*<button class="button danger" type="button" data-open-force-delete>Delete event<\/button>/,
   );
+  assert.match(adminMarkup, /<dialog class="app-confirmation event-delete-dialog" data-force-delete-dialog/);
   assert.match(adminMarkup, /data-force-delete-form/);
-  assert.match(adminMarkup, /Type the exact event name to confirm<input name="confirmName"[^>]*required/);
-  assert.match(adminMarkup, /in any state\. This cannot be undone\./);
-  assert.doesNotMatch(directorMarkup, /data-force-delete-(?:card|form)/);
+  assert.match(adminMarkup, /Type <strong data-force-delete-event-name><\/strong> to confirm<input name="confirmName"[^>]*required/);
+  assert.match(adminMarkup, /This cannot be undone\./);
+  assert.match(adminMarkup, /data-cancel-force-delete>Cancel<\/button><button class="button danger" type="submit" disabled>Delete event<\/button>/);
+  assert.doesNotMatch(adminMarkup, /<details[^>]*data-force-delete-card/);
+  assert.doesNotMatch(directorMarkup, /data-(?:open-)?force-delete|data-cancel-force-delete/);
 
-  assert.ok(staffHomeScript.includes(
-    'if (!await appConfirm("Permanently delete this event and every record for it, in any state? This cannot be undone.", { danger: true })) return;',
-  ));
+  assert.ok(staffHomeScript.includes("forceDeleteDialog.showModal();"));
+  assert.ok(staffHomeScript.includes('input.value !== currentEvent.name;'));
+  assert.ok(staffHomeScript.includes('input.setCustomValidity("Type the exact event name to continue.");'));
+  assert.ok(staffHomeScript.includes("if (forceDeleteBusy) event.preventDefault();"));
+  assert.ok(staffHomeScript.includes("forceDeleteCancel.disabled = true;"));
+  assert.ok(staffHomeScript.includes("globalThis.quickDucksLive.markClean(forceDeleteForm);"));
   assert.ok(staffHomeScript.includes('const confirmName = String(new FormData(form).get("confirmName"));'));
   assert.ok(staffHomeScript.includes('"/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/force-delete"'));
   assert.ok(staffHomeScript.includes(

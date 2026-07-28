@@ -344,7 +344,7 @@ test("the access page keeps every hook, field name, and control the access clien
 
   // Page shell follows the staff page conventions, including the authorization
   // projection the live hub revalidates against.
-  assert.match(markup, /<section class="page-panel operations-panel" data-staff-access data-live-staff data-system-admin="true" data-roles="">/);
+  assert.match(markup, /<section class="page-panel operations-panel staff-panel" data-staff-access data-live-staff data-system-admin="true" data-roles="">/);
   assert.match(
     renderStaffAccess("Promoted Admin", true, ["RACE_DIRECTOR"]),
     /data-live-staff data-system-admin="true" data-roles="RACE_DIRECTOR">/,

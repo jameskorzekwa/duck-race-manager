@@ -686,7 +686,6 @@ const confirmationCallsites = [
   )) return;`],
   [staffHomeScript, 'if (!await appConfirm("Run “" + button.textContent + "” for " + event.name + "?")) return;'],
   [staffHomeScript, 'if (!await appConfirm("Delete this empty draft? This cannot be undone.", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Permanently delete this event and every record for it, in any state? This cannot be undone.", { danger: true })) return;'],
   [staffHomeScript, 'if (dangerous && !await appConfirm(label + " for " + selectedRegistration.firstName + " " + selectedRegistration.lastName + "?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Reactivate this participant?")) return;'],
   [staffHomeScript, 'if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;'],
@@ -729,9 +728,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
   // Inventory owns takeover, clearing a duck name, assign, unpair, release,
   // and delete duck. Every one of them is destructive or irreversible.
   assert.equal((staffInventoryScript.match(/\bappConfirm\(/g) ?? []).length, 6);
-  // 16 minus the five inventory confirmations that moved to /staff/inventory,
-  // plus the race-director heat reset.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 12);
+  // Delete event owns its typed-name modal, while the remaining console
+  // mutations use the shared confirmation dialog.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 11);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The staff duck scan confirms both name moderation and winner publication.
   assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 2);
