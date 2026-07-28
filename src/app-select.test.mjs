@@ -675,6 +675,8 @@ test("enhancement scripts are valid JavaScript and avoid unsafe DOM sinks", () =
   assert.match(appSelectScript, /!element\.multiple/);
   // Real change events are dispatched so existing listeners keep working.
   assert.match(appSelectScript, /new Event\("change", \{ bubbles: true \}\)/);
+  // Escape closes only this listbox when it is nested inside another control.
+  assert.match(appSelectScript, /event\.stopPropagation\(\)/);
   // Form resets re-sync the trigger label.
   assert.match(appSelectScript, /addEventListener\("reset"/);
   // The filter is opt-in, so short lists keep the plain listbox panel.

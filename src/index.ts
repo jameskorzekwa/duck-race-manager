@@ -11,6 +11,7 @@ import { authenticateStaff } from "./auth.ts";
 import { hasAnyRole, type OperationalRole } from "./authorization.ts";
 import {
   announcerScript,
+  appDatePickerScript,
   appSelectScript,
   finishLineScript,
   liveScript,
@@ -240,7 +241,7 @@ export const createWorker = (
       });
     }
 
-    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/live.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/staff-inventory.js", "/assets/app-select.js"].includes(url.pathname)) {
+    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/live.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/staff-inventory.js", "/assets/app-select.js", "/assets/app-date-picker.js"].includes(url.pathname)) {
       const script = url.pathname === "/assets/live-ui.js"
         ? liveUiScript
         : url.pathname === "/assets/register.js"
@@ -261,11 +262,13 @@ export const createWorker = (
                         ? finishLineScript
                         : url.pathname === "/assets/app-select.js"
                           ? appSelectScript
-                          : url.pathname === "/assets/staff-inventory.js" ? staffInventoryScript : staffDuckScript;
+                          : url.pathname === "/assets/app-date-picker.js"
+                            ? appDatePickerScript
+                            : url.pathname === "/assets/staff-inventory.js" ? staffInventoryScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/staff-inventory.js", "/assets/app-select.js"].includes(url.pathname)
+          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/staff-inventory.js", "/assets/app-select.js", "/assets/app-date-picker.js"].includes(url.pathname)
             ? "no-store"
             : "public, max-age=3600",
           "content-type": "text/javascript; charset=utf-8",

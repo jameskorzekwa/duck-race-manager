@@ -45,7 +45,15 @@ test.describe("complete race journey", () => {
     await test.step("create and configure a draft", async () => {
       const create = page.locator("[data-event-create-form]");
       await create.getByLabel("Event name").fill(eventName);
-      await create.getByLabel("Event date").fill(eventDate);
+      const dateInput = create.locator('input[name="eventDate"]');
+      const datePicker = dateInput.locator("xpath=..");
+      await datePicker.locator(".app-date-trigger").click();
+      const datePanel = datePicker.locator(".app-date-panel");
+      if (await datePanel.locator(`[data-date-value="${eventDate}"]`).count() === 0) {
+        await datePanel.getByRole("button", { name: "Next month" }).click();
+      }
+      await datePanel.locator(`[data-date-value="${eventDate}"]`).click();
+      await expect(dateInput).toHaveValue(eventDate);
       await create.getByLabel("Ducks per heat").fill("3");
       await create.getByRole("button", { name: "Create draft event" }).click();
       await expect(page.getByText("Draft", { exact: true }).first()).toBeVisible();
@@ -107,6 +115,7 @@ test.describe("complete race journey", () => {
       }
 
       await page.goto(`/staff/ducks/${ducks[0].tagToken}`);
+      await expect(page.locator(".staff-panel")).toHaveCSS("background-color", "rgb(255, 253, 243)");
       await expect(page.locator("[data-registration-search-status]")).toContainText("waiting for a duck");
       // Let any initial live refresh finish before selecting a row; a refresh
       // intentionally clears an in-progress pairing review.
@@ -127,6 +136,13 @@ test.describe("complete race journey", () => {
 
       const listed = (await client.get(`/api/v1/staff/events/${event.id}/heats`)).body.heats;
       expect(listed.filter((heat) => heat.round === "ROUND_ONE")).toHaveLength(3);
+
+      await page.goto("/my-ducks");
+      const duckLink = page.getByRole("link", { name: "Duck #101", exact: true });
+      const nameButton = page.getByRole("button", { name: "Name this duck", exact: true });
+      await expect(nameButton).toBeVisible();
+      const [duckBox, nameBox] = await Promise.all([duckLink.boundingBox(), nameButton.boundingBox()]);
+      expect(nameBox.y).toBeGreaterThanOrEqual(duckBox.y + duckBox.height);
     });
 
     await test.step("close registration and reject late entry", async () => {
@@ -238,11 +254,10 @@ test.describe("complete race journey", () => {
 
     await test.step("delete the complete dataset and leave staff access intact", async () => {
       await page.goto("/staff");
-      const deleteCard = page.locator("[data-force-delete-card]");
-      await deleteCard.locator("summary").click();
-      await deleteCard.getByLabel("Type the exact event name to confirm").fill(eventName);
-      await deleteCard.getByRole("button", { name: "Delete event" }).click();
-      await confirmAction(page);
+      await page.locator("[data-open-force-delete]").click();
+      const deleteDialog = page.locator("[data-force-delete-dialog]");
+      await deleteDialog.locator('input[name="confirmName"]').fill(eventName);
+      await deleteDialog.getByRole("button", { name: "Delete event", exact: true }).click();
       await expect(page.getByText("No race yet.")).toBeVisible();
 
       await page.goto("/duck/101");

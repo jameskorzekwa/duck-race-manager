@@ -4437,7 +4437,31 @@ const eventConfigSlugPreview = document.querySelector("[data-event-config-slug-p
 const deleteDraftCard = document.querySelector("[data-delete-draft-card]");
 const deleteDraftForm = document.querySelector("[data-delete-draft-form]");
 const forceDeleteCard = document.querySelector("[data-force-delete-card]");
+const forceDeleteOpen = document.querySelector("[data-open-force-delete]");
+const forceDeleteDialog = document.querySelector("[data-force-delete-dialog]");
 const forceDeleteForm = document.querySelector("[data-force-delete-form]");
+const forceDeleteEventName = document.querySelector("[data-force-delete-event-name]");
+const forceDeleteMessage = document.querySelector("[data-force-delete-message]");
+const forceDeleteCancel = document.querySelector("[data-cancel-force-delete]");
+let forceDeleteBusy = false;
+
+const closeForceDeleteDialog = () => {
+  if (!forceDeleteBusy && forceDeleteDialog && forceDeleteDialog.open) forceDeleteDialog.close();
+};
+
+const resetForceDeleteDialog = () => {
+  if (!forceDeleteForm) return;
+  forceDeleteBusy = false;
+  forceDeleteForm.reset();
+  forceDeleteForm.elements.confirmName.disabled = false;
+  forceDeleteForm.elements.confirmName.setCustomValidity("");
+  forceDeleteForm.querySelector('button[type="submit"]').disabled = true;
+  if (forceDeleteCancel) forceDeleteCancel.disabled = false;
+  if (forceDeleteMessage) {
+    forceDeleteMessage.textContent = "";
+    forceDeleteMessage.classList.remove("error-text");
+  }
+};
 
 // The device zone is resolved once and every timezone select is filled from the
 // runtime zone list. The create form defaults to the detected zone; the config
@@ -4578,6 +4602,7 @@ const renderEvent = (detail, readiness) => {
   if (forceDeleteCard) {
     forceDeleteCard.hidden = false;
     forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;
+    forceDeleteEventName.textContent = currentEvent.name;
   }
   if (eventEmptyState) eventEmptyState.hidden = true;
   if (eventDetailRegion) eventDetailRegion.hidden = false;
@@ -4626,7 +4651,8 @@ const loadEvents = async (preferredId) => {
       deleteDraftCard.hidden = true;
     }
     if (forceDeleteForm) {
-      forceDeleteForm.reset();
+      resetForceDeleteDialog();
+      closeForceDeleteDialog();
       forceDeleteCard.hidden = true;
     }
     if (eventDetailRegion) eventDetailRegion.hidden = true;
@@ -4749,19 +4775,81 @@ if (deleteDraftForm) deleteDraftForm.addEventListener("submit", async (event) =>
   });
 });
 
+if (forceDeleteOpen) forceDeleteOpen.addEventListener("click", () => {
+  if (!currentEvent || !forceDeleteDialog || !forceDeleteForm) return;
+  resetForceDeleteDialog();
+  forceDeleteEventName.textContent = currentEvent.name;
+  forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;
+  forceDeleteDialog.showModal();
+  forceDeleteForm.elements.confirmName.focus();
+});
+
+if (forceDeleteCancel) forceDeleteCancel.addEventListener("click", closeForceDeleteDialog);
+if (forceDeleteDialog) {
+  forceDeleteDialog.addEventListener("click", (event) => {
+    if (event.target === forceDeleteDialog) closeForceDeleteDialog();
+  });
+  forceDeleteDialog.addEventListener("cancel", (event) => {
+    if (forceDeleteBusy) event.preventDefault();
+  });
+  forceDeleteDialog.addEventListener("close", () => {
+    resetForceDeleteDialog();
+    globalThis.quickDucksLive.markClean(forceDeleteForm);
+  });
+}
+if (forceDeleteForm) forceDeleteForm.elements.confirmName.addEventListener("input", (event) => {
+  const input = event.currentTarget;
+  input.setCustomValidity("");
+  forceDeleteForm.querySelector('button[type="submit"]').disabled = !currentEvent
+    || input.value !== currentEvent.name;
+  if (forceDeleteMessage) {
+    forceDeleteMessage.textContent = "";
+    forceDeleteMessage.classList.remove("error-text");
+  }
+});
+
 if (forceDeleteForm) forceDeleteForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
-  const button = form.querySelector("button");
+  const button = form.querySelector('button[type="submit"]');
+  const input = form.elements.confirmName;
   const confirmName = String(new FormData(form).get("confirmName"));
-  if (!await appConfirm("Permanently delete this event and every record for it, in any state? This cannot be undone.", { danger: true })) return;
-  await perform(button, "Permanently deleting event…", async () => {
+  if (!currentEvent || confirmName !== currentEvent.name) {
+    input.setCustomValidity("Type the exact event name to continue.");
+    input.reportValidity();
+    return;
+  }
+  forceDeleteBusy = true;
+  button.disabled = true;
+  input.disabled = true;
+  forceDeleteCancel.disabled = true;
+  if (forceDeleteMessage) {
+    forceDeleteMessage.textContent = "Permanently deleting event…";
+    forceDeleteMessage.classList.remove("error-text");
+  }
+  staffCommandCount += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
     await api(
       "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/force-delete",
       commandOptions("POST", { commandId: crypto.randomUUID(), revision: currentEvent.revision, confirmName }),
     );
     location.assign("/staff");
-  });
+  } catch (error) {
+    if (error.message !== "signed-out" && forceDeleteMessage) {
+      forceDeleteBusy = false;
+      forceDeleteMessage.textContent = error.message;
+      forceDeleteMessage.classList.add("error-text");
+      input.disabled = false;
+      forceDeleteCancel.disabled = false;
+      button.disabled = false;
+      input.focus();
+    }
+  } finally {
+    staffCommandCount = Math.max(0, staffCommandCount - 1);
+    endBusy();
+    staffLiveSubscription?.resume();
+  }
 });
 
 const participantFilterForm = document.querySelector("[data-participant-filter-form]");
@@ -6684,6 +6772,7 @@ const createAppSelect = (select, context = {}) => {
       close(true);
     } else if (key === "Escape") {
       if (typeof event.preventDefault === "function") event.preventDefault();
+      if (typeof event.stopPropagation === "function") event.stopPropagation();
       close(true);
     } else if (key === "Tab") {
       close(false);
@@ -6793,4 +6882,474 @@ const appSelectAdditions = new MutationObserver((records) => {
   }
 });
 appSelectAdditions.observe(document.body, { childList: true, subtree: true });
+`;
+
+// App-styled date and date-time picker. The original text input remains the
+// form-associated source of truth, so FormData, required validation, resets,
+// and the staff console's programmatic .value writes keep their normal
+// semantics without exposing a browser- or operating-system-specific picker.
+export const appDatePickerHelpersScript = String.raw`
+let appDateInstanceCount = 0;
+
+const appDatePad = (value) => String(value).padStart(2, "0");
+
+const appDateParse = (value, mode) => {
+  const pattern = mode === "datetime"
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
+    : /^(\d{4})-(\d{2})-(\d{2})$/;
+  const match = String(value || "").match(pattern);
+  if (!match) return null;
+  const parts = {
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hour: mode === "datetime" ? Number(match[4]) : 0,
+    minute: mode === "datetime" ? Number(match[5]) : 0,
+  };
+  const date = new Date(parts.year, parts.month - 1, parts.day, 12, 0, 0, 0);
+  if (
+    parts.year < 1
+    || parts.month < 1
+    || parts.month > 12
+    || parts.day < 1
+    || date.getFullYear() !== parts.year
+    || date.getMonth() !== parts.month - 1
+    || date.getDate() !== parts.day
+    || parts.hour < 0
+    || parts.hour > 23
+    || parts.minute < 0
+    || parts.minute > 59
+  ) return null;
+  return parts;
+};
+
+const appDateValue = (parts, mode) => {
+  const date = String(parts.year).padStart(4, "0") + "-" + appDatePad(parts.month) + "-" + appDatePad(parts.day);
+  return mode === "datetime" ? date + "T" + appDatePad(parts.hour) + ":" + appDatePad(parts.minute) : date;
+};
+
+const appDateDisplay = (value, mode, locale = "en-US") => {
+  const parts = appDateParse(value, mode);
+  if (!parts) return "";
+  const date = new Date(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, 0, 0);
+  return new Intl.DateTimeFormat(locale, mode === "datetime"
+    ? { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }
+    : { month: "short", day: "numeric", year: "numeric" }).format(date);
+};
+
+const appDateMonthDisplay = (year, month, locale = "en-US") =>
+  new Intl.DateTimeFormat(locale, { month: "long", year: "numeric" }).format(new Date(year, month - 1, 1, 12));
+
+const appDateTimeDisplay = (hour, minute, locale = "en-US") =>
+  new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit" })
+    .format(new Date(2000, 0, 1, hour, minute, 0, 0));
+
+const appDatePrototypeAccessor = (target, name) => {
+  let prototype = Object.getPrototypeOf(target);
+  while (prototype !== null) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    if (descriptor && (descriptor.get || descriptor.set)) return descriptor;
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  return null;
+};
+
+const appDateFieldLabel = (input) => {
+  const explicit = typeof input.getAttribute === "function" ? input.getAttribute("aria-label") : null;
+  if (explicit) return explicit;
+  const label = typeof input.closest === "function" ? input.closest("label") : null;
+  if (!label) return "Date";
+  const parts = [];
+  for (const node of Array.from(label.childNodes || [])) {
+    if (node === input || (typeof node.contains === "function" && node.contains(input))) break;
+    parts.push(String(node.textContent || ""));
+  }
+  return parts.join(" ").replace(/\s+/g, " ").trim() || "Date";
+};
+
+const createAppDatePicker = (input, context = {}) => {
+  const doc = context.documentObject || document;
+  const mode = input.getAttribute("data-app-date-picker") === "datetime" ? "datetime" : "date";
+  const nativeValue = appDatePrototypeAccessor(input, "value");
+  const readValue = () => nativeValue && nativeValue.get ? nativeValue.get.call(input) : input.value;
+  const writeValue = (value) => {
+    if (nativeValue && nativeValue.set) nativeValue.set.call(input, value);
+    else input.value = value;
+  };
+  const fieldLabel = appDateFieldLabel(input);
+  const baseId = "app-date-" + (appDateInstanceCount += 1);
+  const wrapper = doc.createElement("div");
+  wrapper.className = "app-date-picker";
+  const trigger = doc.createElement("button");
+  trigger.type = "button";
+  trigger.className = "app-date-trigger";
+  trigger.setAttribute("aria-haspopup", "dialog");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.setAttribute("aria-label", fieldLabel);
+  if (input.required) trigger.setAttribute("aria-required", "true");
+  const describedBy = input.getAttribute("aria-describedby");
+  if (describedBy) trigger.setAttribute("aria-describedby", describedBy);
+  const valueText = doc.createElement("span");
+  valueText.className = "app-date-value";
+  const icon = doc.createElement("span");
+  icon.className = "app-date-icon";
+  icon.setAttribute("aria-hidden", "true");
+  trigger.append(valueText, icon);
+
+  const panel = doc.createElement("div");
+  panel.id = baseId + "-panel";
+  panel.className = "app-date-panel";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-label", "Choose " + fieldLabel);
+  panel.hidden = true;
+  trigger.setAttribute("aria-controls", panel.id);
+
+  const header = doc.createElement("div");
+  header.className = "app-date-header";
+  const previous = doc.createElement("button");
+  previous.type = "button";
+  previous.className = "app-date-month-button";
+  previous.textContent = "<";
+  previous.setAttribute("aria-label", "Previous month");
+  const heading = doc.createElement("h3");
+  heading.className = "app-date-heading";
+  heading.id = baseId + "-heading";
+  panel.setAttribute("aria-labelledby", heading.id);
+  const next = doc.createElement("button");
+  next.type = "button";
+  next.className = "app-date-month-button";
+  next.textContent = ">";
+  next.setAttribute("aria-label", "Next month");
+  header.append(previous, heading, next);
+
+  const weekdays = doc.createElement("div");
+  weekdays.className = "app-date-weekdays";
+  for (const label of ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]) {
+    const weekday = doc.createElement("span");
+    weekday.className = "app-date-weekday";
+    weekday.textContent = label;
+    weekdays.append(weekday);
+  }
+  const grid = doc.createElement("div");
+  grid.className = "app-date-grid";
+
+  let timeHourSelect = null;
+  let timeMinuteSelect = null;
+  let timePeriodSelect = null;
+  if (mode === "datetime") {
+    const time = doc.createElement("div");
+    time.className = "app-date-time";
+    const timeLabel = doc.createElement("span");
+    timeLabel.className = "label-text";
+    timeLabel.textContent = "Time";
+    const timeFields = doc.createElement("div");
+    timeFields.className = "app-date-time-fields";
+    const timeField = (label, select) => {
+      const field = doc.createElement("div");
+      field.className = "app-date-time-field";
+      const fieldLabel = doc.createElement("span");
+      fieldLabel.textContent = label;
+      select.setAttribute("aria-label", label);
+      field.append(fieldLabel, select);
+      return field;
+    };
+    timeHourSelect = doc.createElement("select");
+    timeMinuteSelect = doc.createElement("select");
+    timePeriodSelect = doc.createElement("select");
+    timeFields.append(
+      timeField("Hour", timeHourSelect),
+      timeField("Minute", timeMinuteSelect),
+      timeField("AM or PM", timePeriodSelect),
+    );
+    time.append(timeLabel, timeFields);
+    panel.append(header, weekdays, grid, time);
+  } else {
+    panel.append(header, weekdays, grid);
+  }
+
+  const actions = doc.createElement("div");
+  actions.className = "app-date-actions";
+  const todayButton = doc.createElement("button");
+  todayButton.type = "button";
+  todayButton.className = "button secondary small";
+  todayButton.textContent = "Today";
+  actions.append(todayButton);
+  let clearButton = null;
+  if (!input.required) {
+    clearButton = doc.createElement("button");
+    clearButton.type = "button";
+    clearButton.className = "button secondary small";
+    clearButton.textContent = "Clear";
+    actions.append(clearButton);
+  }
+  let applyButton = null;
+  if (mode === "datetime") {
+    applyButton = doc.createElement("button");
+    applyButton.type = "button";
+    applyButton.className = "button small";
+    applyButton.textContent = "Apply";
+    actions.append(applyButton);
+  }
+  panel.append(actions);
+
+  const parent = input.parentNode || null;
+  if (parent && typeof parent.insertBefore === "function") parent.insertBefore(wrapper, input);
+  wrapper.append(input, trigger, panel);
+  input.classList.add("app-date-native");
+  input.setAttribute("tabindex", "-1");
+  input.setAttribute("aria-hidden", "true");
+
+  let openState = false;
+  let viewYear = 0;
+  let viewMonth = 0;
+  let draft = null;
+  let syncedValue = readValue();
+
+  const nowParts = () => {
+    const now = new Date();
+    return { year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate(), hour: 9, minute: 0 };
+  };
+
+  const syncTrigger = () => {
+    const value = readValue();
+    const display = appDateDisplay(value, mode);
+    const visibleValue = display || input.placeholder || (mode === "datetime" ? "Choose date and time" : "Choose date");
+    valueText.textContent = visibleValue;
+    trigger.setAttribute("aria-label", fieldLabel + ": " + visibleValue + (input.required ? ", required" : ""));
+    trigger.setAttribute("aria-invalid", input.required && value === "" ? "true" : "false");
+    trigger.classList.toggle("is-empty", display === "");
+    trigger.disabled = input.disabled === true;
+    syncedValue = value;
+    if (trigger.disabled && openState) close(false);
+  };
+
+  const populateTimes = () => {
+    if (timeHourSelect === null || timeMinuteSelect === null || timePeriodSelect === null || draft === null) return;
+    const option = (value, text) => {
+      const option = doc.createElement("option");
+      option.value = String(value);
+      option.textContent = String(text);
+      return option;
+    };
+    const displayHour = draft.hour % 12 || 12;
+    timeHourSelect.replaceChildren(...Array.from({ length: 12 }, (_unused, index) => option(index + 1, index + 1)));
+    timeMinuteSelect.replaceChildren(...Array.from({ length: 60 }, (_unused, minute) => option(minute, appDatePad(minute))));
+    timePeriodSelect.replaceChildren(option("AM", "AM"), option("PM", "PM"));
+    timeHourSelect.value = String(displayHour);
+    timeMinuteSelect.value = String(draft.minute);
+    timePeriodSelect.value = draft.hour >= 12 ? "PM" : "AM";
+  };
+
+  const renderMonth = () => {
+    heading.textContent = appDateMonthDisplay(viewYear, viewMonth);
+    grid.replaceChildren();
+    const firstWeekday = new Date(viewYear, viewMonth - 1, 1, 12).getDay();
+    const dayCount = new Date(viewYear, viewMonth, 0, 12).getDate();
+    const today = nowParts();
+    let hasTabStop = false;
+    for (let index = 0; index < firstWeekday; index += 1) {
+      const blank = doc.createElement("span");
+      blank.className = "app-date-blank";
+      blank.setAttribute("aria-hidden", "true");
+      grid.append(blank);
+    }
+    for (let day = 1; day <= dayCount; day += 1) {
+      const button = doc.createElement("button");
+      button.type = "button";
+      button.className = "app-date-day";
+      button.textContent = String(day);
+      const parts = { year: viewYear, month: viewMonth, day, hour: draft.hour, minute: draft.minute };
+      const value = appDateValue(parts, "date");
+      button.dataset.dateValue = value;
+      button.setAttribute("aria-label", appDateDisplay(value, "date"));
+      const selected = draft.year === viewYear && draft.month === viewMonth && draft.day === day;
+      button.setAttribute("aria-pressed", selected ? "true" : "false");
+      button.tabIndex = selected ? 0 : -1;
+      if (selected) hasTabStop = true;
+      if (today.year === viewYear && today.month === viewMonth && today.day === day) button.classList.add("is-today");
+      button.addEventListener("click", () => {
+        draft = parts;
+        if (mode === "date") {
+          commit();
+          close(true);
+          return;
+        }
+        renderMonth();
+        const selectedDay = grid.querySelector('[aria-pressed="true"]');
+        if (selectedDay) selectedDay.focus();
+      });
+      grid.append(button);
+    }
+    if (!hasTabStop) {
+      const firstDay = grid.querySelector(".app-date-day");
+      if (firstDay) firstDay.tabIndex = 0;
+    }
+  };
+
+  const setView = (year, month) => {
+    const normalized = new Date(year, month - 1, 1, 12);
+    viewYear = normalized.getFullYear();
+    viewMonth = normalized.getMonth() + 1;
+    renderMonth();
+  };
+
+  const commit = () => {
+    if (draft === null) return;
+    if (timeHourSelect !== null && timeMinuteSelect !== null && timePeriodSelect !== null) {
+      const hour = Number(timeHourSelect.value) % 12;
+      draft.hour = hour + (timePeriodSelect.value === "PM" ? 12 : 0);
+      draft.minute = Number(timeMinuteSelect.value);
+    }
+    const before = readValue();
+    const value = appDateValue(draft, mode);
+    writeValue(value);
+    syncTrigger();
+    if (value !== before) {
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  };
+
+  const clear = () => {
+    const before = readValue();
+    writeValue("");
+    syncTrigger();
+    if (before !== "") {
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    close(true);
+  };
+
+  const open = () => {
+    if (openState || input.disabled === true) return;
+    draft = appDateParse(readValue(), mode) || nowParts();
+    viewYear = draft.year;
+    viewMonth = draft.month;
+    populateTimes();
+    renderMonth();
+    openState = true;
+    panel.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    const selected = grid.querySelector('[aria-pressed="true"]');
+    if (selected && typeof selected.focus === "function") selected.focus();
+  };
+
+  const close = (returnFocus) => {
+    if (!openState) return;
+    openState = false;
+    panel.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    for (const select of [timeHourSelect, timeMinuteSelect, timePeriodSelect]) {
+      if (select !== null) delete select.dataset.liveDirty;
+    }
+    if (returnFocus && typeof trigger.focus === "function") trigger.focus();
+  };
+
+  const refreshFromInput = () => {
+    const changed = readValue() !== syncedValue;
+    syncTrigger();
+    if (changed && openState) close(true);
+  };
+
+  previous.addEventListener("click", () => setView(viewYear, viewMonth - 1));
+  next.addEventListener("click", () => setView(viewYear, viewMonth + 1));
+  todayButton.addEventListener("click", () => {
+    draft = nowParts();
+    setView(draft.year, draft.month);
+    populateTimes();
+    if (mode === "date") {
+      commit();
+      close(true);
+    }
+  });
+  if (clearButton !== null) clearButton.addEventListener("click", clear);
+  if (applyButton !== null) applyButton.addEventListener("click", () => {
+    commit();
+    close(true);
+  });
+  trigger.addEventListener("click", () => openState ? close(true) : open());
+  trigger.addEventListener("keydown", (event) => {
+    if (["ArrowDown", "Enter", " "].includes(event.key) && !openState) {
+      event.preventDefault();
+      open();
+    }
+  });
+  grid.addEventListener("keydown", (event) => {
+    const current = event.target && event.target.dataset ? event.target.dataset.dateValue : null;
+    const parts = appDateParse(current, "date");
+    if (!parts) return;
+    const movement = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -7, ArrowDown: 7 }[event.key];
+    if (movement === undefined) return;
+    event.preventDefault();
+    const target = new Date(parts.year, parts.month - 1, parts.day + movement, 12);
+    const targetParts = {
+      year: target.getFullYear(), month: target.getMonth() + 1, day: target.getDate(), hour: 0, minute: 0,
+    };
+    const targetValue = appDateValue(targetParts, "date");
+    if (targetParts.year !== viewYear || targetParts.month !== viewMonth) setView(targetParts.year, targetParts.month);
+    const targetButton = grid.querySelector('[data-date-value="' + targetValue + '"]');
+    if (targetButton) {
+      for (const day of grid.querySelectorAll(".app-date-day")) day.tabIndex = -1;
+      targetButton.tabIndex = 0;
+      targetButton.focus();
+    }
+  });
+  doc.addEventListener("keydown", (event) => {
+    if (openState && event.key === "Escape") {
+      event.preventDefault();
+      close(true);
+    }
+  });
+  input.addEventListener("focus", () => trigger.focus());
+  input.addEventListener("change", refreshFromInput);
+  input.addEventListener("invalid", () => {
+    syncTrigger();
+    trigger.focus();
+    open();
+  });
+  if (input.form) input.form.addEventListener("reset", () => queueMicrotask(() => {
+    syncTrigger();
+    if (openState) close(true);
+  }));
+  doc.addEventListener("pointerdown", (event) => {
+    if (openState && !wrapper.contains(event.target)) close(false);
+  }, true);
+  doc.addEventListener("focusin", (event) => {
+    if (openState && !wrapper.contains(event.target)) close(false);
+  }, true);
+
+  const inherited = appDatePrototypeAccessor(input, "value");
+  if (inherited !== null) {
+    Object.defineProperty(input, "value", {
+      configurable: true,
+      get() { return inherited.get.call(input); },
+      set(value) { inherited.set.call(input, value); refreshFromInput(); },
+    });
+  }
+  syncTrigger();
+
+  return {
+    input,
+    wrapper,
+    trigger,
+    panel,
+    grid,
+    timeSelects: [timeHourSelect, timeMinuteSelect, timePeriodSelect].filter(Boolean),
+    open,
+    close: (returnFocus = true) => close(returnFocus),
+    commit,
+    clear,
+    refresh: refreshFromInput,
+    isOpen: () => openState,
+  };
+};
+`;
+
+export const appDatePickerScript = appDatePickerHelpersScript + String.raw`
+for (const input of document.querySelectorAll("input[data-app-date-picker]")) {
+  if (input.dataset.appDateEnhanced === "true") continue;
+  input.dataset.appDateEnhanced = "true";
+  createAppDatePicker(input, { documentObject: document });
+}
 `;

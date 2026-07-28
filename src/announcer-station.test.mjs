@@ -148,7 +148,7 @@ test("the announcer client asset is served no-store like the other protected sta
 test("the announcer page renders the reading-script shell the client binds", () => {
   const markup = renderAnnouncer("Announcer Staff", true, false, ["ANNOUNCER"]);
 
-  assert.match(markup, /<section class="page-panel station-panel announcer-panel" data-announcer data-live-staff data-system-admin="false" data-roles="ANNOUNCER">/);
+  assert.match(markup, /<section class="page-panel station-panel staff-panel announcer-panel" data-announcer data-live-staff data-system-admin="false" data-roles="ANNOUNCER">/);
   for (const hook of [
     "data-station-event",
     "data-announcer-heat",
@@ -175,7 +175,7 @@ test("the announcer page renders the reading-script shell the client binds", () 
 
 test("the announcer page is read-only: no form, no button, and no command hook", () => {
   const markup = renderAnnouncer("Announcer Staff", true, false, ["ANNOUNCER"]);
-  const panel = markup.match(/<section class="page-panel station-panel announcer-panel"[\s\S]*<\/section>/)?.[0];
+  const panel = markup.match(/<section class="page-panel station-panel staff-panel announcer-panel"[\s\S]*<\/section>/)?.[0];
 
   assert.ok(panel);
   // Log out is the one form on the page and it belongs to the shared staff bar.
@@ -191,7 +191,7 @@ test("the announcer page is read-only: no form, no button, and no command hook",
 // body must never introduce a surface for contact, inventory, or audit data.
 test("the announcer panel carries no participant contact detail or staff-only data", () => {
   const panel = renderAnnouncer("Announcer Staff", true, false, ["ANNOUNCER"])
-    .match(/<section class="page-panel station-panel announcer-panel"[\s\S]*<\/section>/)?.[0];
+    .match(/<section class="page-panel station-panel staff-panel announcer-panel"[\s\S]*<\/section>/)?.[0];
 
   assert.ok(panel);
   assert.doesNotMatch(panel, /\b(?:email|phone|lookup|notes|audit|location|address)\b|tag token/i);
