@@ -5093,18 +5093,72 @@ const changeParticipantStatus = async (operation, label, dangerous, button) => {
   });
 };
 
-// Pairing is the line between the two destructive paths. Until a participant
-// has a duck there is nothing physical in the race, so removing the whole
-// registration is the only sensible action — and the server refuses a delete
-// while an assignment exists, which is this same rule from the other side. Once
-// a duck is paired it is sealed into a heat bag and stays in the water, so all
-// staff can do is make the participant ineligible to win.
+// The projection answers two different questions, and the console needs both.
 //
-// This reads the server's own current-assignment field. Status does not answer
-// the question: pairing is what makes a participant ACTIVE, but a reactivated
+// deletable is the only thing that may decide whether Delete is rendered. It is
+// the exact predicate the delete endpoint re-checks inside its guarded write:
+// never paired at all — no assignment row, current or already ended — no heat
+// place, and a deletable event status. A projection served before those fields
+// existed reports undefined, and the safe reading of that is "not deletable":
+// refusing a delete that would have worked costs a page refresh, while offering
+// one the server refuses is a 409 in a staffer's face on race day.
+const participantIsDeletable = (registration) => registration.deletable === true;
+
+// currentlyPaired is the narrower, physical question — is a duck in this
+// participant's hands right now — and it is the only thing that may be used to
+// say a duck is sealed in a heat bag. It is not the same question as deletable:
+// a participant whose duck was later unassigned is not currently paired and is
+// still not deletable, because the ended assignment row proves their duck went
+// into a bag. Status does not answer either question, because a reactivated
 // participant can be SUBMITTED while still holding their duck.
-const participantIsPaired = (registration) =>
-  registration.assignment !== null && registration.assignment !== undefined;
+//
+// The explicit boolean wins; an older projection falls back to the assignment
+// object it is defined to be exactly equivalent to.
+const participantIsCurrentlyPaired = (registration) => registration.currentlyPaired === true
+  || (registration.currentlyPaired === undefined
+    && registration.assignment !== null && registration.assignment !== undefined);
+
+// The bagged duck's number, or null when this render cannot prove one. Rendering
+// runs inside no try block, so a projection without the nested duck must degrade
+// to slightly vaguer wording rather than throw and silently drop every control
+// after it.
+const participantPairedDuckNumber = (registration) => {
+  if (!participantIsCurrentlyPaired(registration)) return null;
+  const assignment = registration.assignment;
+  if (!assignment || !assignment.duck) return null;
+  const visibleNumber = assignment.duck.visibleNumber;
+  return typeof visibleNumber === "number" ? visibleNumber : null;
+};
+
+// The Duck fact reads through the same guard, so an assignment without a
+// readable duck number degrades to a plain word instead of throwing part-way
+// through the fact list and taking every action below it with it.
+const participantDuckFact = (registration) => {
+  const duckNumber = participantPairedDuckNumber(registration);
+  if (duckNumber !== null) return "#" + duckNumber;
+  return participantIsCurrentlyPaired(registration) ? "Paired" : "Unassigned";
+};
+
+// One sentence for the one participant who is being told they cannot be deleted.
+// There are two honest reasons, and claiming the wrong one is a lie a staffer
+// acts on: either the duck is in a bag right now, or this participant has
+// already been in the race and their duck went into a bag earlier.
+const participantUndeletableReason = (registration) => {
+  const duckNumber = participantPairedDuckNumber(registration);
+  if (duckNumber !== null) {
+    return "Duck #" + duckNumber
+      + " is already sealed in a heat bag, so it stays in the race. Withdraw or disqualify only makes this"
+      + " participant ineligible to be counted as a winner; the registration cannot be deleted.";
+  }
+  if (participantIsCurrentlyPaired(registration)) {
+    return "This participant's duck is already sealed in a heat bag, so it stays in the race. Withdraw or"
+      + " disqualify only makes this participant ineligible to be counted as a winner; the registration"
+      + " cannot be deleted.";
+  }
+  return "This participant has already been in the race — their duck went into a heat bag, or they hold a"
+    + " place on a heat roster — so the registration cannot be deleted. Withdraw or disqualify only makes"
+    + " them ineligible to be counted as a winner.";
+};
 
 const clearParticipantDetail = () => {
   selectedRegistration = null;
@@ -5187,7 +5241,7 @@ const renderParticipantDetail = (registration) => {
     ["Email", registration.email || "Not provided"],
     ["Phone", registration.phone || "Not provided"],
     ["Created via", humanize(registration.createdVia)],
-    ["Duck", registration.assignment ? "#" + registration.assignment.duck.visibleNumber : "Unassigned"],
+    ["Duck", participantDuckFact(registration)],
     ["Duck name", participantDuckNameFact(registration)],
     ["Race entry", registration.raceEntryId],
     ["Revision", registration.revision],
@@ -5197,10 +5251,11 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.email.value = registration.email || "";
   participantEditForm.elements.phone.value = registration.phone || "";
   participantEditForm.elements.notes.value = registration.notes || "";
-  // Naming needs a duck to name, and the endpoint refuses without one, so the
-  // field appears only once this participant is paired.
+  // Naming needs a duck to name *now*, and the endpoint refuses without a
+  // current assignment, so this is the pairing question rather than the
+  // deletable one.
   if (participantDuckNameForm) {
-    participantDuckNameForm.hidden = !canRegistration || !registration.assignment;
+    participantDuckNameForm.hidden = !canRegistration || !participantIsCurrentlyPaired(registration);
     participantDuckNameForm.elements.duckName.value = registration.duckName || "";
   }
   participantActions.replaceChildren();
@@ -5219,14 +5274,11 @@ const renderParticipantDetail = (registration) => {
       location.assign("/staff/inventory?raceEntry=" + encodeURIComponent(registration.raceEntryId));
     });
   }
-  // Paired: no Delete at all, and one plain sentence saying why.
-  if (participantIsPaired(registration)) {
-    const note = text(
-      "p",
-      "Duck #" + registration.assignment.duck.visibleNumber
-        + " is already sealed in a heat bag, so it stays in the race. Withdraw or disqualify only makes this participant ineligible to be counted as a winner; the registration cannot be deleted.",
-      "muted participant-action-note",
-    );
+  // Not deletable: no Delete at all, and one plain sentence saying which of the
+  // two reasons applies. This is deletable, never the assignment, so a
+  // participant whose duck was unassigned is not offered a doomed button.
+  if (!participantIsDeletable(registration)) {
+    const note = text("p", participantUndeletableReason(registration), "muted participant-action-note");
     note.dataset.participantActionNote = "";
     participantActions.append(note);
     if (["SUBMITTED", "ACTIVE"].includes(registration.status)) {
@@ -5249,8 +5301,9 @@ const renderParticipantDetail = (registration) => {
       });
     });
   }
-  // Unpaired: deleting the registration outright is the only destructive action.
-  if (!participantIsPaired(registration)) {
+  // Deletable: the server would accept a delete right now, and removing the
+  // registration outright is the only destructive action that makes sense.
+  if (participantIsDeletable(registration)) {
     addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));
   }
 };

@@ -124,6 +124,49 @@ test("participant deletion is a confirmed danger action that clears the detail p
   assert.doesNotMatch(staffHomeScript, /Unassign the duck from inventory first/);
 });
 
+// The projection carries two booleans that answer two different questions, and
+// the shipped script has to ask each one where it belongs. Reading `assignment`
+// for the Delete control was a real defect: a participant whose duck had been
+// unassigned is not currently paired, is still not deletable, and was offered a
+// button whose command the server refuses with 409.
+test("the Delete control is gated on deletable and the bag wording on currentlyPaired", () => {
+  // `deletable` is taken exactly as sent, and an absent field is not deletable.
+  assert.ok(staffHomeScript.includes(
+    "const participantIsDeletable = (registration) => registration.deletable === true;",
+  ));
+  // The pairing question prefers the explicit boolean and falls back only to
+  // the assignment object it is defined to equal.
+  assert.match(
+    staffHomeScript,
+    /const participantIsCurrentlyPaired = \(registration\) => registration\.currentlyPaired === true\s*\|\| \(registration\.currentlyPaired === undefined/,
+  );
+
+  // Both destructive branches read the deletable predicate and nothing else.
+  assert.ok(staffHomeScript.includes(
+    'if (participantIsDeletable(registration)) {\n    addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));',
+  ));
+  assert.ok(staffHomeScript.includes(
+    'if (!participantIsDeletable(registration)) {\n    const note = text("p", participantUndeletableReason(registration), "muted participant-action-note");',
+  ));
+
+  // The renderer itself no longer touches `assignment`: every read of it is
+  // inside the two small helpers that exist to guard it, so a projection with
+  // an assignment shape this console does not expect cannot throw part-way
+  // through the render and silently drop every control below it.
+  const render = staffHomeScript.match(/const renderParticipantDetail = \(registration\) => \{[\s\S]*?\n\};/);
+  assert.ok(render, "the console defines renderParticipantDetail");
+  assert.doesNotMatch(render[0], /registration\.assignment/);
+
+  // And the bag sentence is reachable only through the pairing question, so it
+  // can never claim a duck is in a bag for a participant who holds none.
+  const reason = staffHomeScript.match(/const participantUndeletableReason = \(registration\) => \{[\s\S]*?\n\};/);
+  assert.ok(reason, "the console defines participantUndeletableReason");
+  const [bagBranch, historyBranch] = reason[0].split("return \"This participant has already been in the race");
+  assert.match(bagBranch, /sealed in a heat bag/);
+  assert.ok(historyBranch !== undefined, "the second reason exists");
+  assert.doesNotMatch(historyBranch, /sealed in a heat bag/);
+});
+
 const inventoryDetailController = () => new Function(
   `${inventoryDetailHelpersScript}; return createInventoryDetailController;`,
 )();
