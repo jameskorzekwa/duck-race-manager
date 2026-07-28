@@ -394,10 +394,19 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       eventId,
       lookupCode: participant.lookupCode,
     }), 201, `pair duck ${participant.visibleNumber}`);
-    // Pairing places the duck straight into the next open heat spot.
+    // Pairing places the duck straight into the next open heat spot, and the
+    // heat it reports is the bag the staffer is told to physically put this
+    // duck into. It must therefore be the heat actually written, never one the
+    // browser could have derived.
     assert.equal(pairing.heatAssignmentPending, false);
+    assert.equal(pairing.heat.round, "ROUND_ONE");
     assert.ok(pairing.heat.number >= 1);
     assert.equal(pairing.duck.visibleNumber, participant.visibleNumber);
+    assert.equal(database.prepare(
+      `SELECT h.heat_number FROM heat_entries he JOIN heats h ON h.id = he.heat_id
+        WHERE he.race_entry_id = ?`,
+    ).get(detail.raceEntryId).heat_number, pairing.heat.number, "the reported bag is the stored heat");
+    participant.bagHeatNumber = pairing.heat.number;
   }
 
   const mineAfterPairing = await jsonBody(await api("/api/v1/registrations/mine", {
@@ -570,6 +579,56 @@ test("runs the complete race workflow through real API handlers and migrated SQL
         { token: staffToken },
       ), 200, "inspect a duck from the wrong heat");
       assert.equal(wrongInspection.winnerAction, null);
+      assert.equal(wrongInspection.winnerIneligible, null);
+
+      // A racer whose duck is already in this heat's bag can leave the race.
+      // Nobody empties the bag to fish that duck out, so it is still in the
+      // water and can still reach the line first. The status is set directly
+      // here because the operator route that leaves an inactive racer on a
+      // locked roster is not part of this module; what matters is that the
+      // finish line answers the state honestly whenever it arises.
+      const strandedEntryId = heat.roster[1].raceEntryId;
+      const stranded = participants.find((item) => item.raceEntryId === strandedEntryId);
+      const entriesBeforeWithdrawal = database.prepare(
+        "SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id",
+      ).all().map((row) => ({ ...row }));
+      database.exec(`UPDATE registrations SET status = 'WITHDRAWN' WHERE id = '${stranded.registrationId}'`);
+
+      for (const value of [`https://quickducks.com/t/${stranded.tagToken}`, String(stranded.visibleNumber)]) {
+        const ineligibleScan = await api(
+          `/api/v1/staff/events/${eventId}/heats/${heat.id}/finish-scan?value=${encodeURIComponent(value)}`,
+          { token: staffToken },
+        );
+        assert.equal(ineligibleScan.status, 422, value);
+        const ineligibleBody = await ineligibleScan.json();
+        assert.equal(ineligibleBody.reason, "DUCK_NOT_ELIGIBLE", value);
+        assert.equal(ineligibleBody.ineligible.registrationStatus, "WITHDRAWN", value);
+        assert.equal(ineligibleBody.ineligible.visibleNumber, stranded.visibleNumber, value);
+        assert.match(ineligibleBody.error, /scan the next duck to pass the finish line\.$/i, value);
+      }
+      const strandedInspection = await jsonBody(await api(
+        `/api/v1/staff/ducks/${stranded.tagToken}`,
+        { token: staffToken },
+      ), 200, "inspect a withdrawn duck at the finish line");
+      assert.equal(strandedInspection.winnerAction, null);
+      assert.equal(strandedInspection.winnerIneligible.registrationStatus, "WITHDRAWN");
+      assert.equal(strandedInspection.winnerIneligible.heatNumber, heat.number);
+      const forcedWinner = await post(`/api/v1/staff/ducks/${stranded.tagToken}/heat-winner`, {
+        commandId: crypto.randomUUID(), eventId,
+        heatId: heat.id, raceEntryId: strandedEntryId, revision: heat.revision,
+      });
+      assert.equal(forcedWinner.status, 422);
+      assert.equal((await forcedWinner.json()).reason, "DUCK_NOT_ELIGIBLE");
+
+      // Nothing was written and no heat entry moved: the withdrawn duck keeps
+      // its heat and its slot, and so does every other duck in the race.
+      assert.deepEqual(
+        database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id")
+          .all().map((row) => ({ ...row })),
+        entriesBeforeWithdrawal,
+      );
+      assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
+      database.exec(`UPDATE registrations SET status = 'ACTIVE' WHERE id = '${stranded.registrationId}'`);
     }
     const taggedGet = await api(`/t/${winningParticipant.tagToken}`, { token: staffToken });
     assert.equal(taggedGet.status, 303);

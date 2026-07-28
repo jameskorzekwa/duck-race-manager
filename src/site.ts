@@ -366,6 +366,24 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .winner-action > * { margin-bottom:0; }
 .winner-action > * + * { margin-top:.75rem; }
 .winner-action .button { width:100%; min-height:4rem; }
+.winner-action.ineligible { border-color:#9f261c; background:#ffd8d2; }
+.winner-action.ineligible strong { display:block; font-size:clamp(1.35rem,6vw,2.1rem); line-height:1.08; overflow-wrap:anywhere; }
+.heat-bag { margin:0 0 1.4rem; padding:clamp(1rem,4vw,1.7rem); border:6px solid var(--ink); border-radius:1rem; background:var(--yellow); box-shadow:8px 8px 0 var(--ink); text-align:center; }
+.heat-bag > * { margin-bottom:0; }
+.heat-bag > * + * { margin-top:.6rem; }
+.heat-bag-instruction { font-size:clamp(1.35rem,6vw,2.4rem); font-weight:950; line-height:1.05; letter-spacing:-.02em; text-transform:uppercase; overflow-wrap:anywhere; }
+.heat-bag-number { font-size:clamp(3rem,17vw,7rem); font-weight:950; line-height:.95; letter-spacing:-.04em; overflow-wrap:anywhere; }
+.heat-bag-duck { font-size:clamp(1.05rem,4vw,1.5rem); font-weight:900; overflow-wrap:anywhere; }
+.heat-bag-note { font-size:clamp(.95rem,3.2vw,1.1rem); font-weight:800; line-height:1.45; overflow-wrap:anywhere; }
+.heat-bag .actions { justify-content:center; margin-top:1rem; }
+.heat-bag .button { width:100%; }
+.heat-bag.pending { border-color:#9f261c; background:#ffd8d2; }
+.heat-bag.pending .heat-bag-number { font-size:clamp(1.5rem,7vw,2.6rem); line-height:1.1; }
+.station-ineligible { margin:1.2rem 0; padding:clamp(1rem,3.5vw,1.5rem); border:5px solid #9f261c; border-radius:.9rem; background:#ffd8d2; box-shadow:6px 6px 0 var(--ink); }
+.station-ineligible > * { margin-bottom:0; }
+.station-ineligible > * + * { margin-top:.5rem; }
+.station-ineligible strong { display:block; font-size:clamp(1.35rem,6vw,2.1rem); line-height:1.08; overflow-wrap:anywhere; }
+.station-ineligible p { font-size:clamp(1rem,3.6vw,1.25rem); font-weight:850; overflow-wrap:anywhere; }
 .podium { display:grid; gap:.65rem; margin:1rem 0; }
 .podium-place { padding:.8rem 1rem; border:3px solid var(--ink); border-radius:.75rem; background:var(--yellow); font-size:1.1rem; font-weight:950; }
 .station-panel h1 { max-width:none; }
@@ -1426,6 +1444,7 @@ export const renderFinishLine = (
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
     <h3>Authoritative roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
     <div class="station-action" data-finish-action></div>
+    <section class="station-ineligible" data-finish-ineligible hidden aria-live="assertive" aria-label="Duck that cannot be recorded"></section>
     <form data-finish-scan-form hidden>
       <label>Tag URL or duck number<input class="station-control" name="duck" autocomplete="off" inputmode="url" maxlength="512" required placeholder="https://quickducks.com/t/… or 128"><span>Scan or paste the complete QuickDucks tag URL, or enter the number printed on the duck.</span></label>
       <div class="actions"><button class="button secondary station-control" type="submit">Add this duck</button><button class="button secondary station-control" type="button" data-start-nfc hidden>Scan NFC tag</button></div>
@@ -1551,6 +1570,13 @@ export const renderStaffDuck = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
       ${staffNav(isSystemAdmin, roles)}
+      ${canPair ? `<section class="heat-bag" data-heat-bag hidden aria-live="assertive" aria-label="Which heat bag this duck goes into">
+        <p class="heat-bag-instruction" data-heat-bag-instruction></p>
+        <p class="heat-bag-number" data-heat-bag-number></p>
+        <p class="heat-bag-duck" data-heat-bag-duck></p>
+        <p class="heat-bag-note" data-heat-bag-note></p>
+        <div class="actions"><button class="button secondary station-control" type="button" data-heat-bag-dismiss>Done — this duck is in the bag</button></div>
+      </section>` : ""}
       <section class="winner-action" data-winner-action hidden aria-live="polite"></section>
       <p class="eyebrow">Protected duck record</p>
       <h1 class="page-title" data-staff-title>Checking this duck…</h1>

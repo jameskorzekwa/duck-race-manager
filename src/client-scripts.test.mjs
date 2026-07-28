@@ -10,6 +10,7 @@ import {
   finishNfcHelpersScript,
   finishScanSerializationScript,
   finishSelectionValidationScript,
+  heatBagHelpersScript,
   inventoryIntakeHelpersScript,
   liveBoardStageScript,
   liveScript,
@@ -1559,7 +1560,10 @@ test("heat controls use the exact flow labels and gate the race-director reset",
 
   // A reset publishes a heat refresh. The finish station must accept it even
   // with a reviewed selection, then clear that selection on the new revision.
-  assert.match(finishLineScript, /if \(changedHeatContext\) finishSelected = \[\];/);
+  assert.match(
+    finishLineScript,
+    /if \(changedHeatContext\) \{\s*finishSelected = \[\];\s*finishClearIneligible\(\);\s*\}/,
+  );
   assert.match(finishLineScript, /isBlocked: \(\) => finishScanBusy \|\| finishCommandBusy/);
   assert.doesNotMatch(finishLineScript, /isBlocked: \(\) =>[^\n]*finishSelected/);
 });
@@ -3873,4 +3877,163 @@ test("the QR caption follows the duck table, and each label names its participan
 
   // Several cards share a screen, so the accessible name has to distinguish them.
   assert.match(cardQr(awaiting).getAttribute("aria-label"), /Daisy Duck/);
+});
+
+const heatBagHelpers = () => new Function(
+  `${heatBagHelpersScript}; return { heatBagCallout };`,
+)();
+
+// A duck goes into a heat bag at pairing and stays there. The bag number is
+// therefore only ever the one the pairing command committed and returned.
+test("the heat-bag callout is a pure function of the server's own pairing heat", () => {
+  const { heatBagCallout } = heatBagHelpers();
+
+  const roundOne = heatBagCallout({ round: "ROUND_ONE", number: 3 }, 12, false);
+  assert.equal(roundOne.pending, false);
+  assert.equal(roundOne.instruction, "Put this duck in HEAT 3 bag");
+  assert.equal(roundOne.number, "Heat 3");
+  assert.equal(roundOne.duck, "Duck #12");
+  assert.match(roundOne.note, /Walk Duck #12 to the heat 3 bag now/);
+  assert.match(roundOne.note, /stays in that bag, in that position, for the rest of the race/);
+
+  // A repair pairing during racing can land in the final, which is a different
+  // physical bag. Both the round and the number the server sent are used.
+  const final = heatBagCallout({ round: "FINAL", number: 1 }, 77, false);
+  assert.equal(final.pending, false);
+  assert.equal(final.instruction, "Put this duck in FINAL heat 1 bag");
+  assert.equal(final.number, "Final · Heat 1");
+  assert.equal(final.duck, "Duck #77");
+  assert.match(final.note, /final heat 1 bag/);
+
+  // A heat the server could not report is stated honestly. No blank, no guess.
+  for (const pendingCase of [
+    heatBagCallout(null, 12, true),
+    heatBagCallout(null, 12, false),
+    heatBagCallout({ round: "ROUND_ONE", number: 3 }, 12, true),
+    heatBagCallout({ round: "ROUND_ONE" }, 12, false),
+  ]) {
+    assert.equal(pendingCase.pending, true);
+    assert.equal(pendingCase.instruction, "Do not bag this duck yet");
+    assert.equal(pendingCase.number, "No heat assigned");
+    assert.match(pendingCase.note, /ask the race director which heat it belongs to/);
+    assert.doesNotMatch(pendingCase.number, /\d/);
+  }
+
+  // The number is copied, never computed: the helper has no arithmetic at all.
+  assert.doesNotMatch(heatBagHelpersScript, /number \+ 1|\+\+|length \+|Number\(/);
+});
+
+test("the pairing client paints the bag panel from the response and keeps it up", () => {
+  assert.doesNotThrow(() => new Function(staffDuckScript));
+
+  // Every field comes from heatBagCallout, which takes only the response.
+  assert.match(
+    staffDuckScript,
+    /const callout = heatBagCallout\(result\.heat, result\.duck\.visibleNumber, result\.heatAssignmentPending\)/,
+  );
+  assert.match(staffDuckScript, /heatBag\.classList\.toggle\("pending", callout\.pending\)/);
+  assert.match(staffDuckScript, /heatBagInstruction\.textContent = callout\.instruction/);
+  assert.match(staffDuckScript, /heatBagNumber\.textContent = callout\.number/);
+  assert.match(staffDuckScript, /heatBagDuck\.textContent = callout\.duck/);
+  assert.match(staffDuckScript, /heatBagNote\.textContent = callout\.note/);
+  // Shown and scrolled to as soon as the pairing lands. The live region is
+  // revealed before it is written into, so the announcement is a change inside
+  // a region that is already in the accessibility tree.
+  assert.match(
+    staffDuckScript,
+    /heatBag\.hidden = false;\s*heatBagInstruction\.textContent[\s\S]*?heatBag\.scrollIntoView\(\{ block: "start" \}\)/,
+  );
+  assert.match(staffDuckScript, /showHeatBag\(result\);/);
+  // Only an explicit dismissal hides it, so a live refresh cannot take it off
+  // the screen while the staffer walks to the bags.
+  assert.equal((staffDuckScript.match(/heatBag\.hidden = true/g) ?? []).length, 1);
+  assert.match(
+    staffDuckScript,
+    /data-heat-bag-dismiss\]"\)\.addEventListener\("click", \(\) => \{\s*heatBag\.hidden = true;/,
+  );
+  // The heat fact reads the server's round too, rather than assuming round one.
+  assert.match(staffDuckScript, /result\.heat\.round === "FINAL" \? "Final" : "Round one"/);
+  assert.doesNotMatch(staffDuckScript, /"Round one · Heat " \+ result\.heat\.number/);
+  assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+});
+
+// Scanning a withdrawn or disqualified duck is an expected race-day outcome,
+// because that duck was bagged before its racer left and is still in the water.
+test("the scanned-duck page presents an ineligible winner plainly, not as a failure", () => {
+  assert.doesNotThrow(() => new Function(staffDuckScript));
+
+  assert.match(staffDuckScript, /const ineligible = data\.winnerIneligible;/);
+  assert.match(staffDuckScript, /if \(!candidate && ineligible\) \{/);
+  assert.match(staffDuckScript, /winnerAction\.classList\.add\("ineligible"\)/);
+  assert.match(staffDuckScript, /winnerAction\.classList\.remove\("ineligible"\)/);
+  assert.match(
+    staffDuckScript,
+    /"Duck #" \+ data\.duck\.visibleNumber \+ " is " \+ ineligibleStatusLabel\(ineligible\.registrationStatus\)/,
+  );
+  assert.match(staffDuckScript, /cannot be recorded as the Heat "\s*\+ ineligible\.heatNumber \+ " winner/);
+  assert.match(staffDuckScript, /this duck stays in its heat/);
+  assert.match(staffDuckScript, /Scan the next duck to pass the finish line/);
+  // The real status, never a generic word.
+  const label = new Function(
+    `${staffDuckScript.match(/const ineligibleStatusLabel = [\s\S]*?character\.toUpperCase\(\)\);/)[0]}\nreturn ineligibleStatusLabel;`,
+  )();
+  assert.equal(label("WITHDRAWN"), "Withdrawn");
+  assert.equal(label("DISQUALIFIED"), "Disqualified");
+  // No result command is offered for a duck that cannot win.
+  assert.doesNotMatch(
+    staffDuckScript.match(/if \(!candidate && ineligible\) \{[\s\S]*?return;\s*\}/)[0],
+    /heat-winner|addEventListener/,
+  );
+});
+
+test("the finish line reports an ineligible duck as an outcome and stays armed", () => {
+  assert.doesNotThrow(() => new Function(finishLineScript));
+  assert.doesNotThrow(() => new Function(finishSelectionValidationScript));
+
+  const { finishIneligibleLines } = new Function(
+    `${finishSelectionValidationScript}; return { finishIneligibleLines };`,
+  )();
+  assert.deepEqual(finishIneligibleLines({
+    visibleNumber: 12,
+    registrationStatus: "WITHDRAWN",
+    participantDisplayName: "Daisy D.",
+  }), [
+    "Duck #12 is Withdrawn",
+    "Daisy D. cannot be recorded as a winner, and this duck stays in its heat.",
+    "Scan the next duck to pass the finish line.",
+  ]);
+  assert.equal(finishIneligibleLines({
+    visibleNumber: 7,
+    registrationStatus: "DISQUALIFIED",
+    participantDisplayName: "Donald D.",
+  })[0], "Duck #7 is Disqualified");
+  assert.deepEqual(finishIneligibleLines(null), [
+    "That duck cannot be recorded",
+    "Scan the next duck to pass the finish line.",
+  ]);
+
+  // The client distinguishes the server's stable reason from a real failure.
+  assert.match(finishLineScript, /const FINISH_DUCK_NOT_ELIGIBLE = "DUCK_NOT_ELIGIBLE";/);
+  assert.match(finishLineScript, /failure\.reason = body && typeof body\.reason === "string" \? body\.reason : null/);
+  assert.match(finishLineScript, /failure\.ineligible = body && body\.ineligible \? body\.ineligible : null/);
+  assert.match(
+    finishLineScript,
+    /if \(error\.reason === FINISH_DUCK_NOT_ELIGIBLE\) \{\s*finishShowIneligible\(error\);\s*return;\s*\}/,
+  );
+  // Nothing about that path disarms the station, drops the heat, or needs
+  // clearing: the scan form, the NFC button, and the heat all stay as they are.
+  const handler = finishLineScript.match(/const finishShowIneligible = \([\s\S]*?\n\};/)[0];
+  assert.doesNotMatch(handler, /finishHeat = null|finishEvent = null|finishNfcButton|finishSetScanBusy|hidden = true/);
+  assert.match(handler, /finishIneligible\.hidden = false/);
+  assert.match(handler, /finishMessage\.textContent = "Scan the next duck to pass the finish line\."/);
+  // A good scan and a new heat clear it again without any operator action.
+  assert.match(finishLineScript, /finishSelected\.push\(\{ \.\.\.selection, place: captured\.intendedPlace \}\);\s*finishClearIneligible\(\);/);
+
+  // A racer withdrawn between selecting and submitting drops exactly that
+  // selection, renumbers the rest, and leaves the station taking scans.
+  assert.match(
+    finishLineScript,
+    /const dropped = error\.ineligibleRaceEntryIds;\s*finishSelected = finishSelected\s*\.filter\(\(selection\) => !dropped\.includes\(selection\.raceEntryId\)\)\s*\.map\(\(selection, index\) => \(\{ \.\.\.selection, place: index \+ 1 \}\)\);/,
+  );
+  assert.doesNotMatch(finishLineScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
 });
