@@ -263,37 +263,45 @@ or when a local database drifted while a migration was being written.
 - **Cloudflare Web Analytics**, which is injected at the edge after the Worker
   responds.
 
-## Verifying UI changes
+## Automated integration testing
 
-Real browser verification is expected for any UI change. Point it at the local
-site and check console errors and horizontal overflow at 320, 390, 768, and
-1280 px. Seed the state the change affects rather than trusting a mock — the
-lifecycle phase determines navigation, calls to action, and whole page bodies.
+The local servers are development and diagnostic tools, not a mandatory user
+handoff before every merge. Agents do not need to start a server, leave a clone
+running, or ask James to test each branch manually.
 
-## Trying a branch someone else prepared
-
-Merging to `main` deploys to production, so behavior changes get looked at here
-first. An agent handing over a branch should have left the server running and
-told you where its working copy is. To pick it up yourself, or to restart it:
+Every new feature or behavior change instead adds or extends thorough automated
+integration coverage:
 
 ```sh
-cd <path the agent gave you>       # or: git clone <repo> && git switch <branch>
-npm ci
-npm run dev:local
-npm run seed:local -- --state=<the state the change affects>
+npm test             # real Worker handlers against migrated SQLite, plus focused tests
+npm run test:e2e     # full Chromium workflows; starts and seeds its own Worker
 ```
 
-Things worth knowing while reviewing:
+Use migrated SQLite integration tests for API, authorization, lifecycle, and
+transactional behavior. Use Playwright under `e2e/` for browser-visible changes,
+multi-page workflows, live updates, responsive behavior, and full race flow.
+Unit tests and mocks can supplement these suites, but do not replace integration
+coverage for a new feature.
 
-- The first start applies migrations and asks you to confirm. Later starts
-  report "No migrations to apply" and come straight up.
-- Switching branches does not reset data. The local database lives under
-  `.wrangler/`, which is gitignored, so it survives a `git switch` and a
-  restart. Re-seed when you want a known state, and run
-  `npm run db:reset:local` after a branch that adds a migration.
-- Sign in at `/staff` as the account whose role the change touches, not always
-  the administrator. An administrator passes every role check implicitly, so it
-  is the one account that cannot show you a permission mistake.
+Tests should cover the whole relevant workflow, not only the new happy-path
+route. Include the applicable permission denials, Origin enforcement,
+lifecycle/readiness conflicts, stale revisions, idempotent retries, privacy
+projection, browser errors, and responsive edge cases.
 
-Approve or reject on the pull request, or just say so — nothing merges until you
-do.
+The Playwright configuration owns `.wrangler/e2e`, starts its own local Worker,
+and resets data through the application. Do not start `npm run dev:local` on port
+8787 while `npm run test:e2e` is running, and never point the suite at production
+or a manually seeded database.
+
+## Optional manual testing
+
+Use `npm run dev:local` or `npm run dev:network` when the user explicitly asks to
+try a branch, when diagnosing a browser/device problem, or when hardware such as
+Web NFC needs a spot check. Manual testing is useful supplementary evidence, but
+it is not the routine release gate and cannot replace the required integration
+tests.
+
+When manual testing is useful, seed the exact lifecycle state involved and sign
+in as the role the feature touches rather than always using the administrator.
+An administrator passes every role check implicitly and therefore cannot reveal
+a least-privilege bug.
