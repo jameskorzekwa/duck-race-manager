@@ -21,6 +21,10 @@ test("implementation keeps models and candidate execution outside OIDC publicati
   assert.match(implement, /untrustedReviewEvidence/);
   assert.match(implement, /git archive "\$EXPECTED_BASE"/);
   assert.match(implement, /validate-agent-patch\.mjs" --source "\$PIPELINE_MODEL_DIR"/);
+  for (const runtimePath of ["node_modules", "package.json", "package-lock.json", "bun.lock"]) {
+    assert.match(implement, new RegExp(`\\.opencode/${runtimePath.replace(".", "\\.")}`));
+  }
+  assert.ok(implement.indexOf(".opencode/node_modules") < implement.indexOf("validate-agent-patch.mjs\" --source"));
   assert.ok(implement.indexOf("validate-agent-patch.mjs\" --source") < implement.indexOf("rsync -a"));
   assert.match(implement, /cleanup-model-workspace\.mjs/);
   assert.match(implement, /scripts\/validate-agent-patch\.mjs/);
