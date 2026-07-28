@@ -19,7 +19,7 @@ OpenCode or GitHub issue
 Agent Task: triage -> grouped, blocked, duplicate, or implementation
         |
         v
-OpenCode + Ensemble -> isolated worktrees -> integrated issue branch
+OpenChamber + paid local models -> allowlisted specialists -> integrated patch
         |
         v
 Pull request -> CI Validate + trusted candidate validation + read-only Agent Review
@@ -89,18 +89,25 @@ the later write-capable gate never checks out or executes candidate code.
 `agent-task.yml` runs one OpenCode turn per issue at a time. Deterministic hosted
 intake first records the run and builds an immutable actor-filtered snapshot. A
 repository-scoped self-hosted runner then asks the local OpenChamber server to
-create a visible session in the exact trusted checkout. The OpenChamber process,
-not the Actions job, owns model authentication. The orchestrator
-uses the pinned `@hueyexe/opencode-ensemble@0.16.0` plugin to coordinate a
-bounded team. Its isolated `.opencode/ensemble-package/package-lock.json` avoids
-changing application toolchain resolution. Implementers work in isolated
-worktrees; tests and risk reviews are independent roles.
+create a visible session in a per-run plain-file snapshot of the trusted base.
+The snapshot has no Git metadata and carries the immutable issue context in a
+read-only `.pipeline` directory. The OpenChamber process, not the Actions job,
+owns model authentication. The OpenAI implementation lead
+may launch only the explicitly allowlisted, read-only scout, test reviewer, and
+risk reviewer through OpenCode's built-in task tool. All local pipeline agents
+deny shell, PTY, network, OpenChamber-control, MCP resources, Git metadata,
+OpenCode tool-output storage, environment files, and unspecified tools by
+default. Content grep and filename glob are disabled because current OpenCode
+releases cannot reliably scope their target paths; the path-checked read tool
+supports both repository directory listing and file reads.
+Project configuration also disables LSP and formatter subprocesses.
+Candidate code executes only in the hosted verification job.
 
-The implementation lead and tester/risk roles use James's local ChatGPT/Codex
-OAuth with `openai/gpt-5.6-sol`. Implementation and scouting use Anthropic
-Pro/Max OAuth through the locally installed `opencode-anthropic-oauth@0.4.7`
-plugin, routed to Claude Opus 4.8 and Sonnet 5. Independent semantic review uses
-Claude Opus 4.8. OAuth files, access tokens, and refresh tokens never enter the
+The implementation lead and test/risk roles use James's local ChatGPT/Codex
+OAuth with `openai/gpt-5.6-sol`. Scouting and independent semantic review use
+Anthropic Pro/Max OAuth through the locally installed and pinned
+`opencode-anthropic-oauth@0.4.7` plugin, routed to Sonnet 5 and Opus 4.8. OAuth
+files, access tokens, and refresh tokens never enter the
 runner environment, GitHub secrets, artifacts, logs, or repository.
 
 The model emits a patch artifact. A second job executes and validates that patch
@@ -110,11 +117,21 @@ same digest-bound patch without executing it, and create the branch and PR. App
 events trigger CI; normal workflow `GITHUB_TOKEN` writes do not recursively
 trigger most workflows.
 
+Patch extraction occurs in a fresh trusted Git repository, never in the model's
+workspace. Before the first post-model Git command, a trusted `lstat` walk rejects
+case-folded Git metadata, symlinks, hardlinks, and non-regular files. A
+case-insensitive deterministic policy then rejects gitlinks, agent
+instructions, OpenCode configuration, local actions, workflows, and pipeline
+state helpers before artifact upload, after hosted patch application, and before
+publication. Pipeline control-plane changes therefore use the normal manual PR
+path and cannot make an autonomous branch run code on the OAuth-bearing runner.
+
 `agent-review.yml` is loaded from the trusted default branch and clears stale
 approval whenever the PR head changes. One hosted read-only-token job runs the
 exact candidate's release gate. A separate self-hosted job submits a read-only
-OpenChamber review session from the trusted base checkout, treats the candidate
-checkout as read-only data, and cannot execute candidate code. Its SHA-bound
+OpenChamber review session from a plain trusted-base snapshot. It receives only
+the candidate patch and trusted issue context as read-only data, not a candidate
+filesystem, and cannot execute candidate code or follow candidate symlinks. Its SHA-bound
 decision is uploaded as an artifact. A deterministic write-capable hosted job
 rechecks the live head before adding
 `agent:approved`. On rejection it closes the candidate and dispatches a fresh
@@ -123,6 +140,12 @@ implementation from current `main`, at most three times.
 The gate also publishes `Agent Review / Exact SHA` directly on the candidate
 commit. Control-plane, dependency, migration, and infrastructure changes require
 James's GitHub approval on that exact head in addition to model review.
+Any review-dismissal event runs a separate non-concurrent hosted workflow that
+removes approval state, the merge slot, and auto-merge without launching a paid
+model session. This is a best-effort revocation, not an atomic native merge lock:
+selective human approval cannot be made race-free without requiring a review on
+every PR. Exact-head approval therefore authorizes merge; close the PR or disable
+auto-merge directly when an immediate stop is required.
 
 ## Merge And Deployment
 
@@ -157,6 +180,12 @@ does not call a model. It:
 An interrupted model turn is restarted from issue, branch, PR, and check state;
 it is never resumed as if a provider call were exactly-once.
 
+The runner records each active model directory outside the Actions workspace.
+Every later model job checks that record and fails closed while any prior
+OpenChamber parent or child session remains busy. Workspaces are unique per run
+and are deleted only after all matching sessions report `idle`, so a timed-out
+turn cannot race a later checkout or contaminate another patch.
+
 ## Install In Another Repository
 
 ### 1. Establish deterministic gates
@@ -172,16 +201,16 @@ Copy and review:
 
 ```text
 opencode.json
-.opencode/ensemble.json
-.opencode/ensemble-package/package.json
-.opencode/ensemble-package/package-lock.json
 .opencode/agents/pipeline-*.md
 .opencode/skills/github-agent-pipeline/SKILL.md
 .github/ISSUE_TEMPLATE/agent-task.yml
 .github/workflows/agent-task.yml
 .github/workflows/agent-review.yml
+.github/workflows/agent-review-revoke.yml
 .github/workflows/agent-reconcile.yml
 scripts/agent-pipeline.mjs
+scripts/cleanup-model-workspace.mjs
+scripts/validate-agent-patch.mjs
 ```
 
 Do not copy QuickDucks-specific prompts unchanged. Replace domain invariants,
@@ -190,12 +219,18 @@ model choices, and release workflow name.
 
 ### 3. Configure the local model worker
 
-Pin a tested OpenCode version and every third-party plugin version in the lockfile;
-load repository plugins from the locked local package, never a floating package
-spec. Install OpenChamber and a repository-scoped self-hosted Actions runner on
-the model machine. Give that runner a unique label and target only model jobs
-with it. Serialize top-level OAuth sessions; Ensemble may still parallelize
-roles inside one OpenCode session.
+Pin a tested OpenCode/OpenChamber pairing and every local authentication plugin
+version in the model machine's OpenCode package lock. Install a repository-scoped
+self-hosted Actions runner on that machine. Give the runner a unique label and
+target only model jobs with it. A single runner serializes top-level OAuth
+sessions; the implementation lead may parallelize only the allowlisted read-only
+specialists through OpenCode's built-in task tool.
+
+Do not expose the sensitive runner to autonomous workflow changes. Preserve the
+plain snapshot, protected-path policy, symlink/gitlink rejection, persistent
+active-session record, and fail-closed idle checks. If the runner platform offers
+workflow-ref restrictions, restrict it to the trusted default-branch task and
+review workflows as an additional defense.
 
 Authenticate paid providers only in the local OpenCode/OpenChamber runtime. Do
 not copy `auth.json`, `OPENCODE_AUTH_CONTENT`, access tokens, or refresh tokens to

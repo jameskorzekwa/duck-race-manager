@@ -15,10 +15,22 @@ test("implementation keeps models and candidate execution outside OIDC publicati
   assert.match(implement, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
   assert.match(implement, /openchamber session create/);
   assert.match(implement, /openai\/gpt-5\.6-sol/);
+  assert.doesNotMatch(implement, /quickducks-local-oauth-model/);
+  assert.doesNotMatch(implement, /OPENCODE_ENSEMBLE_TIMEOUT|--dir "\$GITHUB_WORKSPACE"/);
+  assert.match(implement, /timeout-minutes: 105/);
+  assert.match(implement, /untrustedReviewEvidence/);
+  assert.match(implement, /git archive "\$EXPECTED_BASE"/);
+  assert.match(implement, /validate-agent-patch\.mjs" --source "\$PIPELINE_MODEL_DIR"/);
+  assert.ok(implement.indexOf("validate-agent-patch.mjs\" --source") < implement.indexOf("rsync -a"));
+  assert.match(implement, /cleanup-model-workspace\.mjs/);
+  assert.match(implement, /scripts\/validate-agent-patch\.mjs/);
+  assert.match(implement, /session list --dir "\$PIPELINE_MODEL_DIR" --with-status/);
   assert.doesNotMatch(verify, /id-token: write|models: read/);
+  assert.match(verify, /scripts\/validate-agent-patch\.mjs/);
   assert.match(publish, /id-token: write/);
   assert.doesNotMatch(publish, /opencode run|npm test|npm run test:e2e/);
   assert.match(publish, /exchange_github_app_token/);
+  assert.match(publish, /scripts\/validate-agent-patch\.mjs/);
 });
 
 test("review publishes a candidate-SHA check without privileged candidate execution", async () => {
@@ -32,9 +44,55 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   assert.match(review, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
   assert.match(review, /openchamber session create/);
   assert.match(review, /anthropic\/claude-opus-4-8/);
+  assert.doesNotMatch(review, /quickducks-local-oauth-model/);
+  assert.doesNotMatch(review, /REVIEW_CANDIDATE_PATH|--dir "\$GITHUB_WORKSPACE\/trusted"/);
+  assert.match(review, /\.pipeline\/candidate\.patch/);
+  assert.match(review, /git -C trusted archive/);
+  assert.match(review, /session list --dir "\$PIPELINE_MODEL_DIR" --with-status/);
+  assert.match(review, /timeout-minutes: 75/);
+  assert.match(workflow, /github\.actor_id == '38769771'/);
+  assert.match(validate, /scripts\/validate-agent-patch\.mjs/);
   assert.doesNotMatch(review, /id-token: write|issues: write|pull-requests: write/);
   assert.match(gate, /Agent Review \/ Exact SHA/);
   assert.doesNotMatch(gate, /actions\/checkout|npm test|opencode run/);
+
+  const revocation = await read(".github/workflows/agent-review-revoke.yml");
+  assert.match(revocation, /types: \[dismissed\]/);
+  assert.match(revocation, /disablePullRequestAutoMerge/);
+  assert.match(revocation, /Agent Review \/ Exact SHA/);
+  assert.doesNotMatch(revocation, /concurrency:|openchamber|runs-on: \[self-hosted/);
+});
+
+test("local model agents deny unspecified and executable tools", async () => {
+  const paths = [
+    ".opencode/agents/pipeline-orchestrator.md",
+    ".opencode/agents/pipeline-reviewer.md",
+    ".opencode/agents/pipeline-risk-reviewer.md",
+    ".opencode/agents/pipeline-scout.md",
+    ".opencode/agents/pipeline-tester.md",
+  ];
+  for (const path of paths) {
+    const agent = await read(path);
+    assert.match(agent, /permission:\n  "\*": deny/);
+    assert.match(agent, /"mcp:\*": deny/);
+    assert.match(agent, /"\*\*\/\.local\/share\/opencode\/tool-output\/\*\*": deny/);
+    assert.match(agent, /"\.git\/\*\*": deny/);
+    assert.match(agent, /glob: deny/);
+    assert.match(agent, /grep: deny/);
+    assert.doesNotMatch(agent, /bash:\n|pty_|webfetch: allow|websearch: allow|lsp: allow/);
+  }
+  const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
+  assert.match(orchestrator, /"\.\*": deny/);
+  assert.match(orchestrator, /"\*\*\/\.\*": deny/);
+  for (const protectedPath of [".github/**", ".opencode/**", "opencode.json", "**/AGENTS.md"]) {
+    assert.match(orchestrator, new RegExp(`"${protectedPath.replaceAll("*", "\\*")}": deny`));
+  }
+  const config = JSON.parse(await read("opencode.json"));
+  assert.equal(config.permission["*"], "deny");
+  assert.equal(config.lsp, false);
+  assert.equal(config.formatter, false);
+  assert.ok(Object.values(config.mcp).every((server) => server.enabled === false));
+  assert.equal(config.plugin, undefined);
 });
 
 test("reconciliation is deterministic and model-free", async () => {

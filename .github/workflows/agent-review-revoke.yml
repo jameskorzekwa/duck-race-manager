@@ -1,0 +1,79 @@
+name: Agent Review Revocation
+
+on:
+  pull_request_review:
+    types: [dismissed]
+
+permissions: {}
+
+jobs:
+  revoke:
+    name: Revoke dismissed approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      checks: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Fail closed for an eligible agent pull request
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr = context.payload.pull_request;
+            const branch = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
+            const marker = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
+            const eligible = pr.head.repo?.id === pr.base.repo?.id
+              && pr.base.ref === context.payload.repository.default_branch
+              && pr.user.id === 219766164 && branch && marker
+              && marker[1] === branch[2] && marker[2] === branch[1]
+              && marker[3] === pr.base.sha;
+            if (!eligible) return;
+            const issueNumber = Number(branch[1]);
+            const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+            if (issue.user.id !== 38769771) throw new Error(`Issue #${issueNumber} is not trusted pipeline intake.`);
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: pr.number,
+              body: `<!-- agent-pipeline review-dismissed=${context.runId} head=${pr.head.sha} -->\nExact-head approval was dismissed.`,
+            });
+            for (const label of ["agent:approved", "agent:merge-slot"]) {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: pr.number, name: label });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: pr.number, labels: ["agent:failed"],
+            });
+            try {
+              await github.graphql(`
+                mutation($pullRequestId: ID!) {
+                  disablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId }) {
+                    pullRequest { number }
+                  }
+                }
+              `, { pullRequestId: pr.node_id });
+            } catch (error) {
+              core.warning(`Auto-merge was not active or could not be disabled: ${error.message}`);
+            }
+            const states = [
+              "agent:inbox", "agent:triage", "agent:ready", "agent:running",
+              "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
+              "agent:deployed", "agent:failed",
+            ];
+            const labels = issue.labels.map((label) => label.name).filter((label) => !states.includes(label));
+            await github.rest.issues.setLabels({
+              owner, repo, issue_number: issueNumber, labels: [...labels, "agent:review"],
+            });
+            await github.rest.checks.create({
+              owner, repo, name: "Agent Review / Exact SHA", head_sha: pr.head.sha,
+              status: "completed", conclusion: "failure",
+              external_id: `agent-review-dismissed:${context.runId}`,
+              details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              output: {
+                title: "Approval was dismissed",
+                summary: "Exact-head approval was revoked. Submit a new approval to rerun Agent Review.",
+              },
+            });

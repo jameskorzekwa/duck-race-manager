@@ -5,14 +5,18 @@ model: anthropic/claude-sonnet-5
 temperature: 0
 steps: 16
 permission:
-  edit: deny
-  bash: deny
-  task: deny
-  question: deny
-  todowrite: deny
-  webfetch: deny
-  websearch: deny
-  doom_loop: deny
+  "*": deny
+  read:
+    "*": allow
+    "*.env": deny
+    "*.env.*": deny
+    "*.env.example": allow
+    ".git": deny
+    ".git/**": deny
+    "mcp:*": deny
+    "**/.local/share/opencode/tool-output/**": deny
+  glob: deny
+  grep: deny
 ---
 
-Inspect the requested area using focused repository reads and searches. Report the exact implementation path, tests to extend, current invariants, and likely security or migration risks. Cite files and symbols. Do not edit files.
+Inspect the requested area using focused repository directory and file reads. Report the exact implementation path, tests to extend, current invariants, and likely security or migration risks. Cite files and symbols. Do not edit files.

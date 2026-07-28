@@ -101,8 +101,8 @@ request code must never run in a privileged context.
 ## GitHub Agent Pipeline
 
 The OpenCode agent pipeline uses GitHub issues, labels, branches, pull requests,
-checks, workflow runs, and deployments as its durable ledger. OpenCode sessions
-and Ensemble worktrees are execution contexts only; interrupted turns are
+checks, workflow runs, and deployments as its durable ledger. OpenChamber/OpenCode
+sessions are execution contexts only; interrupted turns are
 recovered from GitHub state rather than treated as durable jobs.
 
 - `.github/workflows/agent-task.yml` accepts trusted `agent:inbox` issues,
@@ -111,8 +111,8 @@ recovered from GitHub state rather than treated as durable jobs.
   authority, reviews it from a trusted checkout, and records an exact-SHA gate.
 - `.github/workflows/agent-reconcile.yml` deterministically repairs stale state,
   releases grouped work, settles releases, and advances the next PR without a model.
-- `.opencode/agents/` contains explicit implementation, test, and risk-review
-  roles. The pinned Ensemble plugin coordinates bounded implementation teams.
+- `.opencode/agents/` contains a least-privilege implementation lead and
+  allowlisted read-only scout, test-review, risk-review, and independent-review roles.
 - `docs/AGENT_PIPELINE.md` is the operating and reusable installation guide.
 
 Only issues created by James with `agent:inbox`, explicit James `/agent` or
@@ -125,10 +125,21 @@ GitHub secrets or the Actions environment. Repository writes use the OpenCode
 GitHub App's short-lived installation token so resulting branch and PR events
 still trigger CI. Agent jobs do not receive production credentials.
 
+Local models receive unique plain-file snapshots with no `.git` directory.
+Deny-by-default agents cannot use shell, PTY, network/MCP tools, LSP, formatters,
+environment files, OpenCode tool-output storage, or external paths. Patch
+extraction uses a separate trusted Git repository after a pre-copy `lstat`
+quarantine rejects case-folded Git metadata, symlinks, hardlinks, and non-regular
+files. A case-insensitive policy rejects gitlinks and pipeline control-plane paths
+before any autonomous branch is published. A persistent runner-side state record
+prevents a timed-out OpenChamber session from overlapping later work, and that
+record is removed only after transactional workspace deletion succeeds.
+
 Agent Review uses `pull_request_target` only as a trusted control plane. Candidate
 tests and local OpenChamber model review run in separate jobs with read-only
 repository authority; the model loads agents and plugins from the trusted base
-checkout, candidate code is not executed in the model job, and the write-capable
+snapshot and receives the candidate only as a patch. Candidate code is not
+executed or exposed as a symlink-capable filesystem in the model job, and the write-capable
 hosted gate never checks out or executes candidate code. The gate rechecks the
 current PR head before mutation.
 
