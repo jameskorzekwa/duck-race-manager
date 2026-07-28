@@ -350,6 +350,13 @@ const localWorker: ExportedHandler<Env> = {
 
     // A convenience for the seeding script and for pasting a bearer token into
     // curl. It reveals only local development credentials.
+    //
+    // In network mode this is reachable by every device on the network, and the
+    // token it returns is an administrator. That is not a hole worth plugging
+    // here: the sign-in stand-in at /oauth2/authorize hands out a staff session
+    // to anyone who asks by design, so withholding the token would only be
+    // theatre. Network mode is open to the network — it says so when it starts,
+    // and docs/LOCAL_DEVELOPMENT.md says it again.
     if (url.pathname === "/__local/staff" && request.method === "GET") return accountsResponse();
 
     if (url.pathname.startsWith("/__local/")) {

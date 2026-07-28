@@ -48,10 +48,14 @@ for the Cognito hosted UI and token endpoints so the whole site, including staff
 surfaces, runs offline; see `docs/LOCAL_DEVELOPMENT.md`.
 
 Any behaviour that must differ locally is gated on `isLocalPreviewOrigin` from
-`local-preview.ts`, which is true only for an http loopback `APP_ORIGIN`.
-Production configures an https origin, so those branches are unreachable there.
-Never widen that predicate, and never gate a local affordance on anything else —
-an environment variable or a build flag can be set by mistake in production.
+`local-preview.ts`: loopback on either scheme, or a private network address over
+https. Production configures a public https origin, so those branches are
+unreachable there.
+
+The predicate may only ever admit origins a deployment cannot hold. Widening it
+to a public name or to plain http off loopback breaks that, and so does gating a
+local affordance on anything else — an environment variable or a build flag can
+be set by mistake in production, while `APP_ORIGIN` is pinned by a release test.
 
 ## CODING CONVENTIONS
 

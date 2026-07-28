@@ -9,9 +9,26 @@
 // Usage:
 //   node scripts/seed-local.mjs --state=round-one
 //   npm run seed:local -- --state=completed --participants=12
-import { argv, exit, stderr, stdout } from "node:process";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { argv, env, execPath, exit, stderr, stdout } from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { localPreviewTurnstileToken } from "../src/local-preview.ts";
+
+// `npm run dev:network` writes this while it is serving. Following it means the
+// same seed command works in both modes: public registration checks the request
+// Origin against APP_ORIGIN, so seeding a network session through
+// `http://localhost:8787` would be rejected as cross-origin.
+const networkSession = () => {
+  const markerPath = new URL("../.wrangler/local-network.json", import.meta.url);
+  if (!existsSync(markerPath)) return null;
+  try {
+    return JSON.parse(readFileSync(markerPath, "utf8"));
+  } catch {
+    return null;
+  }
+};
 
 const states = ["empty", "draft", "registration", "closed", "round-one", "final", "completed"];
 
@@ -34,7 +51,7 @@ const stateDescriptions = {
 
 const parseArguments = () => {
   const options = {
-    url: "http://localhost:8787",
+    url: networkSession()?.origin ?? "http://localhost:8787",
     state: "registration",
     participants: 9,
     heatSize: 3,
@@ -438,6 +455,25 @@ try {
     stdout.write(usage());
     exit(0);
   }
+
+  // The network session serves a certificate this machine has no reason to trust
+  // yet. `NODE_EXTRA_CA_CERTS` is only read at startup, so trusting it means
+  // starting again with it set rather than reaching for a global switch that
+  // would disable verification for everything.
+  const session = networkSession();
+  if (
+    options.url.startsWith("https://")
+    && session !== null
+    && env.NODE_EXTRA_CA_CERTS === undefined
+    && existsSync(session.certificatePath)
+  ) {
+    const restarted = spawnSync(execPath, [fileURLToPath(import.meta.url), ...argv.slice(2)], {
+      stdio: "inherit",
+      env: { ...env, NODE_EXTRA_CA_CERTS: session.certificatePath },
+    });
+    exit(restarted.status ?? 1);
+  }
+
   stdout.write(`Seeding ${options.url} to "${options.state}"…\n`);
   report(options, await seed(options));
 } catch (error) {

@@ -53,6 +53,7 @@ npm run wrangler:validate
 npm run db:migrate:local
 
 npm run dev:local                        # whole site on http://localhost:8787, no network
+npm run dev:network                      # same site over https, reachable by other devices
 npm run seed:local -- --state=round-one  # fill it with a race at a chosen lifecycle state
 ```
 
@@ -75,7 +76,9 @@ deploying.
 Before asking him to look:
 
 1. Run the branch locally with `npm run dev:local`, from the working copy that
-   actually holds the change.
+   actually holds the change. Use `npm run dev:network` instead when the change
+   is worth trying on a phone — anything touching the race-day stations, NFC, or
+   small-screen layout.
 2. Seed each state the change affects with
    `npm run seed:local -- --state=<state>`. `docs/LOCAL_DEVELOPMENT.md` lists
    them.
