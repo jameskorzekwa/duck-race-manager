@@ -179,7 +179,11 @@ const consoleParts = {
   loadDuckDetail: fromInventory(/const loadDuckDetail = async \(duckId, trigger = null, focusDetail = false\) => \{[\s\S]*?\n\};/),
   loadParticipantDetail: fromConsole(/const loadParticipantDetail = async \(registrationId\) => \{[\s\S]*?\n\};/),
   revealConsoleSection: fromConsole(/const revealConsoleSection = \(view\) => \{[\s\S]*?\n\};/),
-  participantIsPaired: fromConsole(/const participantIsPaired = \(registration\) =>\n[\s\S]*?;\n/),
+  participantIsDeletable: fromConsole(/const participantIsDeletable = \(registration\) => .*;\n/),
+  participantIsCurrentlyPaired: fromConsole(/const participantIsCurrentlyPaired = \(registration\) =>[\s\S]*?;\n/),
+  participantPairedDuckNumber: fromConsole(/const participantPairedDuckNumber = \(registration\) => \{[\s\S]*?\n\};/),
+  participantDuckFact: fromConsole(/const participantDuckFact = \(registration\) => \{[\s\S]*?\n\};/),
+  participantUndeletableReason: fromConsole(/const participantUndeletableReason = \(registration\) => \{[\s\S]*?\n\};/),
   openRosterParticipant: fromConsole(/const openRosterParticipant = async \(registrationId\) => \{[\s\S]*?\n\};/),
   openRosterDuck: fromConsole(/const openRosterDuck = \(duckId\) => \{[\s\S]*?\n\};/),
   loadHeatDetail: fromConsole(/const loadHeatDetail = async \(heatId\) => \{[\s\S]*?\n\};/),
@@ -771,23 +775,32 @@ test("an inventory selection overtaken by the panel closing never renders into i
 // Moderating a participant-chosen duck name
 // ---------------------------------------------------------------------------
 
-const registrationDetail = (overrides = {}) => ({
-  registrationId: "registration-1",
-  raceEntryId: "entry-1",
-  firstName: "Ada",
-  lastName: "Lovelace",
-  email: "ada@example.com",
-  phone: "555-0100",
-  status: "ACTIVE",
-  lookupCode: "ADAA2345",
-  createdVia: "PUBLIC",
-  notes: null,
-  revision: 3,
-  assignment: { id: "assignment-1", duck: { id: "duck-12", visibleNumber: 12 } },
-  duckName: null,
-  duckNamePubliclyHidden: false,
-  ...overrides,
-});
+// The shape `GET /api/v1/staff/registrations/<id>` returns. The two booleans are
+// derived here exactly as the server derives them, so a fixture cannot express a
+// state D1 could not produce; a test that wants the interesting mismatch — an
+// unassigned duck, so not currently paired but still not deletable — says so
+// explicitly.
+const registrationDetail = (overrides = {}) => {
+  const merged = {
+    registrationId: "registration-1",
+    raceEntryId: "entry-1",
+    firstName: "Ada",
+    lastName: "Lovelace",
+    email: "ada@example.com",
+    phone: "555-0100",
+    status: "ACTIVE",
+    lookupCode: "ADAA2345",
+    createdVia: "PUBLIC",
+    notes: null,
+    revision: 3,
+    assignment: { id: "assignment-1", duck: { id: "duck-12", visibleNumber: 12 } },
+    duckName: null,
+    duckNamePubliclyHidden: false,
+    ...overrides,
+  };
+  const paired = merged.assignment !== null && merged.assignment !== undefined;
+  return { currentlyPaired: paired, deletable: !paired, ...merged };
+};
 
 const participantDetailHarness = ({ canRegistration = true, canDirectRace = false, clearResponse = null } = {}) => {
   const document = new FakeDocument();
@@ -820,7 +833,11 @@ const participantDetailHarness = ({ canRegistration = true, canDirectRace = fals
       "addParticipantAction",
       "participantDuckNameFact",
       "clearParticipantDuckName",
-      "participantIsPaired",
+      "participantIsDeletable",
+      "participantIsCurrentlyPaired",
+      "participantPairedDuckNumber",
+      "participantDuckFact",
+      "participantUndeletableReason",
       "renderParticipantDetail",
     ],
     {
@@ -868,11 +885,10 @@ const participantDetailHarness = ({ canRegistration = true, canDirectRace = fals
   };
 };
 
-// Pairing, not status, decides which destructive action a staffer is offered.
-// An unpaired registration has nothing physical in the race, so removing it is
-// all that makes sense. A paired one has a duck sealed in a heat bag, so it
-// stays in the water and can only be made ineligible to win.
-test("an unpaired participant offers Delete and neither Withdraw nor Disqualify", () => {
+// `deletable`, not pairing, decides which destructive action a staffer is
+// offered. It is the exact predicate the delete endpoint re-checks inside its
+// guarded write, so a rendered Delete button is a button the server accepts.
+test("a deletable participant offers Delete and neither Withdraw nor Disqualify", () => {
   for (const status of ["SUBMITTED", "ACTIVE", "WITHDRAWN"]) {
     const harness = participantDetailHarness({ canDirectRace: true });
     harness.renderParticipantDetail(registrationDetail({ assignment: null, status }));
@@ -890,7 +906,7 @@ test("an unpaired participant offers Delete and neither Withdraw nor Disqualify"
   assert.ok(withdrawn.actionLabels().includes("Reactivate"));
 });
 
-test("a paired participant offers Withdraw and Disqualify, never Delete, and says why", () => {
+test("a currently paired participant offers Withdraw and Disqualify, never Delete, and names the bag", () => {
   const harness = participantDetailHarness({ canDirectRace: true });
   harness.renderParticipantDetail(registrationDetail({ status: "ACTIVE" }));
   const labels = harness.actionLabels();
@@ -923,6 +939,96 @@ test("a paired participant offers Withdraw and Disqualify, never Delete, and say
   disqualified.renderParticipantDetail(registrationDetail({ status: "DISQUALIFIED" }));
   assert.deepEqual(disqualified.actionLabels(), ["Reactivate"]);
   assert.ok(disqualified.note(), "the explanation stays while the duck is still paired");
+});
+
+// The defect this replaces: the panel read `assignment`, so a participant whose
+// duck had been unassigned was offered Delete and collected a 409 from the
+// server, which re-checks the ended assignment row the projection already knew
+// about. `currentlyPaired` and `deletable` are different questions and the panel
+// must ask each one where it belongs.
+test("the two projection booleans decide the controls and the wording independently", () => {
+  const matrix = [
+    {
+      label: "paired now",
+      registration: { currentlyPaired: true, deletable: false },
+      actions: ["Withdraw", "Disqualify"],
+      note: /Duck #12 is already sealed in a heat bag/,
+    },
+    {
+      label: "duck later unassigned",
+      // No current assignment, so `assignment` is null and `currentlyPaired` is
+      // false — but the ended assignment row means the delete endpoint refuses.
+      registration: { assignment: null, currentlyPaired: false, deletable: false },
+      actions: ["Withdraw", "Disqualify"],
+      note: /already been in the race/,
+    },
+    {
+      label: "never paired",
+      registration: { assignment: null, currentlyPaired: false, deletable: true },
+      actions: ["Delete registration"],
+      note: null,
+    },
+    {
+      // A racing event is not a deletable event status, so even a never-paired
+      // registration can be undeletable without ever having held a duck.
+      label: "never paired but the event no longer allows deletion",
+      registration: { assignment: null, currentlyPaired: false, deletable: false },
+      actions: ["Withdraw", "Disqualify"],
+      note: /already been in the race/,
+    },
+  ];
+
+  for (const { label, registration, actions, note } of matrix) {
+    const harness = participantDetailHarness({ canDirectRace: true });
+    harness.renderParticipantDetail(registrationDetail({ status: "ACTIVE", ...registration }));
+    assert.deepEqual(harness.actionLabels(), actions, label);
+    if (note === null) {
+      assert.equal(harness.note(), null, label);
+    } else {
+      assert.match(harness.note().textContent, note, label);
+      // Never claim a duck is in a bag when no duck is currently held.
+      if (registration.currentlyPaired !== true) {
+        assert.equal(/sealed in a heat bag/.test(harness.note().textContent), false, label);
+      }
+    }
+  }
+});
+
+// A staff console render runs inside no try block, so one thrown property read
+// silently drops every control after it. A projection served by an older Worker
+// carries neither boolean; the safe reading is "not deletable", because refusing
+// a delete that would have worked costs a refresh while offering a doomed one
+// costs a 409 in front of a participant.
+test("a projection without the new booleans renders the safe side of both questions", () => {
+  const legacyPaired = participantDetailHarness({ canDirectRace: true });
+  legacyPaired.renderParticipantDetail({
+    ...registrationDetail({ status: "ACTIVE" }),
+    currentlyPaired: undefined,
+    deletable: undefined,
+  });
+  assert.deepEqual(legacyPaired.actionLabels(), ["Withdraw", "Disqualify"]);
+  // `currentlyPaired` falls back to the assignment it is defined to equal, so
+  // the bag sentence is still exactly right.
+  assert.match(legacyPaired.note().textContent, /Duck #12 is already sealed in a heat bag/);
+
+  const legacyUnpaired = participantDetailHarness({ canDirectRace: true });
+  legacyUnpaired.renderParticipantDetail({
+    ...registrationDetail({ status: "ACTIVE", assignment: null }),
+    currentlyPaired: undefined,
+    deletable: undefined,
+  });
+  assert.deepEqual(legacyUnpaired.actionLabels(), ["Withdraw", "Disqualify"]);
+  assert.match(legacyUnpaired.note().textContent, /already been in the race/);
+
+  // A malformed assignment must not throw either: the panel keeps its controls
+  // and drops only the duck number from the sentence.
+  const malformed = participantDetailHarness({ canDirectRace: true });
+  malformed.renderParticipantDetail(registrationDetail({ status: "ACTIVE", assignment: { id: "assignment-1" } }));
+  assert.deepEqual(malformed.actionLabels(), ["Withdraw", "Disqualify"]);
+  assert.match(malformed.note().textContent, /^This participant's duck is already sealed in a heat bag/);
+  // The Duck fact degrades with it rather than throwing and dropping the rest
+  // of the panel, and it never claims the duck was handed back.
+  assert.deepEqual(malformed.facts.find(([label]) => label === "Duck"), ["Duck", "Paired"]);
 });
 
 test("the participant panel shows the stored duck name and whether it is already hidden", () => {

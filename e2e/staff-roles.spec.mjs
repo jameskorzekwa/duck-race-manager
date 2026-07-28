@@ -7,6 +7,7 @@ import {
   rawJson,
   seedState,
   signIn,
+  unassignDuck,
   watchBrowserErrors,
 } from "./helpers.mjs";
 
@@ -154,7 +155,7 @@ test.describe("staff roles and the Admin views", () => {
     expect(errors).toEqual([]);
   });
 
-  test("delete is offered only before pairing and withdraw or disqualify only after it", async ({ page }) => {
+  test("delete is offered only to a deletable participant, withdraw or disqualify to everyone else", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     const seeded = await seedState("registration");
     const admin = seeded.accounts.find((account) => account.isSystemAdmin);
@@ -166,8 +167,8 @@ test.describe("staff roles and the Admin views", () => {
     await menuLink(page, "Participants").click();
     await expect(page.locator("[data-participant-list] button").first()).toBeVisible();
 
-    // Unpaired: nothing is in the water yet, so removing the registration is the
-    // only destructive action offered.
+    // Deletable — never paired, no heat place, an event that still allows it —
+    // so removing the registration is the only destructive action offered.
     await participantRow(page, `${unpaired.firstName} ${unpaired.lastName}`).click();
     await expect(page.locator("[data-participant-detail]")).toBeVisible();
     await expect.poll(() => actionLabels(page)).toContain("Delete registration");
@@ -201,6 +202,73 @@ test.describe("staff roles and the Admin views", () => {
     await expect(
       page.locator("[data-participant-list] button", { hasText: `${unpaired.firstName} ${unpaired.lastName}` }),
     ).toHaveCount(0);
+
+    expect(errors).toEqual([]);
+  });
+
+  // The console must read `deletable`, which is the delete endpoint's own
+  // predicate, and never `assignment`. A participant whose duck was unassigned
+  // afterwards has no current assignment at all, yet the ended assignment row
+  // and the surviving heat place still mean their duck went into a heat bag, so
+  // the registration can never be removed again. Reading `assignment` offered
+  // them a Delete button that could only ever collect a 409.
+  test("an unassigned duck leaves a participant undeletable, and the console says so honestly", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    const seeded = await seedState("registration");
+    const admin = seeded.accounts.find((account) => account.isSystemAdmin);
+    const paired = seeded.participants.find((participant) => participant.visibleNumber !== undefined);
+    expect(paired).toBeTruthy();
+
+    // The projection states both answers, and they agree while the duck is held.
+    const whilePaired = await rawJson(`/api/v1/staff/registrations/${paired.registrationId}`, {
+      token: admin.token,
+    });
+    expect(whilePaired.status).toBe(200);
+    expect(whilePaired.body.registration.currentlyPaired).toBe(true);
+    expect(whilePaired.body.registration.deletable).toBe(false);
+
+    await unassignDuck(admin.token, seeded.eventId, paired.registrationId);
+
+    // Now they disagree, which is the whole point: no duck in hand, still not
+    // removable.
+    const afterUnassign = await rawJson(`/api/v1/staff/registrations/${paired.registrationId}`, {
+      token: admin.token,
+    });
+    expect(afterUnassign.status).toBe(200);
+    expect(afterUnassign.body.registration.assignment).toBeNull();
+    expect(afterUnassign.body.registration.currentlyPaired).toBe(false);
+    expect(afterUnassign.body.registration.deletable).toBe(false);
+
+    await signIn(page, admin.email);
+    await menuLink(page, "Participants").click();
+    await expect(page.locator("[data-participant-list] button").first()).toBeVisible();
+    await participantRow(page, `${paired.firstName} ${paired.lastName}`).click();
+    await expect(page.locator("[data-participant-detail]")).toBeVisible();
+
+    // No Delete, and the two eligibility actions instead.
+    await expect.poll(() => actionLabels(page)).toContain("Withdraw");
+    expect(await actionLabels(page)).toContain("Disqualify");
+    expect(await actionLabels(page)).not.toContain("Delete registration");
+
+    // The sentence tells the truth about *why*: no duck is in a bag right now,
+    // so it must not claim one is.
+    const note = page.locator("[data-participant-action-note]");
+    await expect(note).toBeVisible();
+    await expect(note).toContainText("already been in the race");
+    await expect(note).toContainText("cannot be deleted");
+    await expect(note).not.toContainText("sealed in a heat bag");
+
+    // And the server agrees with the button that is not there: a delete really
+    // would have been refused.
+    const refused = await rawJson(`/api/v1/staff/registrations/${paired.registrationId}`, {
+      token: admin.token,
+      method: "DELETE",
+      body: {
+        commandId: crypto.randomUUID(),
+        expectedRevision: afterUnassign.body.registration.revision,
+      },
+    });
+    expect(refused.status).toBe(409);
 
     expect(errors).toEqual([]);
   });
@@ -253,6 +321,10 @@ test.describe("staff roles and the Admin views", () => {
     await expect(createCard).toBeVisible({ timeout: 20_000 });
     await expect(page.getByText("No race yet.")).toBeVisible();
 
-    expect(errors).toEqual([]);
+    // Deleting the event out from under an open console makes its in-flight
+    // event-scoped refetches 404. That is the deletion working, and the console
+    // recovering from it is the behaviour under test, so those are the only
+    // browser errors this page is allowed to produce.
+    expect(errors.filter((error) => !error.includes("404 (Not Found)"))).toEqual([]);
   });
 });

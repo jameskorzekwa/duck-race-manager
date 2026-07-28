@@ -1255,15 +1255,18 @@ disqualify a `SUBMITTED` or `ACTIVE` registration or reactivate a
 withdrawn/disqualified registration. These
 operations are revision-checked, idempotent, and audited.
 
-The participant detail pane offers **Withdraw** and **Disqualify** only for a
-participant who currently holds a duck assignment, because that duck is already
-sealed into a heat bag and physically stays in the race; all staff can do is
-make the participant ineligible to be counted as a winner, and the pane says so
-in one sentence beside the actions. **Reactivate** is unaffected by pairing. The
-pane reads the projection's current-assignment field, not the status, because a
-reactivated participant can be `SUBMITTED` while still holding their duck. This
-is console convenience only: the API accepts a withdrawal or disqualification
-for an unpaired registration as well.
+The participant detail pane offers **Withdraw** and **Disqualify** to every
+participant the delete endpoint would refuse — that is, whenever the projection's
+`deletable` flag is false — because those two are then the only exit that
+exists. It says so in one sentence beside the actions, and the sentence states
+the reason that actually applies: `currentlyPaired` participants are told the
+named duck is already sealed in a heat bag and stays in the race, and a
+participant who is no longer holding a duck but whose entry has already been in
+the race is told that instead. Neither sentence claims a duck is in a bag when
+`currentlyPaired` is false. **Reactivate** is unaffected by pairing. Neither
+control reads the status, because a reactivated participant can be `SUBMITTED`
+while still holding their duck. This is console convenience only: the API accepts
+a withdrawal or disqualification for a never-paired registration as well.
 
 Withdrawal or disqualification is allowed while every heat containing that
 participant remains `PLANNED` and unlocked. Once any containing heat is locked,
@@ -1301,12 +1304,15 @@ mistaken entry. It is not a substitute for withdrawal or disqualification, which
 are the correct tools for someone who registered legitimately and then stopped
 racing.
 
-The pane offers **Delete registration** only while the participant holds no
-current duck assignment, and offers it as the only destructive action there, so
-a paired participant is never shown a button whose command the server refuses.
-The console filter is narrower than the server rule described below in one case:
-a participant whose assignment has already ended keeps the button and receives
-the server's actionable `409` instead.
+The pane offers **Delete registration** only while the projection reports
+`deletable`, and offers it as the only destructive action there, so a
+participant is never shown a button whose command the server refuses. Because
+`deletable` is the delete endpoint's own predicate rather than a restatement of
+it, the console and the guarded write cannot disagree: a participant whose duck
+was later unassigned is not `currentlyPaired`, is still not `deletable`, and is
+offered withdrawal or disqualification like any other participant who has been
+in the race. A projection that carries neither flag is treated as not
+deletable.
 
 The request follows the other staff participant mutations: an RFC 4122 v4
 `commandId`, the currently loaded `expectedRevision`, the exact application

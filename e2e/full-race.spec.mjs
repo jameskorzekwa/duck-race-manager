@@ -134,6 +134,16 @@ test.describe("complete race journey", () => {
       await expect(page.getByRole("heading", { name: "Duck #101 paired" })).toBeVisible();
       await expect(page.locator("[data-staff-message]")).toHaveText("Duck paired successfully.");
 
+      // Pairing seals this duck into a numbered heat bag it never comes out of,
+      // so the race flow is not honest without the panel that names the bag.
+      // It stays up until the staffer says the duck is physically in it.
+      const bagPanel = page.locator("[data-heat-bag]");
+      await expect(bagPanel).toBeVisible();
+      await expect(page.locator("[data-heat-bag-instruction]")).toHaveText(/^Put this duck in HEAT \d+ bag$/);
+      await expect(page.locator("[data-heat-bag-duck]")).toHaveText("Duck #101");
+      await page.locator("[data-heat-bag-dismiss]").click();
+      await expect(bagPanel).toBeHidden();
+
       const listed = (await client.get(`/api/v1/staff/events/${event.id}/heats`)).body.heats;
       expect(listed.filter((heat) => heat.round === "ROUND_ONE")).toHaveLength(3);
 
