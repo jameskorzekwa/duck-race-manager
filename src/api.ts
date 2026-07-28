@@ -363,7 +363,8 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   // remote verification is waived there and only there. The check stays
   // fail-closed everywhere else: an unconfigured deployment still refuses
   // registrations rather than accepting unverified ones. `isLocalPreviewOrigin`
-  // is false for every https origin, so production cannot reach this branch.
+  // admits only loopback and private network addresses, never a public name, so
+  // production cannot reach this branch.
   const turnstileSecret = env.TURNSTILE_SECRET_KEY;
   if (turnstileSecret === undefined && !isLocalPreviewOrigin(env.APP_ORIGIN)) {
     return json({ error: "Registration protection is not configured." }, 503);

@@ -89,6 +89,7 @@ a race at any lifecycle state:
 ```sh
 npm ci
 npm run dev:local                          # http://localhost:8787
+npm run dev:network                        # or serve it to your phone over https
 npm run seed:local -- --state=round-one    # in a second terminal
 ```
 

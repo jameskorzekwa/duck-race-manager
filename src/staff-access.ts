@@ -45,8 +45,9 @@ const attribute = (
 // A local preview has no AWS credentials and no route to Cognito, so the identity
 // side of staff management is satisfied locally while every D1 write, guard, and
 // audit row still runs for real. The subject is namespaced so a local identity can
-// never collide with a Cognito subject. `isLocalPreviewOrigin` is false for every
-// https origin, so a deployed Worker always talks to the real user pool.
+// never collide with a Cognito subject. `isLocalPreviewOrigin` admits only
+// loopback and private network addresses, never a public name, so a deployed
+// Worker always talks to the real user pool.
 const localStaffIdentity = (email: string): ProvisionedStaffIdentity => ({
   cognitoSub: `local-preview-${email}`,
   username: email,

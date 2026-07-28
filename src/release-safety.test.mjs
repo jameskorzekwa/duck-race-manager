@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { checkD1RolePreflight } from "../scripts/check-d1-role-preflight.mjs";
+import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
 import { checkWorkerSecrets, requiredWorkerSecrets } from "../scripts/check-worker-secrets.mjs";
 import {
   assessReleaseVersion,
@@ -446,13 +447,19 @@ test("Worker secret preflight requires names without inspecting values", () => {
   );
 });
 
-// The local development harness gates every offline stand-in on `APP_ORIGIN`
-// being an http loopback origin. That gate is only as good as the deployed
+// The local development harness gates every offline stand-in on
+// `isLocalPreviewOrigin(APP_ORIGIN)`. That gate is only as good as the deployed
 // configuration, so the release invariants are the right place to hold it.
+//
+// Run the real predicate rather than asserting a property that happens to imply
+// it today. Asserting the scheme was enough while only http qualified; now that
+// https is how the local network is served, the scheme proves nothing, and a
+// future widening of the host rules would pass a scheme check unnoticed.
 test("the deployed Worker configuration cannot reach the local development harness", () => {
   const production = JSON.parse(readRepositoryFile("wrangler.jsonc").replaceAll(/^\s*\/\/.*$/gm, ""));
 
   assert.equal(production.main, "src/index.ts");
   assert.equal(production.vars.APP_ORIGIN, "https://quickducks.com");
-  assert.equal(new URL(production.vars.APP_ORIGIN).protocol, "https:");
+  assert.equal(isLocalPreviewOrigin(production.vars.APP_ORIGIN), false);
+  assert.equal(isLoopbackOrigin(production.vars.APP_ORIGIN), false);
 });

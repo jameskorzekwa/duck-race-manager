@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker from "./index.ts";
-import { isLocalPreviewOrigin, localPreviewTurnstileToken } from "./local-preview.ts";
+import { isLocalPreviewOrigin, isLoopbackOrigin, localPreviewTurnstileToken } from "./local-preview.ts";
 import { renderRegistration } from "./site.ts";
 import { createCognitoStaffLifecycle, createCognitoStaffProvisioner } from "./staff-access.ts";
 
@@ -12,13 +12,16 @@ const localOrigin = "http://localhost:8787";
 // The whole local-development harness hangs off this one predicate. If it ever
 // returns true for an origin a deployment could actually use, the Turnstile
 // waiver and the Cognito stand-ins become reachable in production.
-test("local preview is limited to http loopback origins", () => {
+test("local preview accepts loopback, and the local network only over TLS", () => {
   for (
     const origin of [
+      // Loopback, either scheme: browsers treat it as a secure context already.
       "http://localhost:8787",
       "http://localhost",
       "http://127.0.0.1:8787",
       "http://[::1]:8787",
+      "https://localhost:8787",
+      "https://127.0.0.1:8787",
       // The host is resolved by parsing, so these normalise to loopback and are
       // genuinely local. Pinned so a rewrite to string matching fails loudly.
       "HTTP://LOCALHOST:8787",
@@ -26,6 +29,17 @@ test("local preview is limited to http loopback origins", () => {
       "http://127.1",
       "http://2130706433",
       "http://[0:0:0:0:0:0:0:1]",
+      // Private addresses on the local network, over TLS, including the first
+      // and last address of every accepted range.
+      "https://192.168.0.252:8787",
+      "https://10.0.0.0",
+      "https://10.255.255.255",
+      "https://172.16.0.0",
+      "https://172.31.255.255",
+      "https://192.168.0.0",
+      "https://192.168.255.255",
+      "https://169.254.0.0",
+      "https://169.254.255.255",
     ]
   ) {
     assert.equal(isLocalPreviewOrigin(origin), true, origin);
@@ -34,10 +48,8 @@ test("local preview is limited to http loopback origins", () => {
   for (
     const origin of [
       productionOrigin,
-      "https://localhost:8787",
-      "https://127.0.0.1",
-      "http://localhost.quickducks.com",
       "http://quickducks.com",
+      "http://localhost.quickducks.com",
       "http://notlocalhost",
       "http://localhost.evil.example",
       "http://127.0.0.1.evil.example",
@@ -45,7 +57,35 @@ test("local preview is limited to http loopback origins", () => {
       "http://localhost.",
       "http://[::ffff:127.0.0.1]",
       "http://[::2]",
+      // A private address is only a local preview over TLS. Plain http cannot
+      // store the `__Host-` session cookies off loopback, so it must not qualify.
       "http://192.168.1.20:8787",
+      "http://10.1.2.3",
+      "https://192.168.1.20.nip.io",
+      "https://10.0.0.1.evil.example",
+      // Public addresses one step outside each accepted range.
+      "https://172.15.255.255",
+      "https://172.32.0.0",
+      "https://9.255.255.255",
+      "https://11.0.0.0",
+      "https://192.167.255.255",
+      "https://192.169.0.0",
+      "https://169.253.255.255",
+      "https://169.255.0.0",
+      "https://8.8.8.8",
+      // Deliberately not supported: the shipped commands only ever choose a
+      // private IPv4 address, so neither mDNS names nor IPv6 widen the predicate.
+      "https://j2k-macbook-pro.local:8787",
+      "https://evil.local",
+      "https://attacker.example.com.local",
+      "https://.local",
+      "https://local",
+      "https://[fd12:3456::1]:8787",
+      "https://[fe80::1]:8787",
+      "https://[fc00::1]",
+      "https://[::ffff:192.168.1.1]",
+      "https://[2001:db8::1]",
+      "https://notlocal.example",
       "//localhost:8787",
       "localhost:8787",
       "",
@@ -55,6 +95,18 @@ test("local preview is limited to http loopback origins", () => {
     assert.equal(isLocalPreviewOrigin(origin), false, origin);
   }
 });
+
+test("loopback is distinguished from the wider local network", () => {
+  for (const origin of ["http://localhost:8787", "https://127.0.0.1:8787", "http://[::1]:8787"]) {
+    assert.equal(isLoopbackOrigin(origin), true, origin);
+  }
+
+  for (const origin of ["https://192.168.0.252:8787", "https://10.1.2.3:8787", productionOrigin, "", "not a url"]) {
+    assert.equal(isLoopbackOrigin(origin), false, origin);
+  }
+});
+
+
 
 // Enough of a database to reach the Turnstile gate: one open event, which is the
 // only row `createRegistration` reads before it decides whether to verify.
