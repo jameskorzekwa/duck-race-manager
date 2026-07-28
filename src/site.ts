@@ -1038,7 +1038,7 @@ export const renderStaffHome = (
         <details class="operation-card"><summary>Intake duck and active tag</summary>
           <form data-inventory-intake-form>
             <div class="field-grid"><label>Visible duck number<input name="visibleNumber" type="number" min="1" max="999999999" required></label><label>Physical condition<select name="condition"><option value="GOOD">Good</option><option value="NEEDS_TAG">Needs tag</option><option value="DAMAGED">Damaged</option><option value="RETIRED">Retired</option></select></label></div>
-            <label>Tag token<input name="tagToken" minlength="22" maxlength="128" pattern="[A-Za-z0-9_-]+" required autocomplete="off"><span>Read or write the physical NFC/QR token before intake.</span></label>
+            <label>Tag token<input name="tagToken" minlength="22" maxlength="128" pattern="[A-Za-z0-9_\\-]+" required autocomplete="off"><span>Read or write the physical NFC/QR token before intake.</span></label>
             <div class="field-grid"><label>Storage location<input name="location" maxlength="100"></label><label>Notes<input name="notes" maxlength="1000"></label></div>
             <label class="check"><input name="physicallyPresent" type="checkbox" required><span class="label-text">I have the physical duck and tag in hand.</span></label>
             <button class="button" type="submit">Intake and reserve duck</button>
