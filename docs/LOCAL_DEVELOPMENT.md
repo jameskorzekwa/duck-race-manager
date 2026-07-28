@@ -13,6 +13,26 @@ npm run seed:local -- --state=round-one   # in a second terminal
 Open <http://localhost:8787>, then sign in at `/staff` and pick any account. No
 password, no emailed code, no AWS, no Cloudflare account.
 
+## Automated browser suite
+
+The Playwright suite drives the same local Worker from an empty database through
+draft creation, registration, pairing, every heat, the final podium, completion,
+and administrator deletion. Separate scenarios cover roles, privacy, lifecycle
+blockers, idempotency, stale revisions, Origin protection, heat reset, finalist
+correction, every deletion state, and document overflow at 320, 390, 768, and
+1280 pixels.
+
+```sh
+npm run test:e2e:install   # once per Playwright browser revision
+npm run test:e2e
+```
+
+Playwright starts and stops Wrangler automatically. It clears only its dedicated
+`.wrangler/e2e` state, applies every migration, and runs with one worker because
+QuickDucks permits one event dataset. Do not run `npm run dev:local` on port 8787
+at the same time. Failed runs write ignored diagnostics under `test-results/`
+and `playwright-report/`; the generated records are synthetic local data only.
+
 To open it on a phone or any other device on your network, use
 `npm run dev:network` instead — see [testing on other
 devices](#testing-on-other-devices).

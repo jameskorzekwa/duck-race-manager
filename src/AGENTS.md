@@ -128,6 +128,7 @@ be set by mistake in production, while `APP_ORIGIN` is pinned by a release test.
 
 ```sh
 npm test
+npm run test:e2e
 node --test src/race-workflow.integration.test.mjs
 node --test src/role-authorization.integration.test.mjs
 ```
@@ -145,3 +146,7 @@ node --test src/role-authorization.integration.test.mjs
   assertions.
 - New test files must remain directly under `src`; `src/*.test.mjs` is not
   recursive.
+- Playwright browser integration tests live under `e2e/`, use one worker because
+  only one event dataset may exist, and reset race data through the application.
+  Their server owns `.wrangler/e2e`; never point them at production or a manually
+  seeded local database.

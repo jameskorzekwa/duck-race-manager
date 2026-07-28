@@ -17,7 +17,7 @@ jobs:
   validate:
     name: Validate
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       CI: "true"
       WRANGLER_SEND_METRICS: "false"
@@ -44,6 +44,12 @@ jobs:
 
       - name: Run full test suite
         run: npm test
+
+      - name: Install Chromium for browser integration tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser integration suite
+        run: npm run test:e2e
 
       - name: Validate all Worker bundles and Wrangler configurations
         run: npm run wrangler:validate

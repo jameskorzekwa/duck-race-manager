@@ -51,6 +51,7 @@ npm run typecheck
 npm test
 npm run wrangler:validate
 npm run db:migrate:local
+npm run test:e2e                        # full Chromium race lifecycle and edge cases
 
 npm run dev:local                        # whole site on http://localhost:8787, no network
 npm run dev:network                      # same site over https, reachable by other devices
@@ -59,7 +60,9 @@ npm run seed:local -- --state=round-one  # fill it with a race at a chosen lifec
 
 `npm run check` runs TypeScript and Wrangler validation only. It does not run
 tests, dependency audit, or migrations. CI also runs
-`npm audit --audit-level=high`.
+`npm audit --audit-level=high`. Browser integration tests start their own local
+Worker and use the dedicated `.wrangler/e2e` persistence directory; do not run a
+separate server on port 8787 at the same time.
 
 ## REVIEW BEFORE MERGE
 

@@ -106,7 +106,7 @@ Defaults: --state=registration --participants=9 --heat-size=3
 Every run first deletes the existing event, because QuickDucks holds one event at a time.
 `;
 
-const randomToken = () => {
+export const randomToken = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 };
@@ -125,7 +125,7 @@ const participantName = (index) => ({
   lastName: lastNames[index % lastNames.length],
 });
 
-const createClient = (baseUrl) => {
+export const createClient = (baseUrl) => {
   let token;
   // Set once the first write has been issued, so a failure can say whether the
   // local database was left part-way through a race rather than untouched.
@@ -193,7 +193,7 @@ const createClient = (baseUrl) => {
 
 const step = (message) => stdout.write(`  ${message}\n`);
 
-const seed = async (options) => {
+export const seed = async (options) => {
   const client = createClient(options.url);
 
   // The local entry point owns these accounts. They are the only rows the seeder
@@ -460,48 +460,52 @@ const report = (options, result) => {
   stdout.write(lines.join("\n"));
 };
 
-try {
-  const options = parseArguments();
-  if (options.help) {
-    stdout.write(usage());
-    exit(0);
-  }
-
-  // The network session serves a certificate this machine has no reason to trust
-  // yet. `NODE_EXTRA_CA_CERTS` is only read at startup, so trusting it means
-  // starting again with it set rather than reaching for a global switch that
-  // would disable verification for everything.
-  const session = networkSession();
-  if (
-    options.url.startsWith("https://")
-    && session !== null
-    && env.NODE_EXTRA_CA_CERTS === undefined
-    && existsSync(session.trustAnchorPath)
-  ) {
-    const restarted = spawnSync(execPath, [fileURLToPath(import.meta.url), ...argv.slice(2)], {
-      stdio: "inherit",
-      env: { ...env, NODE_EXTRA_CA_CERTS: session.trustAnchorPath },
-    });
-    // `status` is null both when the spawn fails and when a signal kills the
-    // child, so neither can be allowed to exit quietly with no explanation.
-    if (restarted.error) {
-      throw new SeedError(`Could not re-run with the local certificate trusted.\n${restarted.error.message}`);
+export const runSeedCli = async () => {
+  try {
+    const options = parseArguments();
+    if (options.help) {
+      stdout.write(usage());
+      return;
     }
-    if (restarted.signal !== null) throw new SeedError(`Seeding was stopped by ${restarted.signal}.`);
-    exit(restarted.status ?? 1);
-  }
 
-  stdout.write(`Seeding ${options.url} to "${options.state}"…\n`);
-  report(options, await seed(options));
-} catch (error) {
-  if (error instanceof SeedError) {
-    // A failure part-way through leaves a real, self-consistent event behind.
-    // Say so, or the next person reads it as the previous run's leftovers.
-    const partial = error.afterMutation
-      ? "\nThe local database is now partially seeded. Re-run the command, or clear it with:\n  npm run seed:local -- --state=empty\n"
-      : "";
-    stderr.write(`\nSeeding failed.\n${error.message}\n${partial}\n`);
-    exit(1);
+    // The network session serves a certificate this machine has no reason to trust
+    // yet. `NODE_EXTRA_CA_CERTS` is only read at startup, so trusting it means
+    // starting again with it set rather than reaching for a global switch that
+    // would disable verification for everything.
+    const session = networkSession();
+    if (
+      options.url.startsWith("https://")
+      && session !== null
+      && env.NODE_EXTRA_CA_CERTS === undefined
+      && existsSync(session.trustAnchorPath)
+    ) {
+      const restarted = spawnSync(execPath, [fileURLToPath(import.meta.url), ...argv.slice(2)], {
+        stdio: "inherit",
+        env: { ...env, NODE_EXTRA_CA_CERTS: session.trustAnchorPath },
+      });
+      // `status` is null both when the spawn fails and when a signal kills the
+      // child, so neither can be allowed to exit quietly with no explanation.
+      if (restarted.error) {
+        throw new SeedError(`Could not re-run with the local certificate trusted.\n${restarted.error.message}`);
+      }
+      if (restarted.signal !== null) throw new SeedError(`Seeding was stopped by ${restarted.signal}.`);
+      exit(restarted.status ?? 1);
+    }
+
+    stdout.write(`Seeding ${options.url} to "${options.state}"…\n`);
+    report(options, await seed(options));
+  } catch (error) {
+    if (error instanceof SeedError) {
+      // A failure part-way through leaves a real, self-consistent event behind.
+      // Say so, or the next person reads it as the previous run's leftovers.
+      const partial = error.afterMutation
+        ? "\nThe local database is now partially seeded. Re-run the command, or clear it with:\n  npm run seed:local -- --state=empty\n"
+        : "";
+      stderr.write(`\nSeeding failed.\n${error.message}\n${partial}\n`);
+      exit(1);
+    }
+    throw error;
   }
-  throw error;
-}
+};
+
+if (argv[1] === fileURLToPath(import.meta.url)) await runSeedCli();
