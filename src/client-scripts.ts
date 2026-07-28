@@ -743,7 +743,9 @@ const participantQrFigure = (registration) => {
   svg.setAttribute("viewBox", "0 0 " + size + " " + size);
   svg.setAttribute("shape-rendering", "crispEdges");
   svg.setAttribute("role", "img");
-  svg.setAttribute("aria-label", "QR code containing this participant's staff lookup code");
+  // Named, because several cards can be on screen at once and an identical
+  // label on each one tells a screen-reader user nothing about which is which.
+  svg.setAttribute("aria-label", "QR code with the staff lookup code for " + participantDisplayName(registration));
   const background = document.createElementNS(participantQrNamespace, "rect");
   background.setAttribute("width", String(size));
   background.setAttribute("height", String(size));
@@ -776,7 +778,12 @@ const participantCard = (registration) => {
   const qrFigure = registration.followed ? null : participantQrFigure(registration);
   if (qrFigure !== null) {
     card.append(qrFigure);
-    card.append(participantText("p", "Show this code to staff at the duck table. They can scan it or type the code above.", "muted"));
+    // Once a duck is paired there is nothing left to do at the duck table, so
+    // the card stops sending anyone there and explains what the code is still
+    // good for instead.
+    card.append(participantText("p", registration.paired
+      ? "Staff can scan this code, or type it, to pull up this registration."
+      : "Show this code to staff at the duck table. They can scan it or type the code above.", "muted"));
   }
   card.append(participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"));
   participantAddRaceFacts(card, registration.raceStatus, registration);

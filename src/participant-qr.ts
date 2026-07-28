@@ -60,6 +60,17 @@ export interface ParticipantQrGeometry {
   path: string;
 }
 
+// The geometry is a pure function of the lookup code, and My Ducks re-derives
+// it for every owned registration on every refresh — which the page issues on
+// each live signal as well as on a poll. One device can hold many registrations
+// (a whole family or scout troop signs up from one phone), so the same handful
+// of codes would otherwise be re-encoded continuously for the length of a race.
+// A Workers isolate outlives a request, so caching here removes essentially all
+// of that work. The cap keeps a long-lived isolate bounded; races are far
+// smaller than it, so in practice nothing is ever evicted.
+const GEOMETRY_CACHE_LIMIT = 500;
+const geometryCache = new Map<string, ParticipantQrGeometry>();
+
 /**
  * Encodes a lookup code into the geometry both renderers draw.
  *
@@ -70,7 +81,11 @@ export interface ParticipantQrGeometry {
  * never carries caller input.
  */
 export const participantQrGeometry = (lookupCode: string): ParticipantQrGeometry => {
-  const { data, size } = encode(participantQrPayload(lookupCode), {
+  const payload = participantQrPayload(lookupCode);
+  const cached = geometryCache.get(payload);
+  if (cached !== undefined) return cached;
+
+  const { data, size } = encode(payload, {
     ecc: "M",
     border: QUIET_ZONE_MODULES,
   });
@@ -90,16 +105,25 @@ export const participantQrGeometry = (lookupCode: string): ParticipantQrGeometry
     }
   }
 
-  return { size, path: segments.join("") };
+  // Frozen because callers share one instance: the projection must not be able
+  // to hand a mutated symbol to the next request that asks for the same code.
+  const geometry = Object.freeze({ size, path: segments.join("") });
+  if (geometryCache.size >= GEOMETRY_CACHE_LIMIT) geometryCache.clear();
+  geometryCache.set(payload, geometry);
+  return geometry;
 };
 
 /**
  * Encodes a lookup code, or returns `null` when it cannot be encoded.
  *
- * The My Ducks projection renders many registrations at once, so one row whose
- * stored code predates the current alphabet must degrade to a card without a
- * QR rather than fail the whole response. Callers rendering a single known-good
- * code should keep using {@link participantQrGeometry} and let it throw.
+ * `lookup_code` carries no format constraint in the schema, so this is defence
+ * in depth for a column the database would let hold anything, not a claim that
+ * such rows exist: `randomLookupCode` has only ever emitted the alphabet
+ * {@link isLookupCode} accepts. The My Ducks projection renders many
+ * registrations at once, so one unencodable row must cost that card its QR
+ * rather than fail the whole response. Callers rendering a single code they
+ * already trust should keep using {@link participantQrGeometry} and let it
+ * throw — the private status page does exactly that.
  */
 export const optionalParticipantQrGeometry = (
   lookupCode: string | null,

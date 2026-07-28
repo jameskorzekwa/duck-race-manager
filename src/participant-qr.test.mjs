@@ -144,11 +144,67 @@ test("optional geometry degrades to null instead of throwing", () => {
 });
 
 test("the geometry encodes the lookup code and nothing else", async () => {
-  // The same privacy property the markup renderer is held to: a photographed
-  // card QR reveals exactly the code printed next to it.
+  // The same privacy property the markup renderer is held to, checked against
+  // the encoder's own matrix for the exact payload: a photographed card QR
+  // reveals the code printed next to it and carries nothing extra. Comparing
+  // sizes alone would pass for any code, since every valid one is version 1.
   const { encode } = await import("uqr");
   const expected = encode("QD1:DAASY234", { ecc: "M", border: 4 });
   const geometry = participantQrGeometry("DAASY234");
-
   assert.equal(geometry.size, expected.size);
+
+  const painted = new Set();
+  for (const [, x, y, run] of geometry.path.matchAll(/M(\d+) (\d+)h(\d+)v1h-\d+z/g)) {
+    for (let offset = 0; offset < Number(run); offset += 1) painted.add(`${Number(x) + offset},${y}`);
+  }
+
+  let dark = 0;
+  for (let y = 0; y < expected.size; y += 1) {
+    for (let x = 0; x < expected.size; x += 1) {
+      const shouldPaint = expected.data[y][x] === true;
+      if (shouldPaint) dark += 1;
+      assert.equal(painted.has(`${x},${y}`), shouldPaint, `module ${x},${y}`);
+    }
+  }
+  assert.ok(dark > 0);
+  assert.equal(painted.size, dark);
+});
+
+test("the browser's path guard accepts everything this encoder emits", async () => {
+  // The client re-checks the path alphabet before drawing, and that copy lives
+  // in a served script rather than importing this module. Nothing but this
+  // test stops the two from drifting: a widened encoder would keep the private
+  // status page working while silently dropping every QR on My Ducks, which is
+  // a half-broken release no other test would catch. Extract the guard the
+  // browser actually runs and hold it against real output.
+  const { participantScript } = await import("./client-scripts.ts");
+  const source = participantScript.match(/participantQrPathPattern = (\/.+\/);/);
+  assert.ok(source, "the served script must still define participantQrPathPattern");
+  const [, body, flags] = source[1].match(/^\/(.*)\/([a-z]*)$/);
+  const guard = new RegExp(body, flags);
+
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  for (let index = 0; index < alphabet.length; index += 1) {
+    const code = Array.from({ length: 8 }, (_, position) => alphabet[(index + position * 7) % alphabet.length]).join("");
+    const { size, path } = participantQrGeometry(code);
+    assert.match(path, guard, `the browser would refuse to draw ${code}`);
+    assert.equal(size, 29, `${code} must stay a version 1 symbol`);
+  }
+});
+
+test("repeated encodes of one code reuse a frozen result", () => {
+  // My Ducks re-derives every owned registration on each refresh, so the same
+  // codes are encoded over and over for the length of a race. Callers share the
+  // instance, so it must not be mutable.
+  const first = participantQrGeometry("DAASY234");
+  const second = participantQrGeometry("DAASY234");
+  assert.equal(first, second, "the same code must not be re-encoded");
+  assert.ok(Object.isFrozen(first));
+
+  const other = participantQrGeometry("DUNALD45");
+  assert.notEqual(other, first);
+  assert.notEqual(other.path, first.path, "different codes must encode differently");
+
+  // Normalization happens before the cache, so these must not be separate keys.
+  assert.equal(participantQrGeometry(" daasy234 "), first);
 });

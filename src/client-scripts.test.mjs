@@ -3465,3 +3465,38 @@ test("a card drops its QR rather than drawing unexpected geometry", async () => 
     assert.match(card.text(), /Staff lookup code: DAISY123/, "the typed code still works");
   }
 });
+
+test("a followed card refuses a QR even if the server ever sent geometry", async () => {
+  // Defence in depth for the rule this page exists to keep: a followed entry is
+  // someone else's registration, and its card must never carry an encoding of
+  // their lookup code. The server already withholds it, so this pins the client
+  // half independently rather than trusting one guard twice.
+  const harness = await renderMyDucks([
+    followedEntry("33333333-3333-4333-8333-333333333333", {
+      qr: { size: 29, path: "M4 4h7v1h-7zM12 4h1v1h-1z" },
+    }),
+  ]);
+
+  const [followed] = harness.followed.track.children;
+  assert.equal(cardQr(followed), null, "a followed card never draws a QR");
+  assert.doesNotMatch(followed.text(), /lookup code:/i);
+});
+
+test("the QR caption follows the duck table, and each label names its participant", async () => {
+  const harness = await renderMyDucks([
+    collected("11111111-1111-4111-8111-111111111111", false),
+    collected("22222222-2222-4222-8222-222222222222", true),
+  ]);
+
+  const [awaiting] = harness.awaiting.track.children;
+  const [paired] = harness.paired.track.children;
+
+  // Before pairing the code is an instruction to go somewhere; afterwards that
+  // errand is done and sending them back to the duck table would be wrong.
+  assert.match(awaiting.text(), /Show this code to staff at the duck table/);
+  assert.doesNotMatch(paired.text(), /at the duck table/);
+  assert.match(paired.text(), /pull up this registration/);
+
+  // Several cards share a screen, so the accessible name has to distinguish them.
+  assert.match(cardQr(awaiting).getAttribute("aria-label"), /Daisy Duck/);
+});
