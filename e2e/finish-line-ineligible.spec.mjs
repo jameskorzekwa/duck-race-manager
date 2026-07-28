@@ -18,29 +18,15 @@ import {
 // a calm statement, nothing written, no heat entry moved, and the station stays
 // armed for the very next duck.
 //
-// ---------------------------------------------------------------------------
-// WHY THESE TWO ARE `test.fixme`
-//
-// Both specs need a heat that is AWAITING_RESULT and still holds a withdrawn
-// racer. Today the participant status API refuses a withdrawal outright once
-// any containing heat is locked, running, awaiting a result, or finalized —
-// both in preflight and inside the guarded write — and starting a round refuses
-// while any roster still holds an inactive racer. So the state these specs
-// describe cannot currently be reached through the application at all, and
-// nothing here may fake it: a spec that inserted the row directly would prove
-// the projection works on data the product cannot produce.
-//
-// They are written against the intended behaviour and withdraw through the
-// normal staff API at the point in the flow where it should be allowed. Delete
-// the `.fixme` from both `test.fixme(...)` calls once the branch that removes
-// the locked/running withdrawal guards from `src/participant-operations.ts` has
-// merged. Nothing else in this file needs to change.
-// ---------------------------------------------------------------------------
+// Both specs reach that state the only honest way: they withdraw through the
+// normal staff API while the heat is already awaiting its result. Withdrawal and
+// disqualification are allowed at every heat state now, so nothing here inserts
+// a row or fakes a projection.
 
 const ineligibleBlock = (page) => page.locator("[data-finish-ineligible]");
 
 test.describe("a withdrawn duck at the finish line", () => {
-  test.fixme("shows the staff inspection page a plain statement instead of a winner button", async ({ page }) => {
+  test("shows the staff inspection page a plain statement instead of a winner button", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     // Round one, mid-race: heat 1 is published and heat 2 is on the water.
     const seeded = await seedState("round-one");
@@ -92,7 +78,7 @@ test.describe("a withdrawn duck at the finish line", () => {
     expect(errors).toEqual([]);
   });
 
-  test.fixme("leaves the finish station armed for the very next duck", async ({ page }) => {
+  test("leaves the finish station armed for the very next duck", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     // The final is the round whose station takes scans directly, because it
     // needs a complete podium rather than one scanned winner.
@@ -158,6 +144,15 @@ test.describe("a withdrawn duck at the finish line", () => {
     expect(after.body.roster.map((entry) => `${entry.slotNumber}|${entry.raceEntryId}`))
       .toEqual(roster.map((entry) => `${entry.slotNumber}|${entry.raceEntryId}`));
 
-    expect(errors).toEqual([]);
+    // No page error and no application error — and exactly one line, which is
+    // Chromium's own network log for the deliberate `422` the finish-scan
+    // lookup answers with (`reason: DUCK_NOT_ELIGIBLE`, documented in
+    // docs/WORKFLOWS.md). The browser writes that at the network layer for any
+    // non-2xx fetch and page script cannot suppress it, so it is listed exactly
+    // rather than filtered away — the same convention ui-consistency.spec.mjs
+    // uses. Any second entry, or a real `pageerror`, still fails this spec.
+    expect(errors).toEqual([
+      "console: Failed to load resource: the server responded with a status of 422 (Unprocessable Entity)",
+    ]);
   });
 });

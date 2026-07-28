@@ -1598,6 +1598,45 @@ globalThis.quickDucksLive = liveCreateHub();
 globalThis.quickDucksLive.start();
 ` + sitePhaseNavScript;
 
+// Staff rosters keep a withdrawn or disqualified racer forever. Their duck was
+// sealed into the numbered heat bag when they were paired, nobody digs through a
+// bag on the bank, so it stays in its slot and still floats down the river. The
+// only thing that changed is that it can never be recorded as a winner. Staff
+// therefore see the entry — they have to reconcile what is physically in each
+// bag — with a loud marker naming the real status word. Only public surfaces
+// hide these racers.
+//
+// `eligible === false` is the single trigger, exactly as the staff projections
+// state it. A projection that does not carry the field renders precisely as it
+// did before, and nothing here can throw on a missing entry, a missing
+// participant, or an unknown status: one throw inside a render silently kills
+// every control after it.
+export const rosterEligibilityHelpersScript = String.raw`
+const rosterStatusWord = (status) => {
+  if (status === "WITHDRAWN") return "Withdrawn";
+  if (status === "DISQUALIFIED") return "Disqualified";
+  const plain = String(status == null ? "" : status).replaceAll("_", " ").trim().toLowerCase();
+  return plain === "" ? "Not eligible" : plain.replace(/^./, (character) => character.toUpperCase());
+};
+const ROSTER_INELIGIBLE_NOTE = "The duck stays in its heat bag and still races, but cannot be recorded as a winner.";
+const rosterIneligibleMarker = (entry, lead) => {
+  if (!entry || entry.eligible !== false) return null;
+  const status = rosterStatusWord(entry.registrationStatus == null && entry.participant
+    ? entry.participant.registrationStatus
+    : entry.registrationStatus);
+  return { status, flag: lead + " · " + status, note: ROSTER_INELIGIBLE_NOTE };
+};
+// Adds the marker to an already-built row or card, whatever element factory the
+// surface uses. Returns whether it marked, so a caller can assert on it.
+const rosterMarkIneligible = (container, entry, lead, text) => {
+  const marker = rosterIneligibleMarker(entry, lead);
+  if (marker === null) return false;
+  container.className = container.className ? container.className + " ineligible" : "ineligible";
+  container.append(text("strong", marker.flag, "roster-flag"), text("p", marker.note, "roster-flag-note"));
+  return true;
+};
+`;
+
 export const stationStateHelpersScript = String.raw`
 const startPickHeat = (heats, round) => {
   const active = heats.filter((heat) => heat.round === round && heat.status !== "FINALIZED" && heat.status !== "CANCELLED");
@@ -1969,7 +2008,7 @@ if (liveBoardRoot || liveSummaryRoot) {
 `;
 
 // `appConfirm` is defined once by `live-ui.js`, which every page loads first.
-export const startLineScript = stationStateHelpersScript + String.raw`
+export const startLineScript = rosterEligibilityHelpersScript + stationStateHelpersScript + String.raw`
 const startRoot = document.querySelector("[data-start-line]");
 const startEvent = document.querySelector("[data-station-event]");
 const startHeatTitle = document.querySelector("[data-station-heat]");
@@ -2019,8 +2058,17 @@ const startCommand = async (path, revision) => {
     startSubscription?.resume();
   }
 };
+// A locked roster cannot gain or lose an entry, but a racer on it can withdraw
+// or be disqualified at any heat state now, and that changes nothing the heat
+// itself records — not its status and not its revision. This station already
+// subscribes to the "participants" domain, so it is told; without the roster's
+// eligibility in the render key it would throw the repaint away and keep showing
+// an unmarked racer whose duck can no longer win.
+const startRosterEligibilityKey = (roster) => roster
+  .map((entry) => entry.raceEntryId + (entry.eligible === false ? ":0" : ":1"))
+  .join(",");
 const startRender = (event, detail) => {
-  const renderKey = stationHeatRenderKey(event, detail);
+  const renderKey = stationHeatRenderKey(event, detail) + "|" + startRosterEligibilityKey(detail.roster);
   if (renderKey === startRenderKey) return;
   startRenderKey = renderKey;
   const restoreActionFocus = startAction.contains(document.activeElement);
@@ -2031,8 +2079,11 @@ const startRender = (event, detail) => {
   startAddFact("Roster count", detail.roster.length);
   startRoster.replaceChildren();
   for (const entry of detail.roster) {
-    startRoster.append(startText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
-      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned")));
+    const item = startText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
+      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned"));
+    // The bag still holds this duck, so the row stays where it is and says so.
+    rosterMarkIneligible(item, entry, "Racer out", startText);
+    startRoster.append(item);
   }
   if (detail.roster.length === 0) startRoster.append(startText("li", "This heat has no roster entries."));
   startAction.replaceChildren();
@@ -2160,7 +2211,7 @@ const announcerFullName = (participant) => participant
 // The announcer holds a microphone, so this station is a read-only script. Every
 // request it makes is a GET and it never sends a command, a revision, or a
 // command ID: the start line and the finish line own every transition.
-export const announcerScript = stationStateHelpersScript + announcerHelpersScript + String.raw`
+export const announcerScript = rosterEligibilityHelpersScript + stationStateHelpersScript + announcerHelpersScript + String.raw`
 const announcerRoot = document.querySelector("[data-announcer]");
 const announcerEventLine = document.querySelector("[data-station-event]");
 const announcerHeatTitle = document.querySelector("[data-announcer-heat]");
@@ -2221,7 +2272,11 @@ const announcerRenderCurrent = (event, current) => {
   announcerCueLine.textContent = announcerCue(current.heat.status);
   announcerRosterList.replaceChildren();
   for (const entry of current.roster) {
-    announcerRosterList.append(announcerLine("Slot " + entry.slotNumber, entry.displayName, entry.duckNumber));
+    const item = announcerLine("Slot " + entry.slotNumber, entry.displayName, entry.duckNumber);
+    // Still on the roster because the duck is still in the bag and still races,
+    // but this name must never be called as a winner.
+    rosterMarkIneligible(item, entry, "Do not announce", announcerText);
+    announcerRosterList.append(item);
   }
   if (current.roster.length === 0) {
     announcerRosterList.append(announcerText("li", "This heat has no racers on its roster yet."));
@@ -4345,7 +4400,7 @@ loadEvents()
 // in-page navigations the actor's roles allow. The caller passes the element
 // factory and the already role-checked actions, so this helper never decides
 // permissions and never touches the network itself.
-export const heatRosterHelpersScript = String.raw`
+export const heatRosterHelpersScript = rosterEligibilityHelpersScript + String.raw`
 const heatRosterParticipantName = (entry) => entry.participant.firstName + " " + entry.participant.lastName;
 
 const heatRosterLinkButton = (text, label, action) => {
@@ -4365,6 +4420,9 @@ const createHeatRosterEntry = ({ entry, text, openParticipant, openDuck }) => {
     "roster-entry-line",
   ));
   item.append(text("p", "Race entry " + entry.raceEntryId, "roster-entry-id"));
+  // Marked, never dropped: the console is where a race director reconciles the
+  // bag, so the entry keeps its slot and states why it cannot win.
+  rosterMarkIneligible(item, entry, "Cannot win", text);
   const actions = text("div", "", "actions");
   let linkCount = 0;
   if (openParticipant) {
@@ -4643,6 +4701,15 @@ const renderReadiness = (readiness) => {
     card.append(text("span", presentation.chipText, presentation.chipClass));
     if (presentation.upcoming && state.requiresAdmin) card.append(text("span", "Administrator", "status-chip"));
     if (presentation.upcoming) for (const blocker of state.blockers) card.append(text("p", blocker, "muted"));
+    // Notes are facts to know before committing, never reasons the transition is
+    // refused, so they get their own informational treatment and are shown even
+    // when the action is Ready. An older response without notes renders as it
+    // did before rather than throwing.
+    if (presentation.upcoming) {
+      for (const note of Array.isArray(state.notes) ? state.notes : []) {
+        card.append(text("p", note, "readiness-note"));
+      }
+    }
     if (presentation.upcoming && canDirectRace && (!state.requiresAdmin || isSystemAdmin)) {
       const button = text("button", lifecycleLabels[action] || humanize(action), "button small");
       button.type = "button";
@@ -5656,7 +5723,13 @@ const loadHeatDetail = async (heatId) => {
   }
   if (body.roster.length === 0) heatRoster.append(empty("This heat has no roster entries."));
   heatResults.replaceChildren();
-  for (const result of body.results) heatResults.append(historyCard("Place " + result.place + " · Duck #" + result.duck.visibleNumber, result.participant.firstName + " " + result.participant.lastName));
+  // A published place whose racer has since left stays published — nothing is
+  // reordered — but the card says plainly that it can no longer stand as a win.
+  for (const result of body.results) {
+    const card = historyCard("Place " + result.place + " · Duck #" + result.duck.visibleNumber, result.participant.firstName + " " + result.participant.lastName);
+    rosterMarkIneligible(card, result, "Cannot win", text);
+    heatResults.append(card);
+  }
   if (body.results.length === 0) heatResults.append(empty("No result has been published."));
   renderHeatControls(body);
 };
@@ -5674,7 +5747,13 @@ const loadFinalists = async () => {
   }
   const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/finalists");
   finalistList.replaceChildren();
-  for (const finalist of body.finalists) finalistList.append(historyCard("Slot " + finalist.slotNumber + " · Duck #" + finalist.duck.visibleNumber, finalist.participant.firstName + " " + finalist.participant.lastName + " · won Heat " + finalist.qualifiedFrom.heatNumber + (finalist.podiumPlace ? " · podium " + finalist.podiumPlace : "")));
+  for (const finalist of body.finalists) {
+    const card = historyCard("Slot " + finalist.slotNumber + " · Duck #" + finalist.duck.visibleNumber, finalist.participant.firstName + " " + finalist.participant.lastName + " · won Heat " + finalist.qualifiedFrom.heatNumber + (finalist.podiumPlace ? " · podium " + finalist.podiumPlace : ""));
+    // A finalist who has since left keeps their slot in the final — the duck is
+    // in that heat's bag — and is marked so nobody reads them out as a winner.
+    rosterMarkIneligible(card, finalist, "Cannot win", text);
+    finalistList.append(card);
+  }
   if (body.finalists.length === 0) finalistList.append(empty("No round-one winner has been recorded yet."));
 };
 

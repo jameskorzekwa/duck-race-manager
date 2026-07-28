@@ -749,3 +749,30 @@ test("the finish line has a dedicated region for a duck that cannot be recorded"
   // The scanned-duck page reuses the winner panel in the same refused colours.
   assert.match(style, /\.winner-action\.ineligible \{ border-color:#9f261c; background:#ffd8d2; \}/);
 });
+
+// The staff roster marker. It has to be readable outdoors on a phone, in the
+// same visual language as the rest of the race-day surfaces, and it must not
+// widen anything at 320px — every long value wraps instead.
+test("the roster marker is loud, wraps, and reuses the refused-result colours", () => {
+  assert.match(style, /\.roster-flag \{[^}]*border:3px solid #9f261c/);
+  assert.match(style, /\.roster-flag \{[^}]*background:#ffd8d2/);
+  assert.match(style, /\.roster-flag \{[^}]*box-shadow:3px 3px 0 var\(--ink\)/);
+  assert.match(style, /\.roster-flag \{[^}]*text-transform:uppercase/);
+  assert.match(style, /\.roster-flag \{[^}]*font-size:clamp\(\.95rem,3\.6vw,1\.2rem\)/);
+  // Nothing in the marker can push a narrow layout wider than the viewport.
+  for (const rule of ["roster-flag", "roster-flag-note"]) {
+    assert.match(style, new RegExp(`\\.${rule} \\{[^}]*min-width:0`));
+    assert.match(style, new RegExp(`\\.${rule} \\{[^}]*overflow-wrap:anywhere`));
+  }
+  // The marked row itself is recoloured wherever it appears: a station roster
+  // list item, an announcer line, or a console card.
+  assert.match(style, /li\.ineligible,\.data-card\.ineligible \{ border-color:#9f261c; background:#fff3f1; \}/);
+
+  // Readiness notes are informational, so they never wear the refused colours
+  // and never look like the muted blocking reasons above them.
+  assert.match(style, /\.readiness-note \{[^}]*border-left:\.4rem solid var\(--water-dark\)/);
+  assert.match(style, /\.readiness-note \{[^}]*background:#eaf7fa/);
+  assert.match(style, /\.readiness-note \{[^}]*overflow-wrap:anywhere/);
+  assert.doesNotMatch(style, /\.readiness-note \{[^}]*#9f261c/);
+  assert.match(style, /\[data-event-readiness\] \.data-card > \.readiness-note \{ flex-basis:100%; \}/);
+});

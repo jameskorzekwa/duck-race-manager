@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  announcerHelpersScript,
   announcerScript,
   confirmationDialogScript,
   duckDetailHelpersScript,
+  eventLifecycleHelpersScript,
   eventSlugHelpersScript,
   finishLineScript,
   finishNfcHelpersScript,
@@ -22,6 +24,7 @@ import {
   participantScript,
   registrationHandoffHelpersScript,
   registrationScript,
+  rosterEligibilityHelpersScript,
   stationStateHelpersScript,
   staffAccessScript,
   staffDuckScript,
@@ -4036,4 +4039,421 @@ test("the finish line reports an ineligible duck as an outcome and stays armed",
     /const dropped = error\.ineligibleRaceEntryIds;\s*finishSelected = finishSelected\s*\.filter\(\(selection\) => !dropped\.includes\(selection\.raceEntryId\)\)\s*\.map\(\(selection, index\) => \(\{ \.\.\.selection, place: index \+ 1 \}\)\);/,
   );
   assert.doesNotMatch(finishLineScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+});
+
+// ---------------------------------------------------------------------------
+// Roster eligibility markers
+//
+// A withdrawn or disqualified racer is never removed from a staff roster: their
+// duck was sealed into the numbered heat bag at pairing, it keeps its slot, and
+// it still floats down the river. Every staff surface therefore has to say, in
+// words a staffer can act on at a glance, that this one cannot be recorded as a
+// winner. These tests run the shipped render helpers, lifted out of the
+// generated script rather than copied, over the whole matrix: eligible,
+// ineligible, and a projection that does not carry the field at all.
+// ---------------------------------------------------------------------------
+
+const liftFrom = (source, label, pattern) => {
+  const match = source.match(pattern);
+  assert.ok(match, `the shipped client defines ${label}`);
+  return match[0];
+};
+
+const buildRuntime = (parts, injected, returned) => {
+  const names = Object.keys(injected);
+  return new Function(...names, `${parts.join("\n")}\nreturn { ${returned.join(", ")} };`)(
+    ...names.map((name) => injected[name]),
+  );
+};
+
+// The exact wording every surface shares, asserted once so a drift in the
+// sentence fails here rather than in four separate places.
+const INELIGIBLE_NOTE =
+  "The duck stays in its heat bag and still races, but cannot be recorded as a winner.";
+
+const markerOf = (container) => {
+  const flag = container.children.find((child) => child.className === "roster-flag");
+  const note = container.children.find((child) => child.className === "roster-flag-note");
+  return flag === undefined ? null : { flag: flag.textContent, note: note?.textContent ?? null };
+};
+
+test("the shared roster marker fires only on an explicit eligible:false", () => {
+  const { rosterIneligibleMarker, rosterStatusWord } = new Function(
+    `${rosterEligibilityHelpersScript}; return { rosterIneligibleMarker, rosterStatusWord };`,
+  )();
+
+  // The real status word, never a generic one.
+  assert.equal(rosterStatusWord("WITHDRAWN"), "Withdrawn");
+  assert.equal(rosterStatusWord("DISQUALIFIED"), "Disqualified");
+
+  assert.deepEqual(rosterIneligibleMarker({ eligible: false, registrationStatus: "WITHDRAWN" }, "Do not announce"), {
+    status: "Withdrawn",
+    flag: "Do not announce · Withdrawn",
+    note: INELIGIBLE_NOTE,
+  });
+  // The status may sit on the entry or on its nested participant, because the
+  // staff projections differ, and both must produce the same marker.
+  assert.equal(
+    rosterIneligibleMarker({ eligible: false, participant: { registrationStatus: "DISQUALIFIED" } }, "Cannot win").flag,
+    "Cannot win · Disqualified",
+  );
+
+  // Anything that is not an explicit false renders exactly as it did before.
+  assert.equal(rosterIneligibleMarker({ eligible: true, registrationStatus: "ACTIVE" }, "Racer out"), null);
+  assert.equal(rosterIneligibleMarker({}, "Racer out"), null);
+  assert.equal(rosterIneligibleMarker({ registrationStatus: "WITHDRAWN" }, "Racer out"), null);
+  assert.equal(rosterIneligibleMarker(undefined, "Racer out"), null);
+  assert.equal(rosterIneligibleMarker(null, "Racer out"), null);
+
+  // A status the client has never heard of still yields a usable word instead
+  // of an empty marker or a throw.
+  assert.equal(rosterIneligibleMarker({ eligible: false, registrationStatus: "NO_SHOW" }, "Cannot win").flag, "Cannot win · No show");
+  assert.equal(rosterIneligibleMarker({ eligible: false }, "Cannot win").flag, "Cannot win · Not eligible");
+});
+
+const announcerRosterHarness = () => {
+  const document = new FakeDocument();
+  const announcerHeatTitle = document.createElement("h2");
+  const announcerCueLine = document.createElement("p");
+  const announcerRosterList = document.createElement("ul");
+  const runtime = buildRuntime(
+    [
+      rosterEligibilityHelpersScript,
+      announcerHelpersScript,
+      liftFrom(announcerScript, "announcerText", /const announcerText = \(tag, value, className\) => \{[\s\S]*?\n\};/),
+      liftFrom(announcerScript, "announcerLine", /const announcerLine = \(label, name, duckNumber, className\) => \{[\s\S]*?\n\};/),
+      liftFrom(announcerScript, "announcerRenderCurrent", /const announcerRenderCurrent = \(event, current\) => \{[\s\S]*?\n\};/),
+    ],
+    { document, announcerHeatTitle, announcerCueLine, announcerRosterList },
+    ["announcerRenderCurrent"],
+  );
+  return { announcerRosterList, render: runtime.announcerRenderCurrent };
+};
+
+test("the announcer roster tells the microphone not to call an ineligible racer", () => {
+  const harness = announcerRosterHarness();
+  harness.render({ id: "event", status: "ROUND_ONE" }, {
+    heat: { round: "ROUND_ONE", number: 2, status: "CALLING" },
+    roster: [
+      { slotNumber: 1, displayName: "Ada Lovelace", duckNumber: 101, registrationStatus: "ACTIVE", eligible: true },
+      { slotNumber: 2, displayName: "Grace Hopper", duckNumber: 102, registrationStatus: "WITHDRAWN", eligible: false },
+      { slotNumber: 3, displayName: "Alan Turing", duckNumber: 103, registrationStatus: "DISQUALIFIED", eligible: false },
+      // A projection from before the field existed must paint unchanged.
+      { slotNumber: 4, displayName: "Edsger Dijkstra", duckNumber: 104 },
+    ],
+  });
+
+  const rows = harness.announcerRosterList.children;
+  assert.equal(rows.length, 4);
+
+  // The eligible racer and the field-less entry are untouched: no marker, no
+  // class, and the same three spoken parts as before.
+  for (const index of [0, 3]) {
+    assert.equal(rows[index].className, "");
+    assert.equal(markerOf(rows[index]), null);
+    assert.equal(rows[index].children.length, 3);
+  }
+  assert.equal(rows[0].children[1].textContent, "Ada Lovelace");
+
+  // The withdrawn racer keeps their slot, their name, and their duck number —
+  // the announcer still has to see the roster the bags were filled from — and
+  // gains an unmissable instruction naming the real status.
+  assert.equal(rows[1].className, "ineligible");
+  assert.equal(rows[1].children[0].textContent, "Slot 2");
+  assert.equal(rows[1].children[1].textContent, "Grace Hopper");
+  assert.equal(rows[1].children[2].textContent, "Duck #102");
+  assert.deepEqual(markerOf(rows[1]), {
+    flag: "Do not announce · Withdrawn",
+    note: INELIGIBLE_NOTE,
+  });
+  // The marker is a STRONG element, so it is emphatic without any styling.
+  assert.equal(rows[1].children[3].tagName, "STRONG");
+
+  assert.equal(rows[2].className, "ineligible");
+  assert.equal(markerOf(rows[2]).flag, "Do not announce · Disqualified");
+});
+
+const startLineRosterHarness = () => {
+  const document = new FakeDocument();
+  const elements = {
+    startEvent: document.createElement("p"),
+    startHeatTitle: document.createElement("h2"),
+    startFacts: document.createElement("dl"),
+    startRoster: document.createElement("ul"),
+    startAction: document.createElement("div"),
+    startMessage: document.createElement("p"),
+  };
+  const runtime = buildRuntime(
+    [
+      rosterEligibilityHelpersScript,
+      stationStateHelpersScript,
+      liftFrom(startLineScript, "startText", /const startText = \(tag, value, className\) => \{[\s\S]*?\n\};/),
+      liftFrom(startLineScript, "startHumanize", /const startHumanize = \(value\) => .*;\n/),
+      liftFrom(startLineScript, "startAddFact", /const startAddFact = \(label, value\) => \{[\s\S]*?\n\};/),
+      liftFrom(startLineScript, "startRosterEligibilityKey", /const startRosterEligibilityKey = \(roster\) => roster[\s\S]*?\n  \.join\(","\);/),
+      "let startRenderKey = null;",
+      liftFrom(startLineScript, "startRender", /const startRender = \(event, detail\) => \{[\s\S]*?\n\};/),
+    ],
+    {
+      document,
+      ...elements,
+      appConfirm: async () => true,
+      startCommand: async () => ({}),
+      startLoad: async () => {},
+    },
+    ["startRender"],
+  );
+  return { ...elements, render: runtime.startRender };
+};
+
+const startRosterEntry = (slotNumber, lastName, visibleNumber, extra = {}) => ({
+  slotNumber,
+  raceEntryId: `entry-${slotNumber}`,
+  participant: { firstName: "Racer", lastName, registrationStatus: "ACTIVE" },
+  duck: { id: `duck-${visibleNumber}`, visibleNumber },
+  ...extra,
+});
+
+test("the start line marks a racer who left so the bag can be reconciled", () => {
+  const harness = startLineRosterHarness();
+  harness.render({ id: "event", name: "Annual Duck Race", status: "ROUND_ONE" }, {
+    heat: { id: "heat-1", round: "ROUND_ONE", number: 1, status: "LOADING", revision: 0 },
+    roster: [
+      startRosterEntry(1, "Active", 101, { eligible: true }),
+      startRosterEntry(2, "Gone", 102, {
+        eligible: false,
+        participant: { firstName: "Racer", lastName: "Gone", registrationStatus: "WITHDRAWN" },
+      }),
+      startRosterEntry(3, "Barred", 103, {
+        eligible: false,
+        participant: { firstName: "Racer", lastName: "Barred", registrationStatus: "DISQUALIFIED" },
+      }),
+      startRosterEntry(4, "Legacy", 104),
+    ],
+  });
+
+  const rows = harness.startRoster.children;
+  assert.equal(rows.length, 4, "no roster entry is ever dropped from a staff station");
+  // Slots are never renumbered or reordered around a racer who left.
+  assert.deepEqual(rows.map((row) => row.textContent), [
+    "Slot 1 · Racer Active · Duck #101",
+    "Slot 2 · Racer Gone · Duck #102",
+    "Slot 3 · Racer Barred · Duck #103",
+    "Slot 4 · Racer Legacy · Duck #104",
+  ]);
+
+  for (const index of [0, 3]) {
+    assert.equal(rows[index].className, "");
+    assert.equal(markerOf(rows[index]), null);
+    assert.equal(rows[index].children.length, 0);
+  }
+  assert.equal(rows[1].className, "ineligible");
+  assert.deepEqual(markerOf(rows[1]), { flag: "Racer out · Withdrawn", note: INELIGIBLE_NOTE });
+  assert.equal(rows[2].className, "ineligible");
+  assert.equal(markerOf(rows[2]).flag, "Racer out · Disqualified");
+
+  // Marking a racer changes nothing else about the station: the roster count
+  // and the one legal action are exactly what they were.
+  assert.equal(harness.startFacts.children[1].children[1].textContent, "4");
+  assert.equal(harness.startAction.children[0].textContent, "Mark Heat Ready");
+});
+
+test("the start line repaints when a racer on its locked roster withdraws", () => {
+  const harness = startLineRosterHarness();
+  const event = { id: "event", name: "Annual Duck Race", status: "ROUND_ONE" };
+  // A locked, running heat: nothing about the heat row changes when a racer on
+  // it leaves, so the status and the revision below are deliberately identical.
+  const heat = { id: "heat-1", round: "ROUND_ONE", number: 1, status: "CALLING", revision: 4 };
+  const before = [startRosterEntry(1, "Active", 101, { eligible: true }), startRosterEntry(2, "Leaving", 102, { eligible: true })];
+  harness.render(event, { heat, roster: before });
+  assert.equal(markerOf(harness.startRoster.children[1]), null);
+
+  // An unchanged payload is still discarded, so a live signal cannot churn the
+  // station or steal focus from the one action button.
+  const action = harness.startAction.children[0];
+  harness.render(event, { heat, roster: before });
+  assert.equal(harness.startAction.children[0], action);
+
+  harness.render(event, {
+    heat,
+    roster: [
+      before[0],
+      startRosterEntry(2, "Leaving", 102, {
+        eligible: false,
+        participant: { firstName: "Racer", lastName: "Leaving", registrationStatus: "WITHDRAWN" },
+      }),
+    ],
+  });
+  assert.equal(harness.startRoster.children.length, 2);
+  assert.deepEqual(markerOf(harness.startRoster.children[1]), {
+    flag: "Racer out · Withdrawn",
+    note: INELIGIBLE_NOTE,
+  });
+});
+
+const finalistHarness = (finalists) => {
+  const document = new FakeDocument();
+  const finalistList = document.createElement("div");
+  const finalistCard = document.createElement("section");
+  const runtime = buildRuntime(
+    [
+      rosterEligibilityHelpersScript,
+      liftFrom(staffHomeScript, "text", /const text = \(tag, value, className\) => \{[\s\S]*?\n\};/),
+      liftFrom(staffHomeScript, "empty", /const empty = \(message\) => .*;\n/),
+      liftFrom(staffHomeScript, "historyCard", /const historyCard = \(title, detail\) => \{[\s\S]*?\n\};/),
+      liftFrom(staffHomeScript, "finalistsExist", /const finalistsExist = \(\) => .*;\n/),
+      liftFrom(staffHomeScript, "loadFinalists", /const loadFinalists = async \(\) => \{[\s\S]*?\n\};/),
+    ],
+    {
+      document,
+      finalistList,
+      finalistCard,
+      currentEvent: { id: "event", status: "FINAL" },
+      api: async () => ({ finalists }),
+    },
+    ["loadFinalists"],
+  );
+  return { finalistList, finalistCard, loadFinalists: runtime.loadFinalists };
+};
+
+const finalist = (slotNumber, lastName, visibleNumber, extra = {}) => ({
+  raceEntryId: `entry-${slotNumber}`,
+  slotNumber,
+  participant: { firstName: "Racer", lastName, registrationStatus: "ACTIVE" },
+  duck: { visibleNumber },
+  qualifiedFrom: { heatId: `heat-${slotNumber}`, heatNumber: slotNumber },
+  podiumPlace: null,
+  ...extra,
+});
+
+test("the console finalist list marks a finalist who can no longer win", async () => {
+  const harness = finalistHarness([
+    finalist(1, "Active", 101, { eligible: true }),
+    finalist(2, "Gone", 102, {
+      eligible: false,
+      participant: { firstName: "Racer", lastName: "Gone", registrationStatus: "WITHDRAWN" },
+    }),
+    finalist(3, "Legacy", 103),
+  ]);
+  await harness.loadFinalists();
+
+  const cards = harness.finalistList.children;
+  assert.equal(cards.length, 3, "a finalist who left keeps their slot in the final");
+  assert.equal(cards[0].className, "data-card");
+  assert.equal(markerOf(cards[0]), null);
+  assert.equal(cards[0].children[0].textContent, "Slot 1 · Duck #101");
+
+  assert.equal(cards[1].className, "data-card ineligible");
+  assert.equal(cards[1].children[0].textContent, "Slot 2 · Duck #102");
+  assert.equal(cards[1].children[1].textContent, "Racer Gone · won Heat 2");
+  assert.deepEqual(markerOf(cards[1]), { flag: "Cannot win · Withdrawn", note: INELIGIBLE_NOTE });
+
+  // A projection without the field is untouched.
+  assert.equal(cards[2].className, "data-card");
+  assert.equal(markerOf(cards[2]), null);
+});
+
+const readinessHarness = ({ readiness, eventStatus = "REGISTRATION_CLOSED" }) => {
+  const document = new FakeDocument();
+  const readinessList = document.createElement("div");
+  const runtime = buildRuntime(
+    [
+      eventLifecycleHelpersScript,
+      liftFrom(staffHomeScript, "text", /const text = \(tag, value, className\) => \{[\s\S]*?\n\};/),
+      liftFrom(staffHomeScript, "humanize", /const humanize = \(value\) => [^;]+;/),
+      liftFrom(staffHomeScript, "lifecycleLabels", /const lifecycleLabels = \{[\s\S]*?\n\};/),
+      liftFrom(staffHomeScript, "renderReadiness", /const renderReadiness = \(readiness\) => \{[\s\S]*?\n\};/),
+    ],
+    {
+      document,
+      readinessList,
+      currentEvent: { id: "event", name: "Annual Duck Race", status: eventStatus },
+      canDirectRace: false,
+      isSystemAdmin: false,
+      eventSelect: { value: "event" },
+      appConfirm: async () => true,
+      api: async () => ({}),
+      setMessage: () => {},
+      loadEvents: async () => {},
+      renderLifecycleResult: () => {},
+    },
+    ["renderReadiness"],
+  );
+  return { readinessList, renderReadiness: runtime.renderReadiness };
+};
+
+const readinessState = (overrides = {}) => ({
+  command: "START_ROUND_ONE",
+  fromStatus: "REGISTRATION_CLOSED",
+  toStatus: "ROUND_ONE",
+  requiresAdmin: false,
+  allowed: true,
+  blockers: [],
+  notes: [],
+  ...overrides,
+});
+
+const readinessNote =
+  "1 racer on a round-one roster is withdrawn or disqualified. That duck stays in its heat"
+  + " bag and races as normal, but cannot be recorded as a winner.";
+
+test("readiness notes render as information, never as a blocking reason", () => {
+  const harness = readinessHarness({
+    readiness: { "start-round-one": readinessState({ notes: [readinessNote] }) },
+  });
+  harness.renderReadiness({ "start-round-one": readinessState({ notes: [readinessNote] }) });
+
+  const [card] = harness.readinessList.children;
+  assert.equal(card.children[0].textContent, "Start round one");
+  // A note never turns the action into a blocker: the chip still reads Ready.
+  assert.equal(card.children[1].textContent, "Ready");
+  assert.equal(card.children[1].className, "status-chip ready");
+  const note = card.children[2];
+  assert.equal(note.tagName, "P");
+  assert.equal(note.textContent, readinessNote);
+  assert.equal(note.className, "readiness-note", "a note must not wear the blocker treatment");
+  assert.equal(card.children.filter((child) => child.className === "muted").length, 0);
+});
+
+test("readiness notes sit beside blockers without being mistaken for them", () => {
+  const blocker = "At least one round-one heat is required.";
+  const state = readinessState({ allowed: false, blockers: [blocker], notes: [readinessNote] });
+  const harness = readinessHarness({ readiness: { "start-round-one": state } });
+  harness.renderReadiness({ "start-round-one": state });
+
+  const [card] = harness.readinessList.children;
+  assert.equal(card.children[1].textContent, "Blocked");
+  // Blockers keep their existing muted treatment and come first; the note keeps
+  // its own class, so the two can never read as the same thing.
+  assert.deepEqual(
+    card.children.slice(2).map((child) => [child.className, child.textContent]),
+    [["muted", blocker], ["readiness-note", readinessNote]],
+  );
+});
+
+test("a readiness response without notes renders exactly as it did before", () => {
+  const withoutNotes = { command: "START_ROUND_ONE", fromStatus: "REGISTRATION_CLOSED", toStatus: "ROUND_ONE", requiresAdmin: false, allowed: true, blockers: [] };
+  const harness = readinessHarness({ readiness: { "start-round-one": withoutNotes } });
+  assert.doesNotThrow(() => harness.renderReadiness({ "start-round-one": withoutNotes }));
+  const [card] = harness.readinessList.children;
+  assert.equal(card.children.length, 2);
+  // A malformed notes value is ignored rather than thrown on, because one throw
+  // inside a render silently kills every control after it.
+  assert.doesNotThrow(() => harness.renderReadiness({
+    "start-round-one": readinessState({ notes: "not an array" }),
+  }));
+  assert.equal(harness.readinessList.children[0].children.length, 2);
+});
+
+test("the roster marker never reaches for an unsafe DOM sink", () => {
+  assert.doesNotThrow(() => new Function(rosterEligibilityHelpersScript));
+  assert.doesNotMatch(rosterEligibilityHelpersScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  // Every marked surface builds its nodes through the same textContent factory.
+  for (const script of [announcerScript, startLineScript, staffHomeScript]) {
+    assert.match(script, /const rosterMarkIneligible = \(container, entry, lead, text\) => \{/);
+    assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  }
+  // Staff see everyone. No surface filters an ineligible entry out of a roster.
+  assert.doesNotMatch(announcerScript, /roster\.filter\(/);
+  assert.doesNotMatch(startLineScript, /roster\.filter\(/);
 });

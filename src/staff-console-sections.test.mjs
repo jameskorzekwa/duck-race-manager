@@ -173,6 +173,7 @@ const consoleParts = {
   text: fromConsole(/const text = \(tag, value, className\) => \{[\s\S]*?\n\};/),
   humanize: fromConsole(/const humanize = \(value\) => [^;]+;/),
   empty: fromConsole(/const empty = \(message\) => .*;/),
+  historyCard: fromConsole(/const historyCard = \(title, detail\) => \{[\s\S]*?\n\};/),
   inventoryCard: fromInventory(/const inventoryCard = \(duck\) => \{[\s\S]*?\n\};/),
   inventoryGroupSection: fromInventory(/const inventoryGroupSection = \(group\) => \{[\s\S]*?\n\};/),
   loadInventory: fromInventory(/const loadInventory = async \(\) => \{[\s\S]*?\n\};/),
@@ -541,7 +542,7 @@ const rosterEntry = (overrides = {}) => ({
   ...overrides,
 });
 
-const heatHarness = ({ roster, canRegistration = true, canInventory = true }) => {
+const heatHarness = ({ roster, results = [], canRegistration = true, canInventory = true }) => {
   const document = new FakeDocument();
   const heatDetail = document.hook("[data-heat-detail]");
   const heatRoster = document.hook("[data-heat-roster]", "ul");
@@ -564,6 +565,9 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
       "openRosterParticipant",
       "openRosterDuck",
       "loadParticipantDetail",
+      // The real card builder, so a published-result row is asserted as it
+      // actually ships rather than through a stub.
+      "historyCard",
       "loadHeatDetail",
     ],
     {
@@ -583,7 +587,6 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
       selectedHeat: null,
       currentEventId: () => "event",
       showFacts: () => {},
-      historyCard: () => document.createElement("div"),
       renderHeatControls: () => {},
       renderParticipantDetail: (registration) => {
         participantDetail.hidden = false;
@@ -595,13 +598,14 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
         if (url.includes("/registrations/")) {
           return { registration: { registrationId: decodeURIComponent(url.split("/").pop()) } };
         }
-        return { heat: { id: "heat-1", round: "ROUND_ONE", number: 1, status: "PLANNED", rosterSize: roster.length, publishedResultCount: 0, revision: 0 }, roster, results: [] };
+        return { heat: { id: "heat-1", round: "ROUND_ONE", number: 1, status: "PLANNED", rosterSize: roster.length, publishedResultCount: results.length, revision: 0 }, roster, results };
       },
     },
     ["loadHeatDetail"],
   );
   return {
     document,
+    heatResults,
     heatRoster,
     appliedViews,
     location,
@@ -680,6 +684,92 @@ test("the roster entry builder itself refuses a duck link for an unassigned entr
     openDuck: () => {},
   });
   assert.equal(linked.querySelectorAll("[data-roster-duck-link]").length, 1);
+});
+
+// A withdrawn or disqualified racer stays on the console roster forever: their
+// duck is sealed in this heat's bag and still races. The console is where a race
+// director reconciles a bag, so the entry is marked, never dropped.
+const INELIGIBLE_NOTE =
+  "The duck stays in its heat bag and still races, but cannot be recorded as a winner.";
+
+const markerOf = (container) => {
+  const flag = container.children.find((child) => child.className === "roster-flag");
+  const note = container.children.find((child) => child.className === "roster-flag-note");
+  return flag === undefined ? null : { flag: flag.textContent, note: note?.textContent ?? null };
+};
+
+test("a console roster entry marks a racer who can no longer win", async () => {
+  const harness = heatHarness({
+    roster: [
+      rosterEntry({ eligible: true }),
+      rosterEntry({
+        raceEntryId: "entry-2",
+        slotNumber: 2,
+        eligible: false,
+        participant: { registrationId: "registration-2", firstName: "Grace", lastName: "Hopper", registrationStatus: "WITHDRAWN" },
+        duck: { id: "duck-13", visibleNumber: 13 },
+      }),
+      // A projection without the field renders exactly as it did before.
+      rosterEntry({ raceEntryId: "entry-3", slotNumber: 3, duck: { id: "duck-14", visibleNumber: 14 } }),
+    ],
+  });
+  await harness.loadHeatDetail("heat-1");
+
+  const [active, withdrawn, legacy] = harness.entries();
+  assert.equal(harness.entries().length, 3, "no entry is dropped from a staff roster");
+  assert.equal(active.className, "roster-entry");
+  assert.equal(markerOf(active), null);
+  assert.equal(legacy.className, "roster-entry");
+  assert.equal(markerOf(legacy), null);
+
+  assert.equal(withdrawn.className, "roster-entry ineligible");
+  assert.equal(withdrawn.children[0].textContent, "Slot 2 · Grace Hopper · Duck #13");
+  assert.deepEqual(markerOf(withdrawn), { flag: "Cannot win · Withdrawn", note: INELIGIBLE_NOTE });
+  // The marker sits above the deep links, so it is read before either is taken.
+  assert.equal(withdrawn.children[2].className, "roster-flag");
+  assert.equal(withdrawn.children.at(-1).className, "actions");
+  // Marking a racer removes nothing: both deep links are still offered.
+  assert.equal(harness.links("participant").length, 3);
+  assert.equal(harness.links("duck").length, 3);
+});
+
+test("a published result whose racer has since left is marked, not reordered", async () => {
+  const result = (place, lastName, visibleNumber, extra = {}) => ({
+    id: `result-${place}`,
+    raceEntryId: `entry-${place}`,
+    place,
+    revision: 0,
+    finalizedAt: "2026-07-26T12:00:00Z",
+    participant: { firstName: "Racer", lastName, registrationStatus: "ACTIVE" },
+    duck: { visibleNumber },
+    ...extra,
+  });
+  const harness = heatHarness({
+    roster: [rosterEntry()],
+    results: [
+      result(1, "Winner", 12, { eligible: true }),
+      result(2, "Gone", 13, {
+        eligible: false,
+        participant: { firstName: "Racer", lastName: "Gone", registrationStatus: "DISQUALIFIED" },
+      }),
+      result(3, "Legacy", 14),
+    ],
+  });
+  await harness.loadHeatDetail("heat-1");
+
+  const cards = harness.heatResults.children;
+  assert.equal(cards.length, 3);
+  assert.deepEqual(cards.map((card) => card.children[0].textContent), [
+    "Place 1 · Duck #12",
+    "Place 2 · Duck #13",
+    "Place 3 · Duck #14",
+  ]);
+  assert.equal(cards[0].className, "data-card");
+  assert.equal(markerOf(cards[0]), null);
+  assert.equal(cards[1].className, "data-card ineligible");
+  assert.deepEqual(markerOf(cards[1]), { flag: "Cannot win · Disqualified", note: INELIGIBLE_NOTE });
+  assert.equal(cards[2].className, "data-card");
+  assert.equal(markerOf(cards[2]), null);
 });
 
 test("roster deep links follow the actor's console roles", async () => {
