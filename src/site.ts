@@ -64,7 +64,7 @@ a { color:inherit; }
 .nav a { padding:.7rem .9rem; border:2px solid transparent; border-radius:999px; font-weight:850; text-decoration:none; }
 .nav a:hover,.nav a:focus-visible { border-color:var(--ink); outline:none; }
 .hero { position:relative; overflow:hidden; display:grid; align-items:center; min-height:34rem; padding:clamp(2rem,6vw,5rem); border:3px solid var(--ink); border-radius:2rem; background:var(--paper); box-shadow:9px 9px 0 var(--ink); }
-.hero-water { --wave-length:10rem; position:absolute; z-index:2; right:-2px; bottom:-1px; left:-2px; width:calc(100% + 4px); height:10.5rem; overflow:hidden; pointer-events:none; }
+.hero-water { --wave-length:10rem; position:absolute; z-index:1; right:-2px; bottom:-1px; left:-2px; width:calc(100% + 4px); height:10.5rem; overflow:hidden; pointer-events:none; }
 .hero-water::before { content:""; position:absolute; top:0; right:0; left:0; height:3rem; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='48' viewBox='0 0 160 48'%3E%3Cpath fill='%233294b0' d='M0 24 C20 0 60 0 80 24 S140 48 160 24 V48 H0 Z'/%3E%3C/svg%3E"); background-position:0 0; background-repeat:repeat-x; background-size:var(--wave-length) 3rem; }
 .hero-water::after { content:""; position:absolute; top:calc(3rem - 1px); right:0; bottom:0; left:0; background:var(--water); }
 .hero-copy { position:relative; z-index:3; max-width:42rem; }
@@ -92,7 +92,11 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .app-confirmation h2 { margin-bottom:.75rem; font-size:clamp(1.8rem,6vw,2.5rem); }
 .app-confirmation-message { margin-bottom:1.5rem; overflow-wrap:anywhere; line-height:1.55; white-space:pre-wrap; }
 .app-confirmation-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:.8rem; }
-.hero-duck { --duck-center:0%; position:absolute; z-index:1; right:clamp(1rem,5vw,4rem); bottom:5.5rem; width:clamp(12rem,37vw,25rem); filter:drop-shadow(5px 7px 0 rgba(17,43,60,.22)); pointer-events:none; transform:translateX(var(--duck-center)) translateY(0); }
+.hero-duck-scene { --duck-center:0%; position:absolute; z-index:2; right:clamp(1rem,5vw,4rem); bottom:5.5rem; width:clamp(12rem,37vw,25rem); pointer-events:none; transform:translateX(var(--duck-center)); }
+.hero-duck { position:relative; z-index:1; display:block; width:100%; filter:drop-shadow(5px 7px 0 rgba(17,43,60,.22)); transform:translateY(0); }
+.hero-duck-slit { position:absolute; z-index:2; right:8%; bottom:0; left:8%; height:2.75rem; background:var(--water); }
+.hero-duck-slit::before { content:""; position:absolute; top:-.38rem; right:0; left:0; height:1.05rem; border-radius:50%; background:var(--water-dark); }
+.hero-duck-slit::after { content:""; position:absolute; top:-.12rem; right:.35rem; left:.35rem; height:.72rem; border-radius:50%; background:var(--water); }
 .ticker { display:flex; flex-wrap:wrap; justify-content:center; gap:.2rem .7rem; padding:1.35rem 0; color:var(--water-dark); font-size:.8rem; font-weight:950; letter-spacing:.1em; text-transform:uppercase; }
 .ticker span::after { content:"•"; margin-left:.7rem; color:var(--orange); }
 .ticker span:last-child::after { content:""; margin:0; }
@@ -404,8 +408,8 @@ details.operation-card[open] > summary { margin-bottom:0; }
 [data-event-readiness] .button { margin-top:var(--space-xs); }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,minmax(0,1fr)); } .field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .inventory-layout { grid-template-columns:minmax(0,1.15fr) minmax(20rem,.85fr); } .inventory-detail-panel { position:sticky; top:5.75rem; max-height:calc(100vh - 6.75rem); overflow:auto; } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck { --duck-center:50%; right:50%; bottom:7rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
-@media (prefers-reduced-motion:no-preference) { .button,.result-button { transition:transform 80ms ease-out,box-shadow 80ms ease-out,filter 80ms ease-out,background-color 80ms ease-out; } .hero-duck { animation:duck-bob 2.8s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-bob { 0%,100% { transform:translateX(var(--duck-center)) translateY(0); } 50% { transform:translateX(var(--duck-center)) translateY(-7px); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck-scene { --duck-center:50%; right:50%; bottom:2.5rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
+@media (prefers-reduced-motion:no-preference) { .button,.result-button { transition:transform 80ms ease-out,box-shadow 80ms ease-out,filter 80ms ease-out,background-color 80ms ease-out; } .hero-duck { animation:duck-bob 2.8s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-bob { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-7px); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
 @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } .hero-water::before { background-position:-2.5rem 0; } }
 `;
 
@@ -519,7 +523,10 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
         <div class="actions">${cta === null ? "" : `<a class="button" href="${cta.href}" data-home-cta>${escapeHtml(cta.label)}</a>`}<a class="button secondary" href="#how-it-works">How it works</a></div>
       </div>
       <div class="hero-water" aria-hidden="true"></div>
-      ${duck("hero-duck")}
+      <div class="hero-duck-scene">
+        ${duck("hero-duck")}
+        <span class="hero-duck-slit" aria-hidden="true"></span>
+      </div>
     </section>
     <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
     ${cta === null ? "" : happeningNow()}

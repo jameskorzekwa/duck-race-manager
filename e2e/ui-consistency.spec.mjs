@@ -430,27 +430,47 @@ test.describe("sitewide UI consistency", () => {
     await expect(page.locator(".live-board")).toHaveCSS("background-color", "rgb(255, 253, 243)");
   });
 
-  test("the home duck bobs with the wave and sits partly below its surface", async ({ page }) => {
+  test("the home duck bobs through a water slit without covering mobile actions", async ({ page }) => {
+    await seedState("registration");
     await page.emulateMedia({ reducedMotion: "no-preference" });
     await page.goto("/");
+    const actions = page.locator(".hero .actions");
+    const scene = page.locator(".hero-duck-scene");
     const duck = page.locator(".hero-duck");
+    const slit = page.locator(".hero-duck-slit");
     const water = page.locator(".hero-water");
-    const expectPartlySubmerged = async () => {
-      const [duckBox, waterBox] = await Promise.all([duck.boundingBox(), water.boundingBox()]);
+    const expectSlitComposition = async () => {
+      const [duckBox, slitBox, waterBox] = await Promise.all([
+        duck.boundingBox(),
+        slit.boundingBox(),
+        water.boundingBox(),
+      ]);
       const visibleDuckBottom = duckBox.y + duckBox.height * (68.5 / 76);
-      const averageWaterline = waterBox.y + 24;
-      expect(visibleDuckBottom).toBeGreaterThan(averageWaterline);
+      expect(duckBox.y).toBeLessThan(waterBox.y);
+      expect(slitBox.y).toBeGreaterThan(waterBox.y + 16);
+      expect(slitBox.y).toBeLessThan(visibleDuckBottom);
     };
     await expect(duck).toHaveCSS("animation-name", "duck-bob");
     await expect(duck).toHaveCSS("animation-duration", "2.8s");
     await expect(water).toBeVisible();
-    await expect(duck).toHaveCSS("z-index", "1");
-    await expect(water).toHaveCSS("z-index", "2");
-    await expectPartlySubmerged();
+    await expect(scene).toHaveCSS("z-index", "2");
+    await expect(water).toHaveCSS("z-index", "1");
+    await expect(slit).toHaveCSS("z-index", "2");
+    await expect(slit).toHaveCSS("animation-name", "none");
+    await expect(actions.getByRole("link", { name: "Register", exact: true })).toBeVisible();
+    await expect(actions.getByRole("link", { name: "How it works", exact: true })).toBeVisible();
+    await expectSlitComposition();
 
-    await page.setViewportSize({ width: 390, height: 844 });
-    await expect(duck).toHaveCSS("animation-name", "duck-bob");
-    await expectPartlySubmerged();
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(duck).toHaveCSS("animation-name", "duck-bob");
+      await expectSlitComposition();
+      const [actionsBox, duckBox] = await Promise.all([
+        actions.boundingBox(),
+        duck.boundingBox(),
+      ]);
+      expect(duckBox.y).toBeGreaterThan(actionsBox.y + actionsBox.height + 16);
+    }
 
     await page.emulateMedia({ reducedMotion: "reduce" });
     await expect(duck).toHaveCSS("animation-name", "none");
