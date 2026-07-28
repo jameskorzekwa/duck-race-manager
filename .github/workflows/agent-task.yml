@@ -323,6 +323,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf \
+            "$PIPELINE_MODEL_DIR/.opencode/node_modules" \
+            "$PIPELINE_MODEL_DIR/.opencode/package.json" \
+            "$PIPELINE_MODEL_DIR/.opencode/package-lock.json" \
+            "$PIPELINE_MODEL_DIR/.opencode/bun.lock"
           node "$GITHUB_WORKSPACE/scripts/validate-agent-patch.mjs" --source "$PIPELINE_MODEL_DIR"
           chmod -R u+w "$PIPELINE_MODEL_DIR/.pipeline"
           rm -rf "$PIPELINE_MODEL_DIR/.pipeline"

@@ -118,7 +118,9 @@ events trigger CI; normal workflow `GITHUB_TOKEN` writes do not recursively
 trigger most workflows.
 
 Patch extraction occurs in a fresh trusted Git repository, never in the model's
-workspace. Before the first post-model Git command, a trusted `lstat` walk rejects
+workspace. Known ignored OpenCode runtime dependencies under `.opencode` are
+removed first; the implementation agent cannot edit dot paths. Before the first
+post-model Git command, a trusted `lstat` walk rejects
 case-folded Git metadata, symlinks, hardlinks, and non-regular files. A
 case-insensitive deterministic policy then rejects gitlinks, agent
 instructions, OpenCode configuration, local actions, workflows, and pipeline
