@@ -67,7 +67,7 @@ export const publicHeatStatusLabels: Record<string, string> = {
   PLANNED: "Coming up",
   LOADING: "Ducks are being prepared",
   READY: "Ready to call",
-  CALLING: "Calling racers now",
+  CALLING: "Heat has been announced",
   RUNNING: "Racing now",
   AWAITING_RESULT: "Race finished; checking the result",
   FINALIZED: "Result official",

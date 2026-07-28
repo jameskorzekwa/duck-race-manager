@@ -7,7 +7,6 @@ import {
   duckDetailHelpersScript,
   eventSlugHelpersScript,
   finishLineScript,
-  finishHandoffHelpersScript,
   finishNfcHelpersScript,
   finishScanSerializationScript,
   finishSelectionValidationScript,
@@ -192,10 +191,10 @@ test("the pairing search lists the unpaired by default and puts the keyboard awa
 
   // The list is the resting state: opening the pairing work area runs the same
   // search with whatever is typed, which on arrival is nothing.
-  assert.match(staffDuckScript, /void runRegistrationSearch\(registrationSearchInput\.value, false\)/);
+  assert.match(staffDuckScript, /void runRegistrationSearch\(registrationSearchInput\?\.value \|\| "", false\)/);
   assert.match(
     staffDuckScript,
-    /workArea\.hidden = false;[\s\S]*?void runRegistrationSearch\(registrationSearchInput\.value, false\);/,
+    /workArea\.hidden = false;[\s\S]*?void runRegistrationSearch\(registrationSearchInput\?\.value \|\| "", false\);/,
   );
   // An empty query is sent as an empty query rather than suppressed.
   assert.match(staffDuckScript, /new URLSearchParams\(\{ eventId: currentEvent\.id, q: query \}\)/);
@@ -209,7 +208,7 @@ test("the pairing search lists the unpaired by default and puts the keyboard awa
   // Enter must not submit the form natively, and must drop the soft keyboard.
   assert.match(
     staffDuckScript,
-    /const submitRegistrationSearch = \(\) => \{\s*\n\s*clearTimeout\(registrationSearchTimer\);\s*\n\s*registrationSearchInput\.blur\(\);/,
+    /const submitRegistrationSearch = \(\) => \{\s*\n\s*if \(!registrationSearchInput\) return;\s*\n\s*clearTimeout\(registrationSearchTimer\);\s*\n\s*registrationSearchInput\.blur\(\);/,
   );
   assert.match(
     staffDuckScript,
@@ -692,6 +691,10 @@ const confirmationCallsites = [
   [staffHomeScript, 'if (!await appConfirm("Reactivate this participant?")) return;'],
   [staffHomeScript, 'if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;'],
   [staffHomeScript, 'if (!await appConfirm(confirmation)) return;'],
+  [staffHomeScript, `if (!await appConfirm(
+        "Reset this heat to Loading? Its locked roster and lock details will remain. Start and finish progress and any unsubmitted result entry will be cleared.",
+        { danger: true, confirmLabel: "Reset Heat" },
+      )) return;`],
   [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Permanently delete the registration for " + registration.firstName + " " + registration.lastName + "? This removes the participant and their race entry. This cannot be undone.", { danger: true })) return;'],
@@ -704,6 +707,10 @@ const confirmationCallsites = [
     "Clear this duck's chosen name? It goes back to showing its number everywhere. This is recorded in the audit trail.",
     { danger: true, confirmLabel: "Clear duck name" },
   )) return;`],
+  [staffDuckScript, `if (!await appConfirm(
+      "Mark Duck #" + data.duck.visibleNumber + " as the official Heat " + candidate.heatNumber + " winner? This publishes immediately.",
+      { danger: true, confirmLabel: "Mark winner" },
+    )) return;`],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
   [participantScript, `  const confirmed = await appConfirm(
     "Delete the registration for " + participantDisplayName(registration)
@@ -722,12 +729,12 @@ test("every confirmation callsite preserves its warning and returns before mutat
   // Inventory owns takeover, clearing a duck name, assign, unpair, release,
   // and delete duck. Every one of them is destructive or irreversible.
   assert.equal((staffInventoryScript.match(/\bappConfirm\(/g) ?? []).length, 6);
-  // 16 minus the five inventory confirmations that moved to /staff/inventory.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 11);
+  // 16 minus the five inventory confirmations that moved to /staff/inventory,
+  // plus the race-director heat reset.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 12);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // The staff duck scan has exactly one destructive action of its own:
-  // moderating away a duck name. Pairing confirms through its own review step.
-  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  // The staff duck scan confirms both name moderation and winner publication.
+  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 2);
   // My Ducks has exactly one destructive action: self-service deletion.
   assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The dialog is defined once, by the one bundle every page loads first, so
@@ -1491,6 +1498,57 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
   assert.match(finishLineScript, /\/results\/finalize/);
 });
 
+test("heat controls use the exact flow labels and gate the race-director reset", () => {
+  for (const script of [startLineScript, staffHomeScript]) {
+    assert.match(script, /LOADING: \["ready", "Mark Heat Ready"\]/);
+    assert.match(script, /READY: \["call", "Heat Has Been Announced"\]/);
+    assert.match(script, /CALLING: \["start", "Start This Heat"\]/);
+    assert.doesNotMatch(script, /Mark heat ready|Call this heat|Start this heat|Mark ready|Call heat|Start heat/);
+    assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  }
+  assert.equal(publicHeatStatusLabels.CALLING, "Heat has been announced");
+
+  const source = staffHomeScript.match(/const heatResetAllowed = \(heat\) => [\s\S]*?;\n/)?.[0];
+  assert.ok(source, "the console defines the heat reset visibility gate");
+  const allowedFor = (canDirectRace) => new Function(
+    "canDirectRace",
+    `${source}\nreturn heatResetAllowed;`,
+  )(canDirectRace);
+  const resettable = {
+    status: "READY",
+    rosterLocked: true,
+    rosterSize: 3,
+    publishedResultCount: 0,
+  };
+  for (const status of ["READY", "CALLING", "RUNNING", "AWAITING_RESULT"]) {
+    assert.equal(allowedFor(true)({ ...resettable, status }), true, status);
+    assert.equal(allowedFor(false)({ ...resettable, status }), false, `non-director ${status}`);
+  }
+  for (const status of ["PLANNED", "LOADING", "FINALIZED", "CANCELLED"]) {
+    assert.equal(allowedFor(true)({ ...resettable, status }), false, status);
+  }
+  assert.equal(allowedFor(true)({ ...resettable, rosterLocked: false }), false);
+  assert.equal(allowedFor(true)({ ...resettable, rosterSize: 0 }), false);
+  assert.equal(allowedFor(true)({ ...resettable, publishedResultCount: 1 }), false);
+
+  assert.match(staffHomeScript, /text\("button", "Reset Heat", "button danger small"\)/);
+  assert.match(
+    staffHomeScript,
+    /encodeURIComponent\(selectedHeat\.id\) \+ "\/reset"/,
+  );
+  assert.match(staffHomeScript, /commandOptions\("POST", \{ commandId: crypto\.randomUUID\(\), revision: selectedHeat\.revision \}\)/);
+  assert.match(staffHomeScript, /\{ danger: true, confirmLabel: "Reset Heat" \}/);
+  assert.match(staffHomeScript, /locked roster and lock details will remain/);
+  assert.match(staffHomeScript, /unsubmitted result entry will be cleared/);
+  assert.match(staffHomeScript, /await loadHeats\(\);/);
+
+  // A reset publishes a heat refresh. The finish station must accept it even
+  // with a reviewed selection, then clear that selection on the new revision.
+  assert.match(finishLineScript, /if \(changedHeatContext\) finishSelected = \[\];/);
+  assert.match(finishLineScript, /isBlocked: \(\) => finishScanBusy \|\| finishCommandBusy/);
+  assert.doesNotMatch(finishLineScript, /isBlocked: \(\) =>[^\n]*finishSelected/);
+});
+
 const freshnessStrings = [
   /Updated just now/,
   /Updates are arriving live/,
@@ -1860,7 +1918,8 @@ const myDucksHarness = (route, search = "", confirmResult = true) => {
   const document = new QuickDocument("#document");
   const navigation = document.createElement("a");
   navigation.dataset.myDucksNav = "";
-  navigation.hidden = true;
+  navigation.dataset.phaseVisible = "true";
+  navigation.hidden = false;
   const page = document.createElement("section");
   page.dataset.myDucksPage = "";
   const error = document.createElement("p");
@@ -2003,7 +2062,7 @@ const renderMyDucks = async (registrations) => {
 const deleteButton = (card) => card.descendants()
   .find((node) => node.tagName === "BUTTON" && node.dataset.deleteRegistration !== undefined) ?? null;
 
-test("an empty participant group hides its whole section instead of an empty state", async () => {
+test("an empty participant group normally hides its whole section instead of an empty state", async () => {
   const awaitingOnly = await renderMyDucks([collected("11111111-1111-4111-8111-111111111111", false)]);
   assert.equal(awaitingOnly.awaiting.section.hidden, false);
   assert.equal(awaitingOnly.awaiting.controls.hidden, false);
@@ -2032,7 +2091,17 @@ test("an entirely empty collection keeps one guidance message instead of a blank
   assert.equal(harness.awaiting.section.hidden, true);
   assert.equal(harness.paired.section.hidden, true);
   assert.equal(harness.empty.hidden, false, "the page must never render nothing at all");
-  assert.equal(harness.navigation.hidden, true);
+  assert.equal(harness.navigation.hidden, false);
+});
+
+test("open registration keeps the empty awaiting heading and registration action area", async () => {
+  const harness = myDucksHarness(() => Response.json({ registrations: [] }));
+  harness.awaiting.section.dataset.keepEmpty = "true";
+  await harness.subscriptions[0].refresh();
+
+  assert.equal(harness.awaiting.section.hidden, false);
+  assert.equal(harness.awaiting.track.hidden, true);
+  assert.equal(harness.awaiting.controls.hidden, true);
 });
 
 test("My Ducks sections stay hidden until the first successful collection response", async () => {
@@ -2581,7 +2650,8 @@ const duckPageHarness = (route, pathname, inMyDucks = false) => {
   const document = new QuickDocument("#document");
   const navigation = document.createElement("a");
   navigation.dataset.myDucksNav = "";
-  navigation.hidden = true;
+  navigation.dataset.phaseVisible = "true";
+  navigation.hidden = false;
   const follow = document.createElement("div");
   follow.dataset.duckFollow = "";
   follow.dataset.followId = "11111111-1111-4111-8111-111111111111";
@@ -2641,12 +2711,12 @@ const followResponse = (overrides = {}) => Response.json({
   },
 });
 
-test("a tag scan offers one follow action that adds the duck and reveals the nav", async () => {
+test("a tag scan offers one follow action and records saved-list presence", async () => {
   const harness = duckPageHarness((url) => url.startsWith("/api/v1/registrations/mine/follow")
     ? Response.json({ followed: true, alreadyInCollection: false })
     : url.startsWith("/api/v1/ducks/") ? followResponse() : Response.json({ hasRegistrations: false }), "/t/tag-token-value");
 
-  assert.equal(harness.navigation.hidden, true);
+  assert.equal(harness.navigation.hidden, false);
   await harness.button.dispatch("click");
 
   const request = harness.requests.find((item) => item.url.endsWith("/mine/follow"));
@@ -3263,64 +3333,24 @@ test("NFC scanning cleans up unsupported records and read errors so one retry ca
   assert.deepEqual(readers.map((reader) => reader.scanCalls), [1, 1, 1]);
 });
 
-test("handoff helpers reject expired, wrong-heat, and stale-revision scans", () => {
-  const helpers = new Function(
-    `${finishHandoffHelpersScript}; return { finishParseHandoff, finishBuildHandoffSearch, finishHandoffProblem };`,
-  )();
-  const stored = {
-    returnPath: "/staff/finish-line",
-    eventId: "event-1",
-    heatId: "heat-1",
-    revision: 7,
-    expiresAt: 10_000,
-  };
-  const token = "a".repeat(32);
-  const handoff = helpers.finishParseHandoff("?" + helpers.finishBuildHandoffSearch(stored, token));
-  const current = { eventId: "event-1", heatId: "heat-1", revision: 7, status: "AWAITING_RESULT" };
-
-  assert.equal(helpers.finishHandoffProblem(handoff, current, 9_000), null);
-  assert.equal(helpers.finishHandoffProblem(handoff, current, 10_000), "expired");
-  assert.equal(helpers.finishHandoffProblem(handoff, { ...current, heatId: "heat-2" }, 9_000), "wrong-heat");
-  assert.equal(helpers.finishHandoffProblem(handoff, { ...current, revision: 8 }, 9_000), "stale-revision");
-  assert.equal(helpers.finishHandoffProblem(handoff, { ...current, status: "RUNNING" }, 9_000), "not-awaiting");
+test("round-one tag scans stay on inspection while the final keeps multi-place entry", () => {
+  assert.doesNotMatch(staffDuckScript, /quickducks\.finishStation|finishStationHandoff|location\.replace\("\/staff\/finish-line/);
+  assert.match(staffDuckScript, /"Mark Duck as Heat " \+ candidate\.heatNumber \+ " Winner"/);
+  assert.match(staffDuckScript, /\/heat-winner/);
+  assert.match(staffDuckScript, /winnerSuccess = \{ duckNumber: data\.duck\.visibleNumber, heatNumber: candidate\.heatNumber \}/);
+  assert.match(staffDuckScript, /const success = winnerSuccess;\s*winnerSuccess = null;/);
+  assert.match(finishLineScript, /Scan the winning duck's permanent NFC or QR tag/);
+  assert.match(finishLineScript, /finishHeat\.round === "FINAL"/);
+  assert.match(finishLineScript, /Submit official podium/);
+  assert.doesNotMatch(finishLineScript, /quickducks\.finishStation|finishPendingHandoff|finishConsumeHandoff/);
 });
 
-test("staff duck scan hands complete iPhone context back without submitting", () => {
-  const token = "a".repeat(32);
-  const context = {
-    returnPath: "/staff/finish-line",
-    eventId: "event-1",
-    heatId: "heat-1",
-    revision: 7,
-    expiresAt: Date.now() + 60_000,
-  };
-  const values = new Map([[
-    "quickducks.finishStation",
-    JSON.stringify(context),
-  ]]);
-  const localStorage = {
-    getItem(key) { return values.get(key) ?? null; },
-    removeItem(key) { values.delete(key); },
-  };
-  let destination = null;
-  const location = {
-    pathname: `/staff/ducks/${token}`,
-    replace(value) { destination = value; },
-  };
-
-  new Function("document", "location", "localStorage", staffDuckScript)(null, location, localStorage);
-
-  const destinationUrl = new URL(destination, "https://quickducks.com");
-  assert.equal(destinationUrl.pathname, "/staff/finish-line");
-  assert.deepEqual(Object.fromEntries(destinationUrl.searchParams), {
-    tag: token,
-    eventId: context.eventId,
-    heatId: context.heatId,
-    revision: String(context.revision),
-    expiresAt: String(context.expiresAt),
-  });
-  assert.equal(values.has("quickducks.finishStation"), false);
-  assert.doesNotMatch(destination, /submit|result/i);
+test("the staff console shows accumulating finalists and obeys server correction capabilities", () => {
+  assert.match(staffHomeScript, /\["ROUND_ONE", "FINAL", "COMPLETED"\]\.includes\(currentEvent\?\.status\)/);
+  assert.match(staffHomeScript, /No round-one winner has been recorded yet/);
+  assert.doesNotMatch(staffHomeScript, /Finalist roster verified|not yet verified|data-refresh-finalists/);
+  assert.match(staffHomeScript, /if \(body\.heat\.resultCorrectionAllowed\) heatControls\.append\(resultForm\(body, "correct"\)\)/);
+  assert.match(staffHomeScript, /if \(!body\.heat\.resultReopenAllowed\) return/);
 });
 
 const nodeText = (node) => node.textContent + node.children.map(nodeText).join("");
@@ -3414,7 +3444,7 @@ const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = nu
     "fetch",
     "globalThis",
     "location",
-    `${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell };`,
+    `${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell, liveHeatCard };`,
   )(
     document,
     fetchStub,
@@ -3506,6 +3536,25 @@ test("live board entries link a visible duck number and stay plain text when una
   assert.equal(pending.children.length, 0);
   assert.equal(nodeText(pending), "Duck number pending");
   assert.equal(pending.children.some((child) => child.tagName === "A"), false);
+});
+
+test("official heat winners render an accessible gold text marker beside the participant", () => {
+  const { api } = liveDuckPage();
+  const card = api.liveHeatCard({
+    round: "ROUND_ONE",
+    number: 3,
+    status: "FINALIZED",
+    roster: [
+      { participantDisplayName: "Daisy D.", duckNumber: 4, duckName: null, place: 1 },
+      { participantDisplayName: "Donald M.", duckNumber: 5, duckName: null, place: null },
+    ],
+  }, null);
+  const winnerRow = card.children.find((child) => child.className === "board-entry");
+  const participant = winnerRow.children[0];
+  assert.equal(participant.className, "board-participant");
+  assert.equal(participant.children[1].textContent, "Winner");
+  assert.equal(participant.children[1].className, "winner-ribbon");
+  assert.equal(nodeText(participant), "Daisy D.Winner");
 });
 
 test("a board entry shows the chosen duck name beside the number it never replaces", () => {

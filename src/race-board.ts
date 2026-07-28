@@ -120,7 +120,9 @@ export const getPublicRaceBoard = async (env: Env): Promise<PublicRaceBoard> => 
          ON hr.heat_id = h.id AND hr.race_entry_id = he.race_entry_id AND hr.status = 'FINALIZED'
       WHERE h.event_id = ?
       ORDER BY CASE h.round WHEN 'ROUND_ONE' THEN 0 ELSE 1 END,
-               h.heat_number, he.slot_number`,
+               h.heat_number,
+               CASE WHEN h.status = 'FINALIZED' AND hr.place = 1 THEN 0 ELSE 1 END,
+               he.slot_number`,
   ).bind(event.id).all<BoardRow>();
 
   const byHeat = new Map<string, PublicRaceBoardHeat>();

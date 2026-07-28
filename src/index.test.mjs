@@ -210,10 +210,10 @@ test("renders the private My Ducks page with two accessible horizontal sections"
   assert.match(body, /scroll-snap-type:x mandatory/);
   assert.doesNotMatch(body, /data-my-ducks-freshness|Loading saved registrations|Updated just now/);
   assert.match(body, /<p class="message-line muted" data-my-ducks-error role="alert" hidden><\/p>/);
-  // Neither group ships a per-section empty state; an empty group hides its
-  // whole section and the page keeps one guidance message instead.
+  // Neither group ships a per-section empty state. Registration marks the
+  // awaiting section so hydration reveals its heading and action when empty.
   assert.doesNotMatch(body, /data-carousel-empty/);
-  assert.match(body, /data-participant-section="awaiting" aria-labelledby="awaiting-participants-title" hidden>/);
+  assert.match(body, /data-participant-section="awaiting" data-keep-empty="true" aria-labelledby="awaiting-participants-title" hidden>/);
   assert.match(body, /data-participant-section="paired" aria-labelledby="paired-participants-title" hidden>/);
   assert.match(body, /<p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet\./);
   assert.match(body, /Register another participant/);
@@ -437,6 +437,7 @@ test("the staff duck page opens for exactly the roles the staff duck API allows"
   for (const currentActor of [
     staffActor(["REGISTRATION"]),
     staffActor(["DUCK_MANAGER"]),
+    staffActor(["RESULT_TAKER"]),
     staffActor(["RACE_DIRECTOR"]),
     staffActor([], true),
   ]) {
@@ -446,8 +447,7 @@ test("the staff duck page opens for exactly the roles the staff duck API allows"
     assert.notEqual((await api(currentActor)).status, 403, label);
   }
 
-  // RESULT_TAKER used to open this page while the API refused it.
-  for (const roles of [["RESULT_TAKER"], ["ANNOUNCER"], ["HEAT_RUNNER"], []]) {
+  for (const roles of [["ANNOUNCER"], ["HEAT_RUNNER"], []]) {
     const currentActor = staffActor(roles);
     const label = roles.join(",");
     const denied = await page(currentActor);
@@ -867,6 +867,10 @@ test("camera access is granted only to the authenticated duck-pairing page", asy
     authentication: "cookie",
   }));
   const pairing = await authenticated.fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
+  const resultInspection = await createWorker(async () => ({
+    id: "result_test", cognitoSub: "result-sub", email: "result@example.com",
+    displayName: "Result Staff", isSystemAdmin: false, roles: ["RESULT_TAKER"], authentication: "cookie",
+  })).fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
 
   assert.equal(pairing.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
 
@@ -878,6 +882,7 @@ test("camera access is granted only to the authenticated duck-pairing page", asy
     authenticated.fetch(new Request("https://quickducks.com/staff/finish-line"), env),
     authenticated.fetch(new Request("https://quickducks.com/api/v1/events/current"), env),
     authenticated.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env),
+    Promise.resolve(resultInspection),
   ]);
   for (const response of others) {
     assert.match(response.headers.get("permissions-policy") ?? "", /(^|, )camera=\(\)/);

@@ -40,8 +40,8 @@ export const phaseAllowsRaceStatus = (phase: PublicPhase): boolean => phase !== 
 export const phaseShowsRegisterNav = phaseAllowsRegistration;
 export const phaseShowsRaceStatusNav = (phase: PublicPhase): boolean =>
   phase !== "PREPARING" && phase !== "REGISTRATION";
-// My Ducks is additionally revealed client-side by the saved-registration
-// presence probe, so this is only the phase half of the rule.
+// My Ducks follows the phase because the route redirects home during Preparing.
+// The saved-registration probe still controls the page layout once it is open.
 export const phaseShowsMyDucks = (phase: PublicPhase): boolean => phase !== "PREPARING";
 
 // Preparing wording is per page, not shared: `/register` is where a visitor is

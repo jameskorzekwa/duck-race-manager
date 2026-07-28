@@ -467,16 +467,19 @@ export const createWorker = (
       // Must stay identical to the role set `staff-api.ts` requires for
       // `GET /api/v1/staff/ducks/:token`, which this page fetches immediately.
       // A wider page allow-list only renders a console that instantly 403s.
-      if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"])) {
+      if (!hasAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RESULT_TAKER", "RACE_DIRECTOR"])) {
         return withSessionCookies(html(renderStaffAuthError("This account does not have permission to inspect staff duck records.", actor), 403, true));
       }
-      return withSessionCookies(withCameraAccess(staffHtml(renderStaffDuck(
+      const staffDuckPage = staffHtml(renderStaffDuck(
         staffDuckMatch[1],
         actor.displayName ?? actor.email,
         actor.isSystemAdmin,
         actor.roles,
         await publicPhase(),
-      ))));
+      ));
+      return withSessionCookies(hasAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"])
+        ? withCameraAccess(staffDuckPage)
+        : staffDuckPage);
     }
 
     // Public duck detail by the number printed on the duck and shown on the

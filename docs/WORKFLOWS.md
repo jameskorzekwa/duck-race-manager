@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0012_staff_role_assignments.sql`, browser
+the Worker, D1 migrations through `0016_locked_final_winner_correction.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -42,7 +42,8 @@ not authorized.
 | Set or clear a participant's duck name | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Participant disqualification/reactivation | `RACE_DIRECTOR` | Yes |
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
-| Duck inventory intake, deletion, assignment, unassignment, reservation, and inspection | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Duck inventory intake, deletion, assignment, unassignment, and reservation | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Open a staff duck inspection | `REGISTRATION`, `DUCK_MANAGER`, `RESULT_TAKER`, or `RACE_DIRECTOR`; projection stays role-narrow | Yes |
 | Open `/staff/inventory` | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
 | Event list/detail context | Any operational role | Yes |
@@ -206,10 +207,11 @@ stays reachable for all five post-`DRAFT` statuses, including while registration
 is open, even though the navigation does not advertise it then. Staff stays in
 the top navigation in every phase.
 
-My Ducks appears whenever the phase is Registration or later, or when the saved
-registration presence probe reports that this device has saved registrations.
-The phase half of that rule is server-rendered; the presence half is applied by
-`participant.js`, and neither can hide a link the other grants.
+My Ducks appears whenever the phase is Registration or later. Before
+registration opens, both the navigation and a direct `GET /my-ducks` keep the
+page unavailable; the direct request returns `303` to `/`. The saved-registration
+presence probe controls the page's empty-versus-saved layout after it opens, not
+whether the route or navigation is available.
 
 Navigation is correct on first paint and does not need a refresh to stay
 correct: `live-ui.js` subscribes to the `event` domain of the live hub and
@@ -225,7 +227,10 @@ page, `/race`, `/my-ducks`, `/register`, `/duck/<number>`, `/r/<token>`, and
 pages register the navigation subscriber. The staff sign-in page, the not-found
 page, and staff error pages carry no marker and no other live surface, so they
 open no socket and schedule no polls, and they keep the navigation exactly as the
-server painted it.
+server painted it. Staff HTML routes still resolve the same phase for their
+server-rendered primary navigation, so their Home, Register or Race Status, My
+Ducks, and Staff links match the public site on first paint without taking a
+live-navigation connection.
 
 The not-found page is the one public response that resolves no phase at all.
 Every unmatched path reaches it, including bot and scanner traffic, so it runs
@@ -344,12 +349,13 @@ host-only, and has a one-year sliding lifetime. Only a hash of its token is
 stored in D1. The collection can link many registrations created in the same
 browser.
 
-The primary navigation reveals **My Ducks** only after a lightweight collection
-probe returns `{ hasRegistrations: true }`. Non-My-Ducks pages use this probe;
-it applies the same cookie validation, invalid-cookie clearing, and sliding
-expiry refresh as the full collection endpoint, but queries only whether one
-collection link exists. It never selects or returns names, lookup codes, race
-entries, status details, contact fields, or private paths.
+Non-My-Ducks pages run a lightweight collection presence probe. It applies the
+same cookie validation, invalid-cookie clearing, and sliding expiry refresh as
+the full collection endpoint, but queries only whether one collection link
+exists. It never selects or returns names, lookup codes, race entries, status
+details, contact fields, or private paths. The result controls the saved-list
+layout when My Ducks is phase-accessible; it cannot reveal the link during
+Preparing, when the route redirects home.
 
 A collection link records how it was created. A link created by registering in
 that browser is `REGISTRATION`; a link added from the public name search, a duck
@@ -382,12 +388,18 @@ every `FOLLOWED` entry whether or not that participant has a duck yet. The page
 states the difference in place: entries registered here keep their full details
 and staff lookup code, and followed entries show the public projection only. A
 live or polling refresh immediately regroups a registered card when staff pair
-or unpair its participant. A group with no participants hides its entire
-section, including its heading and controls, rather than rendering an empty
-state; when all groups are empty the page keeps one guidance message so it is
-never blank. Sections stay hidden until the first successful full collection
-response, so a failed initial request shows only the error-only line and keeps
-checking rather than claiming an empty collection.
+or unpair its participant. A group with no participants normally hides its
+entire section, including its heading and controls, rather than rendering an
+empty state. During open registration, the empty Awaiting Participants section
+keeps its heading and **Register another participant** action while its track and
+carousel controls stay hidden. When all groups are empty the page keeps one
+guidance message so it is never blank. Sections stay hidden until the first
+successful full collection response, so a failed initial request shows only the
+error-only line and keeps checking rather than claiming an empty collection.
+
+While registration is open, **Register another participant** sits in the
+Awaiting Participants heading row instead of below the complete page. The row
+wraps the action below the heading on narrow screens.
 
 After the registration redirect, the page highlights the matching registration.
 Only after that UUID appears in a successful full collection response does the
@@ -916,21 +928,28 @@ deactivation fails closed immediately. After the seven-day provider session
 expires, the browser returns to staff sign-in. A scan page preserves its path as
 a safe same-origin return target.
 
-The staff home shows role-aware links to the focused start-line and finish-line
-pages. Hidden links are only a convenience; each page and every API it calls
-repeat authentication, active-profile, role, event-state, heat-state, and
-revision checks.
+The staff home does not repeat large start-line or finish-line shortcut buttons;
+the persistent staff navigation is the single route to those focused pages.
+Hidden links are only a convenience; each page and every API it calls repeat
+authentication, active-profile, role, event-state, heat-state, and revision
+checks.
 
 Every staff page also renders one persistent staff navigation listing only the
 pages the signed-in actor may open: **Console** (`/staff`, any staff member),
-**Access** (`/staff/access`, system administrator), **Start line**
-(`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), **Announcer**
-(`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Finish line**
-(`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`), and **Inventory**
-(`/staff/inventory`, `DUCK_MANAGER` or `RACE_DIRECTOR`). A system
-administrator sees every link. The current page is marked `aria-current="page"`.
-The navigation wraps rather than scrolling, so it never overflows a 320px
-viewport. Omitting a link is convenience only; each page repeats its own check.
+**Announcer** (`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Start
+line** (`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), **Finish line**
+(`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`), **Inventory**
+(`/staff/inventory`, `DUCK_MANAGER` or `RACE_DIRECTOR`), and **Access**
+(`/staff/access`, system administrator). Access is always the right-most item.
+A system administrator sees every link. The current page is marked
+`aria-current="page"`. The navigation wraps rather than scrolling, so it never
+overflows a 320px viewport. Omitting a link is convenience only; each page
+repeats its own check.
+
+The signed-in identity bar is the last element of each operational staff page,
+not a header. It contains only the escaped display name on the left and the
+same-origin POST **Log out** control on the right; page navigation and page-name
+labels do not appear in this footer.
 
 **Operator step:** sign in and load the console on every intended device before
 race operations. Do not assume the browser remains authorized beyond seven days.
@@ -1478,16 +1497,19 @@ participant whose duck was deleted is `SUBMITTED` with no open assignment, which
 is exactly the state pairing already expects, so replacing their duck is the
 ordinary scan-first command and not a separate workflow.
 
-Staff search accepts an exact normalized code or a case-insensitive name
-substring of at least two characters. It can show contact details, status, and
-an assigned duck. The UI disables already assigned results; the server also
-requires an unpaired `SUBMITTED` registration.
+Staff search accepts an empty query, an exact normalized code, or a
+case-insensitive name or contact substring. Opening the pairing work area
+immediately lists up to 100 participants who have no current duck assignment;
+typing filters that same server-authoritative list. The SQL excludes paired
+participants for both listing and search, and the response applies the same
+exclusion defensively, so an assigned participant is never rendered. A truncated
+list tells the operator to type to narrow it.
 
 The search response reports `exactMatch` only when the normalized query is a
-well-formed lookup code that equals a returned registration's code. The console
-pairs that match directly instead of rendering a single-row list. A code that is
-already paired is reported but not auto-paired, so the list explains which duck
-holds it rather than firing a command the server would reject.
+well-formed lookup code that equals an unpaired returned registration's code.
+The console pairs that match directly instead of rendering a single-row list.
+Submitting with Enter prevents native form navigation and blurs the search field
+before the request so a mobile keyboard closes.
 
 ### Participant QR Codes
 
@@ -1715,10 +1737,11 @@ so it never presents a control the API would refuse.
 For each round-one and final heat, station staff perform:
 
 1. Review heat detail and the authoritative roster.
-2. `Mark ready`: changes `LOADING` to `READY`.
-3. `Call heat`: changes `READY` to `CALLING`.
-4. `Start heat`: changes `CALLING` to `RUNNING`.
-5. A result taker `Finish heat`: changes `RUNNING` to `AWAITING_RESULT`.
+2. **Mark Heat Ready**: changes `LOADING` to `READY`.
+3. **Heat Has Been Announced**: changes `READY` to `CALLING`.
+4. **Start This Heat**: changes `CALLING` to `RUNNING`.
+5. A result taker **Mark heat finished**: changes `RUNNING` to
+   `AWAITING_RESULT`.
 6. A result taker enters and publishes the required result.
 
 A heat cannot start while any racer on its roster holds no duck. `transitionHeat`
@@ -1736,6 +1759,15 @@ final does the same for the final heat. The console and the start-line station
 therefore ship no `Lock roster` control. The `announcer-roster` endpoint remains
 available for the announcer surface, but the console button that refetched it
 into the same element it already showed was a visible no-op and was removed.
+
+A race director or administrator can **Reset Heat** from `READY`, `CALLING`,
+`RUNNING`, or `AWAITING_RESULT` before any result is published. The confirmed,
+revision-checked command returns the heat to `LOADING`, clears start, finish, and
+finalization timestamps, and preserves the locked roster and its lock metadata.
+`PLANNED`, `LOADING`, `FINALIZED`, `CANCELLED`, an unlocked or empty roster, and
+any published result are refused. The atomic SQL repeats those state, event-round,
+roster, and no-result guards and records `HEAT_RESET`; result history is never
+deleted by reset.
 
 ### Console Roster Deep Links
 
@@ -1761,7 +1793,8 @@ running heat, then the next unfinished heat in the event's active round. This
 prevents a newer prepared or running heat from hiding a pending official result.
 It shows event, round, heat number, status, roster names, and visible duck
 numbers without contact data. Depending on authoritative status, it exposes
-exactly one of `Mark heat ready`, `Call this heat`, or `Start this heat`. A
+exactly one of **Mark Heat Ready**, **Heat Has Been Announced**, or **Start This
+Heat**. A
 still-planned heat displays that its roster locks by itself when the race
 director starts the round, and an awaiting-result heat instead displays that no
 next heat can start.
@@ -1807,27 +1840,24 @@ so the announcer never has to refresh.
 `/staff/finish-line` prioritizes an `AWAITING_RESULT` heat, otherwise a `RUNNING`
 heat, in the active round. A newer running heat therefore cannot clear result
 selections for an older unpublished heat. A running heat exposes only `Mark heat
-finished`. Once awaiting a result, each tag URL, Web NFC read, iPhone handoff,
-or visible number is resolved server-side against that exact heat's
-authoritative current roster and requires the registration to remain `ACTIVE`.
-Wrong-heat, inactive, and unknown ducks are rejected. Selecting the same race
-entry twice is rejected visibly.
+finished`. For round one, the station then tells the result taker to scan the
+winning duck's permanent NFC or QR URL. Authenticated `GET /t/<tag>` remains
+read-only and redirects to `/staff/ducks/<tag>`. If exactly one round-one heat is
+awaiting a result and the duck's current participant is an active member of that
+roster, the inspection page leads with **Mark Duck as Heat N Winner**. The
+confirmed POST revalidates the tag, assignment, roster entry, event round, heat
+revision, and sole awaiting heat inside the atomic result command before it
+publishes the winner. A result taker receives no contact details, lookup code,
+pairing control, or name-moderation control on that inspection page.
 
-Round one requires exactly one selected winner. A final requires distinct places
-1 through `min(3, final roster size)`. Every selection displays place,
-policy-filtered participant name, and visible duck number before submission.
-Only one tag/number lookup can run at a time. While it runs, manual, NFC,
-selection-removal, and result-submit controls are disabled and additional scans
-are ignored. The station captures event ID, heat ID, revision, and intended
-place before the request and discards the response if any value changed. NFC
-handlers await that same serialized selection path.
-
-Scanning never submits; the operator presses one explicit `Submit official
-winner` or `Submit official podium` button. Submission requires a plain-language
-confirmation that reads back every selected participant, duck, and place. The
-revision-checked, role-guarded result endpoint revalidates that each selected
-registration is `ACTIVE`; the atomic command repeats that eligibility guard.
-The station offers no result correction or automatic retry/offline queue.
+The final keeps the complete-podium station flow. It requires distinct places 1
+through `min(3, final roster size)`. Every selection displays place,
+policy-filtered participant name, and visible duck number before one **Submit
+official podium** confirmation. Only one tag or number lookup can run at a time;
+the station discards a response if event, heat, revision, or intended place
+changed. The role-guarded result endpoint revalidates each selected registration
+and current duck assignment. The station offers no result correction or
+automatic retry/offline queue.
 
 Only one heat in an event may be `RUNNING`, and no heat may start while any other
 heat in that event is `AWAITING_RESULT`. Preparing, locking, readying, and
@@ -1845,9 +1875,9 @@ record.
 ## Round-One Results and Finalist Promotion
 
 After a round-one heat reaches `AWAITING_RESULT`, a result taker, race director,
-or administrator
-selects exactly one `ACTIVE` first-place race entry from that heat's roster and
-confirms the plain-language readback before publication. QuickDucks atomically:
+or administrator scans its winning duck and confirms the winner action on the
+staff inspection page. A race director or administrator may use the console
+result form as a recovery path. QuickDucks atomically:
 
 - Writes one finalized first-place result linked to the current duck assignment.
 - Changes the heat to `FINALIZED`.
@@ -1855,18 +1885,11 @@ confirms the plain-language readback before publication. QuickDucks atomically:
 - Adds the winner to the next final slot.
 - Writes command and audit history.
 
-Finalist verification compares finalized round-one heats and first-place
-results with the one final roster. `verified` is true only when every round-one
-heat is finalized, exactly one final exists, every winner is present, and every
-finalist is a winner.
-
-The console's **Finalists** card in the Heats and results section appears only
-while the event is `FINAL` or `COMPLETED`. There are no finalists before the
-final has been started, and verifying an empty roster during round one reports
-"not yet verified", which is noise rather than information.
-
-The operator checks finalist verification before starting the final. There is
-no physical winners-bag scan or set-verification workflow.
+The console's **Finalists** card appears during `ROUND_ONE`, `FINAL`, and
+`COMPLETED` and lists the current promoted winners as they accumulate. There is
+no Verify finalists button, verified state, verification wording, physical
+winners-bag scan, or set-verification operator step. Final readiness is enforced
+by the authoritative lifecycle checks instead.
 
 ## Final Results
 
@@ -1889,10 +1912,14 @@ results.
 
 ### Round-One Correction
 
-A published winner can be directly replaced while the final heat is still
-`PLANNED` and unlocked. QuickDucks moves the old result into
-`heat_result_history` as `SUPERSEDED`, publishes a new revision, and replaces
-the corresponding finalist roster entry.
+A published winner can be directly replaced while the final heat is `PLANNED`
+or locked and `LOADING`. QuickDucks moves the old result into
+`heat_result_history` as `SUPERSEDED`, publishes a new revision, and atomically
+replaces the exact corresponding finalist roster entry. This narrow correction
+is the only update allowed through the locked-roster trigger. The API and its
+guarded SQL reject the correction once the final reaches `READY`, `CALLING`,
+`RUNNING`, `AWAITING_RESULT`, `FINALIZED`, or `CANCELLED`; the console follows a
+server-projected capability and does not show the correction form then.
 
 A round-one result can instead be reopened to `AWAITING_RESULT`. The existing
 result is superseded and its finalist promotion is removed. If the event had
@@ -1938,8 +1965,9 @@ page must not carry the `/register` call to action. The board includes:
 - Policy-filtered participant display names and visible duck numbers, with the
   participant-chosen duck name beside the number when there is one the read-time
   filter allows. The link text stays the bare number; the name never replaces it.
-- Finalized round-one winners and an ordered final podium, which carry the duck
-  name on the same terms.
+- Finalized heat winners moved to the top of their heat roster with an accessible
+  gold **Winner** ribbon beside the participant; all non-winners retain slot
+  order. The ordered final podium carries the duck name on the same terms.
 
 Visible duck numbers come only from a current assignment with `valid_to IS
 NULL`; a historical assignment closed by pre-race unassignment is never revived

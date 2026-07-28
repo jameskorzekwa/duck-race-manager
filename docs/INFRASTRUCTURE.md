@@ -478,6 +478,15 @@ receive explicit roles through the normal access workflow. Apply this migration 
 `staff_role_assignments`; the release sequence already applies D1 migrations
 before the Worker deployment.
 
+Migration `0016_locked_final_winner_correction.sql` replaces the locked-roster
+update trigger with an otherwise identical trigger that permits one narrow
+exception: a `CORRECT_HEAT_RESULT` command may replace its exact promoted final
+entry while the final heat is `LOADING`. It remains backward compatible with the
+previous Worker, which never attempts that update in `LOADING`; generic roster
+updates, changes to the entry identity or creation timestamp, and every
+correction at `READY` or later still abort. The migration must remain ahead of
+the Worker release that exposes the extended correction window.
+
 The current Worker sends notification IDs to `quickducks-email` through the
 `EMAIL_QUEUE` producer binding. A queue consumer is not currently declared in
 `wrangler.jsonc`; therefore the DLQ is not connected by the current deployment.

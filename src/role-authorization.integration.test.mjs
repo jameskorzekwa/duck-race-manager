@@ -399,6 +399,48 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     ), 201, `heat runner ${transition}`);
     revision = result.heat.revision;
   }
+  for (const [label, deniedActor] of [
+    ["announcer", actors.announcer],
+    ["heat runner", actors.heats],
+    ["result taker", actors.results],
+    ["roleless actor", actors.none],
+  ]) {
+    assert.equal((await post(
+      deniedActor,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/reset`,
+      { commandId: command(), revision },
+    )).status, 403, `${label} cannot reset a heat`);
+  }
+  let reset = await json(await post(
+    actors.director,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/reset`,
+    { commandId: command(), revision },
+  ), 201, "race director resets heat");
+  assert.equal(reset.heat.status, "LOADING");
+  revision = reset.heat.revision;
+  for (const transition of ["ready", "call", "start"]) {
+    const result = await json(await post(
+      actors.heats,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/${transition}`,
+      { commandId: command(), revision },
+    ), 201, `heat runner repeats ${transition}`);
+    revision = result.heat.revision;
+  }
+  reset = await json(await post(
+    actors.admin,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/reset`,
+    { commandId: command(), revision },
+  ), 201, "administrator resets heat");
+  assert.equal(reset.heat.status, "LOADING");
+  revision = reset.heat.revision;
+  for (const transition of ["ready", "call", "start"]) {
+    const result = await json(await post(
+      actors.heats,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/${transition}`,
+      { commandId: command(), revision },
+    ), 201, `heat runner repeats ${transition} after admin reset`);
+    revision = result.heat.revision;
+  }
   assert.equal((await post(actors.heats, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish`, {
     commandId: command(), revision,
   })).status, 403);
@@ -421,11 +463,47 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   ), 200, "result taker validates finish-line duck");
   assert.equal(selectedWinner.selection.raceEntryId, raceEntryId);
   assert.equal(JSON.stringify(selectedWinner).includes("daisy@example.com"), false);
+  const inspection = await json(await api(
+    actors.results,
+    `/api/v1/staff/ducks/${duckOneToken}`,
+  ), 200, "result taker inspects scanned winner");
+  assert.equal(inspection.winnerAction.heatId, roundOneHeatId);
+  assert.equal(inspection.winnerAction.raceEntryId, raceEntryId);
+  assert.deepEqual(Object.keys(inspection.assignment.participant), ["registrationStatus"]);
+  assert.equal(/email|phone|lookup|duckName|registrationId/i.test(JSON.stringify(inspection)), false);
+  const winnerPayload = {
+    commandId: command(),
+    eventId,
+    heatId: roundOneHeatId,
+    raceEntryId,
+    revision: finished.heat.revision,
+  };
+  assert.equal((await post(
+    actors.registration,
+    `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
+    winnerPayload,
+  )).status, 403);
   const finalized = await json(await post(
+    actors.results,
+    `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
+    winnerPayload,
+  ), 201, "result taker publishes scanned round-one winner");
+  const replayedWinner = await json(await post(
+    actors.results,
+    `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
+    winnerPayload,
+  ), 200, "result taker replays scanned winner command");
+  assert.equal(replayedWinner.replayed, true);
+  assert.equal((await post(
+    actors.results,
+    `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
+    { ...winnerPayload, raceEntryId: "forged-entry" },
+  )).status, 409);
+  assert.equal((await post(
     actors.results,
     `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/finalize`,
     { commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }] },
-  ), 201, "result taker finalizes round-one winner");
+  )).status, 403);
   assert.equal(JSON.stringify(finalized).includes("daisy@example.com"), false);
   assert.equal((await post(actors.results, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/correct`, {
     commandId: command(), revision: finalized.heat.revision, reason: "Neighbor denial", results: [{ raceEntryId, place: 1 }],
