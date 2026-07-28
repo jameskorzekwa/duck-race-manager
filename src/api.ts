@@ -38,6 +38,7 @@ import { handleDuckOperations } from "./duck-operations.ts";
 import { handleEventOperations } from "./event-operations.ts";
 import { handleHeatOperations } from "./heat-operations.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
+import { optionalParticipantQrGeometry } from "./participant-qr.ts";
 import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
@@ -621,6 +622,12 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
         ? publicDisplayName(row.public_name_policy, row.first_name, row.last_name)
         : `${row.first_name} ${row.last_name}`,
       lookupCode: followed ? null : row.lookup_code,
+      // Drawing geometry for the same QR the private status page renders, so a
+      // participant can be scanned straight from My Ducks without having kept
+      // the one-time private link. It encodes the lookup code already on the
+      // line above and nothing else, so it discloses nothing new, and a
+      // followed registration has no lookup code to encode.
+      qr: optionalParticipantQrGeometry(followed ? null : row.lookup_code),
       followed,
       registrationStatus: row.status,
       paired: row.is_paired === 1,
