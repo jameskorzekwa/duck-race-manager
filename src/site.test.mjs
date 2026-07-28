@@ -86,6 +86,22 @@ test("the staff pairing page offers scanning, manual search, and a cancel path",
   assert.doesNotMatch(page, /QD1:/);
 });
 
+test("result taker duck inspection exposes only the winner surface, not pairing controls", () => {
+  const page = renderStaffDuck("a".repeat(32), "Result staff", false, ["RESULT_TAKER"]);
+
+  assert.match(page, /data-winner-action/);
+  assert.doesNotMatch(page, /data-registration-search|data-confirm-pairing|data-scan-qr/);
+  assert.doesNotMatch(page, /lookup code pairs|phone, or email/i);
+});
+
+test("the finalists card has current-winner wording and no verification control", () => {
+  const page = renderStaffHome("Result staff", false, ["RESULT_TAKER"]);
+
+  assert.match(page, /data-finalist-card/);
+  assert.match(page, /current round-one winners promoted into the final/i);
+  assert.doesNotMatch(page, /Verify finalists|not yet verified|roster verified/i);
+});
+
 test("shared CSS prevents intrinsic form and card widths from escaping containers", () => {
   assert.ok(style);
   assert.match(style, /\* \{ box-sizing:border-box; \}/);
@@ -105,6 +121,8 @@ test("shared CSS prevents intrinsic form and card widths from escaping container
   assert.match(style, /\.field-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(style, /\.console-grid \{ grid-template-columns:repeat\(2,minmax\(0,1fr\)\); \}/);
   assert.match(style, /\.cards \{ grid-template-columns:repeat\(3,minmax\(0,1fr\)\); \}/);
+  assert.match(style, /\.winner-ribbon \{[^}]*background:#f4c542;[^}]*font-weight:950;[^}]*text-transform:uppercase;/);
+  assert.match(style, /\.winner-action \.button \{ width:100%; min-height:4rem; \}/);
 });
 
 test("pressing a button fully depresses it, distinct from the hover half-press", () => {

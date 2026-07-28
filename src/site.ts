@@ -310,6 +310,12 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .board-heat.current { background:#fff1a8; box-shadow:4px 4px 0 var(--ink); }
 .board-heat h4 { margin:.1rem 0 .4rem; font-size:1.2rem; }
 .board-entry { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.4rem 1rem; margin:.35rem 0 0; padding:.45rem .6rem; border-left:.35rem solid var(--water); background:#fff; font-weight:800; }
+.board-participant { display:inline-flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
+.winner-ribbon { display:inline-flex; align-items:center; padding:.2rem .5rem; border:2px solid #7b5600; border-radius:999px; background:#f4c542; color:#3d2b00; font-size:.7rem; font-weight:950; letter-spacing:.06em; line-height:1.2; text-transform:uppercase; }
+.winner-action { margin:0 0 1.4rem; padding:1rem; border:3px solid #7b5600; border-radius:1rem; background:#fff1a8; box-shadow:5px 5px 0 var(--ink); }
+.winner-action > * { margin-bottom:0; }
+.winner-action > * + * { margin-top:.75rem; }
+.winner-action .button { width:100%; min-height:4rem; }
 .podium { display:grid; gap:.65rem; margin:1rem 0; }
 .podium-place { padding:.8rem 1rem; border:3px solid var(--ink); border-radius:.75rem; background:var(--yellow); font-size:1.1rem; font-weight:950; }
 .station-panel { max-width:62rem; background:#fff; }
@@ -1038,7 +1044,7 @@ export const renderStaffHome = (
       <section class="console-section" id="heats" aria-labelledby="heats-title" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
         <p class="eyebrow">Race control</p><h2 id="heats-title">Heats and results</h2>
         <div class="console-grid" data-finalist-card hidden>
-          <article class="operation-card"><h3>Finalists</h3><p class="muted">Who won a round-one heat and is racing the final.</p><button class="button secondary small" type="button" data-refresh-finalists>Verify finalists</button><div class="data-list" data-finalist-list></div></article>
+          <article class="operation-card"><h3>Finalists</h3><p class="muted">The current round-one winners promoted into the final.</p><div class="data-list" data-finalist-list></div></article>
         </div>
         <div class="section-tools"><button class="button secondary small" type="button" data-refresh-heats>Refresh heats</button></div>
         <div class="console-grid wide"><div class="data-list" data-heat-list></div><article class="operation-card" data-heat-detail hidden><h3 data-heat-name>Heat detail</h3><dl class="facts compact-facts" data-heat-facts></dl><div data-heat-controls></div><h3>Roster</h3><ul class="roster-list" data-heat-roster></ul><h3>Published results</h3><div class="data-list" data-heat-results></div></article></div>
@@ -1173,7 +1179,7 @@ export const renderFinishLine = (
       <div class="actions"><button class="button secondary station-control" type="submit">Add this duck</button><button class="button secondary station-control" type="button" data-start-nfc hidden>Scan NFC tag</button></div>
     </form>
     <div class="data-list" data-finish-selections></div>
-    <button class="button station-control" type="button" data-submit-result disabled>Submit official result</button>
+    <button class="button station-control" type="button" data-submit-result hidden disabled>Submit official result</button>
     <p class="message-line muted" data-station-message aria-live="polite">A scan only selects a duck. Nothing is submitted until you press the final button.</p>
     ${interactive ? '<script src="/assets/finish-line.js" defer></script>' : ""}
   </section>`,
@@ -1278,7 +1284,9 @@ export const renderStaffDuck = (
   displayName: string,
   isSystemAdmin = false,
   roles: readonly OperationalRole[] = [],
-): string => page({
+): string => {
+  const canPair = roles.length === 0 || isSystemAdmin || roles.includes("REGISTRATION") || roles.includes("RACE_DIRECTOR");
+  return page({
   title: "Staff duck scan",
   description: "Protected QuickDucks duck pairing and inspection.",
   robots: "noindex,nofollow",
@@ -1286,11 +1294,12 @@ export const renderStaffDuck = (
     <section class="page-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
       <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Staff scan</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
       ${staffNav(isSystemAdmin, roles)}
+      <section class="winner-action" data-winner-action hidden aria-live="polite"></section>
       <p class="eyebrow">Protected duck record</p>
       <h1 class="page-title" data-staff-title>Checking this duck…</h1>
       <p class="lede" data-staff-message aria-live="polite">Verifying tag, inventory, and assignment state.</p>
       <dl class="facts" data-duck-summary></dl>
-      <section class="work-area" data-pairing-work hidden>
+      ${canPair ? `<section class="work-area" data-pairing-work hidden>
         <div class="privacy"><strong>Current event</strong><span data-pairing-event></span></div>
         <div class="actions" data-qr-launch hidden><button class="button" type="button" data-scan-qr>Scan QR code</button></div>
         <section class="qr-scanner" data-qr-scanner hidden aria-label="Participant QR scanner">
@@ -1305,11 +1314,12 @@ export const renderStaffDuck = (
         <div class="result-list" data-registration-results></div>
         <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
         <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
-      </section>
+      </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/staff-duck.js" defer></script>
     </section>`,
-});
+  });
+};
 
 export const renderStaffAuthError = (
   message: string,

@@ -224,6 +224,28 @@ test("requires same-origin protection for cookie-authenticated staff mutations",
   assert.equal(allowed.status, 404);
 });
 
+test("winner-by-tag mutation requires exact Origin before parsing its command", async () => {
+  const db = makeDb(() => null);
+  const cookieActor = { ...actor, roles: ["RESULT_TAKER"], authentication: "cookie" };
+  const request = (origin) => handleApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}/heat-winner`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(origin === null ? {} : { origin }),
+      },
+      body: "{}",
+    }),
+    makeEnv(db),
+    async () => cookieActor,
+  );
+
+  assert.equal((await request(null)).status, 403);
+  assert.equal((await request("https://evil.example")).status, 403);
+  assert.equal((await request("https://quickducks.com")).status, 400);
+  assert.equal(db.statements.length, 0);
+});
+
 test("staff session revalidation returns authorization state without identity or PII", async () => {
   const response = await handleApi(
     new Request("https://quickducks.com/api/v1/staff/session"),
