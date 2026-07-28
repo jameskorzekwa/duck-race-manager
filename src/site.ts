@@ -173,12 +173,11 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .turnstile-mock { display:grid; min-height:4.4rem; place-items:center; padding:.8rem; border:2px dashed #8da0a6; border-radius:.7rem; background:#f4f7f7; color:var(--muted); font-size:.82rem; font-weight:800; text-align:center; }
 .error-text { color:#9f261c; font-weight:850; }
 .field-error { min-height:1.2em; color:#9f261c; font-size:.8rem; font-weight:800; }
-.staff-bar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:.8rem; margin-bottom:1.2rem; padding:.8rem 1rem; border:2px solid var(--ink); border-radius:.8rem; background:#e4f4f8; }
+.staff-bar { display:flex; flex-wrap:wrap; width:100%; min-width:0; max-width:100%; align-items:center; justify-content:space-between; gap:var(--space-sm); margin:var(--space-lg) 0 0; padding:.8rem 1rem; border:2px solid var(--ink); border-radius:.8rem; background:#e4f4f8; }
+.staff-bar > * { min-width:0; max-width:100%; }
 .staff-bar p { min-width:0; margin:0; overflow-wrap:anywhere; }
-.staff-bar-actions { display:inline-flex; max-width:100%; flex-wrap:wrap; align-items:center; gap:var(--space-xs); }
-.staff-bar-actions > a,.staff-logout button { display:inline-flex; min-height:2.75rem; align-items:center; padding:var(--space-xs); overflow-wrap:anywhere; }
 .staff-logout { display:inline; clear:none; }
-.staff-logout button { border:0; background:transparent; color:inherit; font:inherit; text-decoration:underline; cursor:pointer; }
+.staff-logout button { display:inline-flex; min-height:2.75rem; align-items:center; padding:var(--space-xs); border:0; background:transparent; color:inherit; font:inherit; overflow-wrap:anywhere; text-decoration:underline; cursor:pointer; }
 .staff-logout button:hover,.staff-logout button:focus-visible { border-radius:.2rem; outline:2px solid var(--ink); outline-offset:2px; }
 .result-list { display:grid; gap:.6rem; margin:.8rem 0; }
 .result-list:empty { display:none; }
@@ -320,7 +319,6 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .station-roster { display:grid; gap:.65rem; padding:0; list-style:none; }
 .station-roster li { padding:1rem; border:3px solid var(--ink); border-radius:.7rem; background:#eaf7fa; font-size:1.12rem; font-weight:900; }
 .station-selection { padding:1rem; border:3px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; font-size:1.1rem; }
-.station-links { margin:1rem 0 1.4rem; padding:1rem; border:3px solid var(--ink); border-radius:.9rem; background:var(--yellow); }
 .station-counters { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.75rem; margin:1rem 0; }
 .station-counter { padding:1rem; border:3px solid var(--ink); border-radius:.8rem; background:var(--cream); text-align:center; }
 .station-counter strong { display:block; color:var(--ink); font-size:clamp(2rem,10vw,4rem); line-height:1; }
@@ -356,7 +354,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 [data-event-readiness] .button { margin-top:var(--space-xs); }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,minmax(0,1fr)); } .field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .inventory-layout { grid-template-columns:minmax(0,1.15fr) minmax(20rem,.85fr); } .inventory-detail-panel { position:sticky; top:5.75rem; max-height:calc(100vh - 6.75rem); overflow:auto; } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .search-form { grid-template-columns:1fr; } .staff-bar { align-items:flex-start; } .staff-bar-actions { width:100%; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .search-form { grid-template-columns:1fr; } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
 @media (prefers-reduced-motion:no-preference) { .button,.result-button { transition:transform 80ms ease-out,box-shadow 80ms ease-out,filter 80ms ease-out,background-color 80ms ease-out; } .hero-duck { animation:duck-rock 3.1s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-rock { 0%,100% { transform:translateX(var(--duck-center)) translateY(-3px) rotate(-3deg); } 25% { transform:translateX(var(--duck-center)) translateY(-8px) rotate(0deg); } 50% { transform:translateX(var(--duck-center)) translateY(-12px) rotate(3deg); } 75% { transform:translateX(var(--duck-center)) translateY(-7px) rotate(-1deg); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
 @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } .hero-water::before { background-position:-2.5rem 0; } }
 `;
@@ -861,10 +859,17 @@ export const renderPublicDuckNotFound = (
   content: `<section class="page-panel">${duck()}<p class="eyebrow">Public duck detail</p><h1 class="page-title">${visibleNumber === undefined ? "That duck isn’t racing." : `Duck #${escapeHtml(visibleNumber)} isn’t racing.`}</h1><p class="lede">No duck with this number is paired with a participant in the current race. Check the number printed on the duck, or find it on the live race board.</p>${boardLink(phase)}</section>`,
 });
 
-export const renderStaffLogin = (returnTo = "/staff"): string => page({
+// Staff pages render the same primary site navigation as the public site, from
+// the same resolved phase, so a staff member sees the same Home/Register/My
+// Ducks/Staff links a visitor does. They deliberately do not set `liveNav`:
+// `data-live-nav` is the admission marker for the live navigation subscriber,
+// and `RaceUpdates` admits a bounded number of sockets, so staff surfaces keep
+// the server-rendered nav for the life of the document and hold no subscription.
+export const renderStaffLogin = (returnTo = "/staff", phase: PublicPhase = "PREPARING"): string => page({
   title: "Staff sign in",
   description: "Sign in to protected QuickDucks race operations.",
   robots: "noindex,nofollow",
+  phase,
   content: `
     <section class="page-panel">
       ${duck()}
@@ -895,6 +900,13 @@ const roleCheckboxes = operationalRoles.map((role) =>
 const staffLogoutForm = (): string =>
   '<form class="staff-logout" method="post" action="/staff/logout"><button type="submit">Sign out</button></form>';
 
+// The signed-in bar is the footer of every staff page, not a header on it. It
+// carries who is signed in and how to sign out, and nothing else: navigation is
+// the staff nav's job, and the page name is already the page's heading. Every
+// staff surface renders exactly this element, at the end of its panel.
+const staffFooter = (displayName: string): string =>
+  `<footer class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</footer>`;
+
 // Persistent staff navigation. It lists only the pages this actor may open, so a
 // missing link is a convenience filter; every page and API repeats the check.
 // `anyStaff` is open to every signed-in staff member, an empty `anyOf` is
@@ -905,13 +917,16 @@ interface StaffNavLink {
   access: "anyStaff" | { anyOf: readonly OperationalRole[] };
 }
 
+// Order is race-day reading order: the console first, then the three stations in
+// the order the announcer reports on them — Announcer, Start line, Finish line —
+// then Inventory, and administrator Access last.
 const staffNavLinks: readonly StaffNavLink[] = [
   { href: "/staff", label: "Console", access: "anyStaff" },
-  { href: "/staff/access", label: "Access", access: { anyOf: [] } },
-  { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
   { href: "/staff/announcer", label: "Announcer", access: { anyOf: ["ANNOUNCER", "RACE_DIRECTOR"] } },
+  { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
   { href: "/staff/finish-line", label: "Finish line", access: { anyOf: ["RESULT_TAKER", "RACE_DIRECTOR"] } },
   { href: "/staff/inventory", label: "Inventory", access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"] } },
+  { href: "/staff/access", label: "Access", access: { anyOf: [] } },
 ];
 
 const staffNav = (
@@ -932,6 +947,7 @@ export const renderStaffHome = (
   displayName: string,
   isSystemAdmin: boolean,
   roles: readonly OperationalRole[],
+  phase: PublicPhase = "PREPARING",
 ): string => {
   const hasRole = (role: OperationalRole): boolean => isSystemAdmin || roles.includes(role);
   const canUseConsole = isSystemAdmin || roles.length > 0;
@@ -939,23 +955,19 @@ export const renderStaffHome = (
   const canInventory = hasRole("DUCK_MANAGER") || hasRole("RACE_DIRECTOR");
   const canRaceRead = hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER")
     || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
-  const canStartLine = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
-  const canFinishLine = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
   return page({
   title: "Staff tools",
   description: "Protected QuickDucks staff race operations.",
   robots: "noindex,nofollow",
+  phase,
   content: `
     <section class="page-panel operations-panel" data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
-      <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</div>
       ${staffNav(isSystemAdmin, roles, "/staff")}
       ${duck()}
       <p class="eyebrow">Staff operations</p>
       <h1 class="page-title operations-title">Race control, in one place.</h1>
       <p class="lede">Open the duck’s NFC or QR tag. QuickDucks will take you to pairing when it is available, or inspection when it is already assigned.</p>
-      ${(canStartLine || canFinishLine) ? `<div class="actions station-links" aria-label="Race-day stations">${canStartLine ? '<a class="button station-control" href="/staff/start-line">Open start line</a>' : ""}${canFinishLine ? '<a class="button secondary station-control" href="/staff/finish-line">Open finish line</a>' : ""}</div>` : ""}
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
-      <div class="actions"><a class="button secondary" href="/mock/staff/ducks/128/pair">Preview pairing layout</a></div>
       <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants" data-event-scoped hidden>Participants</a>' : ""}${canInventory ? '<a href="/staff/inventory">Inventory</a>' : ""}${canRaceRead ? '<a href="#heats" data-event-scoped hidden>Heats</a>' : ""}${isSystemAdmin ? '<a href="#support" data-event-scoped hidden>Support</a>' : ""}</nav>
       <p class="message-line muted" data-console-message aria-live="polite">Loading operations…</p>
 
@@ -1053,6 +1065,7 @@ export const renderStaffHome = (
       </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
       ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
+      ${staffFooter(displayName)}
     </section>`,
   });
 };
@@ -1066,13 +1079,14 @@ export const renderStaffAccess = (
   displayName: string,
   isSystemAdmin = true,
   roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
 ): string => page({
   title: "Staff access",
   description: "Protected QuickDucks staff account and role management.",
   robots: "noindex,nofollow",
+  phase,
   content: `
     <section class="page-panel operations-panel" data-staff-access data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
-      <div class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</div>
       ${staffNav(isSystemAdmin, roles, "/staff/access")}
       ${duck()}
       <p class="eyebrow">Administrator</p>
@@ -1085,6 +1099,7 @@ export const renderStaffAccess = (
       <p class="message-line muted" data-staff-access-message aria-live="polite">Loading authorized staff…</p><div class="staff-access-list" data-staff-access-list></div>
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/staff-access.js" defer></script>
+      ${staffFooter(displayName)}
     </section>`,
 });
 
@@ -1093,12 +1108,13 @@ export const renderStartLine = (
   interactive = true,
   isSystemAdmin = false,
   roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
 ): string => page({
   title: "Start line",
   description: "Focused protected QuickDucks start-line station.",
   robots: "noindex,nofollow",
+  phase,
   content: `<section class="page-panel station-panel" data-start-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
-    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Start line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     ${staffNav(isSystemAdmin, roles, "/staff/start-line")}
     <p class="eyebrow">Start-line station</p><h1 class="page-title">Prepare the next heat.</h1>
     <p class="lede" data-station-event>Finding the active event and next heat.</p>
@@ -1107,6 +1123,7 @@ export const renderStartLine = (
     <div class="station-action" data-station-action></div>
     <p class="message-line muted" data-station-message aria-live="polite">This station can only ready, call, or start a heat.</p>
     ${interactive ? '<script src="/assets/start-line.js" defer></script>' : ""}
+    ${staffFooter(displayName)}
   </section>`,
 });
 
@@ -1119,12 +1136,13 @@ export const renderAnnouncer = (
   interactive = true,
   isSystemAdmin = false,
   roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
 ): string => page({
   title: "Announcer",
   description: "Focused protected QuickDucks announcer station.",
   robots: "noindex,nofollow",
+  phase,
   content: `<section class="page-panel station-panel announcer-panel" data-announcer${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
-    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Announcer</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     ${staffNav(isSystemAdmin, roles, "/staff/announcer")}
     <p class="eyebrow">Announcer station</p><h1 class="page-title">Read this out loud.</h1>
     <p class="lede" data-station-event>Finding the active event.</p>
@@ -1148,6 +1166,7 @@ export const renderAnnouncer = (
     </section>
     <p class="message-line muted" data-station-message aria-live="polite">This station only reads. It never changes the race.</p>
     ${interactive ? '<script src="/assets/announcer.js" defer></script>' : ""}
+    ${staffFooter(displayName)}
   </section>`,
 });
 
@@ -1156,12 +1175,13 @@ export const renderFinishLine = (
   interactive = true,
   isSystemAdmin = false,
   roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
 ): string => page({
   title: "Finish line",
   description: "Focused protected QuickDucks finish-line station.",
   robots: "noindex,nofollow",
+  phase,
   content: `<section class="page-panel station-panel" data-finish-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
-    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Finish line</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
     ${staffNav(isSystemAdmin, roles, "/staff/finish-line")}
     <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
     <p class="lede" data-station-event>Finding a running heat.</p>
@@ -1176,6 +1196,7 @@ export const renderFinishLine = (
     <button class="button station-control" type="button" data-submit-result disabled>Submit official result</button>
     <p class="message-line muted" data-station-message aria-live="polite">A scan only selects a duck. Nothing is submitted until you press the final button.</p>
     ${interactive ? '<script src="/assets/finish-line.js" defer></script>' : ""}
+    ${staffFooter(displayName)}
   </section>`,
 });
 
@@ -1193,13 +1214,14 @@ export const renderStaffInventory = (
   appOrigin: string,
   isSystemAdmin = false,
   roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
 ): string => page({
   title: "Inventory",
   description: "Protected QuickDucks duck inventory and NFC provisioning.",
   robots: "noindex,nofollow",
+  phase,
   content: `
     <section class="page-panel operations-panel" data-staff-inventory data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
-      <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Inventory</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
       ${staffNav(isSystemAdmin, roles, "/staff/inventory")}
       <p class="eyebrow">Physical ducks</p>
       <h1 class="page-title operations-title">Inventory</h1>
@@ -1270,6 +1292,7 @@ export const renderStaffInventory = (
       </section>
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/staff-inventory.js" defer></script>
+      ${staffFooter(displayName)}
     </section>`,
 });
 
@@ -1278,13 +1301,14 @@ export const renderStaffDuck = (
   displayName: string,
   isSystemAdmin = false,
   roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
 ): string => page({
   title: "Staff duck scan",
   description: "Protected QuickDucks duck pairing and inspection.",
   robots: "noindex,nofollow",
+  phase,
   content: `
     <section class="page-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
-      <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Staff scan</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
       ${staffNav(isSystemAdmin, roles)}
       <p class="eyebrow">Protected duck record</p>
       <h1 class="page-title" data-staff-title>Checking this duck…</h1>
@@ -1308,6 +1332,7 @@ export const renderStaffDuck = (
       </section>
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/staff-duck.js" defer></script>
+      ${staffFooter(displayName)}
     </section>`,
 });
 
@@ -1321,10 +1346,11 @@ export const renderStaffAuthError = (
   content: `<section class="page-panel"${access === undefined ? "" : ` data-live-staff data-system-admin="${access.isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(access.roles.join(","))}"`}>${duck()}<p class="eyebrow">Sign-in problem</p><h1 class="page-title">We couldn’t finish signing you in.</h1><div class="notice">${escapeHtml(message)}</div><div class="actions"><a class="button" href="/staff">Try staff sign in again</a><a class="button secondary" href="/">Back to public site</a></div></section>`,
 });
 
-export const renderStaffPairing = (): string => page({
+export const renderStaffPairing = (phase: PublicPhase = "PREPARING"): string => page({
   title: "Pair Duck #128",
   description: "Protected staff duck-pairing mockup.",
   robots: "noindex,nofollow",
+  phase,
   content: `<section class="page-panel"><p class="eyebrow">Protected staff preview</p><h1 class="page-title">Pair Duck #128</h1><p class="lede">This duck is available. Find the participant before confirming the assignment.</p><div class="privacy"><strong>Staff authentication required.</strong><span>Live scans verify the Cognito session and matching staff profile before showing codes or accepting a pairing command.</span></div><div class="facts"><div class="fact"><dt>Duck</dt><dd>#128 · Available</dd></div><div class="fact"><dt>Event</dt><dd>Summer Duck Race</dd></div></div><form><label>Participant code, name, phone, or email<input name="query" autocomplete="off" maxlength="80" placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com"></label><button class="button secondary" type="button">Find participant</button></form><div class="notice"><strong>Final confirmation required.</strong> Pairing shows participant and duck together before an authenticated command changes race data.</div></section>`,
 });
 

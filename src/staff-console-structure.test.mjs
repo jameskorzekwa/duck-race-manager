@@ -233,9 +233,10 @@ test("the console drives gating from the event load and the no-events branch", (
 });
 
 test("the staff nav lists only the pages the actor may open", () => {
+  const everyPage = ["/staff", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory", "/staff/access"];
   const cases = [
-    [renderStaffHome("Administrator", true, []), ["/staff", "/staff/access", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory"]],
-    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), ["/staff", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory"]],
+    [renderStaffHome("Administrator", true, []), everyPage],
+    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), ["/staff", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory"]],
     [renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"]), ["/staff", "/staff/start-line"]],
     [renderStaffHome("Result Taker", false, ["RESULT_TAKER"]), ["/staff", "/staff/finish-line"]],
     [renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]), ["/staff", "/staff/inventory"]],
@@ -243,8 +244,8 @@ test("the staff nav lists only the pages the actor may open", () => {
     [renderStaffHome("Registration Staff", false, ["REGISTRATION"]), ["/staff"]],
     [renderStaffHome("No Role", false, []), ["/staff"]],
     [renderStaffHome("Mixed Staff", false, ["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff", "/staff/finish-line", "/staff/inventory"]],
-    [renderStaffHome("Mixed Race Staff", false, ["ANNOUNCER", "HEAT_RUNNER"]), ["/staff", "/staff/start-line", "/staff/announcer"]],
-    [renderStaffAccess("Administrator"), ["/staff", "/staff/access", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory"]],
+    [renderStaffHome("Mixed Race Staff", false, ["ANNOUNCER", "HEAT_RUNNER"]), ["/staff", "/staff/announcer", "/staff/start-line"]],
+    [renderStaffAccess("Administrator"), everyPage],
   ];
 
   for (const [markup, expected] of cases) {
@@ -266,10 +267,10 @@ test("the staff nav lists only the pages the actor may open", () => {
   }
 });
 
-// The announcer works between the start line and the finish line, so the link
-// sits between them. Position is asserted as an adjacency, not an index, so the
-// requirement survives any later station being added or removed.
-test("the announcer link sits immediately to the right of Start line", () => {
+// The staff nav reads Console, Announcer, Start line, Finish line, Inventory,
+// Access. Order is asserted as adjacency and as ends of the list, not as fixed
+// indexes, so the requirement survives any later page being added or removed.
+test("the staff nav reads Console, Announcer, Start line, Finish line, Inventory, Access", () => {
   const navs = [
     ["administrator", staffNav(renderStaffHome("Administrator", true, []))],
     ["race director", staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]))],
@@ -279,19 +280,25 @@ test("the announcer link sits immediately to the right of Start line", () => {
   for (const [label, nav] of navs) {
     const hrefs = navHrefs(nav);
     assert.equal(
-      hrefs.indexOf("/staff/announcer"),
-      hrefs.indexOf("/staff/start-line") + 1,
-      `announcer must follow start line for ${label}`,
+      hrefs.indexOf("/staff/start-line"),
+      hrefs.indexOf("/staff/announcer") + 1,
+      `start line must follow announcer for ${label}`,
     );
-    assert.match(nav, /<a href="\/staff\/start-line"[^>]*>Start line<\/a><a href="\/staff\/announcer"[^>]*>Announcer<\/a>/, label);
+    assert.match(nav, /<a href="\/staff\/announcer"[^>]*>Announcer<\/a><a href="\/staff\/start-line"[^>]*>Start line<\/a>/, label);
+    assert.equal(hrefs[0], "/staff", `console is the left-most entry for ${label}`);
   }
 
+  // Access is administrator-only and is always the right-most entry.
+  const admin = navHrefs(staffNav(renderStaffHome("Administrator", true, [])));
+  assert.equal(admin.at(-1), "/staff/access");
+  assert.deepEqual(admin, ["/staff", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory", "/staff/access"]);
+
   // An announcer without the start-line role still gets the link, and it stays
-  // ahead of the finish line.
-  const announcerOnly = navHrefs(staffNav(renderStaffHome("Announcer", false, ["ANNOUNCER"])));
-  assert.deepEqual(announcerOnly, ["/staff", "/staff/announcer"]);
+  // ahead of the finish line and the inventory page.
+  assert.deepEqual(navHrefs(staffNav(renderStaffHome("Announcer", false, ["ANNOUNCER"]))), ["/staff", "/staff/announcer"]);
   const director = navHrefs(staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])));
   assert.ok(director.indexOf("/staff/announcer") < director.indexOf("/staff/finish-line"));
+  assert.ok(director.indexOf("/staff/finish-line") < director.indexOf("/staff/inventory"));
 });
 
 test("the staff nav is on every operational staff page and marks the current one", () => {
