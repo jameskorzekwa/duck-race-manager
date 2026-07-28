@@ -183,6 +183,10 @@ const consoleParts = {
   participantDuckNameFact: fromConsole(/const participantDuckNameFact = \(registration\) => \{[\s\S]*?\n\};/),
   clearParticipantDuckName: fromConsole(/const clearParticipantDuckName = async \(button\) => \{[\s\S]*?\n\};/),
   renderParticipantDetail: fromConsole(/const renderParticipantDetail = \(registration\) => \{[\s\S]*?\n\};/),
+  markParticipantSelection: fromConsole(/const markParticipantSelection = \(\) => \{[\s\S]*?\n\};/),
+  toggleParticipantDetail: fromConsole(/const toggleParticipantDetail = \(registrationId\) => \{[\s\S]*?\n\};/),
+  clearParticipantDetail: fromConsole(/const clearParticipantDetail = \(\) => \{[\s\S]*?\n\};/),
+  loadParticipants: fromConsole(/const loadParticipants = async \(pruneSelection = false\) => \{[\s\S]*?\n\};/),
 };
 
 const build = (parts, injected, returned) => {
@@ -998,4 +1002,144 @@ test("the inventory page keeps the inventory layout and the console keeps its fo
   assert.match(markup, /\.roster-entry-id \{ font-size:\.78rem; color:var\(--muted\); \}/);
   // The participant detail panel is programmatically focusable for deep links.
   assert.match(markup, /<article class="operation-card" tabindex="-1" data-participant-detail hidden>/);
+});
+
+// ---------------------------------------------------------------------------
+// Participant selection
+// ---------------------------------------------------------------------------
+
+const participantSummary = (registrationId, overrides = {}) => ({
+  registrationId,
+  firstName: "Ada",
+  lastName: registrationId.toUpperCase(),
+  lookupCode: "AAAA2345",
+  status: "SUBMITTED",
+  assignment: null,
+  ...overrides,
+});
+
+const participantListHarness = () => {
+  const document = new FakeDocument();
+  const participantList = document.hook("[data-participant-list]");
+  const participantDetail = document.hook("[data-participant-detail]", "article");
+  const participantFacts = document.hook("[data-participant-facts]", "dl");
+  const participantActions = document.hook("[data-participant-actions]");
+  const participantName = document.hook("[data-participant-name]", "h3");
+  participantDetail.hidden = true;
+  const messages = [];
+  const rendered = [];
+  const resets = [];
+  let listed = [];
+  const runtime = build(
+    [
+      "let selectedRegistration = null;",
+      "text",
+      "humanize",
+      "empty",
+      // A double for the detail renderer: this harness is about which
+      // participant is open, not about how the card is drawn.
+      "const renderParticipantDetail = (registration) => {\n"
+      + "  selectedRegistration = registration;\n"
+      + "  participantDetail.hidden = false;\n"
+      + "  rendered.push(registration.registrationId);\n"
+      + "};",
+      "loadParticipantDetail",
+      "clearParticipantDetail",
+      "markParticipantSelection",
+      "toggleParticipantDetail",
+      "loadParticipants",
+      "const openParticipantId = () => (selectedRegistration === null ? null : selectedRegistration.registrationId);",
+    ],
+    {
+      document,
+      participantList,
+      participantDetail,
+      participantFacts,
+      participantActions,
+      rendered,
+      currentEvent: { id: "event" },
+      participantQuery: () => new URLSearchParams({ limit: "200" }),
+      participantEditForm: { reset: () => resets.push("edit") },
+      setMessage: (message, isError) => messages.push([message, Boolean(isError)]),
+      api: async (url) => {
+        const detail = url.match(/\/registrations\/([^/?]+)$/);
+        if (detail !== null) return { registration: participantSummary(decodeURIComponent(detail[1])) };
+        return { registrations: listed };
+      },
+    },
+    ["loadParticipants", "openParticipantId"],
+  );
+  return {
+    ...runtime,
+    messages,
+    participantDetail,
+    participantName,
+    rendered,
+    setList: (registrations) => { listed = registrations; },
+    rows: () => participantList.children,
+    row: (registrationId) => participantList.children
+      .find((child) => child.dataset.registrationId === registrationId) ?? null,
+  };
+};
+
+test("pressing the open participant again closes the detail card and clears the highlight", async () => {
+  const harness = participantListHarness();
+  harness.setList([participantSummary("registration-1"), participantSummary("registration-2")]);
+  await harness.loadParticipants();
+
+  await harness.row("registration-1").dispatch("click");
+  assert.equal(harness.openParticipantId(), "registration-1");
+  assert.equal(harness.participantDetail.hidden, false);
+  assert.equal(harness.row("registration-1").className, "result-button is-selected");
+  assert.equal(harness.row("registration-1").getAttribute("aria-pressed"), "true");
+  assert.equal(harness.row("registration-2").getAttribute("aria-pressed"), "false");
+
+  // The same row again is how staff put a participant down.
+  await harness.row("registration-1").dispatch("click");
+  assert.equal(harness.openParticipantId(), null);
+  assert.equal(harness.participantDetail.hidden, true);
+  assert.equal(harness.row("registration-1").className, "result-button");
+  assert.equal(harness.row("registration-1").getAttribute("aria-pressed"), "false");
+  assert.equal(harness.participantName.textContent, "Participant detail");
+
+  // A different row still opens normally rather than toggling.
+  await harness.row("registration-2").dispatch("click");
+  assert.equal(harness.openParticipantId(), "registration-2");
+  assert.equal(harness.participantDetail.hidden, false);
+  assert.deepEqual(harness.rendered, ["registration-1", "registration-2"]);
+});
+
+test("a filtered reload drops a detail card the new list no longer contains", async () => {
+  const harness = participantListHarness();
+  harness.setList([participantSummary("registration-1"), participantSummary("registration-2")]);
+  await harness.loadParticipants();
+  await harness.row("registration-1").dispatch("click");
+  assert.equal(harness.openParticipantId(), "registration-1");
+
+  // "List participants" and the filter form ask for a pruning reload.
+  harness.setList([participantSummary("registration-2")]);
+  await harness.loadParticipants(true);
+  assert.equal(harness.openParticipantId(), null);
+  assert.equal(harness.participantDetail.hidden, true);
+  assert.equal(harness.row("registration-1"), null);
+  assert.equal(harness.row("registration-2").getAttribute("aria-pressed"), "false");
+});
+
+test("a reload that still contains the open participant keeps the card and the highlight", async () => {
+  const harness = participantListHarness();
+  harness.setList([participantSummary("registration-1"), participantSummary("registration-2")]);
+  await harness.loadParticipants();
+  await harness.row("registration-1").dispatch("click");
+
+  await harness.loadParticipants(true);
+  assert.equal(harness.openParticipantId(), "registration-1");
+  assert.equal(harness.participantDetail.hidden, false);
+  assert.equal(harness.row("registration-1").getAttribute("aria-pressed"), "true");
+
+  // A background reload after a mutation never prunes: the card it just
+  // rendered must survive a list the filter no longer matches.
+  harness.setList([participantSummary("registration-2")]);
+  await harness.loadParticipants();
+  assert.equal(harness.openParticipantId(), "registration-1");
+  assert.equal(harness.participantDetail.hidden, false);
 });

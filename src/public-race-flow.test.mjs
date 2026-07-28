@@ -696,10 +696,33 @@ test("the search leads My Ducks only while nothing is saved on the device", () =
 });
 
 test("My Ducks offers Register again only while registration is open", () => {
-  assert.match(renderMyDucks("REGISTRATION"), /<a class="button" href="\/register">Register another participant<\/a>/);
+  assert.match(
+    renderMyDucks("REGISTRATION"),
+    /<a class="button small" href="\/register" data-register-another>Register another participant<\/a>/,
+  );
   for (const phase of ["PREPARING", "LOCKED_IN", "RACING", "RESULTS"]) {
     assert.doesNotMatch(renderMyDucks(phase), /href="\/register"/, phase);
   }
+});
+
+test("Register again sits on the Awaiting Participants header row and wraps on a narrow screen", () => {
+  const markup = renderMyDucks("REGISTRATION");
+  const head = markup.match(
+    /<div class="participant-section-head">\s*<h2 id="awaiting-participants-title">Awaiting Participants<\/h2>([\s\S]*?)<\/div>\s*<p class="muted">Participants you registered on this device, waiting/,
+  )?.[1];
+
+  assert.ok(head, "the awaiting heading row must still be one participant-section-head block");
+  assert.match(head, /data-register-another/);
+  // The carousel controls stay in the same row, after the register action.
+  assert.ok(head.indexOf("data-register-another") < head.indexOf("data-carousel-controls"));
+  // Nothing is left behind in a trailing actions block.
+  assert.doesNotMatch(markup, /<div class="actions"><a class="button" href="\/register">/);
+
+  // The row is a wrapping flex row and every part of it can shrink, so 320px
+  // wraps instead of overflowing.
+  assert.match(markup, /\.participant-section-head \{[^}]*flex-wrap:wrap;/);
+  assert.match(markup, /\.participant-section-head-actions \{[^}]*flex-wrap:wrap;[^}]*min-width:0;/);
+  assert.match(markup, /@media \(max-width:43\.99rem\)[^@]*\.participant-section-head-actions \{ flex-basis:100%; justify-content:flex-start; \}/);
 });
 
 // --- private data ------------------------------------------------------------
