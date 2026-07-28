@@ -328,6 +328,126 @@ export interface WinnerByTagCandidate {
   participantDisplayName: string;
 }
 
+/**
+ * The one stable machine-readable reason the finish line uses for "this duck
+ * raced, but its racer is withdrawn or disqualified, so it cannot be the
+ * winner".
+ *
+ * A duck that is already in a heat bag stays in that bag: nobody empties a bag
+ * on the bank to fish one duck out, and the heat entries must never be
+ * reordered because the ducks in a bag are indistinguishable without scanning
+ * every one of them. So the withdrawn duck keeps racing physically and can
+ * simply cross the line first. That is an expected race-day outcome and not a
+ * failure, so every finish-line surface that can meet it reports this exact
+ * reason with `422` and tells the staffer to scan the next duck to finish.
+ */
+export const FINISH_DUCK_INELIGIBLE_REASON = "DUCK_NOT_ELIGIBLE";
+
+const registrationStatusLabel = (status: string): string => status === "WITHDRAWN"
+  ? "Withdrawn"
+  : status === "DISQUALIFIED"
+    ? "Disqualified"
+    : status.replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+
+export interface IneligibleFinishDuck {
+  raceEntryId: string;
+  participantDisplayName: string;
+  visibleNumber: number;
+  registrationStatus: string;
+}
+
+// The projection deliberately stays inside what the finish-line scan already
+// returns for an eligible duck: the policy-filtered public display name and the
+// visible duck number. No contact detail, lookup code, or tag token is added.
+const ineligibleFinishResponse = (duck: IneligibleFinishDuck): Response => json({
+  error: `Duck #${duck.visibleNumber} · ${duck.participantDisplayName} is `
+    + `${registrationStatusLabel(duck.registrationStatus)} and cannot be recorded as the winner. `
+    + "Leave this duck where it is and scan the next duck to pass the finish line.",
+  reason: FINISH_DUCK_INELIGIBLE_REASON,
+  ineligible: {
+    raceEntryId: duck.raceEntryId,
+    participantDisplayName: duck.participantDisplayName,
+    visibleNumber: duck.visibleNumber,
+    registrationStatus: duck.registrationStatus,
+  },
+}, 422);
+
+export interface WinnerByTagIneligible extends IneligibleFinishDuck {
+  eventId: string;
+  heatId: string;
+  heatNumber: number;
+  round: "ROUND_ONE";
+  reason: typeof FINISH_DUCK_INELIGIBLE_REASON;
+}
+
+// The mirror image of `winnerByTagCandidate`: the same tag, the same sole
+// awaiting round-one heat, the same current assignment and roster place — but a
+// racer who is no longer ACTIVE. It exists so the scan station can say
+// "Withdrawn, scan the next duck" instead of falling through to a bare "not the
+// current winner candidate" refusal. It is a read; nothing about the heat, its
+// entries, or their slot numbers is touched.
+export const winnerByTagIneligible = async (
+  env: Env,
+  token: string,
+): Promise<WinnerByTagIneligible | null> => {
+  if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return null;
+  const row = await env.DB.prepare(
+    `SELECT e.id AS event_id, h.id AS heat_id, he.race_entry_id,
+            h.heat_number, e.public_name_policy, d.visible_number,
+            r.status AS registration_status, r.first_name, r.last_name
+       FROM duck_tags dt
+       JOIN duck_assignments da
+         ON da.duck_id = dt.duck_id AND da.valid_to IS NULL
+       JOIN ducks d ON d.id = da.duck_id
+       JOIN heat_entries he
+         ON he.event_id = da.event_id AND he.race_entry_id = da.race_entry_id
+       JOIN heats h
+         ON h.id = he.heat_id AND h.event_id = he.event_id
+        AND h.round = 'ROUND_ONE' AND h.status = 'AWAITING_RESULT'
+       JOIN events e
+         ON e.id = h.event_id AND e.status = 'ROUND_ONE'
+       JOIN race_entries re ON re.id = he.race_entry_id
+       JOIN registrations r ON r.id = re.registration_id AND r.status <> 'ACTIVE'
+      WHERE dt.token = ? AND dt.status = 'ACTIVE'
+        AND (SELECT COUNT(*) FROM heats awaiting
+              WHERE awaiting.event_id = e.id
+                AND awaiting.status = 'AWAITING_RESULT') = 1
+      LIMIT 1`,
+  ).bind(token).first<{
+    event_id: string;
+    heat_id: string;
+    race_entry_id: string;
+    heat_number: number;
+    public_name_policy: string;
+    visible_number: number;
+    registration_status: string;
+    first_name: string;
+    last_name: string;
+  }>();
+  if (
+    row === null
+    || typeof row.event_id !== "string"
+    || typeof row.heat_id !== "string"
+    || typeof row.race_entry_id !== "string"
+    || !Number.isSafeInteger(row.heat_number)
+    || !Number.isSafeInteger(row.visible_number)
+    || typeof row.registration_status !== "string"
+    || typeof row.first_name !== "string"
+    || typeof row.last_name !== "string"
+  ) return null;
+  return {
+    eventId: row.event_id,
+    heatId: row.heat_id,
+    raceEntryId: row.race_entry_id,
+    heatNumber: row.heat_number,
+    round: "ROUND_ONE",
+    reason: FINISH_DUCK_INELIGIBLE_REASON,
+    registrationStatus: row.registration_status,
+    visibleNumber: row.visible_number,
+    participantDisplayName: publicDisplayName(row.public_name_policy, row.first_name, row.last_name),
+  };
+};
+
 // A tag offers a winner action only when it resolves through the current duck
 // assignment to the sole result waiting in the active round. This is also used
 // immediately before the mutation; the guarded finalization SQL repeats every
@@ -454,10 +574,22 @@ const finishScan = async (url: URL, env: Env, eventId: string, heatId: string): 
     visible_number: number;
   }>();
   if (selection !== null) {
+    // Expected, not exceptional. A withdrawn or disqualified racer's duck was
+    // already bagged for this heat, so it is still in the water and can still
+    // reach the line first. Say which duck it is and what its status is, and
+    // send the staffer straight back to scanning. Nothing is written and no
+    // heat entry moves.
     if (selection.registration_status !== "ACTIVE") {
-      return json({
-        error: "That roster entry is no longer active. Do not record a result; ask the race director to resolve the roster.",
-      }, 422);
+      return ineligibleFinishResponse({
+        raceEntryId: selection.race_entry_id,
+        participantDisplayName: publicDisplayName(
+          selection.public_name_policy,
+          selection.first_name,
+          selection.last_name,
+        ),
+        visibleNumber: selection.visible_number,
+        registrationStatus: selection.registration_status,
+      });
     }
     return json({
       selection: {
@@ -1066,9 +1198,19 @@ const validateResultSet = (
     return json({ error: "Every result must identify a participant on this heat roster." }, 422);
   }
   const byRaceEntry = new Map(roster.map((entry) => [entry.race_entry_id, entry]));
-  if (results.some((result) => byRaceEntry.get(result.raceEntryId)?.registration_status !== "ACTIVE")) {
+  // A racer can be withdrawn between selecting their duck and pressing submit.
+  // That is the same expected outcome the scan reports, so it carries the same
+  // stable reason and names exactly which selections to drop, letting the
+  // station clear them and keep taking scans instead of dead-ending.
+  const ineligibleRaceEntryIds = results
+    .filter((result) => byRaceEntry.get(result.raceEntryId)?.registration_status !== "ACTIVE")
+    .map((result) => result.raceEntryId);
+  if (ineligibleRaceEntryIds.length > 0) {
     return json({
-      error: "Every selected result participant must still be ACTIVE. Refresh the heat and ask the race director to resolve inactive roster entries.",
+      error: "One of these ducks belongs to a withdrawn or disqualified racer and cannot be recorded."
+        + " Remove it and scan the next duck to pass the finish line.",
+      reason: FINISH_DUCK_INELIGIBLE_REASON,
+      ineligibleRaceEntryIds,
     }, 422);
   }
   if (results.some((result) => byRaceEntry.get(result.raceEntryId)?.duck_assignment_id === null)) {
@@ -1313,6 +1455,18 @@ const finalizeWinnerByTag = async (
   }
 
   const candidate = await winnerByTagCandidate(env, token);
+  if (candidate === null) {
+    // Distinguish "this racer is withdrawn or disqualified" from every other
+    // reason a tag is not the current candidate, so a stale control that fires
+    // anyway reports the same expected outcome the scan already showed.
+    const ineligible = await winnerByTagIneligible(env, token);
+    if (
+      ineligible !== null
+      && ineligible.eventId === eventId
+      && ineligible.heatId === heatId
+      && ineligible.raceEntryId === raceEntryId
+    ) return ineligibleFinishResponse(ineligible);
+  }
   if (
     candidate === null
     || candidate.eventId !== eventId

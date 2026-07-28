@@ -903,3 +903,105 @@ test("the guarded split insert refuses a heat that would exceed final capacity m
   );
   assertStructurallySound(database);
 });
+
+// A paired duck is already inside a physical heat bag. If its racer leaves the
+// race, nobody empties that bag on the bank to fish one duck out, and the heat
+// entries can never be reordered either, because the ducks inside a bag are
+// indistinguishable without scanning every one of them. So the finish line's
+// answer for that duck must move nothing at all.
+test("a duck whose racer left the race is reported at the finish line without moving one heat entry", async (context) => {
+  const { database, env, participants } = await setup(context, { ducksPerHeat: 3, participantCount: 6 });
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [3, 3]);
+  await assertRoundOneStarts(env, database);
+
+  const heat = heatRow(database, 1);
+  const move = async (operation, revision) => {
+    const response = await handleHeatOperations(new Request(
+      `https://quickducks.com/api/v1/staff/events/event_test/heats/${heat.id}/${operation}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ commandId: crypto.randomUUID(), revision }),
+      },
+    ), env, director);
+    assert.equal(response.status, 201, `${operation}: ${await response.clone().text()}`);
+    return (await response.json()).heat.revision;
+  };
+  let revision = heat.revision;
+  for (const operation of ["ready", "call", "start", "finish"]) revision = await move(operation, revision);
+
+  // Whatever route puts a racer in this state, the finish line has to answer it.
+  const stranded = participants[1];
+  database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-2'");
+
+  const layoutBefore = heatLayout(database);
+  const rostersBefore = [rosterOf(database, 1), rosterOf(database, 2)];
+  const entriesBefore = database.prepare(
+    "SELECT id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source FROM heat_entries ORDER BY id",
+  ).all().map((row) => ({ ...row }));
+
+  const scanned = await handleHeatOperations(new Request(
+    `https://quickducks.com/api/v1/staff/events/event_test/heats/${heat.id}/finish-scan?value=`
+      + encodeURIComponent(`https://quickducks.com/t/${stranded.token}`),
+  ), { ...env, APP_ORIGIN: "https://quickducks.com" }, director);
+  assert.equal(scanned.status, 422);
+  const scannedBody = await scanned.json();
+  assert.equal(scannedBody.reason, "DUCK_NOT_ELIGIBLE");
+  assert.equal(scannedBody.ineligible.registrationStatus, "DISQUALIFIED");
+  assert.equal(scannedBody.ineligible.raceEntryId, stranded.raceEntryId);
+
+  const confirmed = await handleHeatOperations(new Request(
+    `https://quickducks.com/api/v1/staff/ducks/${stranded.token}/heat-winner`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: "event_test",
+        heatId: heat.id,
+        raceEntryId: stranded.raceEntryId,
+        revision,
+      }),
+    },
+  ), env, director);
+  assert.equal(confirmed.status, 422);
+  assert.equal((await confirmed.json()).reason, "DUCK_NOT_ELIGIBLE");
+
+  // Not one entry moved, no heat was renumbered, rebalanced, or emptied, and no
+  // result or command was written.
+  assert.deepEqual(heatLayout(database), layoutBefore);
+  assert.deepEqual([rosterOf(database, 1), rosterOf(database, 2)], rostersBefore);
+  assert.deepEqual(
+    database.prepare(
+      "SELECT id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source FROM heat_entries ORDER BY id",
+    ).all().map((row) => ({ ...row })),
+    entriesBefore,
+  );
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'",
+  ).get().count, 0);
+  assertStructurallySound(database);
+
+  // The next duck to pass the line still records normally, and the disqualified
+  // racer is still sitting in the same slot afterwards.
+  const winner = participants[2];
+  const recorded = await handleHeatOperations(new Request(
+    `https://quickducks.com/api/v1/staff/ducks/${winner.token}/heat-winner`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: "event_test",
+        heatId: heat.id,
+        raceEntryId: winner.raceEntryId,
+        revision,
+      }),
+    },
+  ), env, director);
+  assert.equal(recorded.status, 201, await recorded.clone().text());
+  assert.deepEqual(rosterOf(database, 1), rostersBefore[0]);
+  assert.deepEqual(rosterOf(database, 2), rostersBefore[1]);
+  assertStructurallySound(database);
+});

@@ -7,7 +7,7 @@ import {
   type OperationalRole,
 } from "./authorization.ts";
 import { publicDuckName } from "./duck-name-filter.ts";
-import { winnerByTagCandidate } from "./heat-operations.ts";
+import { winnerByTagCandidate, winnerByTagIneligible } from "./heat-operations.ts";
 import { isLookupCode, normalizeLookupCode } from "./participant-qr.ts";
 import { isCommandId } from "./registration.ts";
 import {
@@ -267,10 +267,16 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
   if (duck === null) return json({ error: "Duck not found." }, 404);
 
   const includePii = canViewParticipantPii(actor);
-  const winnerAction = hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"])
+  const resultTaker = hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"])
     && duck.assignment_id !== null
-    && duck.event_status === "ROUND_ONE"
-    ? await winnerByTagCandidate(env, token)
+    && duck.event_status === "ROUND_ONE";
+  const winnerAction = resultTaker ? await winnerByTagCandidate(env, token) : null;
+  // A duck paired to a racer who later withdrew or was disqualified is still in
+  // its heat bag and still in the water, so it can still reach the line first.
+  // The scan station must therefore name that outcome plainly instead of
+  // silently offering no winner button at all.
+  const winnerIneligible = resultTaker && winnerAction === null
+    ? await winnerByTagIneligible(env, token)
     : null;
   const assignment = duck.assignment_id === null ? null : {
     id: duck.assignment_id,
@@ -318,6 +324,7 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
     },
     assignment,
     winnerAction,
+    winnerIneligible,
   });
 };
 

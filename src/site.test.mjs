@@ -646,3 +646,73 @@ test("the tag token pattern still accepts exactly what the server accepts", () =
   assert.equal(field.test("has/slash"), false);
   assert.equal(field.test(""), false);
 });
+
+// Pairing puts a physical duck into a physical heat bag it never comes out of,
+// so the pairing screen has to shout which bag before the staffer walks away.
+test("the pairing page carries an unmissable heat-bag callout above everything else", () => {
+  const page = renderStaffDuck("a".repeat(32), "Registration staff");
+
+  assert.match(
+    page,
+    /<section class="heat-bag" data-heat-bag hidden aria-live="assertive" aria-label="Which heat bag this duck goes into">/,
+  );
+  for (const hook of [
+    "data-heat-bag-instruction",
+    "data-heat-bag-number",
+    "data-heat-bag-duck",
+    "data-heat-bag-note",
+    "data-heat-bag-dismiss",
+  ]) assert.ok(page.includes(hook), hook);
+  // It stays until the staffer says the duck is in the bag; nothing else clears it.
+  assert.match(page, /data-heat-bag-dismiss>Done — this duck is in the bag</);
+  // It is the first thing in the panel, above the duck record and the pairing work area.
+  assert.ok(page.indexOf("data-heat-bag") < page.indexOf("data-duck-summary"));
+  assert.ok(page.indexOf("data-heat-bag") < page.indexOf("data-pairing-work"));
+  // The server never paints a heat number into the markup; the client renders
+  // the authoritative one from the pairing response.
+  const callout = page.match(/<section class="heat-bag"[\s\S]*?<\/section>/)[0];
+  assert.doesNotMatch(callout, /Heat \d|heat \d/);
+
+  // A role that cannot pair is offered no bag panel at all.
+  assert.doesNotMatch(renderStaffDuck("a".repeat(32), "Result staff", false, ["RESULT_TAKER"]), /data-heat-bag/);
+});
+
+test("the heat-bag callout is styled loud, high contrast, and safe at 320px", () => {
+  assert.match(style, /\.heat-bag \{[^}]*border:6px solid var\(--ink\)/);
+  assert.match(style, /\.heat-bag \{[^}]*background:var\(--yellow\)/);
+  assert.match(style, /\.heat-bag \{[^}]*box-shadow:8px 8px 0 var\(--ink\)/);
+  // The bag number is display sized; the instruction is large but secondary.
+  assert.match(style, /\.heat-bag-number \{ font-size:clamp\(3rem,17vw,7rem\)/);
+  assert.match(style, /\.heat-bag-instruction \{ font-size:clamp\(1\.35rem,6vw,2\.4rem\)/);
+  // Every line wraps rather than pushing a narrow phone sideways, and the
+  // pending state shrinks its wordy headline so it still fits.
+  for (const rule of ["instruction", "number", "duck", "note"]) {
+    assert.match(style, new RegExp(`\\.heat-bag-${rule} \\{[^}]*overflow-wrap:anywhere`));
+  }
+  assert.match(style, /\.heat-bag\.pending \{[^}]*background:#ffd8d2/);
+  assert.match(style, /\.heat-bag\.pending \.heat-bag-number \{ font-size:clamp\(1\.5rem,7vw,2\.6rem\)/);
+  assert.match(style, /\.heat-bag \.button \{ width:100%; \}/);
+});
+
+// Scanning a withdrawn or disqualified duck at the finish line is a normal
+// outcome, so it gets its own calm region rather than the error message line.
+test("the finish line has a dedicated region for a duck that cannot be recorded", () => {
+  const page = renderFinishLine("Finish staff", false);
+
+  assert.match(
+    page,
+    /<section class="station-ineligible" data-finish-ineligible hidden aria-live="assertive" aria-label="Duck that cannot be recorded"><\/section>/,
+  );
+  // It sits above the scan form so it is read before the next scan is typed.
+  assert.ok(page.indexOf("data-finish-ineligible") < page.indexOf("data-finish-scan-form"));
+  // The station keeps its ordinary message line and its scan controls.
+  assert.match(page, /class="message-line muted" data-station-message aria-live="polite"/);
+  assert.match(page, /data-start-nfc/);
+
+  assert.match(style, /\.station-ineligible \{[^}]*border:5px solid #9f261c/);
+  assert.match(style, /\.station-ineligible \{[^}]*background:#ffd8d2/);
+  assert.match(style, /\.station-ineligible strong \{[^}]*overflow-wrap:anywhere/);
+  assert.match(style, /\.station-ineligible p \{[^}]*overflow-wrap:anywhere/);
+  // The scanned-duck page reuses the winner panel in the same refused colours.
+  assert.match(style, /\.winner-action\.ineligible \{ border-color:#9f261c; background:#ffd8d2; \}/);
+});

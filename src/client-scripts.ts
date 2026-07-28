@@ -2326,6 +2326,26 @@ const finishSelectionProblem = (selected, roster, raceEntryId) => {
   if (!roster.some((entry) => entry.raceEntryId === raceEntryId)) return "wrong-heat";
   return null;
 };
+// A withdrawn or disqualified racer's duck was already in this heat's bag when
+// they left the race, and nobody empties a bag on the bank to fish one duck out,
+// so it is still in the water and can still cross the line first. That is an
+// expected race-day outcome, not a failure: name the duck, name its real status,
+// and send the staffer straight back to scanning.
+const finishIneligibleStatusLabel = (status) => status === "WITHDRAWN"
+  ? "Withdrawn"
+  : status === "DISQUALIFIED"
+    ? "Disqualified"
+    : String(status || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+const finishIneligibleLines = (duck) => duck
+  ? [
+    "Duck #" + duck.visibleNumber + " is " + finishIneligibleStatusLabel(duck.registrationStatus),
+    duck.participantDisplayName + " cannot be recorded as a winner, and this duck stays in its heat.",
+    "Scan the next duck to pass the finish line.",
+  ]
+  : [
+    "That duck cannot be recorded",
+    "Scan the next duck to pass the finish line.",
+  ];
 `;
 
 export const finishScanSerializationScript = String.raw`
@@ -2428,6 +2448,7 @@ const finishSelections = document.querySelector("[data-finish-selections]");
 const finishSubmit = document.querySelector("[data-submit-result]");
 const finishMessage = document.querySelector("[data-station-message]");
 const finishNfcButton = document.querySelector("[data-start-nfc]");
+const finishIneligible = document.querySelector("[data-finish-ineligible]");
 let finishEvent = null;
 let finishHeat = null;
 let finishRosterEntries = [];
@@ -2455,8 +2476,38 @@ const finishApi = async (url, options) => {
   }
   let body = null;
   try { body = await response.json(); } catch {}
-  if (!response.ok) throw new Error(body && body.error ? body.error : "The race could not be refreshed.");
+  if (!response.ok) {
+    const failure = new Error(body && body.error ? body.error : "The race could not be refreshed.");
+    failure.status = response.status;
+    // The server distinguishes "this duck's racer is withdrawn or disqualified"
+    // from a genuine failure with one stable reason, so the station can present
+    // that as the expected race-day outcome it is rather than as an error.
+    failure.reason = body && typeof body.reason === "string" ? body.reason : null;
+    failure.ineligible = body && body.ineligible ? body.ineligible : null;
+    failure.ineligibleRaceEntryIds = body && Array.isArray(body.ineligibleRaceEntryIds)
+      ? body.ineligibleRaceEntryIds
+      : [];
+    throw failure;
+  }
   return body;
+};
+const FINISH_DUCK_NOT_ELIGIBLE = "DUCK_NOT_ELIGIBLE";
+const finishClearIneligible = () => {
+  if (!finishIneligible) return;
+  finishIneligible.replaceChildren();
+  finishIneligible.hidden = true;
+};
+// Nothing here disarms the scanner, clears the heat, or leaves a state that has
+// to be dismissed: the station is immediately ready for the next duck.
+const finishShowIneligible = (failure) => {
+  if (!finishIneligible) return;
+  const [headline, ...rest] = finishIneligibleLines(failure.ineligible);
+  // Reveal the live region before writing into it, so the announcement is a
+  // change inside a region that is already in the accessibility tree.
+  finishIneligible.hidden = false;
+  finishIneligible.replaceChildren(finishText("strong", headline));
+  for (const line of rest) finishIneligible.append(finishText("p", line));
+  finishMessage.textContent = "Scan the next duck to pass the finish line.";
 };
 const finishAddFact = (label, value) => {
   const fact = finishText("div", "", "fact");
@@ -2541,6 +2592,7 @@ const finishRunSerializedSelection = finishCreateSerializedSelector({
       return false;
     }
     finishSelected.push({ ...selection, place: captured.intendedPlace });
+    finishClearIneligible();
     finishRenderSelections();
     finishScanForm.elements.duck.value = "";
     globalThis.quickDucksLive.markClean(finishScanForm);
@@ -2564,7 +2616,15 @@ const finishSelectValue = async (value) => {
   try {
     return await finishRunSerializedSelection(value);
   } catch (error) {
-    if (error.message !== "signed-out") finishMessage.textContent = error.message;
+    if (error.message === "signed-out") return;
+    // Expected outcome, not a failure: the station keeps its heat, keeps the
+    // scan form and the NFC button enabled, and is ready for the next duck the
+    // moment this returns.
+    if (error.reason === FINISH_DUCK_NOT_ELIGIBLE) {
+      finishShowIneligible(error);
+      return;
+    }
+    finishMessage.textContent = error.message;
   }
 };
 const finishRender = (event, detail) => {
@@ -2579,7 +2639,10 @@ const finishRender = (event, detail) => {
   finishEvent = event;
   finishHeat = detail.heat;
   finishRosterEntries = detail.roster;
-  if (changedHeatContext) finishSelected = [];
+  if (changedHeatContext) {
+    finishSelected = [];
+    finishClearIneligible();
+  }
   else finishSelected = finishSelected.filter((selection) => finishRosterEntries.some((entry) => entry.raceEntryId === selection.raceEntryId));
   finishEventLabel.textContent = event.name + " · " + finishHumanize(event.status);
   finishHeatTitle.textContent = (finishHeat.round === "FINAL" ? "Final" : "Round one") + " · Heat " + finishHeat.number;
@@ -2646,6 +2709,7 @@ const finishEmpty = (message) => {
   finishFacts.replaceChildren();
   finishRoster.replaceChildren(finishText("li", "A running or just-finished heat will appear here."));
   finishAction.replaceChildren();
+  finishClearIneligible();
   finishScanForm.hidden = true;
   finishSelections.hidden = true;
   finishSubmit.hidden = true;
@@ -2708,11 +2772,26 @@ finishSubmit.addEventListener("click", async () => {
       }),
     });
     finishSelected = [];
+    finishClearIneligible();
     await finishLoad();
     finishMessage.textContent = "Official result saved. The station has moved to the next available heat.";
   } catch (error) {
-    if (error.message !== "signed-out") finishMessage.textContent = error.message;
-    finishSubmit.disabled = false;
+    if (error.message === "signed-out") {
+      // The redirect owns this page now.
+    } else if (error.reason === FINISH_DUCK_NOT_ELIGIBLE) {
+      // Someone was withdrawn between selecting their duck and submitting.
+      // Drop exactly those selections, renumber the rest, and stay armed.
+      const dropped = error.ineligibleRaceEntryIds;
+      finishSelected = finishSelected
+        .filter((selection) => !dropped.includes(selection.raceEntryId))
+        .map((selection, index) => ({ ...selection, place: index + 1 }));
+      finishShowIneligible(error);
+    } else {
+      finishMessage.textContent = error.message;
+    }
+    // Recomputes the submit state from what is actually selected now, so a
+    // dropped selection cannot leave an armed submit behind.
+    finishRenderSelections();
   } finally {
     finishCommandBusy = false;
     endBusy();
@@ -5833,8 +5912,48 @@ const qrLoadDecoder = (documentRef, scope) => {
 };
 `;
 
+// Pairing puts a physical duck into a physical heat bag, and it stays in that
+// bag, in that position, for the whole race: nobody empties a bag on the bank to
+// find one duck, and heat entries are never reordered because the ducks inside a
+// bag are indistinguishable without scanning every one of them.
+//
+// So the bag number is the loudest thing on the pairing screen, and it is ALWAYS
+// the heat the server's pairing command actually committed. This helper is a
+// pure function of that response on purpose: it takes the heat the server
+// returned and never counts entries, increments a previous number, or otherwise
+// derives one. A guessed number here puts a real duck in the wrong real bag.
+export const heatBagHelpersScript = String.raw`
+const heatBagCallout = (heat, duckNumber, heatAssignmentPending) => {
+  const duckLabel = "Duck #" + duckNumber;
+  // Say so plainly rather than printing a blank or an invented bag number.
+  if (!heat || heatAssignmentPending === true || typeof heat.number !== "number") {
+    return {
+      pending: true,
+      instruction: "Do not bag this duck yet",
+      number: "No heat assigned",
+      duck: duckLabel + " is paired",
+      note: "QuickDucks did not return a heat for this pairing, so there is no bag to put "
+        + duckLabel + " in. Keep it aside and ask the race director which heat it belongs to"
+        + " before it goes into any bag.",
+    };
+  }
+  // The round comes from the server too. A repair pairing during racing can land
+  // in the final, and that is a different bag from round-one heat 1.
+  const bag = heat.round === "FINAL" ? "FINAL heat " + heat.number : "HEAT " + heat.number;
+  return {
+    pending: false,
+    instruction: "Put this duck in " + bag + " bag",
+    number: (heat.round === "FINAL" ? "Final · Heat " : "Heat ") + heat.number,
+    duck: duckLabel,
+    note: "Walk " + duckLabel + " to the " + bag.toLowerCase()
+      + " bag now. It stays in that bag, in that position, for the rest of the race.",
+  };
+};
+`;
+
 export const staffDuckScript = participantQrHelpersScript
   + participantQrDecoderScript
+  + heatBagHelpersScript
   + String.raw`
 const root = document.querySelector("[data-staff-duck]");
 const token = root.dataset.token;
@@ -5843,6 +5962,11 @@ const summary = document.querySelector("[data-duck-summary]");
 const workArea = document.querySelector("[data-pairing-work]");
 const winnerAction = document.querySelector("[data-winner-action]");
 const message = document.querySelector("[data-staff-message]");
+const heatBag = document.querySelector("[data-heat-bag]");
+const heatBagInstruction = document.querySelector("[data-heat-bag-instruction]");
+const heatBagNumber = document.querySelector("[data-heat-bag-number]");
+const heatBagDuck = document.querySelector("[data-heat-bag-duck]");
+const heatBagNote = document.querySelector("[data-heat-bag-note]");
 let currentEvent = null;
 let selectedRegistration = null;
 let staffDuckBusy = 0;
@@ -5879,8 +6003,42 @@ const addFact = (label, value) => {
   summary.append(fact);
 };
 
+// The real registration status, in plain race-day words.
+const ineligibleStatusLabel = (status) => status === "WITHDRAWN"
+  ? "Withdrawn"
+  : status === "DISQUALIFIED"
+    ? "Disqualified"
+    : String(status || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+
+// The bag panel is painted straight from the pairing response the server
+// returned, through the pure helper above. Nothing here decides a heat number.
+const showHeatBag = (result) => {
+  if (!heatBag) return;
+  const callout = heatBagCallout(result.heat, result.duck.visibleNumber, result.heatAssignmentPending);
+  heatBag.classList.toggle("pending", callout.pending);
+  // Reveal the live region before writing into it, so the announcement is a
+  // change inside a region that is already in the accessibility tree.
+  heatBag.hidden = false;
+  heatBagInstruction.textContent = callout.instruction;
+  heatBagNumber.textContent = callout.number;
+  heatBagDuck.textContent = callout.duck;
+  heatBagNote.textContent = callout.note;
+  heatBag.scrollIntoView({ block: "start" });
+};
+
+if (heatBag) {
+  // It stays up until the staffer says the duck is physically in the bag, or
+  // until they scan the next duck, which loads a different page entirely. A
+  // live refresh must never take it off the screen while they walk to the bags.
+  heatBag.querySelector("[data-heat-bag-dismiss]").addEventListener("click", () => {
+    heatBag.hidden = true;
+    message.textContent = "Scan the next duck to pair it.";
+  });
+}
+
 const renderWinnerAction = (data) => {
   winnerAction.replaceChildren();
+  winnerAction.classList.remove("ineligible");
   if (winnerSuccess !== null) {
     const success = winnerSuccess;
     winnerSuccess = null;
@@ -5892,6 +6050,23 @@ const renderWinnerAction = (data) => {
     return;
   }
   const candidate = data.winnerAction;
+  // The finish line scanned a duck whose racer is withdrawn or disqualified.
+  // That duck was bagged before the withdrawal and is still in the water, so
+  // this is a normal race-day outcome, not an error: name the duck, name the
+  // status, and send the staffer straight back to the finish line.
+  const ineligible = data.winnerIneligible;
+  if (!candidate && ineligible) {
+    winnerAction.hidden = false;
+    winnerAction.classList.add("ineligible");
+    winnerAction.append(
+      text("strong", "Duck #" + data.duck.visibleNumber + " is " + ineligibleStatusLabel(ineligible.registrationStatus)),
+      text("p", ineligible.participantDisplayName + " cannot be recorded as the Heat "
+        + ineligible.heatNumber + " winner, and this duck stays in its heat."),
+      text("p", "Scan the next duck to pass the finish line."),
+    );
+    message.textContent = "This duck cannot win. Scan the next duck to pass the finish line.";
+    return;
+  }
   if (!candidate) {
     winnerAction.hidden = true;
     return;
@@ -6050,7 +6225,12 @@ const pairWithLookupCode = async (lookupCode) => {
     summary.replaceChildren();
     addFact("Duck", "#" + result.duck.visibleNumber);
     addFact("Participant", result.participant.firstName + " " + result.participant.lastName);
-    addFact("Heat", result.heat ? "Round one · Heat " + result.heat.number : "Assignment pending");
+    // Both facts read the server's own heat. The round comes from the response
+    // too, because a repair pairing can land in the final.
+    addFact("Heat bag", result.heat
+      ? (result.heat.round === "FINAL" ? "Final" : "Round one") + " · Heat " + result.heat.number
+      : "Not assigned yet");
+    showHeatBag(result);
     pageTitle.textContent = "Duck #" + result.duck.visibleNumber + " paired";
     message.textContent = result.replayed ? "This pairing was already saved." : "Duck paired successfully.";
     selectedRegistration = null;

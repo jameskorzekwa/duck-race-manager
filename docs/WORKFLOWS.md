@@ -1569,9 +1569,24 @@ the atomic command re-checks both the open slot and that capacity with guarded
 SQL. Pairing stays available through `REGISTRATION_CLOSED` so a participant
 paired after the close still lands in a heat.
 
-**Operator step:** physically place ducks in a bag labeled with
-the returned heat number. QuickDucks records no bag placement or expected
-physical location confirmation.
+**Implemented:** because that duck immediately goes into a physical heat bag it
+does not come out of, a successful pairing paints one large, high-contrast,
+full-width callout at the very top of the pairing page and scrolls it into view.
+It reads *Put this duck in HEAT 3 bag* with the heat number at display size, the
+duck number beside it as secondary information, and a note that the duck stays in
+that bag, in that position, for the rest of the race. It carries an assertive
+`aria-live` announcement and stays on screen until the staffer presses **Done —
+this duck is in the bag** or scans the next duck, so a live refresh cannot take
+it away while they walk to the bags.
+
+The bag is always the round and heat number the pairing command itself committed
+and returned; the browser never counts entries or derives a number. A repair
+pairing during racing can return the final, and the callout names the final heat
+rather than a round-one one. When the response reports `heatAssignmentPending`
+or no heat at all, the callout turns to its refused colours and says *Do not bag
+this duck yet* with no number, directing the staffer to ask the race director
+which heat it belongs to. QuickDucks still records no bag placement or physical
+location confirmation.
 
 ### Assignment, Reassignment, and Unassignment
 
@@ -1848,6 +1863,28 @@ confirmed POST revalidates the tag, assignment, roster entry, event round, heat
 revision, and sole awaiting heat inside the atomic result command before it
 publishes the winner. A result taker receives no contact details, lookup code,
 pairing control, or name-moderation control on that inspection page.
+
+**A withdrawn or disqualified duck at the finish line is an expected outcome,
+not an error.** A duck that has been paired is already inside a heat bag, and
+nobody empties a bag on the bank to fish one duck out, so that duck keeps racing
+and can cross the line first. Every finish-line surface that can meet it answers
+the same way: `422` with a stable `reason` of `DUCK_NOT_ELIGIBLE` and an
+`ineligible` projection carrying the race entry, the policy-filtered display
+name, the visible duck number, and the real registration status. That covers
+resolving a roster duck by tag URL or by visible number, confirming a scanned
+round-one winner, and submitting a reviewed result whose racer was withdrawn in
+between — the last of which also names the exact `ineligibleRaceEntryIds` to
+drop. The projection adds no contact detail, lookup code, or tag token beyond
+what an eligible scan already returns.
+
+The station presents it as a plain statement — *Duck #12 is Withdrawn*, that
+this duck stays in its heat, and *Scan the next duck to pass the finish line* —
+and stays armed: the heat, the scan field, and the NFC reader are untouched and
+nothing has to be dismissed. Scanning that duck's tag instead lands on its staff
+inspection page, which shows the same statement in place of the winner action.
+Nothing is written and **no heat entry is removed, reordered, renumbered, or
+rebalanced**: the withdrawn duck keeps its heat and its slot, and so does every
+other duck, both before and after a winner is recorded around it.
 
 The final keeps the complete-podium station flow. It requires distinct places 1
 through `min(3, final roster size)`. Every selection displays place,

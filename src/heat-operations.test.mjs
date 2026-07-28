@@ -5,7 +5,12 @@ import test from "node:test";
 
 import { staffHomeScript } from "./client-scripts.ts";
 import { handleEventOperations } from "./event-operations.ts";
-import { handleHeatOperations, winnerByTagCandidate } from "./heat-operations.ts";
+import {
+  FINISH_DUCK_INELIGIBLE_REASON,
+  handleHeatOperations,
+  winnerByTagCandidate,
+  winnerByTagIneligible,
+} from "./heat-operations.ts";
 
 // The full ordered chain, so heat behavior is always exercised against the
 // schema production actually runs.
@@ -846,7 +851,9 @@ test("heat lock, finish scan, validation, and atomic finalization require ACTIVE
     "https://quickducks.com/api/v1/staff/events/event/heats/heat-active/finish-scan?value=1",
   ));
   assert.equal(inactiveScan.status, 422);
-  assert.match((await inactiveScan.json()).error, /no longer active.*race director/i);
+  const inactiveScanBody = await inactiveScan.json();
+  assert.equal(inactiveScanBody.reason, FINISH_DUCK_INELIGIBLE_REASON);
+  assert.match(inactiveScanBody.error, /Withdrawn.*scan the next duck to pass the finish line/i);
 
   const inactiveResult = await handle(jsonRequest(
     "/api/v1/staff/events/event/heats/heat-active/results/finalize",
@@ -854,7 +861,10 @@ test("heat lock, finish scan, validation, and atomic finalization require ACTIVE
     { commandId: commandId(), revision: 4, results: [{ raceEntryId: "entry-1", place: 1 }] },
   ));
   assert.equal(inactiveResult.status, 422);
-  assert.match((await inactiveResult.json()).error, /must still be ACTIVE.*Refresh the heat/i);
+  const inactiveResultBody = await inactiveResult.json();
+  assert.equal(inactiveResultBody.reason, FINISH_DUCK_INELIGIBLE_REASON);
+  assert.deepEqual(inactiveResultBody.ineligibleRaceEntryIds, ["entry-1"]);
+  assert.match(inactiveResultBody.error, /withdrawn or disqualified.*scan the next duck/i);
 
   database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-1'");
   DB.beforeBatch = () => {
@@ -1482,4 +1492,237 @@ test("a heat refuses to start while any racer in it holds no duck", async () => 
   assert.equal(roster.find((entry) => entry.raceEntryId === "entry-2").duck.visibleNumber, 99);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
+});
+
+// A duck that has been paired is already inside a physical heat bag. If its
+// racer then withdraws or is disqualified, nobody empties that bag on the bank
+// to fish one duck out, so the duck keeps racing and can still reach the line
+// first. The finish line must therefore treat scanning it as a normal, expected
+// outcome — and must never move, renumber, or remove its heat entry to make the
+// problem go away.
+const seedAwaitingFinishHeat = (database) => {
+  seedRace(database);
+  seedRoundOneHeats(database);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    UPDATE heats
+       SET status = 'AWAITING_RESULT', roster_locked_at = '2026-07-26T11:00:00Z',
+           started_at = '2026-07-26T11:05:00Z', finished_at = '2026-07-26T11:10:00Z',
+           revision = 5
+     WHERE id = 'heat-1';
+    UPDATE heats SET status = 'READY' WHERE id = 'heat-2';
+  `);
+  const tag = database.prepare(
+    "INSERT INTO duck_tags (id, duck_id, token, status, activated_at) VALUES (?, ?, ?, 'ACTIVE', '2026-07-26T10:00:00Z')",
+  );
+  const tokens = {};
+  for (let index = 1; index <= 6; index += 1) {
+    tokens[`duck-${index}`] = String.fromCharCode(96 + index).repeat(32);
+    tag.run(`tag-${index}`, `duck-${index}`, tokens[`duck-${index}`]);
+  }
+  return tokens;
+};
+
+const heatEntrySnapshot = (database) => database.prepare(
+  `SELECT id, heat_id, race_entry_id, round, slot_number, assignment_source
+     FROM heat_entries ORDER BY id`,
+).all().map((row) => ({ ...row }));
+
+const finishWriteSnapshot = (database) => ({
+  results: database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count,
+  commands: database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'",
+  ).get().count,
+  heatRevision: database.prepare("SELECT revision, status FROM heats WHERE id = 'heat-1'").get().revision,
+  heatStatus: database.prepare("SELECT status FROM heats WHERE id = 'heat-1'").get().status,
+});
+
+for (const status of ["WITHDRAWN", "DISQUALIFIED"]) {
+  test(`the finish line reports a ${status} duck by tag URL and by number without touching its heat`, async (context) => {
+    const database = createDatabase();
+    context.after(() => database.close());
+    const tokens = seedAwaitingFinishHeat(database);
+    database.exec(`UPDATE registrations SET status = '${status}' WHERE id = 'registration-2'`);
+    const env = { APP_ORIGIN: "https://quickducks.com", DB: d1(database) };
+    const handle = (request) => handleHeatOperations(request, env, actor);
+
+    const entriesBefore = heatEntrySnapshot(database);
+    const writesBefore = finishWriteSnapshot(database);
+
+    // Both resolution paths the station offers: the canonical tag URL a scan
+    // produces, and the visible number a staffer can read off the duck.
+    for (const value of [`https://quickducks.com/t/${tokens["duck-2"]}`, "2"]) {
+      const response = await handle(new Request(
+        "https://quickducks.com/api/v1/staff/events/event/heats/heat-1/finish-scan?value="
+          + encodeURIComponent(value),
+      ));
+      assert.equal(response.status, 422, value);
+      const body = await response.json();
+      assert.equal(body.reason, FINISH_DUCK_INELIGIBLE_REASON, value);
+      assert.deepEqual(body.ineligible, {
+        raceEntryId: "entry-2",
+        participantDisplayName: "Donald D.",
+        visibleNumber: 2,
+        registrationStatus: status,
+      }, value);
+      // Plain language: which duck, what it is, and what to do next.
+      assert.match(body.error, /^Duck #2 · Donald D\. is (Withdrawn|Disqualified)/, value);
+      assert.match(body.error, /scan the next duck to pass the finish line\.$/i, value);
+      // No contact detail, lookup code, or tag token leaks into the refusal.
+      const serialized = JSON.stringify(body);
+      assert.equal(serialized.includes("CODE0002"), false, value);
+      assert.equal(serialized.includes(tokens["duck-2"]), false, value);
+    }
+
+    // Confirming the same duck through the scanned-winner endpoint reports the
+    // identical expected outcome instead of a bare "not the winner candidate".
+    const confirmed = await handle(jsonRequest(
+      `/api/v1/staff/ducks/${tokens["duck-2"]}/heat-winner`,
+      "POST",
+      {
+        commandId: commandId(),
+        eventId: "event",
+        heatId: "heat-1",
+        raceEntryId: "entry-2",
+        revision: 5,
+      },
+    ));
+    assert.equal(confirmed.status, 422);
+    const confirmedBody = await confirmed.json();
+    assert.equal(confirmedBody.reason, FINISH_DUCK_INELIGIBLE_REASON);
+    assert.equal(confirmedBody.ineligible.registrationStatus, status);
+
+    // Submitting them as the reviewed result names exactly which selection to
+    // drop, with the same stable reason, so the station can stay armed.
+    const submitted = await handle(jsonRequest(
+      "/api/v1/staff/events/event/heats/heat-1/results/finalize",
+      "POST",
+      { commandId: commandId(), revision: 5, results: [{ raceEntryId: "entry-2", place: 1 }] },
+    ));
+    assert.equal(submitted.status, 422);
+    const submittedBody = await submitted.json();
+    assert.equal(submittedBody.reason, FINISH_DUCK_INELIGIBLE_REASON);
+    assert.deepEqual(submittedBody.ineligibleRaceEntryIds, ["entry-2"]);
+
+    // Nothing was written and, critically, no heat entry moved: the withdrawn
+    // duck keeps its heat, its slot number, and its position among the others.
+    assert.deepEqual(heatEntrySnapshot(database), entriesBefore);
+    assert.deepEqual(finishWriteSnapshot(database), writesBefore);
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+
+    // The station is not stuck: an ACTIVE duck in the same heat still resolves
+    // and still records normally on the very next scan.
+    const active = await handle(new Request(
+      "https://quickducks.com/api/v1/staff/events/event/heats/heat-1/finish-scan?value="
+        + encodeURIComponent(`https://quickducks.com/t/${tokens["duck-3"]}`),
+    ));
+    assert.equal(active.status, 200);
+    assert.deepEqual((await active.json()).selection, {
+      raceEntryId: "entry-3",
+      participantDisplayName: "Della D.",
+      visibleNumber: 3,
+    });
+
+    const recorded = await handle(jsonRequest(
+      `/api/v1/staff/ducks/${tokens["duck-3"]}/heat-winner`,
+      "POST",
+      {
+        commandId: commandId(),
+        eventId: "event",
+        heatId: "heat-1",
+        raceEntryId: "entry-3",
+        revision: 5,
+      },
+    ));
+    assert.equal(recorded.status, 201, JSON.stringify(await recorded.clone().json()));
+    assert.equal(
+      database.prepare("SELECT race_entry_id FROM heat_results WHERE heat_id = 'heat-1'").get().race_entry_id,
+      "entry-3",
+    );
+    // The withdrawn racer is still exactly where they were, in slot order,
+    // after a winner was published around them.
+    assert.deepEqual(
+      database.prepare(
+        "SELECT race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-1' ORDER BY slot_number",
+      ).all().map((row) => ({ ...row })),
+      [
+        { race_entry_id: "entry-1", slot_number: 1 },
+        { race_entry_id: "entry-2", slot_number: 2 },
+        { race_entry_id: "entry-3", slot_number: 3 },
+      ],
+    );
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  });
+}
+
+test("winnerByTagIneligible mirrors the candidate query and answers only for a real roster place", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const tokens = seedAwaitingFinishHeat(database);
+  const env = { DB: d1(database) };
+
+  // While the racer is ACTIVE, the duck is a candidate and never ineligible.
+  assert.equal(await winnerByTagIneligible(env, tokens["duck-2"]), null, "active racer");
+  assert.equal((await winnerByTagCandidate(env, tokens["duck-2"])).raceEntryId, "entry-2");
+
+  database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-2'");
+  assert.equal(await winnerByTagCandidate(env, tokens["duck-2"]), null, "withdrawn racer is no candidate");
+  assert.deepEqual(await winnerByTagIneligible(env, tokens["duck-2"]), {
+    eventId: "event",
+    heatId: "heat-1",
+    raceEntryId: "entry-2",
+    heatNumber: 1,
+    round: "ROUND_ONE",
+    reason: FINISH_DUCK_INELIGIBLE_REASON,
+    registrationStatus: "WITHDRAWN",
+    visibleNumber: 2,
+    participantDisplayName: "Donald D.",
+  });
+
+  // A withdrawn racer in a different heat, an unknown tag, and an unassigned
+  // duck all stay null, exactly like the candidate query.
+  database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-5'");
+  assert.equal(await winnerByTagIneligible(env, tokens["duck-5"]), null, "duck outside the awaiting heat");
+  assert.equal(await winnerByTagIneligible(env, "z".repeat(32)), null, "unknown tag");
+  assert.equal(await winnerByTagIneligible(env, "short"), null, "malformed token");
+  database.exec(
+    "UPDATE duck_assignments SET valid_to = '2026-07-26T11:20:00Z', end_reason = 'UNASSIGNED' WHERE id = 'assignment-2'",
+  );
+  assert.equal(await winnerByTagIneligible(env, tokens["duck-2"]), null, "duck no longer assigned");
+});
+
+test("the finish-line ineligible outcome is refused to roles that may not take results", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const tokens = seedAwaitingFinishHeat(database);
+  database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-2'");
+  const env = { APP_ORIGIN: "https://quickducks.com", DB: d1(database) };
+
+  for (const roles of [["ANNOUNCER"], ["HEAT_RUNNER"], ["REGISTRATION"], ["DUCK_MANAGER"], []]) {
+    const reader = { ...actor, isSystemAdmin: false, roles };
+    const scan = await handleHeatOperations(new Request(
+      "https://quickducks.com/api/v1/staff/events/event/heats/heat-1/finish-scan?value=2",
+    ), env, reader);
+    assert.equal(scan.status, 403, roles.join(",") || "no roles");
+    const confirm = await handleHeatOperations(jsonRequest(
+      `/api/v1/staff/ducks/${tokens["duck-2"]}/heat-winner`,
+      "POST",
+      { commandId: commandId(), eventId: "event", heatId: "heat-1", raceEntryId: "entry-2", revision: 5 },
+    ), env, reader);
+    assert.equal(confirm.status, 403, roles.join(",") || "no roles");
+  }
+
+  // A result taker gets the expected-outcome answer, and an administrator
+  // passes the same check implicitly.
+  for (const permitted of [
+    { ...actor, isSystemAdmin: false, roles: ["RESULT_TAKER"] },
+    { ...actor, isSystemAdmin: true, roles: [] },
+  ]) {
+    const scan = await handleHeatOperations(new Request(
+      "https://quickducks.com/api/v1/staff/events/event/heats/heat-1/finish-scan?value=2",
+    ), env, permitted);
+    assert.equal(scan.status, 422);
+    assert.equal((await scan.json()).reason, FINISH_DUCK_INELIGIBLE_REASON);
+  }
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
 });
