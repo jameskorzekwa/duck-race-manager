@@ -1,0 +1,65 @@
+name: Agent Reconcile
+
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: quickducks-agent-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: github.event_name == 'schedule' || github.actor_id == '38769771'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Reconcile durable pipeline state
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const module = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
+            await module.reconcileAgentPipeline({ github, context, core });
+
+  queue-next:
+    needs: reconcile
+    if: needs.reconcile.result == 'success'
+    concurrency:
+      group: quickducks-agent-merge-lane
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Admit oldest approved PR
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const module = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
+            await module.queueNextApproved({ github, context, core });

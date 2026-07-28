@@ -1,0 +1,30 @@
+name: Agent feature or fix
+description: Submit a feature, fix, or documentation change to the OpenCode agent pipeline.
+title: "[Agent] "
+labels:
+  - agent:inbox
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or feature
+      description: Describe the observed problem or desired behavior and who it affects.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List externally observable conditions that must be true when the work is complete.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and context
+      description: Include relevant workflows, prior issues, screenshots, compatibility requirements, or explicit non-goals.
+    validations:
+      required: false

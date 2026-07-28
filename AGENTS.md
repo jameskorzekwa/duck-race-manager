@@ -18,7 +18,7 @@ src/                 # Worker routing, APIs, rendered UI, browser scripts, tests
 db/migrations/       # Ordered D1 schema and database invariants
 docs/                # Current workflows, infrastructure runbooks, design history
 infra/aws/           # Cognito, SES, and IAM CloudFormation
-.github/workflows/   # Credential-free CI and main/tag production CD
+.github/workflows/   # CI, GitHub agent pipeline, and main/tag production CD
 wrangler.jsonc       # Production Worker, D1, queue, rate-limit, and domain bindings
 wrangler.local.jsonc # Local-only Worker entry and loopback origin; never deployed
 scripts/             # Release, validation, and local seeding tools
@@ -66,8 +66,9 @@ separate server on port 8787 at the same time.
 
 ## INTEGRATION TESTS BEFORE RELEASE
 
-Merging to `main` deploys to production unattended. The release gate is thorough,
-automated integration coverage — not asking James to test every branch manually.
+Merging to `main` starts a production release whose deployment waits for James's
+GitHub environment approval. The code gate is thorough automated integration
+coverage — not asking James to test every branch manually.
 
 **Every new feature or behavior change must add or extend integration tests
 before it is released.** A feature without integration coverage is incomplete
@@ -157,8 +158,9 @@ manual hold. After merging, confirm the release pipeline and production health.
 - Preserve exact D1 binding/resource names unless a coordinated infrastructure
   migration explicitly changes them.
 - Normal production releases follow required CI and a reviewed merge to `main`;
-  the release workflow validates again, deploys unattended, then creates the
-  automatic patch tag and release. Intentional major/minor releases use a
+  the release workflow validates again, waits for production-environment
+  approval, deploys, then creates the automatic patch tag and release.
+  Intentional major/minor releases use a
   reviewed protected tag on a default-branch commit. Because that merge ships
   straight to production, every feature and behavior change requires thorough
   integration coverage first — see INTEGRATION TESTS BEFORE RELEASE.

@@ -1,0 +1,471 @@
+const STATE_LABELS = [
+  "agent:inbox",
+  "agent:triage",
+  "agent:ready",
+  "agent:running",
+  "agent:grouped",
+  "agent:blocked",
+  "agent:review",
+  "agent:approved",
+  "agent:deployed",
+  "agent:failed",
+];
+
+export function closingIssueNumbers(body) {
+  const matches = [...String(body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)];
+  return [...new Set(matches.map((match) => Number(match[1])))];
+}
+
+export function markerNumbers(comments, name) {
+  return markerGroups(comments, name).flat();
+}
+
+export function markerGroups(comments, name) {
+  const pattern = new RegExp(`<!-- agent-pipeline ${name}=([0-9]+(?:,[0-9]+)*) -->`, "g");
+  return comments.flatMap(({ body }) => [...String(body ?? "").matchAll(pattern)]
+    .map((match) => match[1].split(",").map(Number)));
+}
+
+function labelNames(item) {
+  return new Set((item.labels ?? []).map((label) => typeof label === "string" ? label : label.name));
+}
+
+function sensitivePath(path) {
+  return path.startsWith(".github/")
+    || path.startsWith(".opencode/")
+    || path.startsWith("infra/")
+    || path.startsWith("db/migrations/")
+    || path.startsWith("scripts/")
+    || path.startsWith("wrangler")
+    || ["opencode.json", "package.json", "package-lock.json", "AGENTS.md"].includes(path);
+}
+
+async function sensitivePullRequest(github, owner, repo, pullNumber) {
+  const files = await github.paginate(github.rest.pulls.listFiles, {
+    owner, repo, pull_number: pullNumber, per_page: 100,
+  });
+  return files.some(({ filename }) => sensitivePath(filename));
+}
+
+async function currentHumanApproval(github, owner, repo, pullNumber, headSha) {
+  const reviews = await github.paginate(github.rest.pulls.listReviews, {
+    owner, repo, pull_number: pullNumber, per_page: 100,
+  });
+  const latest = reviews
+    .filter((review) => review.user?.id === 38769771 && review.commit_id === headSha)
+    .sort((left, right) => Date.parse(left.submitted_at) - Date.parse(right.submitted_at))
+    .at(-1);
+  return latest?.state === "APPROVED";
+}
+
+function pipelinePullProvenance(pr, defaultBranch) {
+  const branch = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
+  const marker = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
+  const linked = closingIssueNumbers(pr.body);
+  return pr.user?.id === 219766164
+    && pr.base.ref === defaultBranch
+    && pr.head.repo?.id === pr.base.repo?.id
+    && branch !== null
+    && marker !== null
+    && linked.length === 1
+    && Number(branch[1]) === linked[0]
+    && marker[1] === branch[2]
+    && marker[2] === branch[1]
+    && marker[3] === pr.base.sha;
+}
+
+async function validExactCheck(github, owner, repo, pr) {
+  const checks = await github.rest.checks.listForRef({
+    owner, repo, ref: pr.head.sha, check_name: "Agent Review / Exact SHA", per_page: 100,
+  });
+  const check = checks.data.check_runs
+    .sort((left, right) => Date.parse(right.started_at) - Date.parse(left.started_at))[0];
+  const match = check?.external_id?.match(new RegExp(`^agent-review:${pr.base.sha}:(\\d+)$`));
+  if (check?.status !== "completed" || check.conclusion !== "success"
+      || check.app?.slug !== "github-actions" || !match) return false;
+  try {
+    const run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: Number(match[1]) })).data;
+    return run.path === ".github/workflows/agent-review.yml"
+      && ["pull_request_target", "pull_request_review"].includes(run.event);
+  } catch (error) {
+    if (error.status === 404) return false;
+    throw error;
+  }
+}
+
+export async function reconcileAgentPipeline({ github, context, core }) {
+  const { owner, repo } = context.repo;
+  const defaultBranch = context.payload.repository.default_branch;
+
+  const removeLabel = async (issueNumber, name) => {
+    try {
+      await github.rest.issues.removeLabel({ owner, repo, issue_number: issueNumber, name });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  };
+  const setState = async (issueNumber, state) => {
+    const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+    const labels = [...labelNames(issue)].filter((label) => !STATE_LABELS.includes(label));
+    await github.rest.issues.setLabels({
+      owner, repo, issue_number: issueNumber, labels: [...labels, state],
+    });
+  };
+  const commentsFor = (issueNumber) => github.paginate(github.rest.issues.listComments, {
+    owner, repo, issue_number: issueNumber, per_page: 100,
+  });
+  const commentOnce = async (issueNumber, marker, body) => {
+    const comments = await commentsFor(issueNumber);
+    if (comments.some((comment) => comment.body?.includes(marker))) return;
+    await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: `${marker}\n${body}` });
+  };
+  const dispatch = (issueNumber) => github.rest.actions.createWorkflowDispatch({
+    owner,
+    repo,
+    workflow_id: "agent-task.yml",
+    ref: defaultBranch,
+    inputs: { issue: String(issueNumber) },
+  });
+  const issuesWithLabel = async (label) => (await github.paginate(github.rest.issues.listForRepo, {
+    owner, repo, state: "open", labels: label, per_page: 100,
+  })).filter((issue) => !issue.pull_request);
+
+  const slots = await github.paginate(github.rest.search.issuesAndPullRequests, {
+    q: `repo:${owner}/${repo} is:pr label:agent:merge-slot`, sort: "created", order: "asc", per_page: 100,
+  });
+  if (slots.length > 1) {
+    core.warning(`Found ${slots.length} merge slots; retaining only PR #${slots[0].number}.`);
+    for (const extra of slots.slice(1)) await removeLabel(extra.number, "agent:merge-slot");
+  }
+  if (slots[0]) {
+    const pr = (await github.rest.pulls.get({ owner, repo, pull_number: slots[0].number })).data;
+    const linkedIssues = closingIssueNumbers(pr.body);
+    const issueNumber = linkedIssues.length === 1 ? linkedIssues[0] : undefined;
+    if (issueNumber === undefined || !pipelinePullProvenance(pr, defaultBranch)) {
+      await removeLabel(pr.number, "agent:merge-slot");
+      await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["agent:failed"] });
+      await commentOnce(
+        pr.number,
+        `<!-- agent-pipeline invalid-slot=${pr.number} -->`,
+        "Merge slot released because the PR does not close exactly one issue.",
+      );
+    } else if (pr.state === "open") {
+      if (!labelNames(pr).has("agent:approved")) {
+        await removeLabel(pr.number, "agent:merge-slot");
+      } else {
+        const defaultRef = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
+        const exactCheckValid = await validExactCheck(github, owner, repo, pr);
+        const humanApproved = !await sensitivePullRequest(github, owner, repo, pr.number)
+          || await currentHumanApproval(github, owner, repo, pr.number, pr.head.sha);
+        if (defaultRef.data.commit.sha !== pr.base.sha || !exactCheckValid || !humanApproved) {
+          try {
+            await github.graphql(`
+              mutation($pullRequestId: ID!) {
+                disablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId }) {
+                  pullRequest { number }
+                }
+              }
+            `, { pullRequestId: pr.node_id });
+          } catch (error) {
+            core.warning(`Unable to disable auto-merge for stale PR #${pr.number}: ${error.message}`);
+          }
+          await removeLabel(pr.number, "agent:merge-slot");
+          await removeLabel(pr.number, "agent:approved");
+          await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["agent:failed"] });
+          await setState(issueNumber, "agent:failed");
+          await commentOnce(
+            issueNumber,
+            `<!-- agent-pipeline stale-approval=${pr.head.sha} -->`,
+            `PR #${pr.number} lost exact-head/base approval and was removed from the merge lane.`,
+          );
+        }
+      }
+    } else if (!pr.merged_at) {
+      await removeLabel(pr.number, "agent:merge-slot");
+      await setState(issueNumber, "agent:failed");
+      await commentOnce(
+        issueNumber,
+        `<!-- agent-pipeline slot-closed=${pr.number} -->`,
+        `PR #${pr.number} closed without merging; the merge slot was released.`,
+      );
+    } else {
+      const releaseRuns = await github.rest.actions.listWorkflowRuns({
+        owner,
+        repo,
+        workflow_id: "release.yml",
+        event: "push",
+        per_page: 100,
+      });
+      const runs = releaseRuns.data.workflow_runs
+        .filter((run) => run.head_sha === pr.merge_commit_sha)
+        .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+      const active = runs.find((run) => run.status !== "completed");
+      const completed = runs.find((run) => run.status === "completed");
+      if (!active && completed?.conclusion === "success") {
+        await removeLabel(pr.number, "agent:merge-slot");
+        await setState(issueNumber, "agent:deployed");
+        await commentOnce(
+          issueNumber,
+          `<!-- agent-pipeline deployed=${pr.merge_commit_sha} -->`,
+          `Production release succeeded for PR #${pr.number} at \`${pr.merge_commit_sha}\`.`,
+        );
+      } else if (!active && completed) {
+        await setState(issueNumber, "agent:failed");
+        await commentOnce(
+          issueNumber,
+          `<!-- agent-pipeline release-failed=${completed.id} -->`,
+          `Production release failed for PR #${pr.number}. The merge slot remains locked: ${completed.html_url}`,
+        );
+      } else if (!active && runs.length === 0 && Date.now() - Date.parse(pr.merged_at) > 30 * 60 * 1000) {
+        await setState(issueNumber, "agent:failed");
+        await commentOnce(
+          issueNumber,
+          `<!-- agent-pipeline release-missing=${pr.merge_commit_sha} -->`,
+          `No Release run appeared for merged PR #${pr.number}; the merge slot remains locked.`,
+        );
+      }
+    }
+  }
+
+  for (const issue of await issuesWithLabel("agent:grouped")) {
+    const comments = await commentsFor(issue.number);
+    const canonical = markerNumbers(comments, "canonical-issue");
+    if (canonical.length !== 1) {
+      await setState(issue.number, "agent:failed");
+      await commentOnce(
+        issue.number,
+        "<!-- agent-pipeline invalid-group-marker -->",
+        "Grouped work must contain exactly one canonical-issue marker.",
+      );
+      continue;
+    }
+    const canonicalIssue = (await github.rest.issues.get({ owner, repo, issue_number: canonical[0] })).data;
+    if (!labelNames(canonicalIssue).has("agent:deployed")) continue;
+    await setState(issue.number, "agent:inbox");
+    await commentOnce(
+      issue.number,
+      `<!-- agent-pipeline group-released=${canonical[0]} -->`,
+      `Canonical issue #${canonical[0]} deployed; this bounded follow-up is released.`,
+    );
+    await dispatch(issue.number);
+  }
+
+  for (const issue of await issuesWithLabel("agent:blocked")) {
+    const comments = await commentsFor(issue.number);
+    const blockerGroups = markerGroups(comments, "blocked-by");
+    const blockers = blockerGroups[0] ?? [];
+    if (blockerGroups.length !== 1 || blockers.length === 0 || new Set(blockers).size !== blockers.length) {
+      await setState(issue.number, "agent:failed");
+      await commentOnce(
+        issue.number,
+        "<!-- agent-pipeline invalid-blocker-marker -->",
+        "Blocked work must contain one marker listing unique blocker issue numbers.",
+      );
+      continue;
+    }
+    const blockerIssues = await Promise.all(blockers.map((number) => github.rest.issues.get({
+      owner, repo, issue_number: number,
+    })));
+    if (!blockerIssues.every(({ data }) => data.state === "closed")) continue;
+    await setState(issue.number, "agent:inbox");
+    await commentOnce(
+      issue.number,
+      `<!-- agent-pipeline blockers-cleared=${blockers.join(",")} -->`,
+      `All blockers (${blockers.map((number) => `#${number}`).join(", ")}) are closed; work is released.`,
+    );
+    await dispatch(issue.number);
+  }
+
+  const openPulls = await github.paginate(github.rest.pulls.list, {
+    owner, repo, state: "open", per_page: 100,
+  });
+  const issuesWithOpenPulls = new Set(openPulls
+    .filter((pr) => pipelinePullProvenance(pr, defaultBranch))
+    .flatMap((pr) => closingIssueNumbers(pr.body)));
+  const closedPulls = await github.paginate(github.rest.pulls.list, {
+    owner, repo, state: "closed", sort: "updated", direction: "desc", per_page: 100,
+  });
+  for (const state of ["agent:review", "agent:approved"]) {
+    for (const issue of await issuesWithLabel(state)) {
+      if (issuesWithOpenPulls.has(issue.number)) continue;
+      const latest = closedPulls.find((pr) => closingIssueNumbers(pr.body).includes(issue.number));
+      if (latest?.merged_at) {
+        const releaseRuns = await github.rest.actions.listWorkflowRuns({
+          owner, repo, workflow_id: "release.yml", event: "push", per_page: 100,
+        });
+        const runs = releaseRuns.data.workflow_runs
+          .filter((run) => run.head_sha === latest.merge_commit_sha)
+          .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+        if (runs.some((run) => run.status !== "completed")) continue;
+        const completed = runs.find((run) => run.status === "completed");
+        if (completed?.conclusion === "success") {
+          await setState(issue.number, "agent:deployed");
+          await commentOnce(
+            issue.number,
+            `<!-- agent-pipeline deployed=${latest.merge_commit_sha} -->`,
+            `Recovered successful production release for PR #${latest.number}.`,
+          );
+        } else if (completed || Date.now() - Date.parse(latest.merged_at) > 30 * 60 * 1000) {
+          await setState(issue.number, "agent:failed");
+          await commentOnce(
+            issue.number,
+            `<!-- agent-pipeline orphan-merge=${latest.number} -->`,
+            `PR #${latest.number} merged outside the durable merge slot and its exact release did not succeed.`,
+          );
+        }
+        continue;
+      }
+      const comments = await commentsFor(issue.number);
+      const retries = markerNumbers(comments, "orphan-retry").length;
+      if (retries >= 3) {
+        await setState(issue.number, "agent:failed");
+        await commentOnce(
+          issue.number,
+          "<!-- agent-pipeline orphan-exhausted -->",
+          "Recovery exhausted three retries after candidate PRs closed without merging.",
+        );
+        continue;
+      }
+      await github.rest.issues.createComment({
+        owner,
+        repo,
+        issue_number: issue.number,
+        body: `<!-- agent-pipeline orphan-retry=${retries + 1} -->\nNo open candidate PR remains; retrying from current main.`,
+      });
+      await setState(issue.number, "agent:inbox");
+      await dispatch(issue.number);
+    }
+  }
+
+  for (const issue of await issuesWithLabel("agent:running")) {
+    if (Date.now() - Date.parse(issue.updated_at) <= 90 * 60 * 1000 || issuesWithOpenPulls.has(issue.number)) continue;
+    const comments = await commentsFor(issue.number);
+    const taskRuns = markerNumbers(comments, "task-run");
+    if (taskRuns.length > 0) {
+      try {
+        const run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: taskRuns.at(-1) })).data;
+        if (run.status !== "completed") continue;
+      } catch (error) {
+        if (error.status !== 404) throw error;
+      }
+    }
+    const retries = markerNumbers(comments, "stale-retry").length;
+    if (retries >= 3) {
+      await setState(issue.number, "agent:failed");
+      await commentOnce(
+        issue.number,
+        "<!-- agent-pipeline stale-exhausted -->",
+        "Stale implementation recovery exhausted three retries.",
+      );
+      continue;
+    }
+    await github.rest.issues.createComment({
+      owner,
+      repo,
+      issue_number: issue.number,
+      body: `<!-- agent-pipeline stale-retry=${retries + 1} -->\nNo active Agent Task run or open PR remains; retrying from current main.`,
+    });
+    await setState(issue.number, "agent:inbox");
+    await dispatch(issue.number);
+  }
+
+  for (const issue of await issuesWithLabel("agent:failed")) {
+    if (issuesWithOpenPulls.has(issue.number)) continue;
+    const comments = await commentsFor(issue.number);
+    const latestFailure = comments.findLast((comment) => comment.body?.includes("<!-- agent-pipeline run-failed="));
+    const latestTerminal = comments.findLast((comment) => /<!-- agent-pipeline (?:run-failed|review-exhausted)=/.test(comment.body ?? ""));
+    if (!latestFailure || latestFailure.id !== latestTerminal?.id) continue;
+    const retries = markerNumbers(comments, "task-retry").length;
+    if (retries >= 3) {
+      await commentOnce(
+        issue.number,
+        "<!-- agent-pipeline task-exhausted -->",
+        "Agent Task recovery exhausted three retries.",
+      );
+      continue;
+    }
+    await github.rest.issues.createComment({
+      owner,
+      repo,
+      issue_number: issue.number,
+      body: `<!-- agent-pipeline task-retry=${retries + 1} -->\nRetrying the failed Agent Task from current main.`,
+    });
+    await setState(issue.number, "agent:inbox");
+    await dispatch(issue.number);
+  }
+}
+
+export async function queueNextApproved({ github, context, core }) {
+  const { owner, repo } = context.repo;
+  const slot = await github.rest.search.issuesAndPullRequests({
+    q: `repo:${owner}/${repo} is:pr label:agent:merge-slot`, per_page: 1,
+  });
+  const releases = await github.rest.actions.listWorkflowRuns({
+    owner, repo, workflow_id: "release.yml", per_page: 20,
+  });
+  const releaseActive = releases.data.workflow_runs.some(({ status }) => status !== "completed");
+  if (slot.data.total_count > 0 || releaseActive) {
+    core.info(`Merge lane busy: slot=${slot.data.total_count}, activeRelease=${releaseActive}.`);
+    return;
+  }
+
+  const approved = await github.rest.search.issuesAndPullRequests({
+    q: `repo:${owner}/${repo} is:pr is:open label:agent:approved`,
+    sort: "created",
+    order: "asc",
+    per_page: 1,
+  });
+  const candidate = approved.data.items[0];
+  if (!candidate) {
+    core.info("No approved PR is waiting for the merge lane.");
+    return;
+  }
+  const pr = (await github.rest.pulls.get({ owner, repo, pull_number: candidate.number })).data;
+  const defaultBranch = context.payload.repository.default_branch;
+  const defaultRef = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
+  const exactCheckValid = await validExactCheck(github, owner, repo, pr);
+  const provenanceValid = pipelinePullProvenance(pr, defaultBranch);
+  const humanApproved = !await sensitivePullRequest(github, owner, repo, pr.number)
+    || await currentHumanApproval(github, owner, repo, pr.number, pr.head.sha);
+  if (!provenanceValid || defaultRef.data.commit.sha !== pr.base.sha || !exactCheckValid || !humanApproved) {
+    try {
+      await github.rest.issues.removeLabel({
+        owner, repo, issue_number: pr.number, name: "agent:approved",
+      });
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+    await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["agent:failed"] });
+    const linked = closingIssueNumbers(pr.body);
+    if (linked.length === 1) {
+      const issue = (await github.rest.issues.get({ owner, repo, issue_number: linked[0] })).data;
+      const labels = [...labelNames(issue)].filter((label) => !STATE_LABELS.includes(label));
+      await github.rest.issues.setLabels({
+        owner, repo, issue_number: linked[0], labels: [...labels, "agent:failed"],
+      });
+    }
+    core.warning(`PR #${pr.number} lost exact-head/base approval and was not queued.`);
+    return;
+  }
+  await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["agent:merge-slot"] });
+  try {
+    await github.graphql(`
+      mutation($pullRequestId: ID!, $headOid: GitObjectID!) {
+        enablePullRequestAutoMerge(input: {
+          pullRequestId: $pullRequestId,
+          mergeMethod: MERGE,
+          expectedHeadOid: $headOid
+        }) { pullRequest { number } }
+      }
+    `, { pullRequestId: pr.node_id, headOid: pr.head.sha });
+  } catch (error) {
+    try {
+      await github.rest.issues.removeLabel({
+        owner, repo, issue_number: pr.number, name: "agent:merge-slot",
+      });
+    } catch (removeError) {
+      if (removeError.status !== 404) throw removeError;
+    }
+    throw error;
+  }
+}

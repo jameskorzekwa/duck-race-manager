@@ -70,6 +70,8 @@ npm ci
 npm audit --audit-level=high
 npm run typecheck
 npm test
+npx playwright install --with-deps chromium
+npm run test:e2e
 npm run wrangler:validate
 npm run db:migrate:local
 ```
@@ -96,13 +98,50 @@ Configure the `Validate` job as a required status check on the protected default
 branch. Do not replace `pull_request` with `pull_request_target`; untrusted pull
 request code must never run in a privileged context.
 
+## GitHub Agent Pipeline
+
+The OpenCode agent pipeline uses GitHub issues, labels, branches, pull requests,
+checks, workflow runs, and deployments as its durable ledger. OpenCode sessions
+and Ensemble worktrees are execution contexts only; interrupted turns are
+recovered from GitHub state rather than treated as durable jobs.
+
+- `.github/workflows/agent-task.yml` accepts trusted `agent:inbox` issues,
+  serializes work per issue, and runs the implementation orchestrator.
+- `.github/workflows/agent-review.yml` validates candidate code with read-only
+  authority, reviews it from a trusted checkout, and records an exact-SHA gate.
+- `.github/workflows/agent-reconcile.yml` deterministically repairs stale state,
+  releases grouped work, settles releases, and advances the next PR without a model.
+- `.opencode/agents/` contains explicit implementation, test, and risk-review
+  roles. The pinned Ensemble plugin coordinates bounded implementation teams.
+- `docs/AGENT_PIPELINE.md` is the operating and reusable installation guide.
+
+Only issues created by James with `agent:inbox`, explicit James `/agent` or
+`/oc` issue comments, and trusted workflow dispatches run code agents. Public
+issue or PR content never receives an automatic privileged execution path.
+GitHub Models uses the job's short-lived token with `models: read`; repository
+writes use the OpenCode GitHub App's short-lived installation token so resulting
+branch and PR events still trigger CI. Agent jobs do not receive production
+credentials.
+
+Agent Review uses `pull_request_target` only as a trusted control plane. Candidate
+tests and model review run in separate jobs with read-only repository authority;
+the model loads agents and plugins from the trusted base checkout, candidate code
+is not executed in the model job, and the write-capable gate never checks out or
+executes candidate code. The gate rechecks the current PR head before mutation.
+
+The merge lane is deliberately narrower than implementation concurrency. One PR
+holds `agent:merge-slot` until its exact merge commit completes the Release
+workflow and production smoke tests. Other implementation and review runs may
+continue, but no second PR is admitted while a merge slot or non-completed
+Release run exists.
+
 ## GitHub Production Configuration
 
 Create a GitHub environment named exactly `production`. Configure:
 
-- No required reviewers after the remote production configuration and bootstrap
-  have been completed. A protected merge to `main` is the release approval, and
-  deployment must proceed unattended.
+- Require James as the production deployment reviewer. Code may auto-merge only
+  after required CI and agent review, but production credentials remain locked
+  until this explicit environment approval.
 - No administrator bypass.
 - Selected deployment branches and tags allowing exactly the `main` branch and
   `v*` tags. The workflow narrows tags further to `v*.*.*` and validates strict
@@ -144,8 +183,8 @@ The one-time setup order is:
 5. Copy the application outputs into the committed Worker configuration.
 6. Complete the Cloudflare, D1, queue, DNS, SES, Turnstile, and Worker-secret
    gates below.
-7. Confirm the environment has no reviewer, allows only `main` and `v*`, and
-   retains no-admin-bypass, then enable merge-driven releases.
+7. Confirm the environment requires James's review, allows only `main` and `v*`,
+   and retains no-admin-bypass, then enable merge-driven releases.
 
 Protect semantic-version tags with a repository ruleset. Limit tag creation and
 updates to the final release workflow and release maintainers, block force
@@ -640,9 +679,10 @@ active. Follow the permanent-domain and NFC pre-provisioning gate in
 These checks were required before enabling continuous deployment. They are
 historical bootstrap gates, not approval steps to repeat for every merge:
 
-- The GitHub `production` environment has no required reviewer, allows only
-  `main` and `v*`, disables administrator bypass, and contains the secret and
-  repository variables described above.
+- The GitHub `production` environment allows only `main` and `v*`, disables
+  administrator bypass, and contains the secret and repository variables
+  described above. The original unattended bootstrap later gained James as the
+  required deployment reviewer when the agent merge pipeline was enabled.
 - Both configured role ARNs exactly match the bootstrap stack outputs.
 - The AWS OIDC role trusts only this repository's `production` environment,
   the GitHub role controls only the named stack, and that stack records the
@@ -669,6 +709,8 @@ npm ci
 npm audit --audit-level=high
 npm run typecheck
 npm test
+npx playwright install chromium
+npm run test:e2e
 npm run wrangler:validate
 npm run db:migrate:local
 ```
@@ -678,8 +720,8 @@ the protected workflow owns those production operations.
 
 ## Continuous Deployment
 
-Every protected merge to `main` is a production release. There is no routine
-manual tag or environment approval:
+Every protected merge to `main` is a production release. Ordinary versions need
+no manual tag, but deployment requires production-environment approval:
 
 1. A pull request passes the required credential-free `Validate` CI job. Review
    every D1 migration for compatibility with the old and new Worker, every
@@ -707,12 +749,14 @@ manual tag or environment approval:
    high-severity audit, TypeScript check, full tests, every Wrangler-config
    dry-run, and fresh local D1 migration validation. Only that successful job can
    unlock the `production` deployment job.
-6. The unattended deployment verifies the exact account, region, stack and
-   bootstrap role ARN shapes, all four Worker secret names, D1 legacy-role
-   safety, the existing named CloudFormation stack, current Cognito outputs and
-   `AppOrigin`, monotonic stack version, and source ancestry. It validates both
-   templates, deploys CloudFormation with the dedicated execution role, verifies
-   the result, applies D1 migrations, and deploys the Worker.
+6. After James approves the `production` environment, the deployment refetches
+   the default branch and fails if the validated SHA is no longer its current
+   tip. It then verifies the exact account, region, stack and bootstrap role ARN
+   shapes, all four Worker secret names, D1 legacy-role safety, the existing
+   named CloudFormation stack, current Cognito outputs and `AppOrigin`, monotonic
+   stack version, and source ancestry. It validates both templates, deploys
+   CloudFormation with the dedicated execution role, verifies the result,
+   applies D1 migrations, and deploys the Worker.
 7. The workflow checks the D1-backed apex `/health` endpoint, exact `308` `www`
    redirect, and a real same-origin WebSocket connection under bounded timeouts.
 8. Only after every deploy and smoke gate succeeds does the final job receive

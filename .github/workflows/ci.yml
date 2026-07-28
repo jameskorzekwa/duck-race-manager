@@ -34,10 +34,14 @@ jobs:
           cache: npm
 
       - name: Install locked dependencies
-        run: npm ci
+        run: |
+          npm ci
+          npm ci --prefix .opencode/ensemble-package --ignore-scripts
 
       - name: Audit dependencies
-        run: npm audit --audit-level=high
+        run: |
+          npm audit --audit-level=high
+          npm audit --prefix .opencode/ensemble-package --audit-level=high
 
       - name: Check TypeScript
         run: npm run typecheck

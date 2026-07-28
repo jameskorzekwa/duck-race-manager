@@ -1,0 +1,8 @@
+{
+  "name": "quickducks-opencode-ensemble-runtime",
+  "private": true,
+  "dependencies": {
+    "@hueyexe/opencode-ensemble": "0.16.0",
+    "typescript": "5.9.3"
+  }
+}
