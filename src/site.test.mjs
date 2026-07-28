@@ -82,6 +82,15 @@ test("the staff pairing page offers scanning, manual search, and a cancel path",
   // Manual search always remains present as the fallback path.
   assert.match(page, /data-registration-search/);
   assert.match(page, /An exact lookup code pairs immediately/);
+  // The field is a search box that narrows an already-visible list, so it is
+  // neither required nor gated on a minimum length, and Enter reads as "search".
+  assert.match(page, /<input name="query" type="search" enterkeyhint="search" autocomplete="off" maxlength="80"[^>]*data-registration-search-input>/);
+  assert.doesNotMatch(page, /<input name="query"[^>]*minlength=/);
+  assert.doesNotMatch(page, /<input name="query"[^>]*\srequired/);
+  assert.match(page, /Everyone still waiting for a duck is listed below; typing narrows that list/);
+  // The list has a live status line of its own, above the results.
+  assert.match(page, /<p class="muted" data-registration-search-status aria-live="polite">Loading participants who still need a duck…<\/p>/);
+  assert.ok(page.indexOf("data-registration-search-status") < page.indexOf("data-registration-results"));
   // The page itself never renders a participant or a QR payload.
   assert.doesNotMatch(page, /QD1:/);
 });
@@ -499,6 +508,102 @@ test("every pattern attribute compiles the way a browser compiles it", () => {
       `pattern ${pattern} is not a valid v-mode regular expression, so browsers ignore it`,
     );
   }
+});
+
+test("no rendered page offers a Preview button", () => {
+  // The mock routes stay reachable by hand; nothing in the product links to
+  // them, so no visitor and no staff member is ever offered a mock as an action.
+  for (const markup of renderedPages) {
+    for (const [, label] of markup.matchAll(/<(?:a|button)\b[^>]*>([^<]*)</g)) {
+      assert.doesNotMatch(label, /^\s*Preview\b/i, `a control still offers "${label}"`);
+    }
+    assert.doesNotMatch(markup, /<a[^>]+href="\/mock\//);
+  }
+
+  // The read-only slug preview is a labelled input, not a button, and stays.
+  assert.match(
+    renderStaffHome("Administrator", true, []),
+    /<label>URL slug preview<input data-event-create-slug-preview/,
+  );
+});
+
+test("staff renderers take the resolved public phase and never claim a live-nav slot", () => {
+  const staffPages = [
+    ["staff login", renderStaffLogin("/staff", "REGISTRATION")],
+    ["staff home", renderStaffHome("Administrator", true, [], "REGISTRATION")],
+    ["staff access", renderStaffAccess("Administrator", true, [], "REGISTRATION")],
+    ["start line", renderStartLine("Start staff", false, false, ["HEAT_RUNNER"], "REGISTRATION")],
+    ["finish line", renderFinishLine("Finish staff", false, false, ["RESULT_TAKER"], "REGISTRATION")],
+    ["inventory", renderStaffInventory("Inventory staff", "https://quickducks.com", false, ["DUCK_MANAGER"], "REGISTRATION")],
+    ["staff duck", renderStaffDuck("a".repeat(32), "Registration staff", false, ["REGISTRATION"], "REGISTRATION")],
+    ["pairing mock", renderStaffPairing("REGISTRATION")],
+  ];
+
+  for (const [label, markup] of staffPages) {
+    const nav = markup.match(/<nav class="nav"[\s\S]*?<\/nav>/)?.[0];
+    assert.ok(nav, label);
+    assert.match(nav, /data-phase="REGISTRATION"/, label);
+    assert.match(nav, /<a href="\/register" data-nav-register>Register<\/a>/, label);
+    assert.match(nav, /data-my-ducks-nav data-phase-visible="true">My Ducks<\/a>/, label);
+    // `data-live-nav` is the live hub's admission marker; staff pages hold no
+    // navigation subscription, so the server paint is final for them.
+    assert.doesNotMatch(nav, /data-live-nav/, label);
+  }
+
+  // Defaulting is unchanged: a renderer called without a phase still paints the
+  // conservative Preparing navigation.
+  assert.match(renderStaffHome("Administrator", true, []), /data-phase="PREPARING"/);
+});
+
+test("every staff page ends with a signed-in footer holding only the name and log out", () => {
+  const staffPages = [
+    ["staff home", renderStaffHome("Ada Duck", true, [])],
+    ["staff access", renderStaffAccess("Ada Duck")],
+    ["start line", renderStartLine("Ada Duck", false)],
+    ["finish line", renderFinishLine("Ada Duck", false)],
+    ["inventory", renderStaffInventory("Ada Duck", "https://quickducks.com")],
+    ["staff duck", renderStaffDuck("a".repeat(32), "Ada Duck")],
+  ];
+
+  for (const [label, markup] of staffPages) {
+    const main = markup.match(/<main class="shell">[\s\S]*<\/main>/)?.[0];
+    assert.ok(main, label);
+    assert.equal((markup.match(/class="staff-bar"/g) ?? []).length, 1, label);
+    assert.match(
+      markup,
+      /<footer class="staff-bar"><p><strong>Ada Duck<\/strong><\/p><form class="staff-logout" method="post" action="\/staff\/logout"><button type="submit">Log out<\/button><\/form><\/footer>/,
+      label,
+    );
+    // It is a footer at the bottom, below the staff nav and the page heading.
+    assert.ok(main.indexOf('class="staff-bar"') > main.indexOf('class="staff-nav"'), label);
+    assert.ok(main.indexOf('class="staff-bar"') > main.indexOf("<h1"), label);
+    // Nothing else survives in it: no Staff home link, no page-name suffix.
+    assert.doesNotMatch(main, /staff-bar-actions/, label);
+    assert.doesNotMatch(main, />Staff home</, label);
+    assert.doesNotMatch(main, /Ada Duck<\/strong> ·/, label);
+  }
+
+  // A display name is a server value and stays escaped inside the footer.
+  assert.match(
+    renderStaffHome('Ada "<script>" Duck', true, []),
+    /<strong>Ada &quot;&lt;script&gt;&quot; Duck<\/strong>/,
+  );
+});
+
+test("the staff console no longer repeats the stations the staff nav already lists", () => {
+  const director = renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]);
+
+  for (const markup of [director, renderStaffHome("Administrator", true, []), renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"]), renderStaffHome("Result Taker", false, ["RESULT_TAKER"])]) {
+    assert.doesNotMatch(markup, /Open start line|Open finish line/);
+    assert.doesNotMatch(markup, /station-links/);
+  }
+  // The stations are still one tap away, from the staff nav.
+  assert.match(director, /<a href="\/staff\/start-line">Start line<\/a>/);
+  assert.match(director, /<a href="\/staff\/finish-line">Finish line<\/a>/);
+  // `.station-control` is still used by the finish-line and intake stations.
+  assert.ok(style);
+  assert.match(style, /\.station-control \{ min-height:4rem;/);
+  assert.match(renderFinishLine("Finish staff", false), /class="button station-control"/);
 });
 
 test("the tag token pattern still accepts exactly what the server accepts", () => {

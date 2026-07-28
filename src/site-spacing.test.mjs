@@ -44,7 +44,26 @@ test("NFC station renders scoped control, state, history, and logout spacing", (
   assert.match(css, /\.station-state \.message-line \{ min-height:0; \}/);
   assert.match(css, /\.station-counter \{ min-width:0; \}/);
   assert.match(css, /\.station-history li \{[^}]*overflow-wrap:anywhere/);
-  assert.match(css, /\.staff-bar-actions > a,\.staff-logout button \{[^}]*min-height:2\.75rem/);
+  assert.match(css, /\.staff-logout button \{[^}]*min-height:2\.75rem/);
+});
+
+test("the staff bar is a footer that cannot overflow a narrow screen", () => {
+  const css = stylesheetFrom(renderStaffHome("Spacing Test", true, []));
+
+  // Full-width bar, name left and sign out right, and every child bounded so a
+  // long display name wraps instead of pushing the page sideways at 320px.
+  assert.match(css, /\.staff-bar \{[^}]*display:flex/);
+  assert.match(css, /\.staff-bar \{[^}]*flex-wrap:wrap/);
+  assert.match(css, /\.staff-bar \{[^}]*width:100%/);
+  assert.match(css, /\.staff-bar \{[^}]*max-width:100%/);
+  assert.match(css, /\.staff-bar \{[^}]*justify-content:space-between/);
+  // It sits below the page, so its margin is above it rather than beneath it.
+  assert.match(css, /\.staff-bar \{[^}]*margin:var\(--space-lg\) 0 0/);
+  assert.doesNotMatch(css, /\.staff-bar \{[^}]*margin-bottom/);
+  assert.match(css, /\.staff-bar > \* \{ min-width:0; max-width:100%; \}/);
+  assert.match(css, /\.staff-bar p \{[^}]*overflow-wrap:anywhere/);
+  // The action row that used to hold the "Staff home" link is gone entirely.
+  assert.doesNotMatch(css, /staff-bar-actions/);
 });
 
 test("pairing, readiness, inventory, and staff-role renderers expose spacing hooks", () => {

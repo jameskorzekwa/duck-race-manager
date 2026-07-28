@@ -83,7 +83,7 @@ test("the announcer page keeps the staff HTML noindex, CSP, and referrer treatme
     /form-action 'self' https:\/\/quickducks-staff\.example\.com; frame-ancestors 'none'/,
   );
   assert.match(body, /<meta name="robots" content="noindex,nofollow">/);
-  assert.match(body, /Signed in as|<strong>Announcer Staff<\/strong>/);
+  assert.match(body, /<strong>Announcer Staff<\/strong>/);
 });
 
 test("only GET renders the announcer page", async () => {
@@ -178,7 +178,7 @@ test("the announcer page is read-only: no form, no button, and no command hook",
   const panel = markup.match(/<section class="page-panel station-panel announcer-panel"[\s\S]*<\/section>/)?.[0];
 
   assert.ok(panel);
-  // Sign out is the one form on the page and it belongs to the shared staff bar.
+  // Log out is the one form on the page and it belongs to the shared staff bar.
   assert.equal((panel.match(/<form/g) ?? []).length, 1);
   assert.match(panel, /<form class="staff-logout" method="post" action="\/staff\/logout">/);
   assert.equal((panel.match(/<button/g) ?? []).length, 1);

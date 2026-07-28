@@ -316,15 +316,28 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
 
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
 
+/**
+ * Rows the scan-first pairing list returns before it asks staff to narrow.
+ * The list is a working queue, not a report, so it stays bounded rather than
+ * streaming every registration of a large event into a phone.
+ */
+export const REGISTRATION_SEARCH_LIMIT = 100;
+
 const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
   const eventId = url.searchParams.get("eventId")?.trim() ?? "";
   const query = url.searchParams.get("q")?.trim() ?? "";
-  if (eventId.length === 0 || query.length < 2 || query.length > 80) {
-    return json({ error: "Event and at least two search characters are required." }, 400);
+  if (eventId.length === 0 || query.length > 80) {
+    return json({ error: "An event and a search of at most 80 characters are required." }, 400);
   }
 
   const exactCode = normalizeLookupCode(query);
   const like = `%${escapeLike(query)}%`;
+  // This endpoint feeds one screen: a staff member holding a duck that needs a
+  // participant. An empty query is therefore a listing of everyone still
+  // waiting for a duck, and typing narrows that same list; `? = ''` turns the
+  // match group off for the listing without a second statement. A participant
+  // who already holds a duck is excluded here, in SQL, so no browser filter and
+  // no future caller can surface one.
   const results = await env.DB.prepare(
     `SELECT r.id AS registration_id, re.id AS race_entry_id,
             r.first_name, r.last_name, r.email, r.phone,
@@ -336,8 +349,10 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
          ON da.race_entry_id = re.id AND da.valid_to IS NULL
        LEFT JOIN ducks d ON d.id = da.duck_id
       WHERE r.event_id = ?
+        AND da.id IS NULL
         AND (
-           r.lookup_code = ? COLLATE NOCASE
+           ? = ''
+           OR r.lookup_code = ? COLLATE NOCASE
            OR r.first_name LIKE ? ESCAPE '\\' COLLATE NOCASE
            OR r.last_name LIKE ? ESCAPE '\\' COLLATE NOCASE
            OR (r.first_name || ' ' || r.last_name) LIKE ? ESCAPE '\\' COLLATE NOCASE
@@ -348,8 +363,19 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
                r.last_name COLLATE NOCASE,
                r.first_name COLLATE NOCASE,
                r.submitted_at
-      LIMIT 20`,
-  ).bind(eventId, exactCode, like, like, like, like, like, exactCode).all<{
+      LIMIT ?`,
+  ).bind(
+    eventId,
+    query,
+    exactCode,
+    like,
+    like,
+    like,
+    like,
+    like,
+    exactCode,
+    REGISTRATION_SEARCH_LIMIT + 1,
+  ).all<{
     registration_id: string;
     race_entry_id: string;
     first_name: string;
@@ -361,7 +387,11 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
     visible_number: number | null;
   }>();
 
-  const registrations = results.results.map((row) => ({
+  // Belt and braces on top of `da.id IS NULL`: a row that still reports a duck
+  // number never reaches the response, whatever the join returned.
+  const unpaired = results.results.filter((row) => row.visible_number === null);
+  const truncated = unpaired.length > REGISTRATION_SEARCH_LIMIT;
+  const registrations = unpaired.slice(0, REGISTRATION_SEARCH_LIMIT).map((row) => ({
     registrationId: row.registration_id,
     raceEntryId: row.race_entry_id,
     firstName: row.first_name,
@@ -377,12 +407,14 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
   // person with no ambiguity, so the staff console pairs it directly instead of
   // rendering a one-item list to click through. Anything else, including a
   // partial code, stays a normal search. This only reports the match; the
-  // pairing command still performs every authorization and state check.
+  // pairing command still performs every authorization and state check. Because
+  // the list is unpaired-only, an already-paired code reports nothing here and
+  // the console says so instead of firing a command that would be rejected.
   const exactMatch = isLookupCode(exactCode)
     ? registrations.find((registration) => registration.lookupCode.toUpperCase() === exactCode) ?? null
     : null;
 
-  return json({ registrations, exactMatch });
+  return json({ registrations, exactMatch, truncated, limit: REGISTRATION_SEARCH_LIMIT });
 };
 
 interface PairingContext {

@@ -574,7 +574,7 @@ test("every staff page signs out through an accessible POST form without JavaScr
   ];
 
   for (const markup of pages) {
-    assert.match(markup, /<form class="staff-logout" method="post" action="\/staff\/logout"><button type="submit">Sign out<\/button><\/form>/);
+    assert.match(markup, /<form class="staff-logout" method="post" action="\/staff\/logout"><button type="submit">Log out<\/button><\/form>/);
     assert.doesNotMatch(markup, /<a[^>]+href="\/staff\/logout"/);
     assert.doesNotMatch(markup, /<form class="staff-logout"[^>]+(?:onsubmit|data-)/);
     assert.match(markup, /\.app-confirmation::backdrop/);

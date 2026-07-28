@@ -87,9 +87,12 @@ test("HTML pages allow exactly the Cloudflare analytics beacon origins", async (
   // Cloudflare injects the beacon at the edge after this Worker responds, so the
   // policy must admit the script origin and the origin it reports to. Each is a
   // single exact origin: no wildcards, no scheme-only sources, no inline scripts.
+  // Registration is open so that `/my-ducks` renders instead of redirecting to
+  // the home page, which is what it does while the race is still being prepared.
   const pages = ["https://quickducks.com/", "https://quickducks.com/race", "https://quickducks.com/my-ducks"];
   for (const url of pages) {
-    const policy = (await worker.fetch(new Request(url), env)).headers.get("content-security-policy") ?? "";
+    const policy = (await worker.fetch(new Request(url), phaseEnv("REGISTRATION_OPEN")))
+      .headers.get("content-security-policy") ?? "";
     const scriptSrc = policy.match(/script-src ([^;]+)/)?.[1] ?? "";
     const connectSrc = policy.match(/connect-src ([^;]+)/)?.[1] ?? "";
 
@@ -324,7 +327,7 @@ test("gates the standalone staff access page to system administrators", async ()
   assert.match(body, /data-staff-access-list/);
   assert.match(body, /src="\/assets\/staff-access\.js"/);
   assert.match(body, /src="\/assets\/app-select\.js"/);
-  assert.match(body, /Signed in as Access Staff/);
+  assert.match(body, /<strong>Access Staff<\/strong>/);
 
   // Only GET renders the page; other methods fall through to not-found.
   for (const method of ["POST", "PUT", "DELETE"]) {
@@ -453,6 +456,138 @@ test("the staff duck page opens for exactly the roles the staff duck API allows"
     assert.match(await denied.text(), /permission to inspect staff duck records/);
     assert.equal((await api(currentActor)).status, 403, label);
   }
+});
+
+// --- staff chrome -----------------------------------------------------------
+
+const primaryNav = (body) => {
+  const match = body.match(/<nav class="nav"[\s\S]*?<\/nav>/);
+  assert.ok(match, "every page renders the primary site navigation");
+  return match[0];
+};
+
+const primaryNavLabels = (body) =>
+  [...primaryNav(body).matchAll(/<a href="[^"]+"([^>]*)>([^<]*)<\/a>/g)]
+    .filter(([, attributes]) => !/\shidden(?=[\s>])/.test(`${attributes}>`))
+    .map(([, , label]) => label);
+
+const chromeActor = {
+  id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Chrome Staff",
+  isSystemAdmin: true, roles: [], authentication: "bearer",
+};
+
+const staffHtmlPaths = [
+  "/staff",
+  "/staff/access",
+  "/staff/inventory",
+  "/staff/start-line",
+  "/staff/announcer",
+  "/staff/finish-line",
+  `/staff/ducks/${"a".repeat(32)}`,
+  "/mock/staff/home",
+  "/mock/staff/start-line",
+  "/mock/staff/announcer",
+  "/mock/staff/finish-line",
+  "/mock/staff/ducks/128/working",
+  "/mock/staff/ducks/128/pair",
+];
+
+test("staff pages render the same primary site nav as the public site", async () => {
+  // A staff member is also a visitor: during Registration a staff page offers
+  // Home, Register, My Ducks, Staff, exactly like `/` and `/register` do.
+  for (const [status, expected] of [
+    ["REGISTRATION_OPEN", ["Home", "Register", "My Ducks", "Staff"]],
+    ["FINAL", ["Home", "Race Status", "My Ducks", "Staff"]],
+    [undefined, ["Home", "Staff"]],
+  ]) {
+    const phase = phaseEnv(status);
+    const publicBody = await (await worker.fetch(new Request("https://quickducks.com/"), phase)).text();
+    assert.deepEqual(primaryNavLabels(publicBody), expected, `public nav for ${status ?? "no event"}`);
+
+    for (const path of staffHtmlPaths) {
+      const response = await createWorker(async () => chromeActor)
+        .fetch(new Request(`https://quickducks.com${path}`), phase);
+      const body = await response.text();
+      const where = `${path} @ ${status ?? "no event"}`;
+
+      assert.equal(response.status, 200, where);
+      assert.deepEqual(primaryNavLabels(body), expected, where);
+      assert.equal(primaryNav(body), primaryNav(publicBody).replace(" data-live-nav", ""), where);
+    }
+  }
+});
+
+test("staff pages never take the live-nav subscription the hub admission is bounded by", async () => {
+  // `RaceUpdates` admits a bounded number of connections and the navigation
+  // subscriber in `live-ui.js` is gated on `data-live-nav`. Staff pages carry
+  // the server-rendered phase only, so they hold no nav subscription.
+  for (const path of staffHtmlPaths) {
+    const body = await (await createWorker(async () => chromeActor)
+      .fetch(new Request(`https://quickducks.com${path}`), phaseEnv("REGISTRATION_OPEN"))).text();
+    assert.doesNotMatch(primaryNav(body), /data-live-nav/, path);
+    assert.match(primaryNav(body), /data-phase="REGISTRATION"/, path);
+  }
+
+  // The signed-out staff sign-in page is the same: real phase, no marker.
+  const login = await createWorker(async () => null)
+    .fetch(new Request("https://quickducks.com/staff"), phaseEnv("REGISTRATION_OPEN"));
+  const loginBody = await login.text();
+  assert.match(loginBody, /Staff sign in/);
+  assert.deepEqual(primaryNavLabels(loginBody), ["Home", "Register", "My Ducks", "Staff"]);
+  assert.doesNotMatch(primaryNav(loginBody), /data-live-nav/);
+});
+
+test("the signed-in staff bar is the footer of every staff page", async () => {
+  // The `/mock/...` previews render fixed names of their own; every other staff
+  // page renders the signed-in actor.
+  const names = {
+    "/mock/staff/home": "Administrator Preview",
+    "/mock/staff/start-line": "Start-line Preview",
+    "/mock/staff/announcer": "Announcer Preview",
+    "/mock/staff/finish-line": "Finish-line Preview",
+    "/mock/staff/ducks/128/working": "Staff Preview",
+  };
+  // The pairing mock has no session behind it, so it carries no signed-in bar.
+  const barred = staffHtmlPaths.filter((path) => path !== "/mock/staff/ducks/128/pair");
+
+  for (const path of barred) {
+    const name = names[path] ?? "Chrome Staff";
+    const footer = new RegExp(`<footer class="staff-bar"><p><strong>${name}</strong></p><form class="staff-logout" method="post" action="/staff/logout"><button type="submit">Log out</button></form></footer>`);
+    const body = await (await createWorker(async () => chromeActor)
+      .fetch(new Request(`https://quickducks.com${path}`), phaseEnv("REGISTRATION_OPEN"))).text();
+    const panel = body.match(/<main class="shell">[\s\S]*<\/main>/)?.[0];
+    assert.ok(panel, path);
+
+    // Exactly one bar, and it is a footer holding only the name and sign out.
+    assert.equal((body.match(/class="staff-bar"/g) ?? []).length, 1, path);
+    assert.match(body, footer, path);
+    // It is the last thing on the page, below the staff nav that replaced its
+    // "Staff home" link and the page-name suffix it used to carry.
+    assert.ok(panel.indexOf('class="staff-bar"') > panel.indexOf("<h1"), `${path}: the bar is below the page`);
+    assert.doesNotMatch(body, /staff-bar-actions/, path);
+    assert.doesNotMatch(body, /<a href="\/staff">Staff home<\/a>/, path);
+    assert.doesNotMatch(body, new RegExp(`${name}</strong> ·`), path);
+  }
+
+  // The pairing mock is the one staff-styled surface with no session behind it.
+  const pairing = await (await createWorker(async () => chromeActor)
+    .fetch(new Request("https://quickducks.com/mock/staff/ducks/128/pair"), phaseEnv("REGISTRATION_OPEN"))).text();
+  assert.doesNotMatch(pairing.match(/<main class="shell">[\s\S]*<\/main>/)[0], /staff-bar|Log out/);
+});
+
+test("the staff console drops the station shortcut and preview buttons", async () => {
+  const body = await (await createWorker(async () => chromeActor)
+    .fetch(new Request("https://quickducks.com/staff"), phaseEnv("REGISTRATION_OPEN"))).text();
+
+  // The stations are reachable from the staff nav, so the console does not
+  // repeat them, and the pairing mock is not offered as a button.
+  assert.doesNotMatch(body, /Open start line|Open finish line/);
+  assert.doesNotMatch(body, /station-links/);
+  assert.doesNotMatch(body, /Preview pairing layout/);
+  assert.doesNotMatch(body, /href="\/mock\//);
+  // The stations themselves are still one tap away in the staff nav.
+  assert.match(body, /<a href="\/staff\/start-line">Start line<\/a>/);
+  assert.match(body, /<a href="\/staff\/finish-line">Finish line<\/a>/);
 });
 
 test("protects newly composed staff operation routes", async () => {

@@ -605,13 +605,77 @@ test("a partial or non-code search never reports an exact match", async () => {
   assert.equal((await search("ZZZZ2345", [searchRow()])).exactMatch, null);
 });
 
-test("an exact code already paired to a duck is reported for review, not auto-pairing", async () => {
-  // The console falls through to the normal list, which names the duck holding
-  // the code, instead of firing a pairing command that would be rejected.
+test("the pairing search excludes an already-paired participant in SQL and in the response", async () => {
   const body = await search("DAASY234", [searchRow({ visible_number: 128 })]);
 
-  assert.equal(body.exactMatch.assignedDuckNumber, 128);
-  assert.equal(body.registrations[0].assignedDuckNumber, 128);
+  // The join already refuses a live assignment, and the response mapping drops
+  // any row that still reports a duck number, so no caller of this endpoint can
+  // be handed a participant who already has one.
+  assert.deepEqual(body.registrations, []);
+  assert.equal(body.exactMatch, null);
+
+  const db = makeDb(() => null, () => ({ results: [] }));
+  await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q=Daisy"),
+    makeEnv(db),
+    actor,
+  );
+  assert.match(db.statements[0].sql, /LEFT JOIN duck_assignments da\s*\n?\s*ON da\.race_entry_id = re\.id AND da\.valid_to IS NULL/);
+  assert.match(db.statements[0].sql, /AND da\.id IS NULL/);
+});
+
+test("an empty query lists every unpaired participant instead of refusing the search", async () => {
+  const db = makeDb(() => null, () => ({
+    results: [searchRow(), searchRow({ registration_id: "registration_two", lookup_code: "BBBB2345" })],
+  }));
+  const response = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q="),
+    makeEnv(db),
+    actor,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.registrations.length, 2);
+  assert.equal(body.exactMatch, null);
+  assert.equal(body.truncated, false);
+  // The listing and the search are one statement: an empty query switches the
+  // match group off rather than running different SQL.
+  assert.match(db.statements[0].sql, /\? = ''\s*\n?\s*OR r\.lookup_code = \?/);
+  assert.equal(db.statements[0].args[1], "");
+});
+
+test("the pairing search stays bounded and says when it truncated", async () => {
+  const rows = Array.from({ length: 101 }, (unused, index) => searchRow({
+    registration_id: "registration_" + index,
+    lookup_code: "AAAA" + String(2000 + index),
+  }));
+  const db = makeDb(() => null, () => ({ results: rows }));
+  const response = await handleStaffApi(
+    new Request("https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q="),
+    makeEnv(db),
+    actor,
+  );
+  const body = await response.json();
+
+  assert.equal(body.limit, 100);
+  assert.equal(body.registrations.length, 100);
+  assert.equal(body.truncated, true);
+  // One extra row is requested purely to detect truncation.
+  assert.equal(db.statements[0].args.at(-1), 101);
+  assert.match(db.statements[0].sql, /LIMIT \?/);
+});
+
+test("the pairing search still refuses a query longer than the field allows", async () => {
+  const db = makeDb(() => null, () => ({ results: [] }));
+  const response = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q=${"a".repeat(81)}`),
+    makeEnv(db),
+    actor,
+  );
+
+  assert.equal(response.status, 400);
+  assert.equal(db.statements.length, 0);
 });
 
 test("staff inspection does not offer pairing for an ineligible duck", async () => {
@@ -1361,5 +1425,63 @@ test("guarded pairing SQL rejects a concurrent overfill at the heat boundary and
     { heat_number: 1, entry_count: 2 },
     { heat_number: 2, entry_count: 1 },
   ]);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The scan-first pairing screen lists everyone who still needs a duck, so the
+// exclusion of the already-paired has to hold in the schema production runs,
+// not only in the mapping layer above it.
+test("the pairing list in migrated SQLite shows only participants who still need a duck", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  const participants = seedImmediatePairingEvent(database, { ducksPerHeat: 10, finalHeatCapacity: 10 });
+  const env = makeEnv(sqliteD1(database));
+
+  const searchList = async (query) => {
+    const response = await handleStaffApi(
+      new Request(
+        `https://quickducks.com/api/v1/staff/registrations/search?eventId=event_test&q=${encodeURIComponent(query)}`,
+      ),
+      env,
+      actor,
+    );
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+
+  // Nothing typed yet: the whole unpaired list is already on screen.
+  const initial = await searchList("");
+  assert.deepEqual(initial.registrations.map((row) => row.lookupCode).sort(), [
+    "DDDDDDD2", "DDDDDDD3", "DDDDDDD4",
+  ]);
+  assert.equal(initial.truncated, false);
+  assert.ok(initial.registrations.every((row) => row.assignedDuckNumber === null));
+
+  const paired = await handleStaffApi(
+    pairRequest(participants[0].token, participants[0].lookupCode),
+    env,
+    actor,
+  );
+  assert.equal(paired.status, 201);
+
+  // That participant now holds a duck, so no query of any shape reaches them.
+  for (const query of ["", "Racer", "Number1", participants[0].lookupCode]) {
+    const body = await searchList(query);
+    assert.ok(
+      body.registrations.every((row) => row.lookupCode !== participants[0].lookupCode),
+      `"${query}" must not list a participant who already has a duck`,
+    );
+    assert.ok(body.registrations.every((row) => row.assignedDuckNumber === null));
+  }
+  // An exact code that already holds a duck reports nothing to auto-pair.
+  assert.equal((await searchList(participants[0].lookupCode)).exactMatch, null);
+  // The remaining two are still listed by an empty query and narrowed by typing.
+  assert.equal((await searchList("")).registrations.length, 2);
+  assert.deepEqual(
+    (await searchList("Number3")).registrations.map((row) => row.lookupCode),
+    ["DDDDDDD4"],
+  );
+  const stillUnpaired = await searchList(participants[1].lookupCode);
+  assert.equal(stillUnpaired.exactMatch.lookupCode, participants[1].lookupCode);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });

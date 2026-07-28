@@ -265,7 +265,9 @@ test("the render-time resolver degrades a failed phase query to Preparing", asyn
 });
 
 test("every public page still renders with the Preparing nav when the phase query fails", async () => {
-  for (const path of ["/", "/register", "/race", "/my-ducks", "/r/mock", "/t/mock"]) {
+  // `/my-ducks` is deliberately absent: it is unreachable in the Preparing
+  // phase, so a degraded paint sends the visitor home instead of rendering.
+  for (const path of ["/", "/register", "/race", "/r/mock", "/t/mock"]) {
     const { queries, response, body } = await failedPage(path);
 
     assert.equal(response.status, 200, path);
@@ -310,15 +312,46 @@ test("/register and /race degrade to their own preparing wording, never each oth
   assert.equal(race.body.includes(registrationPreparingMessage), false);
 });
 
-test("/my-ducks renders its saved-ducks surface after a failed phase query", async () => {
-  const { response, body } = await failedPage("/my-ducks");
+test("/my-ducks renders its saved-ducks surface once there is a race to have ducks in", async () => {
+  const { response, body } = await page("/my-ducks", "REGISTRATION_OPEN");
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
   assert.match(body, /data-my-ducks-page/);
   assert.match(body, /data-status-search-section/);
-  // My Ducks stays in the document so the presence probe can still reveal it.
-  assert.match(navMarkup(body), /data-my-ducks-nav data-phase-visible="false" hidden/);
+  assert.match(navMarkup(body), /data-my-ducks-nav data-phase-visible="true"/);
+});
+
+test("/my-ducks redirects home before registration opens, degraded phase or not", async () => {
+  // There are no ducks to show while the race is still being prepared, and the
+  // nav does not offer the page, so a bookmark or an old link goes home rather
+  // than to an empty page. A failed phase query degrades to exactly the same
+  // Preparing phase, so it must take the same route and never 500.
+  for (const status of [undefined, "DRAFT"]) {
+    const { response } = await page("/my-ducks", status);
+    assert.equal(response.status, 303, `status ${status ?? "no event"}`);
+    assert.equal(response.headers.get("location"), "/", `status ${status ?? "no event"}`);
+  }
+
+  const degraded = await failedPage("/my-ducks");
+  assert.equal(degraded.response.status, 303);
+  assert.equal(degraded.response.headers.get("location"), "/");
+  assert.equal(degraded.response.headers.get("strict-transport-security"), "max-age=31536000");
+  assert.equal(degraded.body, "");
+
+  const dead = await worker.fetch(new Request("https://quickducks.com/my-ducks"), deadDatabaseEnv());
+  assert.equal(dead.status, 303);
+  assert.equal(dead.headers.get("location"), "/");
+});
+
+test("/my-ducks stays reachable in every phase that has a public race", async () => {
+  for (const { phase, statuses } of phaseMatrix) {
+    if (phase === "PREPARING") continue;
+    for (const status of statuses) {
+      const { response } = await page("/my-ducks", status);
+      assert.equal(response.status, 200, `${phase} (${status})`);
+    }
+  }
 });
 
 test("a failed phase query cannot 500 the record-backed public pages either", async () => {
@@ -347,7 +380,7 @@ test("the not-found page still resolves no phase at all, failing database or not
 });
 
 test("a total database outage still paints the public pages", async () => {
-  for (const path of ["/", "/register", "/race", "/my-ducks"]) {
+  for (const path of ["/", "/register", "/race"]) {
     const response = await worker.fetch(new Request(`https://quickducks.com${path}`), deadDatabaseEnv());
     const body = await response.text();
 
@@ -663,10 +696,33 @@ test("the search leads My Ducks only while nothing is saved on the device", () =
 });
 
 test("My Ducks offers Register again only while registration is open", () => {
-  assert.match(renderMyDucks("REGISTRATION"), /<a class="button" href="\/register">Register another participant<\/a>/);
+  assert.match(
+    renderMyDucks("REGISTRATION"),
+    /<a class="button small" href="\/register" data-register-another>Register another participant<\/a>/,
+  );
   for (const phase of ["PREPARING", "LOCKED_IN", "RACING", "RESULTS"]) {
     assert.doesNotMatch(renderMyDucks(phase), /href="\/register"/, phase);
   }
+});
+
+test("Register again sits on the Awaiting Participants header row and wraps on a narrow screen", () => {
+  const markup = renderMyDucks("REGISTRATION");
+  const head = markup.match(
+    /<div class="participant-section-head">\s*<h2 id="awaiting-participants-title">Awaiting Participants<\/h2>([\s\S]*?)<\/div>\s*<p class="muted">Participants you registered on this device, waiting/,
+  )?.[1];
+
+  assert.ok(head, "the awaiting heading row must still be one participant-section-head block");
+  assert.match(head, /data-register-another/);
+  // The carousel controls stay in the same row, after the register action.
+  assert.ok(head.indexOf("data-register-another") < head.indexOf("data-carousel-controls"));
+  // Nothing is left behind in a trailing actions block.
+  assert.doesNotMatch(markup, /<div class="actions"><a class="button" href="\/register">/);
+
+  // The row is a wrapping flex row and every part of it can shrink, so 320px
+  // wraps instead of overflowing.
+  assert.match(markup, /\.participant-section-head \{[^}]*flex-wrap:wrap;/);
+  assert.match(markup, /\.participant-section-head-actions \{[^}]*flex-wrap:wrap;[^}]*min-width:0;/);
+  assert.match(markup, /@media \(max-width:43\.99rem\)[^@]*\.participant-section-head-actions \{ flex-basis:100%; justify-content:flex-start; \}/);
 });
 
 // --- private data ------------------------------------------------------------
