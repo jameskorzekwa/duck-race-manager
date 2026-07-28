@@ -903,14 +903,14 @@ const roleCheckboxes = operationalRoles.map((role) =>
 ).join("");
 
 const staffLogoutForm = (): string =>
-  '<form class="staff-logout" method="post" action="/staff/logout"><button type="submit">Sign out</button></form>';
+  '<form class="staff-logout" method="post" action="/staff/logout"><button type="submit">Log out</button></form>';
 
 // The signed-in bar is the footer of every staff page, not a header on it. It
 // carries who is signed in and how to sign out, and nothing else: navigation is
 // the staff nav's job, and the page name is already the page's heading. Every
 // staff surface renders exactly this element, at the end of its panel.
 const staffFooter = (displayName: string): string =>
-  `<footer class="staff-bar"><p><strong>Signed in as ${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</footer>`;
+  `<footer class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</footer>`;
 
 // Persistent staff navigation. It lists only the pages this actor may open, so a
 // missing link is a convenience filter; every page and API repeats the check.

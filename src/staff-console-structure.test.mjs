@@ -350,7 +350,7 @@ test("the access page keeps every hook, field name, and control the access clien
     /data-live-staff data-system-admin="true" data-roles="RACE_DIRECTOR">/,
   );
   assert.match(markup, /<meta name="robots" content="noindex,nofollow">/);
-  assert.match(markup, /<form class="staff-logout" method="post" action="\/staff\/logout"><button type="submit">Sign out<\/button><\/form>/);
+  assert.match(markup, /<form class="staff-logout" method="post" action="\/staff\/logout"><button type="submit">Log out<\/button><\/form>/);
   assert.match(markup, /<h1 class="page-title operations-title">Staff access<\/h1>/);
 
   // Exact hooks the client queries.

@@ -555,7 +555,7 @@ test("staff renderers take the resolved public phase and never claim a live-nav 
   assert.match(renderStaffHome("Administrator", true, []), /data-phase="PREPARING"/);
 });
 
-test("every staff page ends with a signed-in footer holding only the name and sign out", () => {
+test("every staff page ends with a signed-in footer holding only the name and log out", () => {
   const staffPages = [
     ["staff home", renderStaffHome("Ada Duck", true, [])],
     ["staff access", renderStaffAccess("Ada Duck")],
@@ -571,7 +571,7 @@ test("every staff page ends with a signed-in footer holding only the name and si
     assert.equal((markup.match(/class="staff-bar"/g) ?? []).length, 1, label);
     assert.match(
       markup,
-      /<footer class="staff-bar"><p><strong>Signed in as Ada Duck<\/strong><\/p><form class="staff-logout" method="post" action="\/staff\/logout"><button type="submit">Sign out<\/button><\/form><\/footer>/,
+      /<footer class="staff-bar"><p><strong>Ada Duck<\/strong><\/p><form class="staff-logout" method="post" action="\/staff\/logout"><button type="submit">Log out<\/button><\/form><\/footer>/,
       label,
     );
     // It is a footer at the bottom, below the staff nav and the page heading.
@@ -586,7 +586,7 @@ test("every staff page ends with a signed-in footer holding only the name and si
   // A display name is a server value and stays escaped inside the footer.
   assert.match(
     renderStaffHome('Ada "<script>" Duck', true, []),
-    /Signed in as Ada &quot;&lt;script&gt;&quot; Duck<\/strong>/,
+    /<strong>Ada &quot;&lt;script&gt;&quot; Duck<\/strong>/,
   );
 });
 

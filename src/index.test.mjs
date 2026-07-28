@@ -327,7 +327,7 @@ test("gates the standalone staff access page to system administrators", async ()
   assert.match(body, /data-staff-access-list/);
   assert.match(body, /src="\/assets\/staff-access\.js"/);
   assert.match(body, /src="\/assets\/app-select\.js"/);
-  assert.match(body, /Signed in as Access Staff/);
+  assert.match(body, /<strong>Access Staff<\/strong>/);
 
   // Only GET renders the page; other methods fall through to not-found.
   for (const method of ["POST", "PUT", "DELETE"]) {
@@ -552,7 +552,7 @@ test("the signed-in staff bar is the footer of every staff page", async () => {
 
   for (const path of barred) {
     const name = names[path] ?? "Chrome Staff";
-    const footer = new RegExp(`<footer class="staff-bar"><p><strong>Signed in as ${name}</strong></p><form class="staff-logout" method="post" action="/staff/logout"><button type="submit">Sign out</button></form></footer>`);
+    const footer = new RegExp(`<footer class="staff-bar"><p><strong>${name}</strong></p><form class="staff-logout" method="post" action="/staff/logout"><button type="submit">Log out</button></form></footer>`);
     const body = await (await createWorker(async () => chromeActor)
       .fetch(new Request(`https://quickducks.com${path}`), phaseEnv("REGISTRATION_OPEN"))).text();
     const panel = body.match(/<main class="shell">[\s\S]*<\/main>/)?.[0];
@@ -572,7 +572,7 @@ test("the signed-in staff bar is the footer of every staff page", async () => {
   // The pairing mock is the one staff-styled surface with no session behind it.
   const pairing = await (await createWorker(async () => chromeActor)
     .fetch(new Request("https://quickducks.com/mock/staff/ducks/128/pair"), phaseEnv("REGISTRATION_OPEN"))).text();
-  assert.doesNotMatch(pairing.match(/<main class="shell">[\s\S]*<\/main>/)[0], /staff-bar|Sign out/);
+  assert.doesNotMatch(pairing.match(/<main class="shell">[\s\S]*<\/main>/)[0], /staff-bar|Log out/);
 });
 
 test("the staff console drops the station shortcut and preview buttons", async () => {
