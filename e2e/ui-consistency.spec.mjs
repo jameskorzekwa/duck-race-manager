@@ -457,6 +457,8 @@ test.describe("sitewide UI consistency", () => {
     await expect(water).toHaveCSS("z-index", "1");
     await expect(slit).toHaveCSS("z-index", "2");
     await expect(slit).toHaveCSS("animation-name", "none");
+    expect(await slit.evaluate((element) => getComputedStyle(element, "::before").backgroundImage))
+      .toContain("data:image/svg+xml");
     await expect(actions.getByRole("link", { name: "Register", exact: true })).toBeVisible();
     await expect(actions.getByRole("link", { name: "How it works", exact: true })).toBeVisible();
     await expectSlitComposition();
