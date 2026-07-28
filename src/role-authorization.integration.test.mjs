@@ -399,6 +399,48 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     ), 201, `heat runner ${transition}`);
     revision = result.heat.revision;
   }
+  for (const [label, deniedActor] of [
+    ["announcer", actors.announcer],
+    ["heat runner", actors.heats],
+    ["result taker", actors.results],
+    ["roleless actor", actors.none],
+  ]) {
+    assert.equal((await post(
+      deniedActor,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/reset`,
+      { commandId: command(), revision },
+    )).status, 403, `${label} cannot reset a heat`);
+  }
+  let reset = await json(await post(
+    actors.director,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/reset`,
+    { commandId: command(), revision },
+  ), 201, "race director resets heat");
+  assert.equal(reset.heat.status, "LOADING");
+  revision = reset.heat.revision;
+  for (const transition of ["ready", "call", "start"]) {
+    const result = await json(await post(
+      actors.heats,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/${transition}`,
+      { commandId: command(), revision },
+    ), 201, `heat runner repeats ${transition}`);
+    revision = result.heat.revision;
+  }
+  reset = await json(await post(
+    actors.admin,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/reset`,
+    { commandId: command(), revision },
+  ), 201, "administrator resets heat");
+  assert.equal(reset.heat.status, "LOADING");
+  revision = reset.heat.revision;
+  for (const transition of ["ready", "call", "start"]) {
+    const result = await json(await post(
+      actors.heats,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/${transition}`,
+      { commandId: command(), revision },
+    ), 201, `heat runner repeats ${transition} after admin reset`);
+    revision = result.heat.revision;
+  }
   assert.equal((await post(actors.heats, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish`, {
     commandId: command(), revision,
   })).status, 403);

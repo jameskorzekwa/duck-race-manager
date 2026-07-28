@@ -429,7 +429,7 @@ const participantHeatStatus = (status) => ({
   PLANNED: "Coming up",
   LOADING: "Ducks are being prepared",
   READY: "Ready to call",
-  CALLING: "Calling racers now",
+  CALLING: "Heat has been announced",
   RUNNING: "Racing now",
   AWAITING_RESULT: "Race finished; checking the result",
   FINALIZED: "Result official",
@@ -1674,7 +1674,7 @@ const liveHeatStatus = (status) => ({
   PLANNED: "Coming up",
   LOADING: "Ducks are being prepared",
   READY: "Ready to call",
-  CALLING: "Calling racers now",
+  CALLING: "Heat has been announced",
   RUNNING: "Racing now",
   AWAITING_RESULT: "Race finished; checking the result",
   FINALIZED: "Result official",
@@ -2028,9 +2028,9 @@ const startRender = (event, detail) => {
   // Rosters lock automatically when the round starts, so this station never
   // offers a lock action and a still-planned heat is simply waiting.
   const transition = {
-    LOADING: ["ready", "Mark heat ready"],
-    READY: ["call", "Call this heat"],
-    CALLING: ["start", "Start this heat"],
+    LOADING: ["ready", "Mark Heat Ready"],
+    READY: ["call", "Heat Has Been Announced"],
+    CALLING: ["start", "Start This Heat"],
   }[detail.heat.status];
   if (!transition) {
     startMessage.textContent = detail.heat.status === "PLANNED"
@@ -2125,8 +2125,8 @@ const announcerHeatLabel = (heat) => heat.round === "FINAL" ? "The final" : "Rou
 const announcerCues = {
   PLANNED: "Coming up next. Read these racers out now.",
   LOADING: "Ducks are going in. Read these racers out now.",
-  READY: "Ready to race. Read these racers out now.",
-  CALLING: "Being called to the water. Read these racers out now.",
+  READY: "Ready to race. Announce these racers now.",
+  CALLING: "Heat announced. Racers are heading to the water.",
   RUNNING: "Racing now. Call the race.",
   AWAITING_RESULT: "Finished. Hold for the official result from the finish line.",
 };
@@ -2747,7 +2747,9 @@ if (finishRoot) {
     domains: ["event", "participants", "ducks", "heats"],
     root: finishRoot,
     refresh: finishLoadWork,
-    isBlocked: () => finishScanBusy || finishCommandBusy || finishSelected.length > 0,
+    // A changed heat revision clears reviewed selections in finishRender. Do not
+    // block that authoritative refresh, especially when a director resets it.
+    isBlocked: () => finishScanBusy || finishCommandBusy,
   });
 }
 `;
@@ -5173,6 +5175,10 @@ const addRosterForm = (body) => {
   heatControls.append(details);
 };
 
+const heatResetAllowed = (heat) => Boolean(canDirectRace)
+  && ["READY", "CALLING", "RUNNING", "AWAITING_RESULT"].includes(heat.status)
+  && heat.rosterLocked && heat.rosterSize > 0 && heat.publishedResultCount === 0;
+
 const resultForm = (body, mode) => {
   const form = text("form", "", "operation-card");
   form.append(text("h3", mode === "finalize" ? "Finalize result" : "Correct published result"));
@@ -5239,8 +5245,8 @@ const renderHeatControls = (body) => {
   // No lock control: starting the round locks every roster in one guarded
   // command, so PLANNED offers nothing for an operator to press here.
   const transition = {
-    LOADING: ["ready", "Mark ready"], READY: ["call", "Call heat"],
-    CALLING: ["start", "Start heat"], RUNNING: ["finish", "Finish heat"],
+    LOADING: ["ready", "Mark Heat Ready"], READY: ["call", "Heat Has Been Announced"],
+    CALLING: ["start", "Start This Heat"], RUNNING: ["finish", "Finish heat"],
   }[body.heat.status];
   const canTransition = transition && (transition[0] === "finish" ? canTakeResults : canRunHeat);
   if (canTransition) {
@@ -5262,6 +5268,24 @@ const renderHeatControls = (body) => {
       });
     });
     heatControls.append(button);
+  }
+  if (heatResetAllowed(body.heat)) {
+    const resetButton = text("button", "Reset Heat", "button danger small");
+    resetButton.type = "button";
+    resetButton.addEventListener("click", async () => {
+      if (!await appConfirm(
+        "Reset this heat to Loading? Its locked roster and lock details will remain. Start and finish progress and any unsubmitted result entry will be cleared.",
+        { danger: true, confirmLabel: "Reset Heat" },
+      )) return;
+      await perform(resetButton, "Resetting heat…", async () => {
+        await api(
+          "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/" + encodeURIComponent(selectedHeat.id) + "/reset",
+          commandOptions("POST", { commandId: crypto.randomUUID(), revision: selectedHeat.revision }),
+        );
+        await loadHeats();
+      });
+    });
+    heatControls.append(resetButton);
   }
   addRosterForm(body);
   if (canTakeResults && body.heat.status === "AWAITING_RESULT" && body.heat.round === "FINAL") {
