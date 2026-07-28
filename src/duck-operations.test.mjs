@@ -716,10 +716,12 @@ const deletableDuck = (overrides = {}) => ({
   revision: 3,
   event_duck_id: "event_duck_test",
   event_duck_event_id: "event_test",
+  event_status: "REGISTRATION_CLOSED",
   active_assignment_id: null,
   race_entry_id: null,
   registration_id: null,
   published_result_count: 0,
+  in_flight_heat_id: null,
   ...overrides,
 });
 
@@ -804,7 +806,12 @@ test("deleting a paired duck returns its participant to the pairing queue and dr
   assert.match(joined, /SET status = 'SUBMITTED'/);
   assert.match(joined, /UPDATE race_entries SET duck_name = NULL/);
   // The heat roster is untouched: it names the race entry, not the assignment.
-  assert.doesNotMatch(joined, /heat_entries/);
+  // The one statement that mentions heat_entries is the command insert, whose
+  // guard refuses to unpair a racer whose heat is already on the water.
+  const touchesRoster = db.batches[0]
+    .filter((statement) => statement.sql.includes("heat_entries"))
+    .map((statement) => statement.sql.trim().split(/\s+/).slice(0, 2).join(" "));
+  assert.deepEqual(touchesRoster, ["INSERT INTO"]);
 });
 
 test("a duck with a published result leaves inventory without erasing the result behind it", async () => {
@@ -819,6 +826,73 @@ test("a duck with a published result leaves inventory without erasing the result
   assert.match(joined, /SET inventory_status = 'RETIRED'/);
   assert.match(joined, /status = 'RETIRED', retired_at = \?/);
   assert.match(joined, /release_reason = 'DUCK_DELETED'/);
+});
+
+// Unpairing a racer whose heat has been run would make that heat's result
+// unpublishable, and every heat behind it waits on that result. This is the one
+// window where deleting is refused outright rather than handled: a duck that
+// breaks while its heat is being called is the ordinary case and goes through.
+test("a duck is not deleted out from under a heat that has been run", async () => {
+  const db = deleteDuckDb(deletableDuck({
+    active_assignment_id: "assignment_test",
+    race_entry_id: "race_entry_test",
+    registration_id: "registration_test",
+    in_flight_heat_id: "heat_test",
+  }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /Publish its official result, then delete the duck/);
+  assert.equal(db.batches.length, 0);
+});
+
+test("a finished event's ducks and results can no longer be changed", async () => {
+  const db = deleteDuckDb(deletableDuck({ event_status: "COMPLETED" }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /This event is finished/);
+  assert.equal(db.batches.length, 0);
+});
+
+// A superseded result revision keeps a duck_assignment_id with no foreign key
+// of its own, so erasing a corrected duck would leave that history pointing at
+// nothing and PRAGMA foreign_key_check would never notice.
+test("a duck named by a superseded result revision is retired rather than erased", async () => {
+  const db = deleteDuckDb(deletableDuck({ published_result_count: 1 }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+
+  assert.equal((await response.json()).erased, false);
+  const historyCount = db.statements.find((statement) => statement.sql.includes("published_result_count"));
+  assert.ok(historyCount, "the erasability count runs");
+  assert.match(historyCount.sql, /FROM heat_result_history hh/);
+});
+
+// The batch, not the preflight, decides. Every statement after the command
+// insert is conditional on that insert having landed, so a duck that changed
+// under the actor leaves no half-deleted wreckage behind.
+test("every write in the delete batch is conditional on the command row landing", async () => {
+  const db = deleteDuckDb(deletableDuck({
+    active_assignment_id: "assignment_test",
+    race_entry_id: "race_entry_test",
+    registration_id: "registration_test",
+  }));
+  await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+
+  const [commandInsert, audit, ...rest] = db.batches[0];
+  assert.match(commandInsert.sql, /INSERT INTO race_commands/);
+  assert.match(commandInsert.sql, /AND d\.revision = \?/);
+  assert.match(commandInsert.sql, /AND e\.status IN \(\?, \?, \?, \?, \?\)/);
+  assert.match(commandInsert.sql, /h\.status IN \('RUNNING', 'AWAITING_RESULT'\)/);
+  assert.match(audit.sql, /INSERT INTO audit_events/);
+  for (const statement of rest) {
+    assert.match(
+      statement.sql,
+      /AND EXISTS \(SELECT 1 FROM race_commands rc WHERE rc\.id = \? AND rc\.event_id = \? AND rc\.command_type = 'DELETE_DUCK' AND rc\.result_id = \?\)/,
+      statement.sql.slice(0, 60),
+    );
+  }
+  assert.ok(rest.length >= 8, "the paired erase path writes every statement");
 });
 
 test("a stale duck revision is refused before any write", async () => {
@@ -853,6 +927,15 @@ test("delete duck requires a reason and refuses a reused command identifier", as
   const reused = await handleDuckOperations(deleteDuckRequest(), makeEnv(reusedDb), actor);
   assert.equal(reused.status, 409);
   assert.equal(reusedDb.batches.length, 0);
+
+  // The same command identifier replayed against a different event is reuse for
+  // different material, not a retry.
+  const crossEventDb = makeDb((sql) => sql.includes("FROM race_commands")
+    ? { event_id: "other_event", command_type: "DELETE_DUCK", result_id: "duck_test" }
+    : null);
+  const crossEvent = await handleDuckOperations(deleteDuckRequest(), makeEnv(crossEventDb), actor);
+  assert.equal(crossEvent.status, 409);
+  assert.equal(crossEventDb.batches.length, 0);
 
   const replayDb = makeDb((sql) => sql.includes("FROM race_commands")
     ? { event_id: "event_test", command_type: "DELETE_DUCK", result_id: "duck_test" }

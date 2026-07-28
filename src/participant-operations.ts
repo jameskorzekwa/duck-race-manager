@@ -851,6 +851,12 @@ const deleteRegistration = async (
 //
 // The rejected text is never echoed, logged, or audited, exactly as on the
 // public path.
+//
+// Like the public endpoint, this is last write wins and takes no expected
+// revision. A duck name is one field that is visible the moment it is saved, so
+// an overwrite is seen and corrected immediately; refusing the desk's save
+// because the owner renamed the duck a second earlier would cost more than it
+// protects. The command identifier is what makes a retry a replay.
 const setDuckName = async (
   request: Request,
   env: Env,

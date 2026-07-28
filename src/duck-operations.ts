@@ -1505,10 +1505,12 @@ interface DeletableDuckRow {
   revision: number;
   event_duck_id: string | null;
   event_duck_event_id: string | null;
+  event_status: string | null;
   active_assignment_id: string | null;
   race_entry_id: string | null;
   registration_id: string | null;
   published_result_count: number;
+  in_flight_heat_id: string | null;
 }
 
 // Deleting a duck has no inventory-event row to compare a replay against — the
@@ -1519,24 +1521,42 @@ const findRaceCommand = (env: Env, commandId: string): Promise<ExistingCommand |
     "SELECT event_id, command_type, result_id FROM race_commands WHERE id = ?",
   ).bind(commandId).first<ExistingCommand>();
 
+// `published_result_count` counts both the live result rows and every superseded
+// revision of them. `heat_result_history` carries a `duck_assignment_id` with no
+// foreign key of its own, so erasing a corrected duck would leave that history
+// pointing at nothing and `PRAGMA foreign_key_check` would never notice.
 const getDeletableDuck = (env: Env, duckId: string): Promise<DeletableDuckRow | null> =>
   env.DB.prepare(
     `SELECT d.id AS duck_id, d.visible_number, d.revision,
             ed.id AS event_duck_id, ed.event_id AS event_duck_event_id,
+            e.status AS event_status,
             da.id AS active_assignment_id, da.race_entry_id,
             re.registration_id,
             (
-              SELECT COUNT(*)
-                FROM heat_results hr
-                JOIN duck_assignments hda ON hda.id = hr.duck_assignment_id
-               WHERE hda.duck_id = d.id
-            ) AS published_result_count
+              (SELECT COUNT(*)
+                 FROM heat_results hr
+                 JOIN duck_assignments hda ON hda.id = hr.duck_assignment_id
+                WHERE hda.duck_id = d.id)
+              + (SELECT COUNT(*)
+                   FROM heat_result_history hh
+                   JOIN duck_assignments hda ON hda.id = hh.duck_assignment_id
+                  WHERE hda.duck_id = d.id)
+            ) AS published_result_count,
+            (
+              SELECT h.id
+                FROM heat_entries he
+                JOIN heats h ON h.id = he.heat_id
+               WHERE he.race_entry_id = da.race_entry_id
+                 AND h.status IN ('RUNNING', 'AWAITING_RESULT')
+               LIMIT 1
+            ) AS in_flight_heat_id
        FROM ducks d
        LEFT JOIN event_ducks ed ON ed.id = (
          SELECT ed2.id FROM event_ducks ed2
           WHERE ed2.duck_id = d.id AND ed2.released_at IS NULL
           LIMIT 1
        )
+       LEFT JOIN events e ON e.id = ed.event_id
        LEFT JOIN duck_assignments da ON da.duck_id = d.id AND da.valid_to IS NULL
        LEFT JOIN race_entries re ON re.id = da.race_entry_id
       WHERE d.id = ?
@@ -1564,7 +1584,11 @@ const deleteDuck = async (
 
   const previous = await findRaceCommand(env, commandId);
   if (previous !== null) {
-    if (previous.command_type !== "DELETE_DUCK" || previous.result_id !== duckId) {
+    if (
+      previous.event_id !== eventId
+      || previous.command_type !== "DELETE_DUCK"
+      || previous.result_id !== duckId
+    ) {
       return json({ error: "This command identifier was already used for another operation." }, 409);
     }
     return json({ duckId, deleted: true, replayed: true });
@@ -1580,20 +1604,60 @@ const deleteDuck = async (
   if (context.event_duck_event_id !== null && context.event_duck_event_id !== eventId) {
     return json({ error: "This duck is reserved for another event." }, 409);
   }
+  if (
+    context.event_status !== null
+    && !activeRaceStatuses.includes(context.event_status as typeof activeRaceStatuses[number])
+  ) {
+    return json({ error: "This event is finished. Its ducks and results can no longer be changed." }, 409);
+  }
+  // The one window deleting a duck is genuinely unsafe: the racer's heat has
+  // been raced and its result is not published yet. Publishing needs an ACTIVE
+  // participant holding an open assignment, so unpairing there would make that
+  // result unpublishable and stall every heat waiting behind it.
+  //
+  // Everything either side is fine. Before the heat runs — including while it is
+  // being called, which is when a duck usually breaks — the heat simply refuses
+  // to start until the racer holds a duck again. After the result is published,
+  // a finalist who lost their duck just needs another one.
+  if (context.in_flight_heat_id !== null) {
+    return json({
+      error: "This racer's heat has been run. Publish its official result, then delete the duck.",
+    }, 409);
+  }
 
   const now = new Date().toISOString();
   const erasable = context.published_result_count === 0;
+  // Every statement below the command insert is conditional on that insert
+  // having landed. The deletes here are irreversible and span four tables, so
+  // the batch, not the preflight, is what has to decide: if the duck was paired,
+  // named, or moved between the read above and this write, the command row is
+  // never written and nothing else in the batch does anything either.
+  const committed = "AND EXISTS (SELECT 1 FROM race_commands rc WHERE rc.id = ? "
+    + "AND rc.event_id = ? AND rc.command_type = 'DELETE_DUCK' AND rc.result_id = ?)";
+  const commit = [commandId, eventId, duckId];
   const statements: D1PreparedStatement[] = [
-    // Guarded on the revision the actor saw, so a duck that was paired, named,
-    // or moved between the preflight and here fails the whole batch.
+    // Guarded on the revision the actor saw and on the event still being one
+    // where inventory can change at all.
     env.DB.prepare(
       `INSERT INTO race_commands
         (id, event_id, command_type, result_id, requested_at, completed_at)
        SELECT ?, ?, 'DELETE_DUCK', ?, ?, ?
          FROM events e
          JOIN ducks d ON d.id = ?
-        WHERE e.id = ? AND d.revision = ?`,
-    ).bind(commandId, eventId, duckId, now, now, duckId, eventId, expectedRevision),
+        WHERE e.id = ? AND d.revision = ?
+          AND e.status IN (${activeRaceStatuses.map(() => "?").join(", ")})
+          AND NOT EXISTS (
+            SELECT 1
+              FROM duck_assignments da
+              JOIN heat_entries he ON he.race_entry_id = da.race_entry_id
+              JOIN heats h ON h.id = he.heat_id
+             WHERE da.duck_id = d.id AND da.valid_to IS NULL
+               AND h.status IN ('RUNNING', 'AWAITING_RESULT')
+          )`,
+    ).bind(
+      commandId, eventId, duckId, now, now, duckId, eventId, expectedRevision,
+      ...activeRaceStatuses,
+    ),
     // Audit first: it is the only record that survives an erased duck, and it
     // carries identifiers and the staff reason, never participant details.
     auditInsert(env, eventId, commandId, "DUCK_DELETED", "DUCK", duckId, actor.id, now, {
@@ -1609,20 +1673,20 @@ const deleteDuck = async (
       env.DB.prepare(
         `UPDATE duck_assignments
             SET valid_to = ?, end_reason = 'DUCK_DELETED', ended_by_staff_profile_id = ?
-          WHERE id = ? AND valid_to IS NULL`,
-      ).bind(now, actor.id, context.active_assignment_id),
+          WHERE id = ? AND valid_to IS NULL ${committed}`,
+      ).bind(now, actor.id, context.active_assignment_id, ...commit),
       // Back to SUBMITTED is exactly where a participant sits before pairing,
       // which is what puts them back in the queue on every staff and public
       // surface without a status of their own.
       env.DB.prepare(
         `UPDATE registrations
             SET status = 'SUBMITTED', status_changed_at = ?, updated_at = ?, revision = revision + 1
-          WHERE id = ? AND status = 'ACTIVE'`,
-      ).bind(now, now, context.registration_id),
+          WHERE id = ? AND status = 'ACTIVE' ${committed}`,
+      ).bind(now, now, context.registration_id, ...commit),
       // The duck is going; a name that described it goes with it.
       env.DB.prepare(
-        "UPDATE race_entries SET duck_name = NULL, updated_at = ? WHERE id = ?",
-      ).bind(now, context.race_entry_id),
+        `UPDATE race_entries SET duck_name = NULL, updated_at = ? WHERE id = ? ${committed}`,
+      ).bind(now, context.race_entry_id, ...commit),
     );
   }
 
@@ -1630,34 +1694,40 @@ const deleteDuck = async (
     statements.push(
       // `supersedes_tag_id` is a self-referencing restricted foreign key, so a
       // multi-row tag delete can hit a retired parent while its replacement
-      // still points at it. Clearing the column first is what makes the delete
+      // still points at it. Clearing it first is what makes the delete
       // survivable; this is the bug that once made force delete permanently
-      // fail for any race where a tag had been replaced.
-      env.DB.prepare("UPDATE duck_tags SET supersedes_tag_id = NULL WHERE duck_id = ?").bind(duckId),
-      env.DB.prepare("DELETE FROM duck_tags WHERE duck_id = ?").bind(duckId),
-      env.DB.prepare("DELETE FROM duck_assignments WHERE duck_id = ?").bind(duckId),
-      env.DB.prepare("DELETE FROM event_ducks WHERE duck_id = ?").bind(duckId),
+      // fail for any race where a tag had been replaced. It clears every row
+      // pointing into this duck's tags, not only this duck's own rows.
+      env.DB.prepare(
+        `UPDATE duck_tags SET supersedes_tag_id = NULL
+          WHERE supersedes_tag_id IN (SELECT id FROM duck_tags WHERE duck_id = ?) ${committed}`,
+      ).bind(duckId, ...commit),
+      env.DB.prepare(`DELETE FROM duck_tags WHERE duck_id = ? ${committed}`).bind(duckId, ...commit),
+      env.DB.prepare(`DELETE FROM duck_assignments WHERE duck_id = ? ${committed}`).bind(duckId, ...commit),
+      env.DB.prepare(`DELETE FROM event_ducks WHERE duck_id = ? ${committed}`).bind(duckId, ...commit),
       // `duck_inventory_events` cascades with the duck, so its history goes
       // with it and the audit row above is what remains.
-      env.DB.prepare("DELETE FROM ducks WHERE id = ? AND revision = ?").bind(duckId, expectedRevision),
+      env.DB.prepare(
+        `DELETE FROM ducks WHERE id = ? AND revision = ? ${committed}`,
+      ).bind(duckId, expectedRevision, ...commit),
     );
   } else {
     statements.push(
       env.DB.prepare(
         `UPDATE duck_tags SET status = 'RETIRED', retired_at = ?, updated_at = ?
-          WHERE duck_id = ? AND status = 'ACTIVE'`,
-      ).bind(now, now, duckId),
+          WHERE duck_id = ? AND status = 'ACTIVE' ${committed}`,
+      ).bind(now, now, duckId, ...commit),
       env.DB.prepare(
         `UPDATE event_ducks
             SET released_at = ?, release_reason = 'DUCK_DELETED', released_by_staff_profile_id = ?
-          WHERE duck_id = ? AND released_at IS NULL`,
-      ).bind(now, actor.id, duckId),
+          WHERE duck_id = ? AND released_at IS NULL ${committed}`,
+      ).bind(now, actor.id, duckId, ...commit),
       env.DB.prepare(
         `UPDATE ducks
             SET inventory_status = 'RETIRED', inventory_status_changed_at = ?,
                 updated_at = ?, revision = revision + 1
-          WHERE id = ? AND revision = ?`,
-      ).bind(now, now, duckId, expectedRevision),
+          WHERE id = ? AND revision = ? ${committed}`,
+      ).bind(now, now, duckId, expectedRevision, ...commit),
     );
   }
 
@@ -1666,8 +1736,8 @@ const deleteDuck = async (
   } catch {
     return json({ error: "Deleting this duck conflicted with another update. Refresh and try again." }, 409);
   }
-  const committed = await findRaceCommand(env, commandId);
-  return committed === null || committed.command_type !== "DELETE_DUCK"
+  const saved = await findRaceCommand(env, commandId);
+  return saved === null || saved.command_type !== "DELETE_DUCK"
     ? json({ error: "Deleting this duck conflicted with another update. Refresh and try again." }, 409)
     : json({
       duckId,

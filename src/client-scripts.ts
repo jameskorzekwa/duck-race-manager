@@ -3581,6 +3581,13 @@ const historyCard = (title, detail) => {
   return card;
 };
 
+// The duck name is free text that is published, so a moderator has to be able to
+// tell a name the read-time filter is already suppressing from one the public
+// can see. It reaches the page as text through the shared helper either way.
+const inventoryDuckNameLabel = (duck) => duck.duckNamePubliclyHidden === true
+  ? duck.duckName + " (already hidden from public surfaces)"
+  : duck.duckName;
+
 const commandOptions = (method, payload) => ({
   method,
   headers: { accept: "application/json", "content-type": "application/json" },
@@ -3652,7 +3659,7 @@ const inventoryDetailController = createInventoryDetailController({
 const inventoryCard = (duck) => {
   const eventLabel = duck.reservation && !duck.reservation.releasedAt ? " · " + duck.reservation.event.name : "";
   const label = "Duck #" + duck.visibleNumber
-    + (duck.duckName ? " · " + duck.duckName : "")
+    + (duck.duckName ? " · " + inventoryDuckNameLabel(duck) : "")
     + " · " + humanize(duck.inventoryStatus) + eventLabel;
   const button = text("button", label, "result-button");
   button.type = "button";
@@ -3705,8 +3712,8 @@ const loadInventory = async () => {
 // so the confirmation says which of the two things is about to happen.
 const renderDeleteEffect = (duck) => {
   deleteDuckEffect.textContent = duck.participant
-    ? "Removes this duck from inventory, retires its tag, and puts its participant back in the queue for a new duck. Their heat place is kept, and that heat cannot start until they hold a duck again. This cannot be undone."
-    : "Removes this duck from inventory and retires its tag. This cannot be undone.";
+    ? "Removes this duck from inventory and puts its participant back in the queue for a new duck. Their heat place is kept, and that heat cannot start until they hold a duck again. This cannot be undone."
+    : "Removes this duck from inventory. Its tag can be written again. This cannot be undone.";
 };
 
 const renderDuckDetail = (body) => {
@@ -3715,7 +3722,7 @@ const renderDuckDetail = (body) => {
   document.querySelector("[data-inventory-name]").textContent = "Duck #" + duck.visibleNumber;
   showFacts(inventoryFacts, [
     ["Inventory", humanize(duck.inventoryStatus)],
-    ["Duck name", duck.duckName || "Not named"],
+    ["Duck name", duck.duckName ? inventoryDuckNameLabel(duck) : "Not named"],
     ["Location", duck.location || "Not set"],
     ["Tag", duck.tag ? humanize(duck.tag.status) : "No tag"],
     ["Reservation", duck.reservation ? duck.reservation.event.name + (duck.reservation.releasedAt ? " · released" : " · active") : "None"],
@@ -3893,6 +3900,10 @@ deleteDuckForm.addEventListener("submit", async (event) => {
   const button = form.querySelector("button");
   const reason = String(new FormData(form).get("reason"));
   const duck = selectedDuck;
+  if (!duck) {
+    setMessage("Select an inventory duck first.", true);
+    return;
+  }
   if (!await appConfirm(
     duck.participant
       ? "Delete Duck #" + duck.visibleNumber + "? Its participant goes back into the queue for a new duck, and this duck is gone for good."
