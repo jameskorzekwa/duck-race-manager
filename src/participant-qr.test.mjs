@@ -5,7 +5,9 @@ import {
   PARTICIPANT_QR_PREFIX,
   isLookupCode,
   normalizeLookupCode,
+  optionalParticipantQrGeometry,
   parseParticipantQrPayload,
+  participantQrGeometry,
   participantQrPayload,
   renderParticipantQrSvg,
 } from "./participant-qr.ts";
@@ -105,4 +107,48 @@ test("the rendered SVG matches the encoder's own module matrix", async () => {
 
   assert.equal(covered.size, dark);
   assert.ok(dark > 0);
+});
+
+test("the SVG renderer and the shared geometry encode the same symbol", () => {
+  // My Ducks draws from the geometry while the private status page draws from
+  // the markup. They must stay one encoder, or a card could show a QR that
+  // scans differently from the one beside the printed code.
+  const geometry = participantQrGeometry("DAASY234");
+  const markup = renderParticipantQrSvg("DAASY234");
+
+  assert.ok(geometry.size > 0);
+  assert.match(markup, new RegExp(`viewBox="0 0 ${geometry.size} ${geometry.size}"`));
+  assert.ok(markup.includes(` d="${geometry.path}"`));
+});
+
+test("geometry paths carry only drawing commands, never caller input", () => {
+  // The browser sets this straight onto an SVG path attribute, so the alphabet
+  // it can contain is part of the contract rather than an implementation
+  // detail. The client re-checks the same alphabet before drawing.
+  for (const code of ["DAASY234", "ZZZZ2345", "BCDEFGHJ"]) {
+    assert.match(participantQrGeometry(code).path, /^[Mhvz0-9 -]+$/);
+  }
+});
+
+test("optional geometry degrades to null instead of throwing", () => {
+  // One unencodable stored code must cost that card its QR, not fail the whole
+  // My Ducks response for every other registration on the device.
+  assert.equal(optionalParticipantQrGeometry(null), null);
+  assert.equal(optionalParticipantQrGeometry(""), null);
+  assert.equal(optionalParticipantQrGeometry("SHORT"), null);
+  assert.equal(optionalParticipantQrGeometry("DAISY123"), null, "I and 1 are outside the alphabet");
+  assert.deepEqual(
+    optionalParticipantQrGeometry("DAASY234"),
+    participantQrGeometry("DAASY234"),
+  );
+});
+
+test("the geometry encodes the lookup code and nothing else", async () => {
+  // The same privacy property the markup renderer is held to: a photographed
+  // card QR reveals exactly the code printed next to it.
+  const { encode } = await import("uqr");
+  const expected = encode("QD1:DAASY234", { ecc: "M", border: 4 });
+  const geometry = participantQrGeometry("DAASY234");
+
+  assert.equal(geometry.size, expected.size);
 });

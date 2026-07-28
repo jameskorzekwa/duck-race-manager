@@ -722,6 +722,42 @@ const participantNameControls = (registration) => {
   return form;
 };
 
+const participantQrNamespace = "http://www.w3.org/2000/svg";
+
+// The server sends drawing geometry rather than markup, and this builds the
+// symbol through namespaced DOM calls, so nothing from the response is ever
+// parsed as HTML. The path guard keeps that true even if the projection ever
+// changed shape: only the digits, spaces, signs, and Mhvz commands the encoder
+// emits can reach the attribute, and anything else drops the QR instead of
+// drawing it.
+const participantQrPathPattern = /^[Mhvz0-9 -]+$/;
+
+const participantQrFigure = (registration) => {
+  const qr = registration.qr;
+  if (!qr || typeof qr.path !== "string" || !participantQrPathPattern.test(qr.path)) return null;
+  const size = Number(qr.size);
+  if (!Number.isFinite(size) || size <= 0) return null;
+
+  const svg = document.createElementNS(participantQrNamespace, "svg");
+  svg.setAttribute("class", "participant-qr");
+  svg.setAttribute("viewBox", "0 0 " + size + " " + size);
+  svg.setAttribute("shape-rendering", "crispEdges");
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", "QR code containing this participant's staff lookup code");
+  const background = document.createElementNS(participantQrNamespace, "rect");
+  background.setAttribute("width", String(size));
+  background.setAttribute("height", String(size));
+  background.setAttribute("fill", "#ffffff");
+  const modules = document.createElementNS(participantQrNamespace, "path");
+  modules.setAttribute("fill", "#111827");
+  modules.setAttribute("d", qr.path);
+  svg.append(background, modules);
+
+  const frame = participantText("div", "", "lookup-code-qr");
+  frame.append(svg);
+  return frame;
+};
+
 const participantCard = (registration) => {
   const current = registration.registrationId === participantCurrentId;
   const card = participantText("article", "", "duck-card participant-card" + (current ? " is-current" : ""));
@@ -737,6 +773,11 @@ const participantCard = (registration) => {
   card.append(registration.followed
     ? participantText("p", "Followed from a duck tag, a duck page, or the race status search. Followed participants have no staff lookup code here.", "muted")
     : participantText("p", "Staff lookup code: " + registration.lookupCode));
+  const qrFigure = registration.followed ? null : participantQrFigure(registration);
+  if (qrFigure !== null) {
+    card.append(qrFigure);
+    card.append(participantText("p", "Show this code to staff at the duck table. They can scan it or type the code above.", "muted"));
+  }
   card.append(participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"));
   participantAddRaceFacts(card, registration.raceStatus, registration);
   if (participantCanDelete(registration)) card.append(...participantDeleteControls(registration));
