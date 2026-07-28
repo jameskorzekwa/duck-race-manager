@@ -1531,6 +1531,12 @@ class QuickDocument extends QuickNode {
   createElement(tagName) {
     return new QuickNode(tagName);
   }
+
+  createElementNS(namespace, tagName) {
+    const node = new QuickNode(tagName);
+    node.namespaceURI = namespace;
+    return node;
+  }
 }
 
 class QuickFormData {
@@ -1824,6 +1830,9 @@ const collected = (registrationId, paired, overrides = {}) => ({
   lastName: "Duck",
   displayName: "Daisy Duck",
   lookupCode: "DAISY123",
+  // Drawing geometry as the projection sends it. The path is a real, if tiny,
+  // run of the encoder's own output alphabet.
+  qr: { size: 29, path: "M4 4h7v1h-7zM12 4h1v1h-1z" },
   followed: false,
   registrationStatus: "SUBMITTED",
   paired,
@@ -1840,6 +1849,7 @@ const followedEntry = (registrationId, overrides = {}) => collected(registration
   lastName: null,
   displayName: "Donald M.",
   lookupCode: null,
+  qr: null,
   duckName: null,
   nameable: false,
   followed: true,
@@ -3389,4 +3399,104 @@ test("the shared duck-link helper is declared once across the public classic scr
   }
   // The public duck views never read or render private material.
   assert.doesNotMatch(duckDetailHelpersScript, /email|phone|lookupCode|privateToken|tagToken|token/i);
+});
+
+// --- Participant QR codes on the My Ducks cards ---------------------------
+
+const cardQr = (card) => card.descendants().find((node) => node.tagName === "SVG") ?? null;
+
+test("My Ducks renders the pairing QR on awaiting and paired cards it owns", async () => {
+  // The awaiting section is the pre-pairing state staff scan at the duck table,
+  // and the code stays useful for lookup afterwards, so both owned sections
+  // carry it. This is the surface a participant actually has on their phone;
+  // the private status link only works if they kept it.
+  const harness = await renderMyDucks([
+    collected("11111111-1111-4111-8111-111111111111", false),
+    collected("22222222-2222-4222-8222-222222222222", true),
+    followedEntry("33333333-3333-4333-8333-333333333333"),
+  ]);
+
+  const [awaiting] = harness.awaiting.track.children;
+  const [paired] = harness.paired.track.children;
+  const [followed] = harness.followed.track.children;
+
+  assert.ok(cardQr(awaiting), "an awaiting card shows the QR staff scan");
+  assert.ok(cardQr(paired), "a paired card keeps the QR for lookup");
+  assert.equal(cardQr(followed), null, "a followed entry has no lookup code to encode");
+});
+
+test("the card QR is built as namespaced SVG from the projected geometry", async () => {
+  // Built through createElementNS and setAttribute rather than markup, so no
+  // part of the API response is ever parsed as HTML.
+  const harness = await renderMyDucks([collected("11111111-1111-4111-8111-111111111111", false)]);
+  const svg = cardQr(harness.awaiting.track.children[0]);
+
+  assert.equal(svg.namespaceURI, "http://www.w3.org/2000/svg");
+  assert.equal(svg.getAttribute("viewBox"), "0 0 29 29");
+  assert.equal(svg.getAttribute("role"), "img");
+  assert.match(svg.getAttribute("aria-label"), /lookup code/i);
+
+  const [background, modules] = svg.children;
+  assert.equal(background.tagName, "RECT");
+  assert.equal(background.namespaceURI, "http://www.w3.org/2000/svg");
+  assert.equal(modules.tagName, "PATH");
+  assert.equal(modules.namespaceURI, "http://www.w3.org/2000/svg");
+  assert.equal(modules.getAttribute("d"), "M4 4h7v1h-7zM12 4h1v1h-1z");
+});
+
+test("a card drops its QR rather than drawing unexpected geometry", async () => {
+  // Every rejection still leaves a usable card: the readable code staff can
+  // type is never gated on the QR rendering.
+  const rejected = [
+    { qr: null },
+    { qr: undefined },
+    { qr: { size: 29, path: "M0 0L5 5" } },
+    { qr: { size: 29, path: 'M0 0h1v1h-1z" onload="alert(1)' } },
+    { qr: { size: 0, path: "M4 4h7v1h-7z" } },
+    { qr: { size: "many", path: "M4 4h7v1h-7z" } },
+  ];
+
+  for (const override of rejected) {
+    const harness = await renderMyDucks([
+      collected("11111111-1111-4111-8111-111111111111", false, override),
+    ]);
+    const [card] = harness.awaiting.track.children;
+    assert.equal(cardQr(card), null, `must not draw ${JSON.stringify(override.qr)}`);
+    assert.match(card.text(), /Staff lookup code: DAISY123/, "the typed code still works");
+  }
+});
+
+test("a followed card refuses a QR even if the server ever sent geometry", async () => {
+  // Defence in depth for the rule this page exists to keep: a followed entry is
+  // someone else's registration, and its card must never carry an encoding of
+  // their lookup code. The server already withholds it, so this pins the client
+  // half independently rather than trusting one guard twice.
+  const harness = await renderMyDucks([
+    followedEntry("33333333-3333-4333-8333-333333333333", {
+      qr: { size: 29, path: "M4 4h7v1h-7zM12 4h1v1h-1z" },
+    }),
+  ]);
+
+  const [followed] = harness.followed.track.children;
+  assert.equal(cardQr(followed), null, "a followed card never draws a QR");
+  assert.doesNotMatch(followed.text(), /lookup code:/i);
+});
+
+test("the QR caption follows the duck table, and each label names its participant", async () => {
+  const harness = await renderMyDucks([
+    collected("11111111-1111-4111-8111-111111111111", false),
+    collected("22222222-2222-4222-8222-222222222222", true),
+  ]);
+
+  const [awaiting] = harness.awaiting.track.children;
+  const [paired] = harness.paired.track.children;
+
+  // Before pairing the code is an instruction to go somewhere; afterwards that
+  // errand is done and sending them back to the duck table would be wrong.
+  assert.match(awaiting.text(), /Show this code to staff at the duck table/);
+  assert.doesNotMatch(paired.text(), /at the duck table/);
+  assert.match(paired.text(), /pull up this registration/);
+
+  // Several cards share a screen, so the accessible name has to distinguish them.
+  assert.match(cardQr(awaiting).getAttribute("aria-label"), /Daisy Duck/);
 });

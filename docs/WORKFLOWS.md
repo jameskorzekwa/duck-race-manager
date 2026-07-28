@@ -653,7 +653,9 @@ screen; deleting the event revalidates the server route immediately.
 save the short lookup code. The short code is not authorization for the private
 page and staff cannot regenerate its private token. At the duck table,
 participants can simply show this screen: staff scan its QR code or type the
-code shown beside it.
+code shown beside it. A participant who did not keep the private link can show
+their card on `/my-ducks` instead, which carries the same code and QR on the
+device that registered them.
 
 ### Public Name Search
 
@@ -1404,6 +1406,22 @@ lookup code both as readable text and as a QR code. The QR encodes only
 it carries no name, contact detail, private status token, event identifier, or
 external reference. Photographing it reveals exactly what photographing the
 printed code beside it would.
+
+**Implemented:** `/my-ducks` renders the same QR on every registration this
+device owns, in both the Awaiting Participants and My Ducks sections. That is
+the surface a participant reliably still has at the duck table, because the
+private status link only helps someone who bookmarked it, so pairing no longer
+depends on having kept it. A followed entry has no lookup code and therefore no
+QR, exactly as it has no readable code today.
+
+Those cards are built in the browser, so the projection sends drawing geometry
+— the symbol size and one SVG path — rather than markup, and the page builds
+the symbol with `createElementNS` and `setAttribute`. No part of the response is
+ever parsed as HTML, and the client redraws only geometry matching the encoder's
+own alphabet. Server and browser encode through one function in
+`participant-qr.ts`, so a card QR and the private page's QR are the same symbol.
+A stored code the encoder cannot represent yields no QR for that one card
+instead of failing the whole My Ducks response.
 
 The staff pairing page shows a **Scan QR code** button whenever the browser has
 a camera in a secure context. The scanner ignores any QR code that is not a
