@@ -385,6 +385,11 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     `/api/v1/staff/events/${eventId}/registrations`,
     { token: staffToken },
   ), 200, "staff registrations");
+  // Before pairing, every participant is unpaired, so the console offers Delete
+  // and the endpoint would honour it.
+  assert.ok(staffRegistrations.registrations.every((item) => item.currentlyPaired === false));
+  assert.ok(staffRegistrations.registrations.every((item) => item.deletable === true));
+
   for (const participant of participants) {
     const detail = staffRegistrations.registrations.find((item) => item.registrationId === participant.registrationId);
     assert.ok(detail);
@@ -415,6 +420,23 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.ok(mineAfterPairing.registrations.every((item) => item.paired === true));
   assert.ok(mineAfterPairing.registrations.every((item) => item.raceStatus.duck !== null));
   assert.equal(/duckKeepPreference/i.test(JSON.stringify(mineAfterPairing)), false);
+
+  // Pairing is the one-way door. The duck is now in a heat bag, so the staff
+  // projection stops offering Delete and the delete endpoint refuses with 409,
+  // naming withdrawal and disqualification as the remedy instead.
+  const pairedRegistrations = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/registrations`,
+    { token: staffToken },
+  ), 200, "paired staff registrations");
+  assert.ok(pairedRegistrations.registrations.every((item) => item.currentlyPaired === true));
+  assert.ok(pairedRegistrations.registrations.every((item) => item.deletable === false));
+  const refusedDelete = await api(`/api/v1/staff/registrations/${participants[0].registrationId}`, {
+    method: "DELETE",
+    token: staffToken,
+    body: { commandId: crypto.randomUUID(), expectedRevision: 1 },
+  });
+  assert.equal(refusedDelete.status, 409);
+  assert.match((await refusedDelete.json()).error, /Withdraw or disqualify them instead/);
 
   const duplicatePairing = await post(`/api/v1/staff/ducks/${participants[0].tagToken}/assignments`, {
     commandId: crypto.randomUUID(),

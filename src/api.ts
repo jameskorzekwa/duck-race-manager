@@ -146,13 +146,14 @@ export const findDuckNumberRaceStatus = async (
   return getPublicStatusByDuckNumber(env, event.id, Number(visibleNumber));
 };
 
-// Follow eligibility is deliberately a separate question from status
-// visibility. A withdrawn or disqualified registration still has a public race
-// status by tag or number, but it has left the public name search and the
-// follow endpoint refuses it, so the predicate below is the follow endpoint's
-// own and is re-evaluated instead of inferred from the rendered status. It
-// therefore emits `followId` for exactly the entries the public name search
-// already exposes, and never for one it hides.
+// Follow eligibility is re-evaluated here rather than inferred from a rendered
+// status, so this predicate stays the follow endpoint's own. A withdrawn or
+// disqualified registration is refused by every one of them alike: the public
+// name search, the follow endpoint, and — since those participants are publicly
+// not racing at all — the tag and duck-number status lookups these two probes
+// accompany, which now resolve to nothing. The probe therefore emits `followId`
+// for exactly the entries the public surfaces already expose, and never for one
+// they hide.
 //
 // `source` and `selector` are fixed internal SQL fragments; every external
 // value stays bound.
@@ -562,6 +563,28 @@ const nameableRaceEntrySql = `bcr.added_via = 'REGISTRATION'
                  WHERE da.race_entry_id = re.id AND da.valid_to IS NULL
               )`;
 
+// A followed link is a public view of someone else's participant, so it obeys
+// the public rule: a withdrawn or disqualified participant is not racing and is
+// simply absent. A link this device holds as `REGISTRATION` is the owner's own
+// card and always stays, with its true status, because the person who withdrew
+// is entitled to see that they withdrew.
+//
+// `added_via` is nullable in the projected type because migration 0013 backfills
+// it, so this asks the question the same way the projection does — anything that
+// is not explicitly `FOLLOWED` is the owner's own link.
+//
+// The status test is a correlated `EXISTS` rather than a join so the predicate
+// stands on its own in both users, including the presence probe, which must keep
+// selecting nothing but a literal and reading no participant column at all.
+const visibleCollectionLinkSql = `(
+        COALESCE(bcr.added_via, 'REGISTRATION') <> 'FOLLOWED'
+        OR EXISTS (
+          SELECT 1 FROM registrations followed
+           WHERE followed.id = bcr.registration_id
+             AND followed.status IN ('SUBMITTED', 'ACTIVE')
+        )
+      )`;
+
 const getMyRegistrations = async (request: Request, env: Env): Promise<Response> => {
   const existingCollection = await getBrowserCollection(request, env);
   if (existingCollection === null) {
@@ -594,6 +617,7 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
        JOIN race_entries re ON re.registration_id = r.id
        JOIN events e ON e.id = r.event_id
       WHERE bcr.collection_id = ?
+        AND ${visibleCollectionLinkSql}
       ORDER BY bcr.added_at`,
   ).bind(collection.id).all<{
     registration_id: string;
@@ -657,10 +681,14 @@ const getMyRegistrationPresence = async (request: Request, env: Env): Promise<Re
     });
   }
   const collection = await refreshBrowserCollection(env, existingCollection);
+  // Counts exactly the links the full collection projection would return, so a
+  // browser whose only saved duck is a followed participant who has left the
+  // race is not offered a My Ducks shortcut to an empty list.
   const registration = await env.DB.prepare(
     `SELECT 1 AS has_registration
-       FROM browser_collection_registrations
-      WHERE collection_id = ?
+       FROM browser_collection_registrations bcr
+      WHERE bcr.collection_id = ?
+        AND ${visibleCollectionLinkSql}
       LIMIT 1`,
   ).bind(collection.id).first<{ has_registration: number }>();
   return json({ hasRegistrations: registration !== null }, 200, {
