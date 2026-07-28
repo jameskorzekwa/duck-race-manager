@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import worker from "./index.ts";
-import { isLocalPreviewOrigin, localPreviewTurnstileToken } from "./local-preview.ts";
+import { isLocalPreviewOrigin, isLoopbackOrigin, localPreviewTurnstileToken } from "./local-preview.ts";
 import { renderRegistration } from "./site.ts";
 import { createCognitoStaffLifecycle, createCognitoStaffProvisioner } from "./staff-access.ts";
 
@@ -29,15 +29,17 @@ test("local preview accepts loopback, and the local network only over TLS", () =
       "http://127.1",
       "http://2130706433",
       "http://[0:0:0:0:0:0:0:1]",
-      // Private addresses on the local network, over TLS.
+      // Private addresses on the local network, over TLS, including the first
+      // and last address of every accepted range.
       "https://192.168.0.252:8787",
-      "https://10.1.2.3:8787",
-      "https://172.16.0.9:8787",
-      "https://172.31.255.254:8787",
-      "https://169.254.7.7:8787",
-      "https://[fd12:3456::1]:8787",
-      "https://[fe80::1]:8787",
-      "https://j2k-macbook-pro.local:8787",
+      "https://10.0.0.0",
+      "https://10.255.255.255",
+      "https://172.16.0.0",
+      "https://172.31.255.255",
+      "https://192.168.0.0",
+      "https://192.168.255.255",
+      "https://169.254.0.0",
+      "https://169.254.255.255",
     ]
   ) {
     assert.equal(isLocalPreviewOrigin(origin), true, origin);
@@ -61,13 +63,28 @@ test("local preview accepts loopback, and the local network only over TLS", () =
       "http://10.1.2.3",
       "https://192.168.1.20.nip.io",
       "https://10.0.0.1.evil.example",
-      // Public addresses that are one octet away from a private range.
-      "https://172.15.0.1",
-      "https://172.32.0.1",
-      "https://11.0.0.1",
-      "https://193.168.0.1",
+      // Public addresses one step outside each accepted range.
+      "https://172.15.255.255",
+      "https://172.32.0.0",
+      "https://9.255.255.255",
+      "https://11.0.0.0",
+      "https://192.167.255.255",
+      "https://192.169.0.0",
+      "https://169.253.255.255",
+      "https://169.255.0.0",
       "https://8.8.8.8",
+      // Deliberately not supported: the shipped commands only ever choose a
+      // private IPv4 address, so neither mDNS names nor IPv6 widen the predicate.
+      "https://j2k-macbook-pro.local:8787",
+      "https://evil.local",
+      "https://attacker.example.com.local",
+      "https://.local",
       "https://local",
+      "https://[fd12:3456::1]:8787",
+      "https://[fe80::1]:8787",
+      "https://[fc00::1]",
+      "https://[::ffff:192.168.1.1]",
+      "https://[2001:db8::1]",
       "https://notlocal.example",
       "//localhost:8787",
       "localhost:8787",
@@ -76,6 +93,16 @@ test("local preview accepts loopback, and the local network only over TLS", () =
     ]
   ) {
     assert.equal(isLocalPreviewOrigin(origin), false, origin);
+  }
+});
+
+test("loopback is distinguished from the wider local network", () => {
+  for (const origin of ["http://localhost:8787", "https://127.0.0.1:8787", "http://[::1]:8787"]) {
+    assert.equal(isLoopbackOrigin(origin), true, origin);
+  }
+
+  for (const origin of ["https://192.168.0.252:8787", "https://10.1.2.3:8787", productionOrigin, "", "not a url"]) {
+    assert.equal(isLoopbackOrigin(origin), false, origin);
   }
 });
 

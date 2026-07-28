@@ -115,9 +115,15 @@ it, plain http fails in three ways at once:
 - Web NFC refuses to run outside a secure context, so the inventory station
   cannot work at all.
 
-So `isLocalPreviewOrigin` accepts a private network address **only over https**.
-Plain http off loopback fails at the guard with a clear refusal rather than as a
-half-working site.
+So `isLocalPreviewOrigin` accepts a private IPv4 address **only over https**.
+Plain http off loopback fails at the guard, which names both conditions and shows
+you the two origins, rather than half-working.
+
+Nothing wider is accepted. A `.local` mDNS name would be convenient and private
+IPv6 would be reasonable, but `npm run dev:network` only ever picks a private
+IPv4 address this machine actually holds, so neither could come from the shipped
+commands — and each would be more surface on the one check the whole harness
+rests on.
 
 ### The certificate
 
@@ -146,10 +152,13 @@ addresses and the automatic choice is the wrong one — a VPN or Docker interfac
 is reachable from the machine but usually not from a phone. The command lists
 what it found. Use `--port` to move off 8787.
 
-Prefer the IP address over a `.local` name. Browsers do not store HSTS for an IP,
-but they do for a name, and this site sends a one-year `strict-transport-security`
-header. A `.local` name pinned that way will force https for every other service
-you ever run on that hostname.
+It binds that one address rather than every interface, so a public address on the
+same machine is never served.
+
+The address has to be an IP, not a hostname. That is also the safer option:
+the site sends a one-year `strict-transport-security` header, and browsers store
+HSTS for names but not for IP addresses — a hostname pinned that way would force
+https for every other service you ever run on it.
 
 ## Seeding
 

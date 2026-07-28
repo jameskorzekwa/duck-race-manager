@@ -23,11 +23,20 @@ import { localPreviewTurnstileToken } from "../src/local-preview.ts";
 const networkSession = () => {
   const markerPath = new URL("../.wrangler/local-network.json", import.meta.url);
   if (!existsSync(markerPath)) return null;
+  let session;
   try {
-    return JSON.parse(readFileSync(markerPath, "utf8"));
+    session = JSON.parse(readFileSync(markerPath, "utf8"));
   } catch {
     return null;
   }
+  // A marker left behind by a server that is gone would send seeding at an origin
+  // nothing is listening on, with a confusing connection error at the end of it.
+  try {
+    if (typeof session.pid === "number") process.kill(session.pid, 0);
+  } catch {
+    return null;
+  }
+  return session;
 };
 
 const states = ["empty", "draft", "registration", "closed", "round-one", "final", "completed"];
@@ -90,7 +99,10 @@ const usage = () => `Seed the local QuickDucks database with a testable race sta
 States:
 ${states.map((state) => `  ${state.padEnd(13)} ${stateDescriptions[state]}`).join("\n")}
 
-Defaults: --state=registration --participants=9 --heat-size=3 --url=http://localhost:8787
+Defaults: --state=registration --participants=9 --heat-size=3
+          --url=${networkSession()?.origin ?? "http://localhost:8787"}${
+  networkSession() === null ? "" : "  (following the running network session)"
+}
 Every run first deletes the existing event, because QuickDucks holds one event at a time.
 `;
 
@@ -465,12 +477,18 @@ try {
     options.url.startsWith("https://")
     && session !== null
     && env.NODE_EXTRA_CA_CERTS === undefined
-    && existsSync(session.certificatePath)
+    && existsSync(session.trustAnchorPath)
   ) {
     const restarted = spawnSync(execPath, [fileURLToPath(import.meta.url), ...argv.slice(2)], {
       stdio: "inherit",
-      env: { ...env, NODE_EXTRA_CA_CERTS: session.certificatePath },
+      env: { ...env, NODE_EXTRA_CA_CERTS: session.trustAnchorPath },
     });
+    // `status` is null both when the spawn fails and when a signal kills the
+    // child, so neither can be allowed to exit quietly with no explanation.
+    if (restarted.error) {
+      throw new SeedError(`Could not re-run with the local certificate trusted.\n${restarted.error.message}`);
+    }
+    if (restarted.signal !== null) throw new SeedError(`Seeding was stopped by ${restarted.signal}.`);
     exit(restarted.status ?? 1);
   }
 

@@ -16,15 +16,17 @@
 // has no warning at all — and Chrome withholds some powerful features, Web NFC
 // among them, from an origin whose certificate it does not trust.
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { networkInterfaces } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { argv, env, exit, stderr, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { chooseAddress, privateAddresses, shouldReuseCertificate, wranglerArguments } from "./local-network.mjs";
+
 const repositoryRoot = new URL("../", import.meta.url);
 const certificateDirectory = new URL(".wrangler/local-network/", repositoryRoot);
-const certificatePath = new URL("cert.pem", certificateDirectory);
-const keyPath = new URL("key.pem", certificateDirectory);
+const certificatePath = fileURLToPath(new URL("cert.pem", certificateDirectory));
+const keyPath = fileURLToPath(new URL("key.pem", certificateDirectory));
 const metadataPath = new URL("session.json", certificateDirectory);
 const markerPath = new URL(".wrangler/local-network.json", repositoryRoot);
 
@@ -47,54 +49,11 @@ const parseArguments = () => {
 
 const usage = () => `Serve the local site to other devices on your network, over HTTPS.
 
-  npm run dev:network [-- --host=<address>] [-- --port=<port>]
+  npm run dev:network -- [--host=<address>] [--port=<port>]
 
 Picks a private IPv4 address of this machine automatically. Pass --host when the
 machine has several and you want a specific one. Default port is 8787.
 `;
-
-// Only addresses this machine actually holds, and only private ones. A public
-// address would mean serving a development site to the internet.
-const privateAddresses = () =>
-  Object.entries(networkInterfaces())
-    .flatMap(([name, addresses]) => (addresses ?? []).map((address) => ({ ...address, name })))
-    .filter((address) =>
-      address.family === "IPv4"
-      && !address.internal
-      && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(address.address)
-    );
-
-const chooseHost = (requested) => {
-  const available = privateAddresses();
-  if (requested !== undefined) {
-    const match = available.find((address) => address.address === requested);
-    if (match === undefined) {
-      throw new Error(
-        `${requested} is not a private address on this machine.${
-          available.length === 0 ? "" : ` Available: ${available.map((address) => address.address).join(", ")}`
-        }`,
-      );
-    }
-    return match;
-  }
-  if (available.length === 0) {
-    throw new Error(
-      "This machine has no private network address, so other devices have nothing to connect to.\n"
-        + "Join a Wi-Fi or wired network and try again, or use `npm run dev:local` on this machine only.",
-    );
-  }
-  // Wi-Fi and wired interfaces sort before virtual ones (Docker, VPNs), which are
-  // reachable from this machine but usually not from a phone.
-  const preferred = available.find((address) => /^en\d/.test(address.name)) ?? available[0];
-  if (available.length > 1) {
-    stdout.write(
-      `This machine has several private addresses: ${
-        available.map((address) => `${address.address} (${address.name})`).join(", ")
-      }\nUsing ${preferred.address}. Pass --host=<address> to choose another.\n\n`,
-    );
-  }
-  return preferred;
-};
 
 const commandExists = (command) => spawnSync("command", ["-v", command], { shell: true }).status === 0;
 
@@ -106,13 +65,20 @@ const readMetadata = () => {
   }
 };
 
+const mkcertRoot = () => {
+  const result = spawnSync("mkcert", ["-CAROOT"], { encoding: "utf8" });
+  const root = result.stdout?.trim();
+  if (result.status !== 0 || !root) throw new Error("mkcert could not report its CA directory.");
+  return join(root, "rootCA.pem");
+};
+
 // Regenerated whenever the address changes — DHCP hands out a different one often
 // enough that a stale certificate would otherwise be the first thing to go wrong.
 const ensureCertificate = (host) => {
-  const previous = readMetadata();
   const useMkcert = commandExists("mkcert");
-  const expiresSoon = previous !== null && Date.parse(previous.expiresAt) - Date.now() < 7 * 86_400_000;
-  if (previous?.host === host && previous?.mkcert === useMkcert && !expiresSoon) return previous;
+  const filesPresent = existsSync(certificatePath) && existsSync(keyPath);
+  const previous = readMetadata();
+  if (shouldReuseCertificate(previous, { host, mkcert: useMkcert, filesPresent })) return previous;
 
   mkdirSync(fileURLToPath(certificateDirectory), { recursive: true });
   const days = 90;
@@ -120,16 +86,11 @@ const ensureCertificate = (host) => {
 
   if (useMkcert) {
     stdout.write("Issuing a certificate with mkcert…\n");
-    const result = spawnSync("mkcert", [
-      "-cert-file",
-      fileURLToPath(certificatePath),
-      "-key-file",
-      fileURLToPath(keyPath),
-      host,
-      "localhost",
-      "127.0.0.1",
-      "::1",
-    ], { stdio: "inherit" });
+    const result = spawnSync(
+      "mkcert",
+      ["-cert-file", certificatePath, "-key-file", keyPath, host, "localhost", "127.0.0.1", "::1"],
+      { stdio: "inherit" },
+    );
     if (result.status !== 0) throw new Error("mkcert could not issue a certificate.");
   } else {
     stdout.write("Issuing a self-signed certificate…\n");
@@ -144,39 +105,53 @@ const ensureCertificate = (host) => {
         + `basicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature, keyEncipherment\n`
         + `extendedKeyUsage = serverAuth\n`,
     );
-    const result = spawnSync("openssl", [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-keyout",
-      fileURLToPath(keyPath),
-      "-out",
-      fileURLToPath(certificatePath),
-      "-days",
-      String(days),
-      "-config",
-      fileURLToPath(configPath),
-    ], { stdio: ["ignore", "ignore", "pipe"] });
+    const result = spawnSync(
+      "openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        keyPath,
+        "-out",
+        certificatePath,
+        "-days",
+        String(days),
+        "-config",
+        fileURLToPath(configPath),
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
     rmSync(configPath, { force: true });
     if (result.status !== 0) {
       throw new Error(`openssl could not issue a certificate.\n${result.stderr?.toString() ?? ""}`);
     }
   }
 
-  const metadata = { host, mkcert: useMkcert, expiresAt };
+  // What a client has to trust, which is not the same file in both cases: a
+  // self-signed certificate is its own anchor, but an mkcert certificate is
+  // issued by the mkcert root and verifying it needs that root instead.
+  const metadata = {
+    host,
+    mkcert: useMkcert,
+    expiresAt,
+    trustAnchorPath: useMkcert ? mkcertRoot() : certificatePath,
+  };
   writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
   return metadata;
 };
 
-const run = (command, args, options = {}) => {
-  const result = spawnSync(command, args, { cwd: fileURLToPath(repositoryRoot), stdio: "inherit", ...options });
-  if (result.error) throw result.error;
-  return result.status ?? 1;
-};
+const options = (() => {
+  try {
+    return parseArguments();
+  } catch (error) {
+    stderr.write(`\n${error.message}\n\n${usage()}`);
+    exit(1);
+  }
+})();
 
-const options = parseArguments();
 if (options.help) {
   stdout.write(usage());
   exit(0);
@@ -185,7 +160,7 @@ if (options.help) {
 let host;
 let certificate;
 try {
-  host = chooseHost(options.host).address;
+  host = chooseAddress(options.host, privateAddresses()).address;
   certificate = ensureCertificate(host);
 } catch (error) {
   stderr.write(`\n${error.message}\n\n`);
@@ -194,16 +169,21 @@ try {
 
 const origin = `https://${host}:${options.port}`;
 
-const migrated = run("npx", ["--no-install", "wrangler", "d1", "migrations", "apply", "quickducks-local", "--local", "--config", "wrangler.local.jsonc"]);
-if (migrated !== 0) exit(migrated);
+const migrated = spawnSync(
+  "npx",
+  ["--no-install", "wrangler", "d1", "migrations", "apply", "quickducks-local", "--local", "--config", "wrangler.local.jsonc"],
+  { cwd: fileURLToPath(repositoryRoot), stdio: "inherit" },
+);
+if (migrated.status !== 0) exit(migrated.status ?? 1);
 
 // The seeding script reads this so `npm run seed:local` targets the origin that
 // is actually serving, and trusts the certificate it is served with. Public
 // registration checks the request Origin against APP_ORIGIN, so seeding through
 // the wrong one would be rejected.
+const clearMarker = () => rmSync(markerPath, { force: true });
 writeFileSync(
   markerPath,
-  `${JSON.stringify({ origin, certificatePath: fileURLToPath(certificatePath) }, null, 2)}\n`,
+  `${JSON.stringify({ origin, trustAnchorPath: certificate.trustAnchorPath, pid: process.pid }, null, 2)}\n`,
 );
 
 stdout.write(`
@@ -214,13 +194,12 @@ Serving the local site to your network.
 
 Open that address on the device. ${
   certificate.mkcert
-    ? "The certificate is from your mkcert CA — install that CA on the device once\n  (mkcert -CAROOT) and there is no warning."
-    : "The certificate is self-signed, so the browser warns once:\n  tap Advanced, then Proceed. Run `brew install mkcert` for a warning-free\n  certificate, which Android Chrome also requires before it will allow Web NFC."
+    ? "The certificate is from your mkcert CA — install that CA on the\n  device once (mkcert -CAROOT) and there is no warning."
+    : "The certificate is self-signed, so the browser warns\n  once: tap Advanced, then Proceed. Run `brew install mkcert` for a warning-free\n  certificate, which Android Chrome also requires before it will allow Web NFC."
 }
 
   Seed it with        npm run seed:local -- --state=round-one
   Sign in at          ${origin}/staff
-
   Stop it with        Ctrl-C
 
 Anyone on this network can open this site and sign in as any staff account,
@@ -230,37 +209,24 @@ or credentials — but run this on your own network, not a cafe or a conference.
 
 `);
 
-const wrangler = spawn("npx", [
-  "--no-install",
-  "wrangler",
-  "dev",
-  "--config",
-  "wrangler.local.jsonc",
-  "--ip",
-  "0.0.0.0",
-  "--port",
-  String(options.port),
-  "--local-protocol",
-  "https",
-  "--https-key-path",
-  fileURLToPath(keyPath),
-  "--https-cert-path",
-  fileURLToPath(certificatePath),
-  "--var",
-  `APP_ORIGIN:${origin}`,
-  // The stand-in for the Cognito hosted UI is served by this same Worker, so its
-  // domain has to follow the origin too.
-  "--var",
-  `COGNITO_DOMAIN:${origin}`,
-], { cwd: fileURLToPath(repositoryRoot), stdio: "inherit", env });
+const wrangler = spawn(
+  "npx",
+  wranglerArguments({ host, port: options.port, origin, keyPath, certificatePath }),
+  { cwd: fileURLToPath(repositoryRoot), stdio: "inherit", env },
+);
 
+// The marker must not outlive the server. Every exit path clears it: a signal, a
+// crash, wrangler failing to spawn at all, or the process simply ending.
 const stop = () => {
-  rmSync(markerPath, { force: true });
+  clearMarker();
   wrangler.kill("SIGTERM");
 };
 process.on("SIGINT", stop);
 process.on("SIGTERM", stop);
-wrangler.on("exit", (code) => {
-  rmSync(markerPath, { force: true });
-  exit(code ?? 0);
+process.on("SIGHUP", stop);
+process.on("exit", clearMarker);
+wrangler.on("error", (error) => {
+  stderr.write(`\nCould not start wrangler: ${error.message}\n\n`);
+  exit(1);
 });
+wrangler.on("exit", (code) => exit(code ?? 0));

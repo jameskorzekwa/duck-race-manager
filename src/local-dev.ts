@@ -9,11 +9,12 @@
 // path navigates to. Sign-in therefore exercises the production PKCE flow,
 // cookie handling, D1 profile lookup, and role loading rather than bypassing it.
 //
-// Every request is refused unless `APP_ORIGIN` is an http loopback origin, so a
-// copy of this module deployed by accident serves nothing.
+// Every request is refused unless `APP_ORIGIN` is a local address — loopback, or
+// a private network address over https — and the request arrived on that same
+// origin, so a copy of this module deployed by accident serves nothing.
 import { authenticateStaff } from "./auth.ts";
 import { createWorker } from "./index.ts";
-import { isLocalPreviewOrigin } from "./local-preview.ts";
+import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
 import { escapeHtml } from "./site.ts";
 import type { Env } from "./types.ts";
 
@@ -286,9 +287,16 @@ ${body}
   );
 };
 
-const refusal = (env: Env): Response =>
+// Names both conditions and shows both values, because "it refused" is otherwise
+// indistinguishable between "your APP_ORIGIN is wrong" and "you opened a
+// different address than the one it is serving".
+const refusal = (env: Env, requestUrl: URL): Response =>
   new Response(
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Local development entry point</title></head><body><h1>Refusing to run</h1><p>src/local-dev.ts serves loopback requests against a loopback APP_ORIGIN only. APP_ORIGIN is <code>${escapeHtml(env.APP_ORIGIN ?? "unset")}</code>.</p></body></html>`,
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Local development entry point</title></head><body><h1>Refusing to run</h1>`
+      + `<p>src/local-dev.ts serves a local development site only. It needs <code>APP_ORIGIN</code> to be loopback on either scheme, or a private network address over https, and it needs the request to arrive on that same origin.</p>`
+      + `<ul><li>APP_ORIGIN is <code>${escapeHtml(env.APP_ORIGIN ?? "unset")}</code></li>`
+      + `<li>this request arrived on <code>${escapeHtml(requestUrl.origin)}</code></li></ul>`
+      + `<p>Start it with <code>npm run dev:local</code>, or <code>npm run dev:network</code> to reach it from other devices.</p></body></html>`,
     { status: 500, headers: noStoreHtml },
   );
 
@@ -297,16 +305,24 @@ const worker = createWorker(localAuthenticate, localTokenFetch);
 const localWorker: ExportedHandler<Env> = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    // Two independent conditions, because each covers a different mistake. The
-    // configured origin catches this module being deployed with a production
-    // config; the request origin catches this *config* being served from
-    // anywhere but the machine it was written for — `wrangler dev --remote`, or
-    // a deploy that publishes a preview URL. `wrangler dev` serves loopback, so
-    // the second costs nothing locally and closes every remote path.
+    // Two independent conditions, because each covers a different mistake.
     //
-    // `APP_ORIGIN` is typed as a required string, but a config can omit the var
-    // and the type would not know, so the check tolerates it being absent.
-    if (!isLocalPreviewOrigin(env.APP_ORIGIN ?? "") || !isLocalPreviewOrigin(url.origin)) return refusal(env);
+    // The configured origin catches this module being deployed with a production
+    // config. `APP_ORIGIN` is typed as a required string, but a config can omit
+    // the var and the type would not know, so it tolerates being absent.
+    //
+    // The request origin catches this *config* being served from anywhere but the
+    // machine it was written for — `wrangler dev --remote`, or a deploy that
+    // publishes a preview URL. It demands an exact match rather than merely
+    // another local-looking origin, because the request's Host is chosen by the
+    // caller: anyone reaching the socket could otherwise send a private-looking
+    // Host and pass. Both dev commands set `APP_ORIGIN` to the address they tell
+    // you to open, so an exact match is what already happens. Loopback stays
+    // allowed alongside it so `http://127.0.0.1:8787` still works under
+    // `dev:local`, where `APP_ORIGIN` names `localhost`.
+    const appOrigin = env.APP_ORIGIN ?? "";
+    if (!isLocalPreviewOrigin(appOrigin)) return refusal(env, url);
+    if (url.origin !== new URL(appOrigin).origin && !isLoopbackOrigin(url.origin)) return refusal(env, url);
 
     if (url.pathname === "/oauth2/authorize" && request.method === "GET") {
       return signInChooser(env, url);
