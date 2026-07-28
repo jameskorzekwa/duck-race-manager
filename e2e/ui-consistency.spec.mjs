@@ -460,6 +460,15 @@ test.describe("sitewide UI consistency", () => {
     await expect(actions.getByRole("link", { name: "Register", exact: true })).toBeVisible();
     await expect(actions.getByRole("link", { name: "How it works", exact: true })).toBeVisible();
     await expectSlitComposition();
+    const [heroBox, desktopSceneBox, desktopSlitBox, desktopWaterBox] = await Promise.all([
+      page.locator(".hero").boundingBox(),
+      scene.boundingBox(),
+      slit.boundingBox(),
+      water.boundingBox(),
+    ]);
+    // The 2.5rem offset is measured from the hero's inner border edge.
+    expect(heroBox.y + heroBox.height - desktopSceneBox.y - desktopSceneBox.height).toBeCloseTo(43, 0);
+    expect(desktopSlitBox.y).toBeGreaterThan(desktopWaterBox.y + 64);
 
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 844 });
@@ -469,7 +478,8 @@ test.describe("sitewide UI consistency", () => {
         actions.boundingBox(),
         duck.boundingBox(),
       ]);
-      expect(duckBox.y).toBeGreaterThan(actionsBox.y + actionsBox.height + 16);
+      const visibleDuckTop = duckBox.y + duckBox.height * (8 / 76);
+      expect(visibleDuckTop).toBeGreaterThan(actionsBox.y + actionsBox.height + 16);
     }
 
     await page.emulateMedia({ reducedMotion: "reduce" });

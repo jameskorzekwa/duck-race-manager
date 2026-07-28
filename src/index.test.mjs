@@ -76,9 +76,11 @@ test("renders the responsive landing page", async () => {
   assert.match(body, /background-size:var\(--wave-length\) 3rem/);
   assert.match(body, /@keyframes water-flow \{ to \{ background-position:-10rem 0/);
   assert.match(body, /\.hero-water \{[^}]*z-index:1/);
-  assert.match(body, /\.hero-duck-scene \{[^}]*z-index:2;[^}]*bottom:5\.5rem/);
+  assert.match(body, /\.hero-duck-scene \{[^}]*z-index:2;[^}]*bottom:2\.5rem/);
   assert.match(body, /\.hero-duck-slit \{[^}]*z-index:2;[^}]*height:2\.75rem/);
-  assert.match(body, /hero-duck-scene \{[^}]*bottom:2\.5rem;[^}]*width:13\.5rem/);
+  assert.match(body, /\.hero-duck-slit::before \{[^}]*background:var\(--water\)/);
+  assert.doesNotMatch(body, /\.hero-duck-slit(?:::before|::after)? \{[^}]*background:var\(--water-dark\)/);
+  assert.match(body, /hero-duck-scene \{[^}]*bottom:4rem;[^}]*width:13\.5rem/);
   assert.match(body, /\.hero-duck \{ animation:duck-bob 2\.8s ease-in-out infinite/);
   assert.match(body, /@keyframes duck-bob[^@]+translateY\(-7px\)/);
   assert.doesNotMatch(body, /duck-(?:rock|bob)[^@]+rotate\(/);
