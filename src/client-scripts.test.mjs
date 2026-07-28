@@ -357,8 +357,11 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(participantScript, /Open private status/);
   assert.match(participantScript, /registration\.paired/);
   assert.match(participantScript, /history\.replaceState/);
-  assert.match(participantScript, /card\.focus/);
+  // The just-registered card is scrolled into view but never focused or marked:
+  // it must look exactly like it does on a plain refresh.
   assert.match(participantScript, /card\.scrollIntoView/);
+  assert.doesNotMatch(participantScript, /card\.focus/);
+  assert.doesNotMatch(participantScript, /is-current|Just registered|aria-current/);
   assert.doesNotMatch(participantScript, /duckKeepPreference|duck_keep_preference/);
   for (const script of [searchScript, registrationScript, participantScript]) {
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
@@ -2269,7 +2272,7 @@ test("a refused delete restores the action and reports the refusal on that card"
   assert.deepEqual(harness.busy, ["begin", "end"]);
 });
 
-test("the just-registered highlight survives the section-visibility change", async () => {
+test("the just-registered notice names the participant without highlighting the card", async () => {
   const registrationId = "11111111-1111-4111-8111-111111111111";
   const harness = myDucksHarness(
     () => Response.json({ registrations: [collected(registrationId, false)] }),
@@ -2279,14 +2282,62 @@ test("the just-registered highlight survives the section-visibility change", asy
   await harness.subscriptions[0].refresh();
 
   assert.equal(harness.awaiting.section.hidden, false);
+  // The notice is the one-time affordance: it names the participant so the
+  // private status link beside it is unambiguous, and it never sends the visitor
+  // looking for a highlight that no longer exists.
   assert.equal(harness.success.hidden, false);
   assert.match(harness.success.text(), /Registration saved\./);
-  assert.match(harness.success.text(), /Daisy Duck is highlighted below\./);
+  assert.match(harness.success.text(), /Daisy Duck\./);
+  assert.doesNotMatch(harness.success.text(), /highlighted/);
+
+  // The card is byte-for-byte the plain-refresh card: no highlight class, no
+  // "Just registered" pill, no aria-current, and no stolen focus.
   const card = harness.awaiting.track.children[0];
-  assert.equal(card.className, "duck-card participant-card is-current");
-  assert.equal(card.getAttribute("aria-current"), "true");
-  assert.equal(card.focusCalls, 1);
+  assert.equal(card.className, "duck-card participant-card");
+  assert.equal(card.getAttribute("aria-current"), null);
+  assert.equal(card.tabIndex, 0, "the card must not be made programmatically focusable");
+  assert.equal(card.focusCalls, 0);
+  assert.doesNotMatch(card.text(), /Just registered/);
+  assert.equal(card.children.filter((child) => child.className === "success-tag").length, 0);
+  // Scrolling the new card into view is kept: it is orientation, not emphasis.
   assert.equal(card.scrollCalls, 1);
+
+  const plain = await renderMyDucks([collected(registrationId, false)]);
+  assert.equal(plain.awaiting.track.children[0].className, card.className);
+  assert.equal(plain.awaiting.track.children[0].text(), card.text());
+});
+
+test("the card of a just-registered participant stays plain once staff pair it", async () => {
+  const registrationId = "11111111-1111-4111-8111-111111111111";
+  let registrations = [collected(registrationId, false)];
+  const harness = myDucksHarness(
+    () => Response.json({ registrations }),
+    `?registered=${registrationId}`,
+  );
+  await harness.subscriptions[0].refresh();
+
+  // Staff pair the duck; the live refresh regroups the card into My Ducks.
+  registrations = [collected(registrationId, true, { nameable: true, raceStatus: pairedStatus() })];
+  await harness.subscriptions[0].refresh();
+
+  const [card] = harness.paired.track.children;
+  assert.equal(harness.awaiting.track.children.length, 0);
+  assert.equal(card.className, "duck-card participant-card");
+  assert.equal(card.getAttribute("aria-current"), null);
+  assert.doesNotMatch(card.text(), /Just registered/);
+
+  const plain = await renderMyDucks([
+    collected(registrationId, true, { nameable: true, raceStatus: pairedStatus() }),
+  ]);
+  assert.equal(plain.paired.track.children[0].className, card.className);
+});
+
+test("a followed participant keeps its Following pill", async () => {
+  const harness = await renderMyDucks([followedEntry("33333333-3333-4333-8333-333333333333")]);
+  const [card] = harness.followed.track.children;
+
+  assert.equal(card.children[0].className, "success-tag");
+  assert.equal(card.children[0].textContent, "Following");
 });
 
 test("My Ducks separates own unpaired, own paired, and followed participants", async () => {

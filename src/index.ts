@@ -25,7 +25,12 @@ import {
   startLineScript,
 } from "./client-scripts.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
-import { phaseShowsMyDucks, publicPhaseForRender, type PublicPhase } from "./public-phase.ts";
+import {
+  phaseAllowsRaceStatus,
+  phaseShowsMyDucks,
+  publicPhaseForRender,
+  type PublicPhase,
+} from "./public-phase.ts";
 import {
   faviconSvg,
   manifestJson,
@@ -317,10 +322,18 @@ export const createWorker = (
       const protectionWaived = env.TURNSTILE_SECRET_KEY === undefined && localPreview;
       return html(renderRegistration(configuredSiteKey, await publicPhase(), protectionWaived), 200, true);
     }
-    // Race Status. Public for the five post-DRAFT statuses and the shared
-    // preparing message before that.
+    // Race Status exists only once there is a race to report on. Before that
+    // there is no stage, no heat, and no result, and the nav does not offer the
+    // page, so a visitor arriving from a bookmark or an old link is sent home
+    // rather than shown a race-status page with nothing in it. This is exactly
+    // what `/my-ducks` below does, including under a degraded phase query: a
+    // failed read resolves to Preparing and therefore redirects too.
     if (url.pathname === "/race" && request.method === "GET") {
-      return html(renderRace(await publicPhase()), 200, true);
+      const phase = await publicPhase();
+      if (!phaseAllowsRaceStatus(phase)) {
+        return new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } });
+      }
+      return html(renderRace(phase), 200, true);
     }
     // My Ducks exists only once there is a public race to have ducks in. Before
     // registration opens the nav does not offer it, so a visitor who reaches it

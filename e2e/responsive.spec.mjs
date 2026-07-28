@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  baseUrl,
   expectNoDocumentOverflow,
   seedState,
   signIn,
@@ -24,7 +25,11 @@ test.describe("responsive race surfaces", () => {
   test("preparing and registration pages never overflow", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     await seedState("empty");
-    await verifyWidths(page, ["/", "/register", "/race"]);
+    // `/race` is not in this list because it has no Preparing page any more: it
+    // redirects home, which is the first path already verified here.
+    await verifyWidths(page, ["/", "/register"]);
+    await page.goto("/race");
+    await expect(page).toHaveURL(`${baseUrl}/`);
 
     await seedState("registration");
     await verifyWidths(page, ["/", "/register", "/my-ducks", "/race", "/duck/101"]);

@@ -1,9 +1,11 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  baseUrl,
   bootstrap,
   expectNoDocumentOverflow,
   intakeDuck,
+  pairDuck,
   seedState,
   signIn,
   watchBrowserErrors,
@@ -430,11 +432,125 @@ test.describe("sitewide UI consistency", () => {
     await expect(page.locator(".live-board")).toHaveCSS("background-color", "rgb(255, 253, 243)");
   });
 
-  test("the home duck bobs through a water slit without covering mobile actions", async ({ page }) => {
+  test("the home page puts the race action in the section named after the race", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    await seedState("registration");
+    await page.goto("/");
+
+    await expect(page.getByRole("heading", { level: 1, name: "Find your duck. Cheer it home." })).toBeVisible();
+    await expect(page.locator(".hero .lede").first()).toHaveText(
+      "A friendly home for the small races that bring a whole town down to the water."
+      + " Built for the volunteers, families, and rubber ducks that make race day happen.",
+    );
+    await expect(page.locator(".ticker span")).toHaveText(["Pick your duck", "Find your heat", "Cheer loudly"]);
+
+    // The How it works button is gone; the cards it jumped to are still here.
+    await expect(page.getByRole("link", { name: "How it works" })).toHaveCount(0);
+    await expect(page.locator("#how-it-works")).toBeVisible();
+
+    // The hero holds no action at all, and the only call to action on the page
+    // is the primary action of the section the live client titles with the
+    // event's own name, ahead of the secondary board link.
+    await expect(page.locator(".hero a")).toHaveCount(0);
+    const summary = page.locator("[data-live-summary]");
+    await expect(summary.locator("[data-live-summary-title]")).toHaveText("Harbor Duck Derby");
+    const cta = summary.locator("[data-home-cta]");
+    await expect(cta).toBeVisible();
+    await expect(cta).toHaveText("Register");
+    await expect(cta).toHaveAttribute("href", "/register");
+    await expect(page.locator("[data-home-cta]")).toHaveCount(1);
+    await expect(summary.locator(".actions a")).toHaveText(["Register", "Open the full race board"]);
+
+    await cta.click();
+    await expect(page.locator("[data-registration-form]")).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test("race status redirects home while a race is only being prepared", async ({ page }) => {
+    await seedState("empty");
+    const direct = await page.goto("/race");
+    expect(direct.request().redirectedFrom()).not.toBeNull();
+    await expect(page).toHaveURL(`${baseUrl}/`);
+    await expect(page.getByText(/The next race is being prepared/)).toBeVisible();
+    await expect(page.locator("[data-race-preparing]")).toHaveCount(0);
+
+    // Once a race exists, the same URL renders the board again.
+    await seedState("round-one");
+    await page.goto("/race");
+    await expect(page).toHaveURL(`${baseUrl}/race`);
+    await expect(page.locator("[data-live-board]")).toBeVisible();
+  });
+
+  test("a just-registered card looks exactly like a plain refresh, before and after pairing", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    const seeded = await seedState("registration");
+    const { client } = await bootstrap();
+
+    await page.goto("/register");
+    const form = page.locator("[data-registration-form]");
+    await form.getByLabel("First name").fill("Plain");
+    await form.getByLabel("Last name").fill("Cardholder");
+    await form.getByRole("button", { name: "Register participant" }).click();
+    // The `?registered=` handoff is consumed and cleaned out of the URL as soon
+    // as the collection response arrives, so the landing URL is the bare page.
+    await expect(page).toHaveURL(`${baseUrl}/my-ducks`);
+
+    // The one-time notice still carries the private status link; it just no
+    // longer promises a highlight.
+    const notice = page.locator("[data-registration-success]");
+    await expect(notice).toBeVisible();
+    await expect(notice).toContainText("Registration saved.");
+    await expect(notice).toContainText("Plain Cardholder");
+    await expect(notice).not.toContainText("highlighted");
+    await expect(notice.getByRole("link", { name: "Open private status" })).toBeVisible();
+    await expect(notice).toHaveClass(/\bnotice\b/);
+
+    const card = page.locator('[data-registration-id]', { hasText: "Plain Cardholder" });
+    const plainBackground = "rgb(255, 255, 255)";
+    await expect(card).toHaveClass("duck-card participant-card");
+    await expect(card).toHaveCSS("background-color", plainBackground);
+    await expect(card.locator(".success-tag")).toHaveCount(0);
+    await expect(card).not.toContainText("Just registered");
+    expect(await card.getAttribute("aria-current")).toBeNull();
+    expect(await card.evaluate((node) => node === document.activeElement)).toBe(false);
+
+    // Pairing must not bring the highlight back on the paired card either.
+    const registrations = (await client.get(
+      `/api/v1/staff/events/${seeded.eventId}/registrations?q=${encodeURIComponent("Cardholder")}`,
+    )).body.registrations;
+    const created = registrations.find((registration) => registration.lastName === "Cardholder");
+    expect(created).toBeTruthy();
+    const duck = await intakeDuck(client, seeded.eventId, 401);
+    await pairDuck(client, seeded.eventId, duck, created);
+
+    await page.reload();
+    const pairedCard = page.locator('[data-participant-section="paired"] [data-registration-id]', {
+      hasText: "Plain Cardholder",
+    });
+    await expect(pairedCard).toHaveClass("duck-card participant-card");
+    await expect(pairedCard).toHaveCSS("background-color", plainBackground);
+    await expect(pairedCard.locator(".success-tag")).toHaveCount(0);
+    await expect(pairedCard).not.toContainText("Just registered");
+
+    // A followed participant keeps its own pill, so the removal was surgical.
+    await page.locator("[data-status-search] input[name='name']").fill(
+      `${seeded.participants[0].firstName} ${seeded.participants[0].lastName}`,
+    );
+    await page.locator("[data-status-search]").getByRole("button", { name: "Find status" }).click();
+    await page.locator("[data-search-results]").getByRole("button", { name: "Add to My Ducks" }).first().click();
+    await expect(
+      page.locator('[data-participant-section="followed"] .success-tag').first(),
+    ).toHaveText("Following");
+    expect(errors).toEqual([]);
+  });
+
+  test("the home duck bobs through a water slit without covering mobile hero copy", async ({ page }) => {
     await seedState("registration");
     await page.emulateMedia({ reducedMotion: "no-preference" });
     await page.goto("/");
-    const actions = page.locator(".hero .actions");
+    // The hero carries copy and artwork only now, so the duck must clear the
+    // copy block that used to be protected through its action row.
+    const heroCopy = page.locator(".hero-copy");
     const scene = page.locator(".hero-duck-scene");
     const duck = page.locator(".hero-duck");
     const slit = page.locator(".hero-duck-slit");
@@ -457,8 +573,9 @@ test.describe("sitewide UI consistency", () => {
     await expect(water).toHaveCSS("z-index", "1");
     await expect(slit).toHaveCSS("z-index", "2");
     await expect(slit).toHaveCSS("animation-name", "none");
-    await expect(actions.getByRole("link", { name: "Register", exact: true })).toBeVisible();
-    await expect(actions.getByRole("link", { name: "How it works", exact: true })).toBeVisible();
+    // The hero holds no action row at all; the phase CTA lives with the race.
+    await expect(page.locator(".hero .actions")).toHaveCount(0);
+    await expect(page.locator(".hero a")).toHaveCount(0);
     await expectSlitComposition();
     const [heroBox, desktopSceneBox, desktopSlitBox, desktopWaterBox] = await Promise.all([
       page.locator(".hero").boundingBox(),
@@ -474,14 +591,14 @@ test.describe("sitewide UI consistency", () => {
       await page.setViewportSize({ width, height: 844 });
       await expect(duck).toHaveCSS("animation-name", "duck-bob");
       await expectSlitComposition();
-      const [actionsBox, duckBox] = await Promise.all([
-        actions.boundingBox(),
+      const [copyBox, duckBox] = await Promise.all([
+        heroCopy.boundingBox(),
         duck.boundingBox(),
       ]);
       const visibleDuckTop = duckBox.y + duckBox.height * (8 / 76);
       const visibleDuckBottom = duckBox.y + duckBox.height * (68.5 / 76);
       const slitBox = await slit.boundingBox();
-      expect(visibleDuckTop).toBeGreaterThan(actionsBox.y + actionsBox.height + 16);
+      expect(visibleDuckTop).toBeGreaterThan(copyBox.y + copyBox.height + 16);
       expect(visibleDuckBottom - slitBox.y).toBeGreaterThan(4);
       expect(visibleDuckBottom - slitBox.y).toBeLessThan(24);
     }

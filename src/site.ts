@@ -8,10 +8,10 @@ import {
   phaseShowsMyDucks,
   phaseShowsRaceStatusNav,
   phaseShowsRegisterNav,
-  racePreparingMessage,
   registrationClosedMessage,
   registrationPreparingMessage,
   type PublicPhase,
+  type PublicPhaseCta,
 } from "./public-phase.ts";
 import {
   publicHeatStatusLabel,
@@ -120,7 +120,6 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .participant-track { position:relative; display:flex; gap:1rem; padding:.25rem .25rem 1rem; overflow-x:auto; overscroll-behavior-inline:contain; scroll-padding-inline:.25rem; scroll-snap-type:x mandatory; scrollbar-color:var(--water-dark) #dce9e9; }
 .participant-track:focus-visible { border-radius:.8rem; outline:4px solid #83d8ec; outline-offset:2px; }
 .participant-card { flex:0 0 min(30rem,calc(100% - 3rem)); min-width:0; scroll-snap-align:start; scroll-snap-stop:always; }
-.participant-card.is-current { border-color:var(--orange); background:#fff8c5; box-shadow:4px 4px 0 var(--ink); }
 .participant-card:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
 .success-tag { display:inline-block; margin-bottom:.65rem; padding:.3rem .55rem; border:2px solid var(--ink); border-radius:999px; background:var(--yellow); font-size:.75rem; font-weight:950; letter-spacing:.06em; text-transform:uppercase; }
 .search-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.75rem; align-items:end; margin-top:1rem; }
@@ -485,20 +484,27 @@ const liveBoard = (): string => `
 
 // The compact home summary. It carries the stage chip and a single current-heat
 // line and sends anyone who wants detail to `/race`; the full board lives there.
-const happeningNow = (): string => `
+//
+// This section is also where the phase call to action lives. `live.js` replaces
+// the title with the event's own name, so this is the block a visitor reads as
+// "this race", and the action for that race belongs beside it rather than in the
+// decorative hero. The section renders only when there is a call to action, so
+// the two are always present together.
+const happeningNow = (cta: PublicPhaseCta): string => `
   <section class="status-section" data-live-summary aria-labelledby="happening-now-title">
     <p class="eyebrow">Happening now</p>
     <p class="status-chip live-board-stage" data-live-summary-stage aria-live="polite">Loading race stage…</p>
     <h2 class="live-board-title" id="happening-now-title" data-live-summary-title>Checking the race…</h2>
     <p class="lede" data-live-summary-line>Loading the latest official race information.</p>
     <p class="message-line muted" data-live-summary-error role="alert" hidden></p>
-    <div class="actions"><a class="button secondary" href="/race">Open the full race board</a></div>
+    <div class="actions"><a class="button" href="${escapeHtml(cta.href)}" data-home-cta>${escapeHtml(cta.label)}</a><a class="button secondary" href="/race">Open the full race board</a></div>
   </section>`;
 
 // Preparing is deliberately terminal and bare: no form, no privacy block, no
 // notice, and no multi-registration hint, only the one approved sentence for
-// that page. `/register` and `/race` pass different sentences because only
-// `/register` may tell a visitor to come back and register.
+// that page. `/register` is the only caller: it is the one page that may tell a
+// visitor to come back and register. `/race` has no preparing panel because the
+// route redirects home while a race is being prepared.
 const preparingPanel = (marker: string, message: string): string => `
     <section class="page-panel" ${marker}>
       ${duck()}
@@ -516,10 +522,9 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">Race-day, simplified</p>
-        <h1>Find your duck. Follow the race.</h1>
-        <p class="lede">A fast, friendly home for community duck races. Register, keep your private code, and follow your duck from check-in to finish.</p>
+        <h1>Find your duck. Cheer it home.</h1>
+        <p class="lede">A friendly home for the small races that bring a whole town down to the water. Built for the volunteers, families, and rubber ducks that make race day happen.</p>
         ${cta === null ? '<p class="lede" data-home-preparing>The next race is being prepared. Check back soon for the next QuickDucks race.</p>' : ""}
-        <div class="actions">${cta === null ? "" : `<a class="button" href="${cta.href}" data-home-cta>${escapeHtml(cta.label)}</a>`}<a class="button secondary" href="#how-it-works">How it works</a></div>
       </div>
       <div class="hero-water" aria-hidden="true"></div>
       <div class="hero-duck-scene">
@@ -527,8 +532,8 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
         <span class="hero-duck-slit" aria-hidden="true"></span>
       </div>
     </section>
-    <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
-    ${cta === null ? "" : happeningNow()}
+    <div class="ticker" aria-label="QuickDucks features"><span>Pick your duck</span><span>Find your heat</span><span>Cheer loudly</span></div>
+    ${cta === null ? "" : happeningNow(cta)}
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p></article>
       <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p></article>
@@ -537,20 +542,17 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
   });
 };
 
-// The full live board. It is public for the five post-DRAFT statuses and falls
-// back to its own preparing message before that: this is a race-status page, so
-// it says what will appear here and never repeats the `/register` call to action.
+// The full live board. It is public for the five post-DRAFT statuses, and it has
+// no Preparing variant: `index.ts` redirects `/race` home while the phase is
+// Preparing, so there is exactly one thing this page can be. The phase is still
+// passed in because the shared navigation is phase-driven.
 export const renderRace = (phase: PublicPhase = "PREPARING"): string => page({
   title: "Race status",
-  description: phase === "PREPARING"
-    ? "Live QuickDucks race status will appear here once the next race begins."
-    : "Live QuickDucks race status: stage, heats, the current heat, and official results.",
+  description: "Live QuickDucks race status: stage, heats, the current heat, and official results.",
   robots: "noindex,nofollow",
   phase,
   liveNav: true,
-  content: phase === "PREPARING"
-    ? preparingPanel("data-race-preparing", racePreparingMessage)
-    : `
+  content: `
     <section class="page-panel">
       ${duck()}
       <p class="eyebrow">Live race status</p>

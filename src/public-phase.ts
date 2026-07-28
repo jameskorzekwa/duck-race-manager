@@ -30,7 +30,7 @@ export const publicPhaseForStatus = (status: string | null | undefined): PublicP
 
 // Page availability. `/register` is reachable only while registration is open;
 // `/race` is reachable for all five post-DRAFT statuses, including while
-// registration is still open.
+// registration is still open, and redirects home during Preparing.
 export const phaseAllowsRegistration = (phase: PublicPhase): boolean => phase === "REGISTRATION";
 export const phaseAllowsRaceStatus = (phase: PublicPhase): boolean => phase !== "PREPARING";
 
@@ -44,13 +44,13 @@ export const phaseShowsRaceStatusNav = (phase: PublicPhase): boolean =>
 // The saved-registration probe still controls the page layout once it is open.
 export const phaseShowsMyDucks = (phase: PublicPhase): boolean => phase !== "PREPARING";
 
-// Preparing wording is per page, not shared: `/register` is where a visitor is
-// told to come back and register, and `/race` is a race-status page where that
-// call to action would be wrong. Both are terminal single-message pages.
+// Preparing wording belongs to `/register` alone. It is the one page that may
+// tell a visitor to come back and register, and it is a terminal single-message
+// page while the race is being prepared. `/race` has no preparing wording at
+// all: `phaseAllowsRaceStatus` is false during Preparing and the route sends the
+// visitor home instead of painting an empty race-status page.
 export const registrationPreparingMessage =
   "The next race is being prepared. Registration is not open yet, please come back later to register!";
-export const racePreparingMessage =
-  "The next race is being prepared. Live race status will appear here once the race begins.";
 export const registrationClosedMessage = "Registration is closed.";
 
 export interface PublicPhaseCta {

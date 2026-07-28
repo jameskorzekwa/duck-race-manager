@@ -62,7 +62,7 @@ test("renders the responsive landing page", async () => {
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000");
-  assert.match(body, /Find your duck\. Follow the race\./);
+  assert.match(body, /Find your duck\. Cheer it home\./);
   assert.match(body, /<a href="\/my-ducks" data-my-ducks-nav data-phase-visible="true">My Ducks<\/a>/);
   assert.doesNotMatch(body, /Saved on this device|data-my-ducks-list/);
   // The name search moved to My Ducks and the full board moved to /race.

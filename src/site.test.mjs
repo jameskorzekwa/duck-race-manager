@@ -276,6 +276,34 @@ test("the how-it-works cards describe the race without linking anywhere", () => 
   assert.match(participantScript, /participantText\("a", "Open private status", "card-link"\)/);
 });
 
+test("the home hero is copy and artwork only, with the CTA in the race-named section", () => {
+  const home = renderHome("REGISTRATION");
+  const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
+  const summary = home.match(/<section class="status-section" data-live-summary[\s\S]*?<\/section>/)?.[0];
+
+  assert.ok(hero);
+  assert.ok(summary);
+  assert.match(hero, /<h1>Find your duck\. Cheer it home\.<\/h1>/);
+  assert.doesNotMatch(hero, /class="actions"|<a\b|data-home-cta/);
+  assert.match(summary, /<a class="button" href="\/register" data-home-cta>Register<\/a>/);
+  // Preparing has no CTA, so it has no happening-now section, and the hero keeps
+  // its own empty-state sentence.
+  const preparing = renderHome("PREPARING");
+  assert.match(preparing, /data-home-preparing>The next race is being prepared\./);
+  assert.doesNotMatch(preparing, /data-live-summary|data-home-cta|class="actions"/);
+});
+
+test("no public card is singled out with the retired just-registered highlight", () => {
+  // The just-registered card is rendered exactly like every other card, so the
+  // highlight rule has no remaining consumer anywhere in the shared stylesheet.
+  assert.doesNotMatch(style, /\.participant-card\.is-current/);
+  assert.doesNotMatch(style, /#fff8c5/);
+  assert.doesNotMatch(participantScript, /is-current|Just registered/);
+  // The Following pill and its shared tag styling stay.
+  assert.match(participantScript, /participantText\("span", "Following", "success-tag"\)/);
+  assert.match(style, /\.success-tag \{/);
+});
+
 test("My Ducks keeps the registration action while sections stay gated until data loads", () => {
   const myDucks = renderMyDucks("REGISTRATION");
 

@@ -386,7 +386,11 @@ const participantSearchLead = document.querySelector("[data-search-lead]");
 let participantRegisteredId = participantRoot
   ? new URLSearchParams(location.search).get("registered")
   : null;
-let participantCurrentId = null;
+// Which registration the one-time success notice is talking about. It exists
+// only so the notice — and the private status link inside it — disappears the
+// moment that registration is deleted or leaves the collection. It never changes
+// how a card is rendered.
+let participantSuccessId = null;
 let participantPrivateStatusPath = null;
 let participantVersion = null;
 
@@ -549,8 +553,8 @@ const participantDelete = async (registration, button, feedback) => {
       feedback.hidden = false;
       return;
     }
-    if (participantCurrentId === registration.registrationId) {
-      participantCurrentId = null;
+    if (participantSuccessId === registration.registrationId) {
+      participantSuccessId = null;
       participantSuccess.hidden = true;
     }
     // The card disappears only when the authoritative collection says so, and
@@ -852,15 +856,15 @@ const participantQrFigure = (registration) => {
   return frame;
 };
 
+// Every card is rendered the same way, including the one this visitor has just
+// registered: a card that was created a second ago and the same card on the next
+// plain refresh must look identical. The one-time private status link lives in
+// the page's own success notice instead, which is where it can be read once and
+// then go away with the rest of the notice.
 const participantCard = (registration) => {
-  const current = registration.registrationId === participantCurrentId;
-  const card = participantText("article", "", "duck-card participant-card" + (current ? " is-current" : ""));
+  const card = participantText("article", "", "duck-card participant-card");
   card.dataset.registrationId = registration.registrationId;
-  if (current) {
-    card.tabIndex = -1;
-    card.setAttribute("aria-current", "true");
-    card.append(participantText("span", "Just registered", "success-tag"));
-  } else if (registration.followed) {
+  if (registration.followed) {
     card.append(participantText("span", "Following", "success-tag"));
   }
   card.append(participantText("h3", participantDisplayName(registration)));
@@ -958,7 +962,7 @@ const participantRender = (registrations) => {
     ? registrations.find((registration) => registration.registrationId === participantRegisteredId)
     : null;
   if (justRegistered) {
-    participantCurrentId = justRegistered.registrationId;
+    participantSuccessId = justRegistered.registrationId;
     if (participantPrivateStatusPath === null) {
       let handoff = null;
       try {
@@ -967,8 +971,8 @@ const participantRender = (registrations) => {
       if (handoff !== null) participantPrivateStatusPath = handoff.privateStatusPath;
     }
   }
-  if (participantCurrentId && !registrations.some((registration) => registration.registrationId === participantCurrentId)) {
-    participantCurrentId = null;
+  if (participantSuccessId && !registrations.some((registration) => registration.registrationId === participantSuccessId)) {
+    participantSuccessId = null;
     participantSuccess.hidden = true;
   }
   if (version !== participantVersion || justRegistered) {
@@ -990,9 +994,12 @@ const participantRender = (registrations) => {
   }
   if (!justRegistered) return;
 
+  // The notice is this visitor's only chance to open and bookmark the private
+  // status link, so it names the participant it belongs to. It stays an ordinary
+  // polite notice: the card itself is not marked, decorated, or focused.
   participantSuccess.replaceChildren(
     participantText("strong", "Registration saved. "),
-    participantText("span", participantDisplayName(justRegistered) + " is highlighted below."),
+    participantText("span", participantDisplayName(justRegistered) + "."),
   );
   if (participantPrivateStatusPath !== null) {
     const privateLink = participantText("a", "Open private status", "card-link");
@@ -1001,10 +1008,14 @@ const participantRender = (registrations) => {
   }
   participantSuccess.hidden = false;
   participantRegisteredId = null;
+  // Scrolling the new card into view is orientation, not emphasis: the card is
+  // in a horizontal track that may already have scrolled past it. Focus is
+  // deliberately left alone: the notice is a polite live region above the
+  // sections, so assistive technology already announces the result and the
+  // private link is the next thing in the tab order.
   const card = Array.from(document.querySelectorAll("[data-registration-id]"))
     .find((item) => item.dataset.registrationId === justRegistered.registrationId);
   if (card) requestAnimationFrame(() => {
-    card.focus({ preventScroll: true });
     card.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
     participantCleanRegisteredQuery();
   });

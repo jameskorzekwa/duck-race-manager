@@ -195,7 +195,7 @@ navigation, the home call to action, and what `/register` and `/race` render.
 
 | Phase | Event state | Navigation | Home CTA |
 | --- | --- | --- | --- |
-| Preparing | no event, or `DRAFT` | Home, Staff | none; the hero says the next race is being prepared |
+| Preparing | no event, or `DRAFT` | Home, Staff | none; the hero says the next race is being prepared, and `/race` redirects home |
 | Registration | `REGISTRATION_OPEN` | Home, Register, My Ducks, Staff | Register |
 | Locked in | `REGISTRATION_CLOSED` | Home, Race Status, My Ducks, Staff | View race status |
 | Racing | `ROUND_ONE`, `FINAL` | Home, Race Status, My Ducks, Staff | View live race |
@@ -204,8 +204,16 @@ navigation, the home call to action, and what `/register` and `/race` render.
 Register and Race Status strictly swap: the navigation offers exactly one of
 them after `DRAFT` and neither while a race is being prepared. `/race` itself
 stays reachable for all five post-`DRAFT` statuses, including while registration
-is open, even though the navigation does not advertise it then. Staff stays in
-the top navigation in every phase.
+is open, even though the navigation does not advertise it then. While the phase
+is Preparing there is no stage, heat, or result to report, so both the
+navigation and a direct `GET /race` keep the page unavailable and the direct
+request returns `303` to `/`. Staff stays in the top navigation in every phase.
+
+The home call to action is not in the hero. When a phase has one it is the
+primary action of the "happening now" section, whose title the live client
+replaces with the event's own name, so the action sits with the race it belongs
+to and the secondary "Open the full race board" link follows it. The hero
+carries copy and artwork only, plus the Preparing empty-state sentence.
 
 My Ducks appears whenever the phase is Registration or later. Before
 registration opens, both the navigation and a direct `GET /my-ducks` keep the
@@ -401,13 +409,16 @@ While registration is open, **Register another participant** sits in the
 Awaiting Participants heading row instead of below the complete page. The row
 wraps the action below the heading on narrow screens.
 
-After the registration redirect, the page highlights the matching registration.
-Only after that UUID appears in a successful full collection response does the
-page validate and consume the matching handoff. A valid handoff must contain
-exactly the matching registration UUID and a same-origin relative
-`/r/<valid-private-token>` path. Safe consumption removes it from
-`sessionStorage` and adds an accessible **Open private status** link to the
-just-registered notice so the participant can open and bookmark it. Invalid,
+After the registration redirect, the page scrolls the matching card into view.
+The card itself is rendered exactly as it is on a plain refresh: it carries no
+highlight, no "just registered" tag, and no moved focus, and it stays that way
+once staff pair it with a duck. Only after that UUID appears in a successful full
+collection response does the page validate and consume the matching handoff. A
+valid handoff must contain exactly the matching registration UUID and a
+same-origin relative `/r/<valid-private-token>` path. Safe consumption removes it
+from `sessionStorage` and adds an accessible **Open private status** link to the
+one-time "Registration saved." notice, which names the participant so the link is
+unambiguous, so the participant can open and bookmark it. Invalid,
 cross-origin, absolute, malformed, mismatched, unreadable, or non-removable
 handoffs are never exposed. Full collection and presence responses never return
 the private path or token.
@@ -1948,9 +1959,8 @@ from `REGISTRATION_OPEN` through `COMPLETED`. The prominent board appears on the
 noindex `/race` page, private status pages, and public duck-tag status pages.
 The home page instead carries a compact "happening now" summary, the stage chip
 plus one current-heat line, that links to `/race`. While there is no public
-event, `/race` shows only "The next race is being prepared. Live race status
-will appear here once the race begins." — its own wording, because a race-status
-page must not carry the `/register` call to action. The board includes:
+event, `/race` has nothing to report, so it redirects to the home page with a
+`303` rather than rendering an empty race-status page. The board includes:
 
 - Safe event lifecycle status and date. The board turns that status into a
   prominent plain-language stage chip and summary line beside the event name:
