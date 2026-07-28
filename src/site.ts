@@ -130,6 +130,8 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .lookup-code-detail { flex:1 1 14rem; min-width:0; }
 .lookup-code-qr { flex:0 0 auto; padding:.5rem; border:2px solid var(--ink); border-radius:.65rem; background:#fff; }
 .participant-qr { display:block; width:clamp(8rem,38vw,10.5rem); height:auto; }
+.participant-card > .lookup-code-qr { width:max-content; max-width:100%; margin:.15rem auto .5rem; }
+.participant-card > .lookup-code-qr .participant-qr { width:clamp(7rem,28vw,9rem); }
 .qr-scanner { display:grid; gap:.75rem; margin-top:1rem; padding:1rem; border:2px solid var(--ink); border-radius:.9rem; background:#fff; }
 .qr-scanner[hidden] { display:none; }
 .qr-video { width:100%; max-width:26rem; min-width:0; margin:0 auto; aspect-ratio:1; border-radius:.65rem; background:var(--ink); object-fit:cover; }
@@ -1244,7 +1246,7 @@ export const renderStaffInventory = (
           <p class="muted">For a tag that is already written, or a device that cannot scan. Scanning a blank sticker does all of this in one tap.</p>
           <form data-inventory-intake-form>
             <label>Visible duck number<input name="visibleNumber" type="number" min="1" max="999999999" required></label>
-            <label>Tag token<input name="tagToken" minlength="22" maxlength="128" pattern="[A-Za-z0-9_-]+" required autocomplete="off"><span>Read or write the physical NFC/QR token before intake.</span></label>
+            <label>Tag token<input name="tagToken" minlength="22" maxlength="128" pattern="[A-Za-z0-9_\\-]+" required autocomplete="off"><span>Read or write the physical NFC/QR token before intake.</span></label>
             <div class="field-grid"><label>Storage location<input name="location" maxlength="100"></label><label>Notes<input name="notes" maxlength="1000"></label></div>
             <label class="check"><input name="physicallyPresent" type="checkbox" required><span class="label-text">I have the physical duck and tag in hand.</span></label>
             <button class="button" type="submit">Add duck</button>

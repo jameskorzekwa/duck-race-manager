@@ -154,9 +154,9 @@ test("the local entry point refuses a non-loopback configuration", async () => {
 });
 
 // Covers the mistake the configuration alone cannot: `wrangler dev --remote`, or
-// a deploy that publishes a preview URL, would run this module with a loopback
+// a deploy that publishes a preview URL, would run this module with a local
 // APP_ORIGIN while serving the public internet.
-test("the local entry point refuses a request that did not arrive on loopback", async () => {
+test("the local entry point refuses a request that did not arrive on a local address", async () => {
   const database = createDatabase();
   const env = localEnv(database);
 
@@ -164,6 +164,7 @@ test("the local entry point refuses a request that did not arrive on loopback", 
     const url of [
       "https://quickducks-local.someone.workers.dev/__local/staff",
       "https://quickducks.com/",
+      // Private, but plain http off loopback, which cannot hold a staff session.
       "http://192.168.1.20:8787/",
     ]
   ) {
@@ -174,6 +175,74 @@ test("the local entry point refuses a request that did not arrive on loopback", 
 
   // Nothing was created by the refused bootstrap attempts.
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_profiles").get().count, 0);
+  database.close();
+});
+
+const networkOrigin = "https://192.168.0.252:8787";
+
+const networkEnv = (database) => ({ ...localEnv(database), APP_ORIGIN: networkOrigin, COGNITO_DOMAIN: networkOrigin });
+
+test("the site serves other devices when it is configured for the local network", async () => {
+  const database = createDatabase();
+  const env = networkEnv(database);
+
+  const home = await localWorker.fetch(new Request(`${networkOrigin}/`), env);
+  assert.equal(home.status, 200);
+  // Not redirected to production, and not refused.
+  assert.doesNotMatch(await home.text(), /Refusing to run/);
+
+  const signIn = await localWorker.fetch(new Request(`${networkOrigin}/staff`), env);
+  assert.equal(signIn.status, 200);
+  assert.match(await signIn.text(), /Continue to secure sign in/);
+  database.close();
+});
+
+// Seeding runs on the host but must address the network origin, because public
+// registration checks the request Origin against APP_ORIGIN. Bootstrapping
+// therefore has to answer on that origin too.
+test("bootstrapping answers on the network origin so seeding can reach it", async () => {
+  const database = createDatabase();
+  const env = networkEnv(database);
+
+  const bootstrap = await localWorker.fetch(
+    new Request(`${networkOrigin}/__local/staff`, {
+      method: "POST",
+      headers: { origin: networkOrigin },
+    }),
+    env,
+  );
+
+  assert.equal(bootstrap.status, 200);
+  assert.equal((await bootstrap.json()).accounts.length, 7);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_profiles").get().count, 7);
+  database.close();
+});
+
+test("a device on the network can sign in through the stand-in hosted UI", async () => {
+  const database = createDatabase();
+  const env = networkEnv(database);
+  await localWorker.fetch(new Request("https://localhost:8787/__local/staff", { method: "POST" }), env);
+
+  const start = await localWorker.fetch(new Request(`${networkOrigin}/staff/login/start?returnTo=%2Fstaff`), env);
+  const oauthCookie = cookieFrom(start, "__Host-quickducks_oauth");
+  const authorize = await localWorker.fetch(new Request(start.headers.get("location")), env);
+  const chooser = await authorize.text();
+  const callbackUrl = chooser.match(/href="(https:\/\/192\.168\.0\.252:8787\/auth\/callback\?[^"]+)"/)?.[1];
+  assert.ok(callbackUrl, "the chooser must return the device to the network origin");
+
+  const callback = await localWorker.fetch(
+    new Request(callbackUrl.replaceAll("&amp;", "&"), { headers: { cookie: oauthCookie } }),
+    env,
+  );
+  assert.equal(callback.status, 303);
+  const session = cookieFrom(callback, "__Host-quickducks_staff");
+  assert.ok(session);
+
+  const console = await localWorker.fetch(
+    new Request(`${networkOrigin}/staff`, { headers: { cookie: session } }),
+    env,
+  );
+  assert.match(await console.text(), /Avery Admin/);
   database.close();
 });
 

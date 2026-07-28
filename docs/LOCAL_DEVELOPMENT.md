@@ -13,6 +13,10 @@ npm run seed:local -- --state=round-one   # in a second terminal
 Open <http://localhost:8787>, then sign in at `/staff` and pick any account. No
 password, no emailed code, no AWS, no Cloudflare account.
 
+To open it on a phone or any other device on your network, use
+`npm run dev:network` instead — see [testing on other
+devices](#testing-on-other-devices).
+
 ## What makes this work
 
 Only two things in QuickDucks genuinely need the network: Cognito, which
@@ -24,8 +28,8 @@ development replaces exactly those two and nothing else.
 | | Production | Local |
 | --- | --- | --- |
 | `main` | `src/index.ts` | `src/local-dev.ts` |
-| `APP_ORIGIN` | `https://quickducks.com` | `http://localhost:8787` |
-| `COGNITO_DOMAIN` | the Cognito hosted UI | `http://localhost:8787` |
+| `APP_ORIGIN` | `https://quickducks.com` | `http://localhost:8787`, or the network address |
+| `COGNITO_DOMAIN` | the Cognito hosted UI | the same origin as `APP_ORIGIN` |
 | `name` / `routes` | `quickducks`, both custom domains | `quickducks-local`, none |
 
 The D1, Durable Object, queue, and rate-limiter bindings are identical, because
@@ -52,10 +56,11 @@ behaviour you observe locally is authorization behaviour you will get deployed.
 
 ### Everything local hangs off one predicate
 
-`isLocalPreviewOrigin` in `src/local-preview.ts` is true only for an `http`
-origin on `localhost`, `127.0.0.1`, or `[::1]`. Production configures
-`https://quickducks.com`, so every local affordance is unreachable in production
-by construction rather than by convention. Three behaviours depend on it:
+`isLocalPreviewOrigin` in `src/local-preview.ts` is true for loopback on either
+scheme, and for a private network address — RFC 1918, link-local, or a `.local`
+name — **over https only**. Production configures `https://quickducks.com`, a
+public name, so every local affordance is unreachable in production by
+construction rather than by convention. Three behaviours depend on it:
 
 1. **The canonical-origin redirect is skipped**, so `http://localhost:8787` is
    served instead of 308-redirected to production.
@@ -71,20 +76,89 @@ by construction rather than by convention. Three behaviours depend on it:
 including that `wrangler.jsonc` still points at `src/index.ts` with an https
 origin.
 
-### Use `localhost`, not a hostname alias
+### Browse the origin you configured
 
-Serve on `localhost` (or `127.0.0.1`) and browse the same one. Two reasons:
-
-- The CSP sets `upgrade-insecure-requests`. Browsers skip the upgrade for
-  loopback origins, but on any other http host — a LAN IP, or a `/etc/hosts`
-  alias — every script, image, and fetch is rewritten to `https://` and the site
-  breaks.
-- `APP_ORIGIN` must match the origin in the address bar exactly.
-  `http://localhost:8787` and `http://127.0.0.1:8787` are different origins, and
-  the mismatch turns every staff mutation into a `403`.
+`APP_ORIGIN` must match the origin in the address bar exactly.
+`http://localhost:8787` and `http://127.0.0.1:8787` are different origins, and
+the mismatch turns every staff mutation into a `403`. Both dev commands set
+`APP_ORIGIN` to the address they tell you to open, so this only bites if you go
+looking for another one.
 
 Never point a `/etc/hosts` alias for `quickducks.com` at a local server. Your
 browser has the production HSTS entry pinned and will silently force https.
+
+## Testing on other devices
+
+```sh
+npm run dev:network
+```
+
+Serves the same site to phones, tablets, and anyone else on your network. It
+picks a private address of this machine, issues a certificate for it, and prints
+the URL to open on the device. Seeding is unchanged — `npm run seed:local` finds
+the running server on its own.
+
+**Anyone on the network can open it and sign in as any staff account, including
+the administrator.** Sign-in is deliberately passwordless, so there is nothing to
+guess. The database is throwaway and holds no real participant data, but run this
+on your own network rather than a cafe or a conference.
+
+### Why it is HTTPS, and not optional
+
+Loopback is the only origin browsers treat as secure without a certificate. Off
+it, plain http fails in three ways at once:
+
+- `__Host-` session cookies are `Secure`, so a browser will not store them, and
+  staff sign-in loops forever with no error.
+- The CSP sets `upgrade-insecure-requests`, so every script, image, and `fetch`
+  is rewritten to `https://` and the page breaks.
+- Web NFC refuses to run outside a secure context, so the inventory station
+  cannot work at all.
+
+So `isLocalPreviewOrigin` accepts a private IPv4 address **only over https**.
+Plain http off loopback fails at the guard, which names both conditions and shows
+you the two origins, rather than half-working.
+
+Nothing wider is accepted. A `.local` mDNS name would be convenient and private
+IPv6 would be reasonable, but `npm run dev:network` only ever picks a private
+IPv4 address this machine actually holds, so neither could come from the shipped
+commands — and each would be more surface on the one check the whole harness
+rests on.
+
+### The certificate
+
+Self-signed by default, kept in `.wrangler/local-network/`, and regenerated when
+your address changes. The device warns once — tap **Advanced**, then **Proceed**.
+
+For no warning at all:
+
+```sh
+brew install mkcert && mkcert -install
+```
+
+`npm run dev:network` uses `mkcert` automatically once it is installed. Install
+the CA on the device too (`mkcert -CAROOT`) and the warning disappears.
+
+**Android Chrome needs this for NFC.** Chrome withholds powerful features,
+Web NFC among them, from an origin whose certificate it does not trust — so
+`/staff/inventory-intake` needs a `mkcert` certificate the phone trusts, not a
+tapped-through warning. That is the one part of the site a self-signed
+certificate will not get you.
+
+### Picking an address
+
+`npm run dev:network -- --host=10.0.0.5` when the machine has several private
+addresses and the automatic choice is the wrong one — a VPN or Docker interface
+is reachable from the machine but usually not from a phone. The command lists
+what it found. Use `--port` to move off 8787.
+
+It binds that one address rather than every interface, so a public address on the
+same machine is never served.
+
+The address has to be an IP, not a hostname. That is also the safer option:
+the site sends a one-year `strict-transport-security` header, and browsers store
+HSTS for names but not for IP addresses — a hostname pinned that way would force
+https for every other service you ever run on it.
 
 ## Seeding
 
@@ -160,11 +234,12 @@ or when a local database drifted while a migration was being written.
 
 - **Outbound email.** The queue producer runs, but there is no consumer and no
   SES path in any environment, so nothing sends.
-- **Real NFC writing.** The scanning station on `/staff/inventory` needs Web NFC
-  on Android Chrome; the rest of that page works on any device. The station's
-  HTTP API works locally, and the seeding script uses it to create tags, so every
-  downstream page — `/t/:token`, pairing, staff duck inspection — is fully
-  testable without hardware.
+- **Real NFC writing**, unless you serve the site to an Android phone with
+  `npm run dev:network` and a `mkcert` certificate the phone trusts. That is only
+  the scanning station on `/staff/inventory`; the rest of that page works on any
+  device. Without a phone, the station's HTTP API still works and the seeding
+  script uses it to create tags, so every downstream page — `/t/:token`, pairing,
+  staff duck inspection — is testable without hardware.
 - **Cloudflare Web Analytics**, which is injected at the edge after the Worker
   responds.
 

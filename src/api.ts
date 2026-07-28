@@ -38,6 +38,7 @@ import { handleDuckOperations } from "./duck-operations.ts";
 import { handleEventOperations } from "./event-operations.ts";
 import { handleHeatOperations } from "./heat-operations.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
+import { optionalParticipantQrGeometry } from "./participant-qr.ts";
 import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
@@ -362,7 +363,8 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   // remote verification is waived there and only there. The check stays
   // fail-closed everywhere else: an unconfigured deployment still refuses
   // registrations rather than accepting unverified ones. `isLocalPreviewOrigin`
-  // is false for every https origin, so production cannot reach this branch.
+  // admits only loopback and private network addresses, never a public name, so
+  // production cannot reach this branch.
   const turnstileSecret = env.TURNSTILE_SECRET_KEY;
   if (turnstileSecret === undefined && !isLocalPreviewOrigin(env.APP_ORIGIN)) {
     return json({ error: "Registration protection is not configured." }, 503);
@@ -621,6 +623,12 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
         ? publicDisplayName(row.public_name_policy, row.first_name, row.last_name)
         : `${row.first_name} ${row.last_name}`,
       lookupCode: followed ? null : row.lookup_code,
+      // Drawing geometry for the same QR the private status page renders, so a
+      // participant can be scanned straight from My Ducks without having kept
+      // the one-time private link. It encodes the lookup code already on the
+      // line above and nothing else, so it discloses nothing new, and a
+      // followed registration has no lookup code to encode.
+      qr: optionalParticipantQrGeometry(followed ? null : row.lookup_code),
       followed,
       registrationStatus: row.status,
       paired: row.is_paired === 1,

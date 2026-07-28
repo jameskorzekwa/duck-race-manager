@@ -479,3 +479,41 @@ test("the duck number link style is shared by the board and My Ducks", () => {
   assert.match(participantScript, /duckDetailLink\(document, status\.duck \? status\.duck\.visibleNumber : null, duckName\)/);
   assert.match(style, /\.duck-number-note \{[^}]*color:var\(--muted\);/);
 });
+
+test("every pattern attribute compiles the way a browser compiles it", () => {
+  // HTML compiles `pattern` with the RegExp `v` flag, which is stricter than
+  // the default: `-` is a reserved character class syntax character there and
+  // must be escaped even in a trailing position. A pattern that fails to
+  // compile is not a strict validator that rejects everything — the browser
+  // discards the attribute, so the field silently stops validating at all and
+  // only logs to the console. `[A-Za-z0-9_-]+` shipped that way on the duck
+  // intake tag-token field, where the constraint had never once run.
+  const patterns = renderedPages.flatMap((html) =>
+    [...html.matchAll(/ pattern="([^"]*)"/g)].map((match) => match[1])
+  );
+  assert.ok(patterns.length > 0, "no pattern attributes found — has this moved out of site.ts?");
+
+  for (const pattern of patterns) {
+    assert.doesNotThrow(
+      () => new RegExp(pattern, "v"),
+      `pattern ${pattern} is not a valid v-mode regular expression, so browsers ignore it`,
+    );
+  }
+});
+
+test("the tag token pattern still accepts exactly what the server accepts", () => {
+  // Escaping must not narrow the accepted set: this pattern mirrors
+  // `validTagToken` in duck-operations.ts, and the lengths come from
+  // minlength/maxlength beside it.
+  const pattern = renderStaffInventory("Duck Manager", "https://quickducks.com")
+    .match(/name="tagToken"[^>]* pattern="([^"]*)"/)[1];
+  const field = new RegExp(`^(?:${pattern})$`, "v");
+
+  // A real token from the seeded local site, which carries both - and _.
+  assert.ok(field.test("gegczEBa_iiuCKl2j9r4bkC-QC4gFEhvDQm4zF20JWw"));
+  assert.ok(field.test("abcDEF012_-"));
+  assert.equal(field.test("has space"), false);
+  assert.equal(field.test("has.dot"), false);
+  assert.equal(field.test("has/slash"), false);
+  assert.equal(field.test(""), false);
+});

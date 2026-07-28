@@ -9,9 +9,35 @@
 // Usage:
 //   node scripts/seed-local.mjs --state=round-one
 //   npm run seed:local -- --state=completed --participants=12
-import { argv, exit, stderr, stdout } from "node:process";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { argv, env, execPath, exit, stderr, stdout } from "node:process";
+import { fileURLToPath } from "node:url";
 
 import { localPreviewTurnstileToken } from "../src/local-preview.ts";
+
+// `npm run dev:network` writes this while it is serving. Following it means the
+// same seed command works in both modes: public registration checks the request
+// Origin against APP_ORIGIN, so seeding a network session through
+// `http://localhost:8787` would be rejected as cross-origin.
+const networkSession = () => {
+  const markerPath = new URL("../.wrangler/local-network.json", import.meta.url);
+  if (!existsSync(markerPath)) return null;
+  let session;
+  try {
+    session = JSON.parse(readFileSync(markerPath, "utf8"));
+  } catch {
+    return null;
+  }
+  // A marker left behind by a server that is gone would send seeding at an origin
+  // nothing is listening on, with a confusing connection error at the end of it.
+  try {
+    if (typeof session.pid === "number") process.kill(session.pid, 0);
+  } catch {
+    return null;
+  }
+  return session;
+};
 
 const states = ["empty", "draft", "registration", "closed", "round-one", "final", "completed"];
 
@@ -34,7 +60,7 @@ const stateDescriptions = {
 
 const parseArguments = () => {
   const options = {
-    url: "http://localhost:8787",
+    url: networkSession()?.origin ?? "http://localhost:8787",
     state: "registration",
     participants: 9,
     heatSize: 3,
@@ -73,7 +99,10 @@ const usage = () => `Seed the local QuickDucks database with a testable race sta
 States:
 ${states.map((state) => `  ${state.padEnd(13)} ${stateDescriptions[state]}`).join("\n")}
 
-Defaults: --state=registration --participants=9 --heat-size=3 --url=http://localhost:8787
+Defaults: --state=registration --participants=9 --heat-size=3
+          --url=${networkSession()?.origin ?? "http://localhost:8787"}${
+  networkSession() === null ? "" : "  (following the running network session)"
+}
 Every run first deletes the existing event, because QuickDucks holds one event at a time.
 `;
 
@@ -437,6 +466,31 @@ try {
     stdout.write(usage());
     exit(0);
   }
+
+  // The network session serves a certificate this machine has no reason to trust
+  // yet. `NODE_EXTRA_CA_CERTS` is only read at startup, so trusting it means
+  // starting again with it set rather than reaching for a global switch that
+  // would disable verification for everything.
+  const session = networkSession();
+  if (
+    options.url.startsWith("https://")
+    && session !== null
+    && env.NODE_EXTRA_CA_CERTS === undefined
+    && existsSync(session.trustAnchorPath)
+  ) {
+    const restarted = spawnSync(execPath, [fileURLToPath(import.meta.url), ...argv.slice(2)], {
+      stdio: "inherit",
+      env: { ...env, NODE_EXTRA_CA_CERTS: session.trustAnchorPath },
+    });
+    // `status` is null both when the spawn fails and when a signal kills the
+    // child, so neither can be allowed to exit quietly with no explanation.
+    if (restarted.error) {
+      throw new SeedError(`Could not re-run with the local certificate trusted.\n${restarted.error.message}`);
+    }
+    if (restarted.signal !== null) throw new SeedError(`Seeding was stopped by ${restarted.signal}.`);
+    exit(restarted.status ?? 1);
+  }
+
   stdout.write(`Seeding ${options.url} to "${options.state}"…\n`);
   report(options, await seed(options));
 } catch (error) {

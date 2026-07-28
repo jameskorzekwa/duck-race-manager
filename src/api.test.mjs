@@ -408,7 +408,9 @@ test("a followed collection entry is projected without a lookup code or unmasked
           race_entry_id: "entry_owned",
           first_name: "Daisy",
           last_name: "Duck",
-          lookup_code: "DAISY123",
+          // Both codes must be encodable, or every row would get `qr: null` for
+          // the wrong reason and the followed guard below could not fail.
+          lookup_code: "DAASY234",
           status: "SUBMITTED",
           added_via: "REGISTRATION",
           public_name_policy: "FIRST_NAME_LAST_INITIAL",
@@ -419,7 +421,7 @@ test("a followed collection entry is projected without a lookup code or unmasked
           race_entry_id: "entry_followed",
           first_name: "Donald",
           last_name: "Mallard",
-          lookup_code: "DONALD45",
+          lookup_code: "DUNALD45",
           status: "SUBMITTED",
           added_via: "FOLLOWED",
           public_name_policy: "FIRST_NAME_LAST_INITIAL",
@@ -438,15 +440,22 @@ test("a followed collection entry is projected without a lookup code or unmasked
 
   const [owned, followed] = body.registrations;
   assert.equal(owned.followed, false);
-  assert.equal(owned.lookupCode, "DAISY123");
+  assert.equal(owned.lookupCode, "DAASY234");
   assert.equal(owned.displayName, "Daisy Duck");
   assert.equal(followed.followed, true);
   assert.equal(followed.lookupCode, null);
   assert.equal(followed.firstName, null);
   assert.equal(followed.lastName, null);
+  // A QR is an encoding of the lookup code, so withholding the code but
+  // sending its QR would hand back exactly what the projection just refused.
+  // Asserting the owned side too keeps this pair failing for the right reason:
+  // without it, dropping the followed guard would still pass.
+  assert.equal(followed.qr, null, "a followed entry has no code to encode");
+  assert.equal(owned.qr.size, 29);
+  assert.match(owned.qr.path, /^[Mhvz0-9 -]+$/);
   // Following must never widen the name past the public search projection.
   assert.equal(followed.displayName, "Donald M.");
-  assert.equal(JSON.stringify(body).includes("DONALD45"), false);
+  assert.equal(JSON.stringify(body).includes("DUNALD45"), false);
   assert.equal(JSON.stringify(body).includes("Mallard"), false);
   assert.match(db.statements[2].sql, /bcr\.added_via, e\.public_name_policy/);
   assert.doesNotMatch(db.statements[2].sql, /email|phone|private_token/i);

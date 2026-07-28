@@ -52,15 +52,40 @@ export const parseParticipantQrPayload = (value: string): string | null => {
 // styling cannot accidentally crowd the code and break scanning.
 const QUIET_ZONE_MODULES = 4;
 
+/** The drawing geometry for one participant QR, independent of any markup. */
+export interface ParticipantQrGeometry {
+  /** Width and height of the symbol in modules, including the quiet zone. */
+  size: number;
+  /** SVG path data covering every dark module. */
+  path: string;
+}
+
+// The geometry is a pure function of the lookup code, and My Ducks re-derives
+// it for every owned registration on every refresh — which the page issues on
+// each live signal as well as on a poll. One device can hold many registrations
+// (a whole family or scout troop signs up from one phone), so the same handful
+// of codes would otherwise be re-encoded continuously for the length of a race.
+// A Workers isolate outlives a request, so caching here removes essentially all
+// of that work. The cap keeps a long-lived isolate bounded; races are far
+// smaller than it, so in practice nothing is ever evicted.
+const GEOMETRY_CACHE_LIMIT = 500;
+const geometryCache = new Map<string, ParticipantQrGeometry>();
+
 /**
- * Renders a participant lookup code as a self-contained monochrome SVG.
+ * Encodes a lookup code into the geometry both renderers draw.
  *
- * Every value written into the markup is either a fixed string owned by this
- * module or a number derived from the encoder's boolean matrix, so no caller
- * input reaches the document as markup.
+ * Markup generation is deliberately split out so the server-rendered private
+ * status page and the browser-rendered My Ducks cards encode through exactly
+ * one implementation. The returned `path` contains only digits, spaces, and the
+ * fixed `Mhvz` command letters derived from the encoder's boolean matrix, so it
+ * never carries caller input.
  */
-export const renderParticipantQrSvg = (lookupCode: string): string => {
-  const { data, size } = encode(participantQrPayload(lookupCode), {
+export const participantQrGeometry = (lookupCode: string): ParticipantQrGeometry => {
+  const payload = participantQrPayload(lookupCode);
+  const cached = geometryCache.get(payload);
+  if (cached !== undefined) return cached;
+
+  const { data, size } = encode(payload, {
     ecc: "M",
     border: QUIET_ZONE_MODULES,
   });
@@ -80,9 +105,50 @@ export const renderParticipantQrSvg = (lookupCode: string): string => {
     }
   }
 
+  // Frozen because callers share one instance: the projection must not be able
+  // to hand a mutated symbol to the next request that asks for the same code.
+  const geometry = Object.freeze({ size, path: segments.join("") });
+  if (geometryCache.size >= GEOMETRY_CACHE_LIMIT) geometryCache.clear();
+  geometryCache.set(payload, geometry);
+  return geometry;
+};
+
+/**
+ * Encodes a lookup code, or returns `null` when it cannot be encoded.
+ *
+ * `lookup_code` carries no format constraint in the schema, so this is defence
+ * in depth for a column the database would let hold anything, not a claim that
+ * such rows exist: `randomLookupCode` has only ever emitted the alphabet
+ * {@link isLookupCode} accepts. The My Ducks projection renders many
+ * registrations at once, so one unencodable row must cost that card its QR
+ * rather than fail the whole response. Callers rendering a single code they
+ * already trust should keep using {@link participantQrGeometry} and let it
+ * throw — the private status page does exactly that.
+ */
+export const optionalParticipantQrGeometry = (
+  lookupCode: string | null,
+): ParticipantQrGeometry | null => {
+  if (lookupCode === null) return null;
+  try {
+    return participantQrGeometry(lookupCode);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Renders a participant lookup code as a self-contained monochrome SVG.
+ *
+ * Every value written into the markup is either a fixed string owned by this
+ * module or a number derived from the encoder's boolean matrix, so no caller
+ * input reaches the document as markup.
+ */
+export const renderParticipantQrSvg = (lookupCode: string): string => {
+  const { size, path } = participantQrGeometry(lookupCode);
+
   return `<svg class="participant-qr" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" `
     + `shape-rendering="crispEdges" role="img" aria-label="QR code containing this participant&#39;s staff lookup code">`
     + `<rect width="${size}" height="${size}" fill="#ffffff"/>`
-    + `<path fill="#111827" d="${segments.join("")}"/>`
+    + `<path fill="#111827" d="${path}"/>`
     + `</svg>`;
 };
