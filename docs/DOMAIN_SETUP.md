@@ -166,31 +166,30 @@ tag. Anonymous unpaired tags redirect to `/`; anonymous paired tags open public
 race status. The staff application uses the protected duck endpoint to choose
 pairing or inspection after verifying the Cognito access token.
 
-The protected `/staff/inventory-intake` page is available only to duck managers,
-race directors, and system administrators. It provisions blank writable NDEF
-stickers and has no desktop, pasted-token, or manual-number fallback. Android
-Web NFC requires current Android Chrome, a secure HTTPS context, an NFC-capable
-device, a top-level visible page, and a user gesture. The operator selects the
-race and optional station location, presses Start once, and then taps one blank
-sticker per duck without entering per-duck data.
+The protected `/staff/inventory` page is available only to duck managers, race
+directors, and system administrators. Its blank-sticker station provisions
+writable NDEF stickers and has no desktop, pasted-token, or manual-number
+fallback. Android Web NFC requires current Android Chrome, a secure HTTPS
+context, an NFC-capable device, a top-level visible page, and a user gesture. The
+operator selects the race and optional station location, presses Start once, and
+then taps one blank sticker per duck without entering per-duck data.
 
-The Worker authenticates the staff member and checks the inventory role before
-examining the page request's user agent. Missing and non-Android user agents get
-a noindex unsupported-device response with a staff-inventory return link and no
-station configuration, script, or provisioning data. This user-agent gate is
-only an early compatibility guard and provides no security or trust signal; user
-agents are spoofable. The accepted page keeps controls hidden and makes no
-station API request until runtime checks confirm Android Chrome, `NDEFReader`,
-HTTPS, top-level browsing, and document visibility, and it checks the runtime
-again before starting NFC.
+The Worker authenticates the staff member and checks the inventory role; it does
+not examine the page request's user agent. Every authorized device receives the
+whole page, and the scanning station is the only device-dependent part. It keeps
+its controls hidden and makes no station API request until runtime checks confirm
+Android Chrome, `NDEFReader`, HTTPS, top-level browsing, and document visibility,
+it says which requirement is missing, and it checks the runtime again before
+starting NFC.
 
 The server generates the duck UUID, next globally unique internal number, and
 cryptographically random 32-byte base64url token. The browser writes only the
 exact configured-origin `https://quickducks.com/t/<token>` URL. Web NFC
 `write()` resolution is the physical-write verification used for activation;
-the station does not call `makeReadOnly`, so tags remain writable for controlled
-replacement. Query strings, fragments, credentials, alternate origins, and
-redirected hostnames are rejected when an existing QuickDucks URL is scanned.
+the station does not call `makeReadOnly`, so a sticker stays writable for reuse
+after the race dataset is deleted. Query strings, fragments, credentials,
+alternate origins, and redirected hostnames are rejected when an existing
+QuickDucks URL is scanned.
 
 Provisioning requires live staff authentication, same-origin mutation
 protection, and live API connectivity. A server-side `NEW`/`NEEDS_TAG` duck and
@@ -234,11 +233,11 @@ Do not write production NFC tags until all checks pass:
 - Android Chrome can start the protected provisioner from one user gesture in a
   top-level visible HTTPS page and keep scanning for repeated physical taps.
 - A blank writable NDEF test sticker receives the exact canonical URL, activates
-  only after `write()` resolves, and remains writable for controlled replacement.
+  only after `write()` resolves, and remains writable for later reuse.
 - Reloading or losing connectivity with a pending sticker recovers the same URL
   for the same actor and event without allocating another duck.
-- A canonical URL already assigned to different or unknown inventory is rejected
-  without being overwritten; there is no desktop/manual fallback.
+- A canonical URL already in inventory opens that duck's record instead of being
+  overwritten; there is no desktop/manual fallback.
 - iPhone background scanning opens the test tag correctly.
 - The PWA has been installed or cached and handles a tag route during a planned
   connectivity outage.

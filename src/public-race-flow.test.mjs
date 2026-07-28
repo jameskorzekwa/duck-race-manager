@@ -20,7 +20,6 @@ import {
 } from "./public-phase.ts";
 import {
   renderHome,
-  renderInventoryIntakeUnsupported,
   renderMyDucks,
   renderNotFound,
   renderRace,
@@ -918,7 +917,6 @@ test("every public content page keeps the live navigation subscriber", async () 
 const socketFreePages = {
   "staff sign in": renderStaffLogin(),
   "not found": renderNotFound(),
-  "inventory unsupported": renderInventoryIntakeUnsupported("Inventory staff"),
   "staff auth error": renderStaffAuthError("Your sign-in link expired."),
 };
 

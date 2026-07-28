@@ -9,7 +9,7 @@ import {
 } from "./client-scripts.ts";
 import {
   renderFinishLine,
-  renderInventoryIntake,
+  renderStaffInventory,
   renderStaffDuck,
   renderStaffHome,
   renderStartLine,
@@ -37,7 +37,6 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
   for (const endpoint of [
     "/api/v1/staff/events",
     "/api/v1/staff/registrations/",
-    "/api/v1/staff/inventory/ducks",
     "/results/",
     "/api/v1/staff/support/events/",
     "/force-delete",
@@ -198,7 +197,7 @@ test("inventory detail controller returns focus to the refreshed card and invali
 });
 
 test("inventory cards and detail panel have isolated responsive layout semantics", () => {
-  const markup = renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]);
+  const markup = renderStaffInventory("Duck Manager", "https://quickducks.com", false, ["DUCK_MANAGER"]);
 
   assert.match(markup, /<div class="inventory-layout"><div class="data-list inventory-card-grid" data-inventory-list><\/div>\s*<aside class="operation-card inventory-detail-panel"[^>]+role="region"[^>]+aria-labelledby="inventory-detail-title"[^>]+data-inventory-detail hidden>/);
   assert.match(markup, /id="inventory-detail-title" data-inventory-name>Duck detail<\/h3><button[^>]+data-close-inventory-detail>Close<\/button>/);
@@ -570,7 +569,7 @@ test("every staff page signs out through an accessible POST form without JavaScr
     renderStaffHome("Staff Member", false, ["REGISTRATION"]),
     renderStartLine("Staff Member"),
     renderFinishLine("Staff Member"),
-    renderInventoryIntake("Staff Member", "https://quickducks.com"),
+    renderStaffInventory("Staff Member", "https://quickducks.com"),
     renderStaffDuck("tag-token", "Staff Member"),
   ];
 

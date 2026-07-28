@@ -1,8 +1,14 @@
 import type { StaffActor } from "./auth.ts";
 import { requireAnyRole } from "./authorization.ts";
-import { publicDuckName } from "./duck-name-filter.ts";
 import {
+  hasSupportedDuckNameCharacters,
+  isAllowedDuckName,
+  publicDuckName,
+} from "./duck-name-filter.ts";
+import {
+  cleanDuckName,
   DELETABLE_EVENT_STATUSES,
+  DUCK_NAME_MAX_LENGTH,
   hashToken,
   isCommandId,
   isPrivateToken,
@@ -835,14 +841,124 @@ const deleteRegistration = async (
     : json({ error: "Registration deletion conflicted with another update. Refresh and try again." }, 409);
 };
 
-// Staff moderation of a participant-chosen duck name. No filter is perfect and
-// the name is shown publicly at a community event, so staff must be able to
-// remove one that should never have been on the board.
+// Staff naming of a duck, used at the desk for a participant who cannot do it
+// themselves — a walk-up with no phone, or a device that lost its saved list.
 //
-// It is deliberately not a rename: staff clear the name and the duck falls back
-// to the canonical "Duck #N" on every surface. The participant may name it again
-// afterwards, and the write-time filter applies to that attempt as it always
-// does.
+// It writes through exactly the gates the public endpoint applies, in the same
+// order, so a name staff can set is a name a participant could have set. The
+// duck must already be paired: a name with no duck has nothing to label, and
+// every surface that shows a name resolves it through the current assignment.
+//
+// The rejected text is never echoed, logged, or audited, exactly as on the
+// public path.
+//
+// Like the public endpoint, this is last write wins and takes no expected
+// revision. A duck name is one field that is visible the moment it is saved, so
+// an overwrite is seen and corrected immediately; refusing the desk's save
+// because the owner renamed the duck a second earlier would cost more than it
+// protects. The command identifier is what makes a retry a replay.
+const setDuckName = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  registrationId: string,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  if (payload === null) return json({ error: "A valid JSON request is required." }, 400);
+  const commandId = payload.commandId;
+  if (typeof commandId !== "string" || !isCommandId(commandId) || typeof payload.duckName !== "string") {
+    return json({ error: "A valid command and duck name are required." }, 400);
+  }
+  const duckName = cleanDuckName(payload.duckName);
+  if (duckName === null) {
+    return json({
+      error: `Enter a duck name of 1 to ${DUCK_NAME_MAX_LENGTH} characters.`,
+    }, 422);
+  }
+  if (!hasSupportedDuckNameCharacters(duckName)) {
+    return json({ error: "That duck name uses characters QuickDucks cannot show." }, 422);
+  }
+  if (!isAllowedDuckName(duckName)) {
+    return json({ error: "That duck name cannot be shown on the public race board." }, 422);
+  }
+
+  const previous = await findCommand(env, commandId);
+  if (previous !== null) {
+    if (previous.command_type !== "SET_DUCK_NAME" || previous.result_id !== registrationId) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const replay = await getRegistration(env, registrationId);
+    return replay === null
+      ? json({ error: "Registration not found." }, 404)
+      : registrationResult(replay, true);
+  }
+
+  const current = await getRegistration(env, registrationId);
+  if (current === null) return json({ error: "Registration not found." }, 404);
+  if (current.assignment_id === null) {
+    return json({ error: "Pair a duck with this participant before naming it." }, 409);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      // Guarded on the assignment still being open, so a duck unpaired between
+      // the preflight and the write cannot end up with a name.
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+         SELECT ?, r.event_id, 'SET_DUCK_NAME', r.id, ?, ?, ?
+           FROM registrations r
+           JOIN race_entries re ON re.registration_id = r.id
+           JOIN duck_assignments da ON da.race_entry_id = re.id AND da.valid_to IS NULL
+          WHERE r.id = ?`,
+      ).bind(commandId, now, now, actor.id, registrationId),
+      env.DB.prepare(
+        `UPDATE race_entries
+            SET duck_name = ?, updated_at = ?
+          WHERE registration_id = ?
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'SET_DUCK_NAME' AND rc.result_id = ?
+            )`,
+      ).bind(duckName, now, registrationId, commandId, registrationId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         SELECT ?, rc.event_id, rc.id, 'DUCK_NAME_SET', 'REGISTRATION', rc.result_id, 'STAFF', ?, ?
+           FROM race_commands rc
+          WHERE rc.id = ? AND rc.command_type = 'SET_DUCK_NAME' AND rc.result_id = ?`,
+      ).bind(
+        crypto.randomUUID(),
+        now,
+        JSON.stringify({
+          staff_profile_id: actor.id,
+          changed_fields: ["duck_name"],
+          named_via: "STAFF_DESK",
+        }),
+        commandId,
+        registrationId,
+      ),
+    ]);
+  } catch {
+    return json({ error: "The duck name could not be saved. Refresh and try again." }, 409);
+  }
+
+  const updated = await getRegistration(env, registrationId);
+  if (updated === null) return json({ error: "The saved registration could not be loaded." }, 500);
+  return updated.duck_name === duckName
+    ? registrationResult(updated, false)
+    : json({ error: "The duck name could not be saved. Refresh and try again." }, 409);
+};
+
+// Staff moderation of a duck name. No filter is perfect and the name is shown
+// publicly at a community event, so staff must be able to remove one that should
+// never have been on the board.
+//
+// Clearing is separate from setting on purpose: it must never fail, so it
+// applies none of the naming preconditions. The duck falls back to the canonical
+// "Duck #N" on every surface, and the participant may name it again afterwards.
 //
 // No expected revision is required. Clearing is idempotent and always safe, and
 // a moderation action must not fail because the owner renamed the duck a second
@@ -947,7 +1063,7 @@ export const handleParticipantOperations = async (
   }
 
   const registrationMatch = url.pathname.match(
-    /^\/api\/v1\/staff\/registrations\/([^/]{1,128})(?:\/(withdraw|reactivate|disqualify|clear-duck-name))?$/,
+    /^\/api\/v1\/staff\/registrations\/([^/]{1,128})(?:\/(withdraw|reactivate|disqualify|set-duck-name|clear-duck-name))?$/,
   );
   if (registrationMatch === null) return null;
   const [, registrationId, operation] = registrationMatch;
@@ -963,9 +1079,12 @@ export const handleParticipantOperations = async (
   if (operation === undefined && request.method === "DELETE") {
     return deleteRegistration(request, env, actor, registrationId);
   }
-  // Clearing a duck name is moderation of published text, so it is available to
-  // the same registration and race-director roles (and administrators) that own
-  // the rest of this participant surface.
+  // Naming and clearing a duck name are both work at the registration desk, so
+  // they are available to the same registration and race-director roles (and
+  // administrators) that own the rest of this participant surface.
+  if (operation === "set-duck-name" && request.method === "POST") {
+    return setDuckName(request, env, actor, registrationId);
+  }
   if (operation === "clear-duck-name" && request.method === "POST") {
     return clearDuckName(request, env, actor, registrationId);
   }

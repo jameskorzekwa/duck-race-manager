@@ -235,10 +235,11 @@ or when a local database drifted while a migration was being written.
 - **Outbound email.** The queue producer runs, but there is no consumer and no
   SES path in any environment, so nothing sends.
 - **Real NFC writing**, unless you serve the site to an Android phone with
-  `npm run dev:network` and a `mkcert` certificate the phone trusts. Without
-  that, the station's HTTP API still works and the seeding script uses it to
-  create tags, so every downstream page — `/t/:token`, pairing, staff duck
-  inspection — is testable without hardware.
+  `npm run dev:network` and a `mkcert` certificate the phone trusts. That is only
+  the scanning station on `/staff/inventory`; the rest of that page works on any
+  device. Without a phone, the station's HTTP API still works and the seeding
+  script uses it to create tags, so every downstream page — `/t/:token`, pairing,
+  staff duck inspection — is testable without hardware.
 - **Cloudflare Web Analytics**, which is injected at the edge after the Worker
   responds.
 

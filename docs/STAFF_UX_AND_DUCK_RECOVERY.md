@@ -5,8 +5,15 @@
 > batches, the `RETURN_STEWARD` role, and the `RETURN_PROCESSING`/`ARCHIVED`
 > statuses no longer exist. The lifecycle is `DRAFT -> REGISTRATION_OPEN ->
 > REGISTRATION_CLOSED -> ROUND_ONE -> FINAL -> COMPLETED`, and the
-> administrator "Delete event" action is the only cleanup path. See
-> `docs/WORKFLOWS.md` for implemented behavior.
+> administrator "Delete event" action is the only cleanup path.
+>
+> The three recovery operations below are design history too. There is no
+> replace-lost-duck command, no replace-NFC-tag command, no tag retirement, no
+> duck swap, and no duck condition. A duck leaves inventory only by being
+> deleted, which closes its assignment and returns its participant to the pairing
+> queue with their heat place intact; staff then pair them with another duck
+> through the ordinary scan-first flow, and no heat can start while a racer on it
+> holds nothing. See `docs/WORKFLOWS.md` for implemented behavior.
 
 ## Purpose
 

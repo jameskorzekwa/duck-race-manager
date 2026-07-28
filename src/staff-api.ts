@@ -405,7 +405,7 @@ const pairingResponse = (
   assignmentId: string,
   duckNumber: number,
   context: PairingContext,
-  heat: { number: number } | null,
+  heat: { round: string; number: number } | null,
   replayed: boolean,
 ): Response => json({
   assignmentId,
@@ -418,7 +418,7 @@ const pairingResponse = (
     phone: context.phone,
     lookupCode: context.lookup_code,
   },
-  heat: heat === null ? null : { round: "ROUND_ONE", number: heat.number },
+  heat: heat === null ? null : { round: heat.round, number: heat.number },
   heatAssignmentPending: heat === null,
 }, replayed ? 200 : 201);
 
@@ -453,7 +453,7 @@ const pairDuck = async (
             r.revision AS registration_revision,
             re.id AS race_entry_id, re.revision AS race_entry_revision,
             r.first_name, r.last_name, r.email, r.phone, r.lookup_code,
-            h.heat_number
+            h.round AS heat_round, h.heat_number
        FROM race_commands c
         JOIN duck_assignments da ON da.id = c.result_id
         JOIN ducks d ON d.id = da.duck_id
@@ -465,8 +465,8 @@ const pairDuck = async (
           SELECT he2.id
             FROM heat_entries he2
             JOIN heats h2 ON h2.id = he2.heat_id
-           WHERE he2.race_entry_id = re.id AND h2.round = 'ROUND_ONE'
-           ORDER BY h2.heat_number
+           WHERE he2.race_entry_id = re.id
+           ORDER BY CASE h2.round WHEN 'FINAL' THEN 0 ELSE 1 END, h2.heat_number
            LIMIT 1
         )
         LEFT JOIN heats h ON h.id = he.heat_id
@@ -477,6 +477,7 @@ const pairDuck = async (
   ).bind(token, commandId, eventId, lookupCode).first<PairingContext & {
     assignment_id: string;
     visible_number: number;
+    heat_round: string | null;
     heat_number: number | null;
   }>();
   if (replay !== null) {
@@ -484,7 +485,9 @@ const pairDuck = async (
       replay.assignment_id,
       replay.visible_number,
       replay,
-      replay.heat_number === null ? null : { number: replay.heat_number },
+      replay.heat_number === null || replay.heat_round === null
+        ? null
+        : { round: replay.heat_round, number: replay.heat_number },
       true,
     );
   }
@@ -508,13 +511,26 @@ const pairDuck = async (
   if (duck === null) return json({ error: "This tag is not an active race duck." }, 404);
   if (duck.active_assignment_id !== null) return json({ error: "This duck is already paired." }, 409);
 
+  // Pairing is allowed once racing has started, because a duck can be deleted
+  // mid-race and its participant then has to be given another one. It is the
+  // same command either way: the participant is SUBMITTED with no open
+  // assignment, which is exactly the state deleting their duck left them in.
   const context = await env.DB.prepare(
     `SELECT e.id AS event_id, e.round_one_heat_capacity,
             e.final_heat_capacity,
+            e.status AS event_status,
             r.id AS registration_id, r.status AS registration_status,
             r.revision AS registration_revision,
             re.id AS race_entry_id, re.revision AS race_entry_revision,
-            r.first_name, r.last_name, r.email, r.phone, r.lookup_code
+            r.first_name, r.last_name, r.email, r.phone, r.lookup_code,
+            (
+              SELECT h.round || ':' || h.heat_number
+                FROM heat_entries he
+                JOIN heats h ON h.id = he.heat_id
+               WHERE he.race_entry_id = re.id
+               ORDER BY CASE h.round WHEN 'FINAL' THEN 0 ELSE 1 END, h.heat_number
+               LIMIT 1
+            ) AS existing_heat
        FROM registrations r
        JOIN race_entries re ON re.registration_id = r.id
        JOIN events e ON e.id = r.event_id
@@ -524,11 +540,23 @@ const pairDuck = async (
         AND r.lookup_code = ? COLLATE NOCASE
         AND r.status = 'SUBMITTED'
         AND da.id IS NULL
-        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
+        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
       LIMIT 1`,
-  ).bind(eventId, lookupCode).first<PairingContext>();
+  ).bind(eventId, lookupCode).first<PairingContext & {
+    event_status: string;
+    existing_heat: string | null;
+  }>();
   if (context === null) {
     return json({ error: "No unpaired participant matches that code in this event." }, 404);
+  }
+  // Once racing has started, pairing is a repair and nothing else. Someone with
+  // no heat place cannot be given one: round-one heats are locked, and a new one
+  // could never be started from a lifecycle that has moved past its round.
+  const racingStarted = ["ROUND_ONE", "FINAL"].includes(context.event_status);
+  if (racingStarted && context.existing_heat === null) {
+    return json({
+      error: "Racing has started, so a new racer cannot be added. This code has no place in any heat.",
+    }, 409);
   }
 
   const reservation = await env.DB.prepare(
@@ -586,8 +614,16 @@ const pairDuck = async (
   // post-close balanced planner is gone, so an event row that still carries the
   // retired mode value is paired into heats exactly like every other event
   // rather than being left with no route to a heat at all.
-  let heat: { id: string; number: number; slot: number; isNew: boolean } | null = null;
-  {
+  //
+  // A participant who already holds a heat place keeps it. That is what makes
+  // replacing a deleted duck mid-race possible at all: the heat roster names the
+  // race entry, and the duck is resolved through whichever assignment is
+  // currently open, so a new assignment is the whole repair.
+  let heat: { round: string; number: number } | null = null;
+  if (typeof context.existing_heat === "string") {
+    const [round, number] = context.existing_heat.split(":");
+    heat = { round, number: Number(number) };
+  } else {
     const existingHeat = await env.DB.prepare(
       `SELECT h.id, h.heat_number, COUNT(he.id) AS entry_count
          FROM heats h
@@ -603,6 +639,7 @@ const pairDuck = async (
       heat_number: number;
       entry_count: number;
     }>();
+    let heatId: string;
     if (existingHeat === null) {
       const last = await env.DB.prepare(
         `SELECT COALESCE(MAX(heat_number), 0) AS last_number,
@@ -613,12 +650,8 @@ const pairDuck = async (
       if ((last?.heat_count ?? 0) >= context.final_heat_capacity) {
         return json({ error: "Pairing would create more round-one heats than the final can hold." }, 409);
       }
-      heat = {
-        id: crypto.randomUUID(),
-        number: (last?.last_number ?? 0) + 1,
-        slot: 1,
-        isNew: true,
-      };
+      heatId = crypto.randomUUID();
+      heat = { round: "ROUND_ONE", number: (last?.last_number ?? 0) + 1 };
       // Guarded creation: no row is inserted once round-one heats reach final
       // capacity, and the dependent heat-entry insert then fails its foreign
       // key, rolling the whole pairing batch back.
@@ -630,14 +663,10 @@ const pairDuck = async (
           WHERE e.id = ?
             AND (SELECT COUNT(*) FROM heats h
                   WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') < e.final_heat_capacity`,
-      ).bind(heat.id, heat.number, commandId, eventId));
+      ).bind(heatId, heat.number, commandId, eventId));
     } else {
-      heat = {
-        id: existingHeat.id,
-        number: existingHeat.heat_number,
-        slot: existingHeat.entry_count + 1,
-        isNew: false,
-      };
+      heatId = existingHeat.id;
+      heat = { round: "ROUND_ONE", number: existingHeat.heat_number };
     }
     // Guarded slot: the slot number is recomputed inside the atomic batch and
     // becomes NULL when the heat is already full, so the NOT NULL constraint
@@ -656,10 +685,10 @@ const pairDuck = async (
         WHERE e.id = ?`,
     ).bind(
       crypto.randomUUID(),
-      heat.id,
+      heatId,
       context.race_entry_id,
-      heat.id,
-      heat.id,
+      heatId,
+      heatId,
       now,
       commandId,
       eventId,
@@ -695,7 +724,7 @@ const pairDuck = async (
     assignmentId,
     duck.visible_number,
     context,
-    heat === null ? null : { number: heat.number },
+    heat,
     false,
   );
 };

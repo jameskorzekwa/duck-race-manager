@@ -400,12 +400,12 @@ test("duplicate preflight recognizes any known current-dataset tag without mutat
 
   const active = await classify();
   assert.equal(active.status, 200);
-  assert.deepEqual(await active.json(), { kind: "already" });
+  assert.deepEqual(await active.json(), { kind: "already", duckId: "duck_existing" });
   assert.deepEqual(database.prepare(
     "SELECT visible_number, inventory_status, physical_condition, revision FROM ducks WHERE id = 'duck_existing'",
   ).get(), duckBefore);
   database.exec("UPDATE duck_tags SET status = 'RETIRED', retired_at = '2026-07-26T01:00:00Z' WHERE id = 'tag_existing'");
-  assert.deepEqual(await (await classify()).json(), { kind: "already" });
+  assert.deepEqual(await (await classify()).json(), { kind: "already", duckId: "duck_existing" });
   assert.deepEqual(database.prepare(
     "SELECT visible_number, inventory_status, physical_condition, revision FROM ducks WHERE id = 'duck_existing'",
   ).get(), duckBefore);
@@ -707,172 +707,278 @@ test("provisioning start rejects an event after the pre-race phases without writ
   assert.equal(db.batches.length, 0);
 });
 
-test("revision-checked inventory edit binds all user values and writes command history", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("FROM ducks d") && sql.includes("d.storage_location")) {
-      return {
-        id: "duck_test",
-        visible_number: 42,
-        inventory_status: "RESERVED_FOR_EVENT",
-        revision: 7,
-        physical_condition: "GOOD",
-        storage_location: "Intake",
-        notes: null,
-        event_duck_id: "event_duck_test",
-        event_status: "REGISTRATION_CLOSED",
-        active_assignment_id: null,
-      };
-    }
-    return null;
-  });
-  const response = await handleDuckOperations(
-    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        expectedRevision: 7,
-        visibleNumber: 43,
-        condition: "NEEDS_TAG",
-        location: "Repair shelf",
-        notes: "Replace before pairing",
-      }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-  const body = await response.json();
-
-  assert.equal(response.status, 200);
-  assert.equal(body.duck.revision, 8);
-  assert.equal(body.duck.visibleNumber, 43);
-  const update = db.batches[0].find((statement) => statement.sql.includes("UPDATE ducks SET"));
-  assert.equal(update.sql.includes("Replace before pairing"), false);
-  assert.equal(update.args.includes("Replace before pairing"), true);
-  const audit = db.batches[0].find((statement) => statement.sql.includes("INSERT INTO audit_events"));
-  assert.equal(audit.args[3], "DUCK_INVENTORY_EDITED");
+// Delete duck replaced the pre-race inventory edit, tag replacement, and tag
+// retirement commands. The duck leaves inventory; the participant does not
+// leave the race.
+const deletableDuck = (overrides = {}) => ({
+  duck_id: "duck_test",
+  visible_number: 42,
+  revision: 3,
+  event_duck_id: "event_duck_test",
+  event_duck_event_id: "event_test",
+  event_status: "REGISTRATION_CLOSED",
+  active_assignment_id: null,
+  race_entry_id: null,
+  registration_id: null,
+  published_result_count: 0,
+  in_flight_heat_id: null,
+  ...overrides,
 });
 
-test("stale edit is rejected before any write", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("FROM ducks d")) {
-      return {
-        id: "duck_test",
-        visible_number: 42,
-        inventory_status: "RESERVED_FOR_EVENT",
-        revision: 8,
-        physical_condition: "GOOD",
-        storage_location: null,
-        notes: null,
-        event_duck_id: "event_duck_test",
-        event_status: "REGISTRATION_OPEN",
-        active_assignment_id: null,
-      };
+const deleteDuckRequest = (body = {}) => new Request(
+  "https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/delete",
+  {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      commandId: crypto.randomUUID(),
+      eventId: "event_test",
+      expectedRevision: 3,
+      reason: "Duck was crushed by a paddle boat",
+      ...body,
+    }),
+  },
+);
+
+const deleteDuckDb = (duck, committed = { event_id: "event_test", command_type: "DELETE_DUCK", result_id: "duck_test" }) => {
+  let commandReads = 0;
+  return makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) {
+      commandReads += 1;
+      // The first read is the replay check, before the batch; the second is the
+      // commit check afterwards.
+      return commandReads === 1 ? null : committed;
     }
+    if (sql.includes("FROM ducks d")) return duck;
     return null;
   });
-  const response = await handleDuckOperations(
-    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        expectedRevision: 7,
-        notes: "stale",
-      }),
-    }),
-    makeEnv(db),
-    actor,
-  );
+};
+
+test("deleting an unpaired duck erases its rows and clears the self-referencing tag link first", async () => {
+  const db = deleteDuckDb(deletableDuck());
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+  const body = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.equal(body.deleted, true);
+  assert.equal(body.erased, true);
+  assert.equal(body.unpairedRaceEntryId, null);
+
+  const statements = db.batches[0].map((statement) => statement.sql);
+  const joined = statements.join("\n");
+  // The self-referencing restricted foreign key has to be cleared before the
+  // tags are deleted, or a replaced tag aborts the whole batch.
+  const clearIndex = statements.findIndex((sql) => sql.includes("SET supersedes_tag_id = NULL"));
+  const deleteTagsIndex = statements.findIndex((sql) => sql.includes("DELETE FROM duck_tags"));
+  assert.ok(clearIndex >= 0 && deleteTagsIndex > clearIndex, "supersedes_tag_id is cleared before the tag delete");
+  assert.match(joined, /DELETE FROM duck_assignments/);
+  assert.match(joined, /DELETE FROM event_ducks/);
+  assert.match(joined, /DELETE FROM ducks WHERE id = \? AND revision = \?/);
+  // Nothing touched a participant, because there was none.
+  assert.doesNotMatch(joined, /UPDATE registrations/);
+
+  const audit = db.batches[0].find((statement) => statement.sql.includes("INSERT INTO audit_events"));
+  assert.equal(audit.args[3], "DUCK_DELETED");
+  const details = JSON.parse(audit.args.at(-1));
+  assert.equal(details.erased, true);
+  assert.equal(details.reason, "Duck was crushed by a paddle boat");
+  // The reason is staff text about a duck; no participant detail is recorded.
+  assert.deepEqual(Object.keys(details).sort(), [
+    "erased", "reason", "staff_profile_id", "unpaired_race_entry_id", "visible_number",
+  ]);
+});
+
+test("deleting a paired duck returns its participant to the pairing queue and drops the duck name", async () => {
+  const db = deleteDuckDb(deletableDuck({
+    active_assignment_id: "assignment_test",
+    race_entry_id: "race_entry_test",
+    registration_id: "registration_test",
+  }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+  const body = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.equal(body.unpairedRaceEntryId, "race_entry_test");
+  const joined = db.batches[0].map((statement) => statement.sql).join("\n");
+  assert.match(joined, /UPDATE duck_assignments\s+SET valid_to = \?, end_reason = 'DUCK_DELETED'/);
+  // SUBMITTED is exactly where a participant sits before pairing, so this is
+  // the state that puts them back in the queue everywhere at once.
+  assert.match(joined, /SET status = 'SUBMITTED'/);
+  assert.match(joined, /UPDATE race_entries SET duck_name = NULL/);
+  // The heat roster is untouched: it names the race entry, not the assignment.
+  // The one statement that mentions heat_entries is the command insert, whose
+  // guard refuses to unpair a racer whose heat is already on the water.
+  const touchesRoster = db.batches[0]
+    .filter((statement) => statement.sql.includes("heat_entries"))
+    .map((statement) => statement.sql.trim().split(/\s+/).slice(0, 2).join(" "));
+  assert.deepEqual(touchesRoster, ["INSERT INTO"]);
+});
+
+test("a duck with a published result leaves inventory without erasing the result behind it", async () => {
+  const db = deleteDuckDb(deletableDuck({ published_result_count: 1 }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+  const body = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.equal(body.erased, false);
+  const joined = db.batches[0].map((statement) => statement.sql).join("\n");
+  assert.doesNotMatch(joined, /DELETE FROM/);
+  assert.match(joined, /SET inventory_status = 'RETIRED'/);
+  assert.match(joined, /status = 'RETIRED', retired_at = \?/);
+  assert.match(joined, /release_reason = 'DUCK_DELETED'/);
+});
+
+// Unpairing a racer whose heat has been run would make that heat's result
+// unpublishable, and every heat behind it waits on that result. This is the one
+// window where deleting is refused outright rather than handled: a duck that
+// breaks while its heat is being called is the ordinary case and goes through.
+test("a duck is not deleted out from under a heat that has been run", async () => {
+  const db = deleteDuckDb(deletableDuck({
+    active_assignment_id: "assignment_test",
+    race_entry_id: "race_entry_test",
+    registration_id: "registration_test",
+    in_flight_heat_id: "heat_test",
+  }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /Publish its official result, then delete the duck/);
+  assert.equal(db.batches.length, 0);
+});
+
+test("a finished event's ducks and results can no longer be changed", async () => {
+  const db = deleteDuckDb(deletableDuck({ event_status: "COMPLETED" }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /This event is finished/);
+  assert.equal(db.batches.length, 0);
+});
+
+// A superseded result revision keeps a duck_assignment_id with no foreign key
+// of its own, so erasing a corrected duck would leave that history pointing at
+// nothing and PRAGMA foreign_key_check would never notice.
+test("a duck named by a superseded result revision is retired rather than erased", async () => {
+  const db = deleteDuckDb(deletableDuck({ published_result_count: 1 }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+
+  assert.equal((await response.json()).erased, false);
+  const historyCount = db.statements.find((statement) => statement.sql.includes("published_result_count"));
+  assert.ok(historyCount, "the erasability count runs");
+  assert.match(historyCount.sql, /FROM heat_result_history hh/);
+});
+
+// The batch, not the preflight, decides. Every statement after the command
+// insert is conditional on that insert having landed, so a duck that changed
+// under the actor leaves no half-deleted wreckage behind.
+test("every write in the delete batch is conditional on the command row landing", async () => {
+  const db = deleteDuckDb(deletableDuck({
+    active_assignment_id: "assignment_test",
+    race_entry_id: "race_entry_test",
+    registration_id: "registration_test",
+  }));
+  await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
+
+  const [commandInsert, audit, ...rest] = db.batches[0];
+  assert.match(commandInsert.sql, /INSERT INTO race_commands/);
+  assert.match(commandInsert.sql, /AND d\.revision = \?/);
+  assert.match(commandInsert.sql, /AND e\.status IN \(\?, \?, \?, \?, \?\)/);
+  assert.match(commandInsert.sql, /h\.status IN \('RUNNING', 'AWAITING_RESULT'\)/);
+  assert.match(audit.sql, /INSERT INTO audit_events/);
+  for (const statement of rest) {
+    assert.match(
+      statement.sql,
+      /AND EXISTS \(SELECT 1 FROM race_commands rc WHERE rc\.id = \? AND rc\.event_id = \? AND rc\.command_type = 'DELETE_DUCK' AND rc\.result_id = \?\)/,
+      statement.sql.slice(0, 60),
+    );
+  }
+  assert.ok(rest.length >= 8, "the paired erase path writes every statement");
+});
+
+test("a stale duck revision is refused before any write", async () => {
+  const db = deleteDuckDb(deletableDuck({ revision: 8 }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
 
   assert.equal(response.status, 409);
   assert.equal((await response.json()).revision, 8);
   assert.equal(db.batches.length, 0);
 });
 
-test("tag replacement retires the active mapping and activates a verified successor atomically", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("FROM ducks d")) {
-      return {
-        duck_id: "duck_test",
-        visible_number: 42,
-        revision: 3,
-        inventory_status: "IN_USE",
-        physical_condition: "GOOD",
-        event_duck_id: "event_duck_test",
-        event_status: "ROUND_ONE",
-        tag_id: "old_tag",
-        active_assignment_id: "assignment_test",
-      };
-    }
-    return null;
-  });
-  const response = await handleDuckOperations(
-    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/tags/replace", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        expectedRevision: 3,
-        physicalTagVerified: true,
-        tagToken: "b".repeat(32),
-      }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-
-  assert.equal(response.status, 201);
-  assert.equal((await response.json()).revision, 4);
-  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.match(sql, /status = 'RETIRED'/);
-  assert.match(sql, /supersedes_tag_id/);
-  const audit = db.batches[0].find((statement) => statement.sql.includes("INSERT INTO audit_events"));
-  assert.equal(audit.args[3], "DUCK_TAG_REPLACED");
-});
-
-test("tag retirement without replacement is blocked for an assigned duck", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) return null;
-    if (sql.includes("FROM ducks d")) {
-      return {
-        duck_id: "duck_test",
-        visible_number: 42,
-        revision: 3,
-        inventory_status: "IN_USE",
-        physical_condition: "GOOD",
-        event_duck_id: "event_duck_test",
-        event_status: "REGISTRATION_CLOSED",
-        tag_id: "old_tag",
-        active_assignment_id: "assignment_test",
-      };
-    }
-    return null;
-  });
-  const response = await handleDuckOperations(
-    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/tags/retire", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        expectedRevision: 3,
-        reason: "Tag is damaged",
-        physicalTagRemoved: true,
-      }),
-    }),
-    makeEnv(db),
-    actor,
-  );
+test("a duck reserved for another event is not this event's to delete", async () => {
+  const db = deleteDuckDb(deletableDuck({ event_duck_event_id: "other_event" }));
+  const response = await handleDuckOperations(deleteDuckRequest(), makeEnv(db), actor);
 
   assert.equal(response.status, 409);
-  assert.match((await response.json()).error, /Replace the tag instead/);
+  assert.match((await response.json()).error, /reserved for another event/);
+  assert.equal(db.batches.length, 0);
+});
+
+test("delete duck requires a reason and refuses a reused command identifier", async () => {
+  const missingReason = await handleDuckOperations(
+    deleteDuckRequest({ reason: "no" }),
+    makeEnv(deleteDuckDb(deletableDuck())),
+    actor,
+  );
+  assert.equal(missingReason.status, 400);
+
+  const reusedDb = makeDb((sql) => sql.includes("FROM race_commands")
+    ? { event_id: "event_test", command_type: "ASSIGN_DUCK", result_id: "assignment_test" }
+    : null);
+  const reused = await handleDuckOperations(deleteDuckRequest(), makeEnv(reusedDb), actor);
+  assert.equal(reused.status, 409);
+  assert.equal(reusedDb.batches.length, 0);
+
+  // The same command identifier replayed against a different event is reuse for
+  // different material, not a retry.
+  const crossEventDb = makeDb((sql) => sql.includes("FROM race_commands")
+    ? { event_id: "other_event", command_type: "DELETE_DUCK", result_id: "duck_test" }
+    : null);
+  const crossEvent = await handleDuckOperations(deleteDuckRequest(), makeEnv(crossEventDb), actor);
+  assert.equal(crossEvent.status, 409);
+  assert.equal(crossEventDb.batches.length, 0);
+
+  const replayDb = makeDb((sql) => sql.includes("FROM race_commands")
+    ? { event_id: "event_test", command_type: "DELETE_DUCK", result_id: "duck_test" }
+    : null);
+  const replay = await handleDuckOperations(deleteDuckRequest(), makeEnv(replayDb), actor);
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).replayed, true);
+  assert.equal(replayDb.batches.length, 0);
+});
+
+// A duck that could not be erased still has to be gone from the operator's
+// point of view, or delete would look like "set aside" for exactly the ducks
+// that already raced.
+test("a retired duck is excluded from the inventory list", async () => {
+  const db = makeDb(() => null);
+  await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks"),
+    makeEnv(db),
+    actor,
+  );
+  const listQuery = db.statements.find((statement) => statement.sql.includes("ORDER BY d.visible_number"));
+  assert.ok(listQuery, "the list query runs");
+  assert.match(listQuery.sql, /WHERE d\.inventory_status != 'RETIRED'/);
+});
+
+test("the retired inventory edit and tag commands are gone", async () => {
+  const db = makeDb(() => null);
+  for (const [path, method] of [
+    ["/api/v1/staff/inventory/ducks/duck_test", "PATCH"],
+    ["/api/v1/staff/inventory/ducks/duck_test/tags/replace", "POST"],
+    ["/api/v1/staff/inventory/ducks/duck_test/tags/retire", "POST"],
+  ]) {
+    const response = await handleDuckOperations(
+      new Request("https://quickducks.com" + path, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ commandId: crypto.randomUUID(), eventId: "event_test" }),
+      }),
+      makeEnv(db),
+      actor,
+    );
+    assert.ok(response === null || response.status === 405, `${method} ${path} must no longer be handled`);
+  }
   assert.equal(db.batches.length, 0);
 });
 
@@ -1045,56 +1151,6 @@ test("print label endpoint returns only duck number and canonical tag URL", asyn
   });
 });
 
-test("matching command UUID replay is read-only and reports replayed", async () => {
-  const commandId = "2c293c36-bca9-4bd0-bc12-a5c9d1ab8370";
-  const requestDetails = {
-    duckId: "duck_test",
-    expectedRevision: 7,
-    changes: { notes: "Counted twice" },
-  };
-  const db = makeDb((sql) => {
-    if (sql.includes("FROM race_commands")) {
-      return { event_id: "event_test", command_type: "EDIT_DUCK_INVENTORY", result_id: "duck_test" };
-    }
-    if (sql.includes("FROM duck_inventory_events")) {
-      return { details_json: JSON.stringify({ request: requestDetails }) };
-    }
-    if (sql.includes("FROM ducks d")) {
-      return {
-        id: "duck_test",
-        visible_number: 42,
-        inventory_status: "RESERVED_FOR_EVENT",
-        revision: 8,
-        physical_condition: "GOOD",
-        storage_location: null,
-        notes: "Counted twice",
-        event_duck_id: "event_duck_test",
-        event_status: "REGISTRATION_CLOSED",
-        active_assignment_id: null,
-      };
-    }
-    return null;
-  });
-  const response = await handleDuckOperations(
-    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId,
-        eventId: "event_test",
-        expectedRevision: 7,
-        notes: "Counted twice",
-      }),
-    }),
-    makeEnv(db),
-    actor,
-  );
-
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).replayed, true);
-  assert.equal(db.batches.length, 0);
-});
-
 test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle execute against migrated SQLite", async () => {
   const database = createDatabase();
   database.exec(`
@@ -1200,17 +1256,19 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   assert.equal((await unknownClassification.json()).kind, "reusable");
 
   const confirmCommandId = crypto.randomUUID();
-  database.exec("UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event_test'");
+  // Intake stays open once racing starts, because deleting a duck mid-race
+  // hands its participant back to the pairing queue and they need another duck.
+  // A completed event is what closes it.
+  database.exec("UPDATE events SET status = 'COMPLETED' WHERE id = 'event_test'");
   const blockedConfirm = await handleDuckOperations(confirmRequest(confirmCommandId, provisioning), env, actor);
   assert.equal(blockedConfirm.status, 409);
   assert.equal(database.prepare("SELECT status FROM duck_tags WHERE duck_id = ?").get(provisioning.duckId).status, "RESERVED");
-  database.exec("UPDATE events SET status = 'REGISTRATION_CLOSED' WHERE id = 'event_test'");
+  database.exec("UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event_test'");
 
   const confirmed = await handleDuckOperations(confirmRequest(confirmCommandId, provisioning), env, actor);
   const intakeBody = await confirmed.json();
   assert.equal(confirmed.status, 201);
   assert.equal(intakeBody.duck.inventoryStatus, "RESERVED_FOR_EVENT");
-  assert.equal(intakeBody.duck.condition, "GOOD");
   assert.equal(intakeBody.tag.status, "ACTIVE");
   const activeTag = database.prepare(
     "SELECT status, written_at, verified_at, activated_at FROM duck_tags WHERE duck_id = ?",
@@ -1236,66 +1294,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   );
   assert.equal((await clearedRecovery.json()).provisioning, null);
 
-  const edit = await handleDuckOperations(
-    new Request(`https://quickducks.com/api/v1/staff/inventory/ducks/${intakeBody.duck.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        expectedRevision: 1,
-        visibleNumber: 43,
-        location: "Ready rack",
-      }),
-    }),
-    env,
-    actor,
-  );
-  assert.equal(edit.status, 200);
-  assert.equal((await edit.json()).duck.revision, 2);
-
-  const replace = await handleDuckOperations(
-    new Request(`https://quickducks.com/api/v1/staff/inventory/ducks/${intakeBody.duck.id}/tags/replace`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        expectedRevision: 2,
-        tagToken: "b".repeat(32),
-        physicalTagVerified: true,
-      }),
-    }),
-    env,
-    actor,
-  );
-  assert.equal(replace.status, 201);
-  assert.deepEqual(
-    database.prepare("SELECT status FROM duck_tags ORDER BY created_at, id").all().map((row) => row.status).sort(),
-    ["ACTIVE", "RETIRED"],
-  );
-
-  const retire = await handleDuckOperations(
-    new Request(`https://quickducks.com/api/v1/staff/inventory/ducks/${intakeBody.duck.id}/tags/retire`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        commandId: crypto.randomUUID(),
-        eventId: "event_test",
-        expectedRevision: 3,
-        reason: "Tag removed for repair",
-        physicalTagRemoved: true,
-      }),
-    }),
-    env,
-    actor,
-  );
-  assert.equal(retire.status, 201);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM duck_tags WHERE duck_id = ? AND status = 'ACTIVE'").get(intakeBody.duck.id).count, 0);
-  const retiredDuck = database.prepare("SELECT inventory_status, physical_condition FROM ducks WHERE id = ?").get(intakeBody.duck.id);
-  assert.equal(retiredDuck.inventory_status, "QUARANTINED");
-  assert.equal(retiredDuck.physical_condition, "NEEDS_TAG");
-
+  database.exec("UPDATE events SET status = 'REGISTRATION_CLOSED' WHERE id = 'event_test'");
   const release = await handleDuckOperations(
     new Request(`https://quickducks.com/api/v1/staff/inventory/ducks/${intakeBody.duck.id}/reservations/release`, {
       method: "POST",
@@ -1303,7 +1302,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
       body: JSON.stringify({
         commandId: crypto.randomUUID(),
         eventId: "event_test",
-        expectedRevision: 4,
+        expectedRevision: 1,
         reason: "Removed from this race",
       }),
     }),
@@ -1311,16 +1310,53 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
     actor,
   );
   assert.equal(release.status, 201);
-  assert.equal((await release.json()).duck.inventoryStatus, "QUARANTINED");
+  assert.equal((await release.json()).duck.inventoryStatus, "AVAILABLE");
   assert.equal(database.prepare("SELECT released_at IS NOT NULL AS released FROM event_ducks WHERE duck_id = ?").get(intakeBody.duck.id).released, 1);
+
+  // Delete duck is the one way a duck leaves inventory now, and this one has
+  // never been paired, so its rows go with it.
+  const deleted = await handleDuckOperations(
+    new Request(`https://quickducks.com/api/v1/staff/inventory/ducks/${intakeBody.duck.id}/delete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: "event_test",
+        expectedRevision: 2,
+        reason: "Sticker was written to the wrong duck",
+      }),
+    }),
+    env,
+    actor,
+  );
+  const deletedBody = await deleted.json();
+  assert.equal(deleted.status, 201);
+  assert.equal(deletedBody.erased, true);
+  for (const table of ["ducks", "duck_tags", "event_ducks", "duck_inventory_events"]) {
+    const column = table === "ducks" ? "id" : "duck_id";
+    assert.equal(
+      database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column} = ?`).get(intakeBody.duck.id).count,
+      0,
+      `${table} rows must go with the duck`,
+    );
+  }
+  // The audit row is what survives an erased duck.
+  assert.equal(
+    database.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'DUCK_DELETED' AND subject_id = ?",
+    ).get(intakeBody.duck.id).count,
+    1,
+  );
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
 
   const concurrentStart = await handleDuckOperations(startRequest({
     commandId: crypto.randomUUID(), eventId: "event_test", location: null,
   }), env, actor);
   const concurrentProvisioning = await concurrentStart.json();
-  const activeWhilePending = await handleDuckOperations(classifyRequest(provisioning.tagUrl), env, actor);
-  const activeWhilePendingBody = await activeWhilePending.json();
-  assert.equal(activeWhilePendingBody.kind, "already");
+  // That sticker's duck was deleted outright a moment ago, so the sticker is
+  // blank as far as QuickDucks is concerned and can be written again.
+  const deletedTagClassification = await handleDuckOperations(classifyRequest(provisioning.tagUrl), env, actor);
+  assert.equal((await deletedTagClassification.json()).kind, "reusable");
   const concurrentResults = await Promise.all([
     handleDuckOperations(confirmRequest(crypto.randomUUID(), concurrentProvisioning), env, actor),
     handleDuckOperations(confirmRequest(crypto.randomUUID(), concurrentProvisioning), env, actor),

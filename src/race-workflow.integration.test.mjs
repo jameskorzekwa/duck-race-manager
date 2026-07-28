@@ -451,11 +451,14 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   }), 201, "start round one");
   assert.equal(roundStarted.event.status, "ROUND_ONE");
 
-  const lateIntake = await post("/api/v1/staff/inventory/provisioning", {
+  // Intake stays open while a round is running. A duck can be deleted mid-race,
+  // which puts its participant back in the pairing queue, and a race with no
+  // spare duck in inventory would otherwise have no way to finish.
+  const lateIntake = await jsonBody(await post("/api/v1/staff/inventory/provisioning", {
     commandId: crypto.randomUUID(),
     eventId,
-  });
-  assert.equal(lateIntake.status, 409);
+  }), 201, "mid-race provisioning start");
+  assert.match(lateIntake.tagUrl, /^https:\/\/quickducks\.com\/t\//);
 
   const heatsBody = await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats`, {
     token: staffToken,

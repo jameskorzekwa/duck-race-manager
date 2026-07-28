@@ -1,3 +1,4 @@
+import { DUCK_NAME_ADJECTIVES, DUCK_NAME_NOUNS } from "./duck-name-suggestions.ts";
 import { publicPhaseByStatus } from "./public-phase.ts";
 import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
 import { DUCK_NAME_MAX_LENGTH } from "./registration.ts";
@@ -455,6 +456,10 @@ const participantDuckName = (registration) => {
 // the owner named this duck, the name replaces "Duck #N" as the link text and
 // the number stays beside it, quietly, so the card still matches the physical
 // duck.
+//
+// Naming belongs to this fact rather than to a block of its own: the duck is
+// what is being named, so the control that renames it sits with the duck's
+// identity and stays folded away until it is asked for.
 const participantAddDuckFact = (facts, status, registration) => {
   const duckName = participantDuckName(registration);
   const link = duckDetailLink(document, status.duck ? status.duck.visibleNumber : null, duckName);
@@ -469,6 +474,7 @@ const participantAddDuckFact = (facts, status, registration) => {
     value.append(participantText("span", "Duck #" + status.duck.visibleNumber, "duck-number-note"));
   }
   fact.append(participantText("dt", "Duck"), value);
+  if (participantCanName(registration)) value.append(...participantNameControls(registration));
   facts.append(fact);
 };
 
@@ -630,12 +636,41 @@ const participantUnfollowControls = (registration) => {
 // it. The server recomputes both conditions inside its guarded write, so this
 // flag is presentation only.
 const participantCanName = (registration) =>
-  registration.followed !== true && registration.nameable === true;
+  Boolean(registration) && registration.followed !== true && registration.nameable === true;
 
 const participantNameLimit = ${JSON.stringify(DUCK_NAME_MAX_LENGTH)};
 
 const participantCleanName = (value) =>
   String(value == null ? "" : value).trim().replace(/\s+/g, " ");
+
+// Suggestion word lists, serialized from src/duck-name-suggestions.ts.
+// duck-name-suggestions.test.mjs proves every pairing of the two lists passes
+// the same length, control-character, alphabet, and wordlist gates the write
+// endpoint applies and the read-time projection repeats, so a participant who
+// accepts a suggestion can never be told the name is unusable.
+const participantNameAdjectives = ${JSON.stringify(DUCK_NAME_ADJECTIVES)};
+const participantNameNouns = ${JSON.stringify(DUCK_NAME_NOUNS)};
+
+const participantRandomIndex = (length) =>
+  crypto.getRandomValues(new Uint32Array(1))[0] % length;
+
+// Pressing the button again should visibly change something, so a suggestion
+// that repeats the value already in the field is retried. The attempt count is
+// bounded so a future one-word list could never spin here.
+const participantSuggestName = (avoid) => {
+  let suggestion = "";
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    suggestion = participantNameAdjectives[participantRandomIndex(participantNameAdjectives.length)]
+      + " " + participantNameNouns[participantRandomIndex(participantNameNouns.length)];
+    if (suggestion !== avoid) return suggestion;
+  }
+  return suggestion;
+};
+
+// Which cards currently have their name editor open. A live refresh rebuilds
+// the whole card, so this has to live outside the DOM: otherwise a background
+// update would fold away an editor the participant is still using.
+const participantOpenNameEditors = new Set();
 
 const participantSaveName = async (registration, form, input, button, feedback) => {
   const duckName = participantCleanName(input.value);
@@ -685,6 +720,7 @@ const participantSaveName = async (registration, form, input, button, feedback) 
     // The saved name is read back from the authoritative collection, never from
     // this response, and the field is clean again so live refreshes resume.
     globalThis.quickDucksLive.markClean(form);
+    participantOpenNameEditors.delete(registration.registrationId);
     participantVersion = null;
     await participantRefreshWork();
   } finally {
@@ -692,34 +728,90 @@ const participantSaveName = async (registration, form, input, button, feedback) 
   }
 };
 
+// The naming control is a button beside the duck's identity plus the field it
+// reveals. Both are returned together because the button owns the field's
+// visibility and the field's Cancel restores focus to the button.
 const participantNameControls = (registration) => {
-  const named = participantDuckName(registration) !== null;
+  const registrationId = registration.registrationId;
+  const currentName = participantDuckName(registration);
+  const named = currentName !== null;
+
+  const toggle = participantText("button", named ? "Rename" : "Name this duck", "button secondary small duck-name-toggle");
+  toggle.type = "button";
+  toggle.dataset.duckNameToggle = registrationId;
+  toggle.setAttribute("aria-controls", "duck-name-form-" + registrationId);
+
   const form = participantText("form", "", "duck-name-form");
-  form.dataset.duckNameForm = registration.registrationId;
-  const label = participantText("label", named ? "Rename this duck" : "Give this duck a name");
+  form.id = "duck-name-form-" + registrationId;
+  form.dataset.duckNameForm = registrationId;
+  const label = participantText("label", named ? "New duck name" : "Duck name");
   const input = document.createElement("input");
   input.name = "duckName";
   input.type = "text";
   input.maxLength = participantNameLimit;
-  input.value = named ? participantDuckName(registration) : "";
+  input.value = named ? currentName : "";
   input.placeholder = "Sir Quacks-a-Lot";
   label.append(input);
-  const button = participantText("button", named ? "Save new name" : "Save name", "button small");
-  button.type = "submit";
   const feedback = participantText("p", "", "message-line muted");
   feedback.setAttribute("role", "status");
   feedback.hidden = true;
+
+  const save = participantText("button", "Save name", "button small");
+  save.type = "submit";
+  const suggest = participantText("button", "Suggest a name", "button secondary small");
+  suggest.type = "button";
+  suggest.dataset.duckNameSuggest = registrationId;
+  suggest.addEventListener("click", () => {
+    input.value = participantSuggestName(participantCleanName(input.value));
+    // A suggestion is an edit like any other, so it defers live refreshes the
+    // same way typing does and cannot be wiped by a background repaint.
+    input.dataset.liveDirty = "true";
+    feedback.hidden = true;
+    input.focus();
+  });
+  const cancel = participantText("button", "Cancel", "button secondary small");
+  cancel.type = "button";
+  const actions = participantText("div", "", "actions");
+  actions.append(save, suggest, cancel);
   form.append(
     label,
-    button,
+    actions,
     participantText("p", "The name you choose is shown publicly beside this duck’s number, on the race board and its duck page. Keep it friendly: race staff can remove a name that is not.", "muted"),
     feedback,
   );
+
+  // Painting the initial state must not touch the live hub: this runs for every
+  // card on every render, and marking clean asks every subscriber to refetch.
+  const paint = (open) => {
+    form.hidden = !open;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+
+  const setOpen = (open) => {
+    if (open) participantOpenNameEditors.add(registrationId);
+    else participantOpenNameEditors.delete(registrationId);
+    paint(open);
+    if (open) {
+      input.focus();
+      input.select();
+      return;
+    }
+    // Closing discards the draft rather than keeping it: the field always
+    // reopens showing the name the server currently holds.
+    input.value = named ? currentName : "";
+    feedback.hidden = true;
+    globalThis.quickDucksLive.markClean(form);
+    toggle.focus();
+  };
+
+  toggle.addEventListener("click", () => setOpen(form.hidden));
+  cancel.addEventListener("click", () => setOpen(false));
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    return participantSaveName(registration, form, input, button, feedback);
+    return participantSaveName(registration, form, input, save, feedback);
   });
-  return form;
+  paint(participantOpenNameEditors.has(registrationId));
+  return [toggle, form];
 };
 
 const participantQrNamespace = "http://www.w3.org/2000/svg";
@@ -789,7 +881,6 @@ const participantCard = (registration) => {
   participantAddRaceFacts(card, registration.raceStatus, registration);
   if (participantCanDelete(registration)) card.append(...participantDeleteControls(registration));
   if (participantCanUnfollow(registration)) card.append(...participantUnfollowControls(registration));
-  if (participantCanName(registration)) card.append(participantNameControls(registration));
   return card;
 };
 
@@ -2752,7 +2843,13 @@ if (finishRoot) {
 `;
 
 export const inventoryIntakeHelpersScript = String.raw`
-const intakePreRaceStatuses = new Set(["DRAFT", "REGISTRATION_OPEN", "REGISTRATION_CLOSED"]);
+// Scanning ducks in stays available once racing starts. Deleting a duck mid-race
+// puts its participant back in the pairing queue, and a race with no spare duck
+// in inventory would otherwise have no way to finish. Only a race that is over,
+// or no race at all, closes intake.
+const intakeOpenStatuses = new Set([
+  "DRAFT", "REGISTRATION_OPEN", "REGISTRATION_CLOSED", "ROUND_ONE", "FINAL",
+]);
 
 const intakeProvisioningRuntimeIssue = ({ userAgent, hasNdefReader, secureContext, topLevel, visible }) => {
   if (
@@ -2868,16 +2965,19 @@ const intakeCreateProvisioningMachine = ({
     });
   };
 
-  const alreadyRegistered = () => {
+  // Scanning a duck that is already in inventory is not an error to recover
+  // from: it is how staff reach that duck's record. The identifier travels to
+  // the caller, which opens the duck below the station.
+  const alreadyRegistered = (duckId) => {
     pending = null;
     nextStartCommandId = commandId();
-    accepted({ outcome: "already" });
+    accepted({ outcome: "already", duckId: typeof duckId === "string" ? duckId : null });
     feedback("already");
     state("ready");
-    message("This duck is already registered in inventory. Ready to scan the next duck.", true);
+    message("This duck is already in inventory. Its record is open below; tap the next sticker when you are done.", false);
     changed();
     void refresh().catch(() => {});
-    return { accepted: true, outcome: "already" };
+    return { accepted: true, outcome: "already", duckId: typeof duckId === "string" ? duckId : null };
   };
 
   const refreshAfterOutcome = async () => {
@@ -2955,7 +3055,7 @@ const intakeCreateProvisioningMachine = ({
           return { accepted: false, reason: "mismatch" };
         }
         if (already.length > 0 && !exactLocalPending) {
-          return alreadyRegistered();
+          return alreadyRegistered(already[0].result.duckId);
         }
 
         if (already.length === 1 && exactLocalPending) {
@@ -3157,377 +3257,6 @@ const intakeCreateNfcStation = ({ createReader, decode, appOrigin, onReading, on
     isActive() { return active; },
   };
 };
-`;
-
-export const inventoryIntakeScript = inventoryIntakeHelpersScript + String.raw`
-const intakeRoot = document.querySelector("[data-inventory-intake]");
-const intakeEventSelect = document.querySelector("[data-intake-event]");
-const intakeLocation = document.querySelector("[data-intake-location]");
-const intakeNfcButton = document.querySelector("[data-start-intake-nfc]");
-const intakeEndNfcButton = document.querySelector("[data-end-intake-nfc]");
-const intakeState = document.querySelector("[data-intake-state]");
-const intakeMessage = document.querySelector("[data-intake-message]");
-const intakeReservedCount = document.querySelector("[data-reserved-count]");
-const intakeSessionCount = document.querySelector("[data-session-count]");
-const intakeHistory = document.querySelector("[data-intake-history]");
-const intakeTakeoverPanel = document.querySelector("[data-intake-takeover]");
-const intakeTakeoverMessage = document.querySelector("[data-intake-takeover-message]");
-const intakeTakeoverButton = document.querySelector("[data-takeover-provisioning]");
-const intakeRuntimeNotice = document.querySelector("[data-intake-runtime]");
-const intakeRuntimeMessage = document.querySelector("[data-intake-runtime-message]");
-const intakeControls = document.querySelector("[data-intake-controls]");
-let intakeTopLevel = false;
-try { intakeTopLevel = window.top === window.self; } catch {}
-const intakeRuntimeIssue = () => intakeProvisioningRuntimeIssue({
-  userAgent: navigator.userAgent,
-  hasNdefReader: typeof globalThis.NDEFReader === "function",
-  secureContext: isSecureContext === true,
-  topLevel: intakeTopLevel,
-  visible: document.visibilityState === "visible",
-});
-const intakeShowRuntimeIssue = (issue) => {
-  const messages = {
-    "android-chrome": "Use current Chrome on an NFC-capable Android device. This station is not available on desktop, iPhone, iPad, Android WebView, or another Android browser.",
-    "web-nfc": "This Android Chrome runtime does not expose Web NFC. Update Chrome or use another NFC-capable Android device.",
-    "secure-context": "Open the HTTPS QuickDucks site directly before using NFC provisioning.",
-    "top-level": "Open QuickDucks in a top-level browser tab, not an embedded frame.",
-    visible: "Bring this page into view and reload it before using NFC provisioning.",
-  };
-  intakeControls.hidden = true;
-  intakeRuntimeNotice.hidden = false;
-  intakeRuntimeMessage.textContent = messages[issue] || "This device cannot run the NFC provisioning station.";
-};
-
-const intakeInitialRuntimeIssue = intakeRuntimeIssue();
-if (intakeInitialRuntimeIssue !== null) {
-  intakeShowRuntimeIssue(intakeInitialRuntimeIssue);
-} else {
-intakeRuntimeNotice.hidden = true;
-intakeControls.hidden = false;
-const intakeAppOrigin = intakeRoot.dataset.appOrigin;
-let intakeAddedCount = 0;
-let intakeSelectedEvent = null;
-let intakeStarted = false;
-let intakeStarting = false;
-let intakeSupported = true;
-let intakeEventsAvailable = false;
-let intakeAudio = null;
-let intakeTakeoverCandidate = null;
-let intakeNfcStation = null;
-let intakeMachine = null;
-let intakeSubscription = null;
-
-const intakeApi = async (url, options) => {
-  const response = await fetch(url, { ...options, cache: "no-store" });
-  if (response.status === 401) {
-    document.querySelector("main")?.replaceChildren();
-    location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
-    throw new Error("signed-out");
-  }
-  let body = null;
-  try { body = await response.json(); } catch {}
-  if (!response.ok) {
-    const error = new Error(body && body.error ? body.error : "The station request failed.");
-    error.status = response.status;
-    throw error;
-  }
-  return body;
-};
-
-const intakeSetMessage = (value, isError = false) => {
-  intakeMessage.textContent = value;
-  intakeMessage.classList.toggle("error-text", isError);
-};
-
-const intakeSetState = (value) => {
-  const labels = {
-    checking: "Checking sticker",
-    confirming: "Confirming",
-    error: "Needs attention",
-    ended: "Ended",
-    ready: "Ready",
-    remove: "Remove duck",
-    reserving: "Reserving URL",
-    writing: "Writing sticker",
-  };
-  intakeState.textContent = labels[value] || "Not started";
-};
-
-const intakeUpdateControls = () => {
-  const active = intakeStarted && intakeNfcStation?.isActive() === true;
-  const pending = intakeMachine?.hasPending() === true;
-  const busy = intakeMachine?.isBusy() === true;
-  const running = active || intakeStarting;
-  intakeNfcButton.disabled = !intakeSupported || !intakeEventsAvailable || running;
-  intakeNfcButton.textContent = active ? "NFC provisioning active" : "Start NFC provisioning";
-  intakeEndNfcButton.hidden = !active;
-  intakeEndNfcButton.disabled = !active || busy || pending;
-  intakeEventSelect.disabled = !intakeEventsAvailable || running || pending;
-  intakeLocation.disabled = running;
-};
-
-const intakePost = (path, body) => intakeApi(path, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify(body),
-});
-
-const intakeOfferTakeover = (record) => {
-  intakeTakeoverCandidate = intakeSafeTakeoverCandidate(record);
-  intakeTakeoverPanel.hidden = intakeTakeoverCandidate === null;
-  intakeTakeoverMessage.textContent = intakeTakeoverCandidate === null
-    ? ""
-    : "Pending Duck #" + intakeTakeoverCandidate.visibleNumber + " has had no ownership activity for at least 10 minutes.";
-};
-
-const intakeRefreshStation = async () => {
-  const eventId = intakeEventSelect.value;
-  if (!eventId) {
-    intakeSelectedEvent = null;
-    intakeReservedCount.textContent = "0";
-    return;
-  }
-  const detail = await intakeApi("/api/v1/staff/events/" + encodeURIComponent(eventId));
-  intakeSelectedEvent = detail.event;
-  intakeReservedCount.textContent = String(detail.summary.eventDucks);
-  if (!intakePreRaceStatuses.has(detail.event.status)) {
-    intakeSetState("error");
-    intakeSetMessage("NFC provisioning is closed for the selected event.", true);
-  }
-};
-
-const intakeAddHistory = ({ outcome }) => {
-  if (intakeHistory.children.length === 1 && intakeHistory.firstElementChild.textContent.startsWith("No ducks")) {
-    intakeHistory.replaceChildren();
-  }
-  const item = document.createElement("li");
-  item.textContent = outcome === "added" ? "Sticker provisioned and reserved" : "Already provisioned; count unchanged";
-  intakeHistory.prepend(item);
-  while (intakeHistory.children.length > 12) intakeHistory.lastElementChild.remove();
-  if (outcome === "added") {
-    intakeAddedCount += 1;
-    intakeSessionCount.textContent = String(intakeAddedCount);
-  }
-};
-
-const intakeFeedback = () => {
-  if (typeof navigator.vibrate === "function") navigator.vibrate(120);
-  if (!intakeAudio) return;
-  try {
-    const oscillator = intakeAudio.createOscillator();
-    const gain = intakeAudio.createGain();
-    oscillator.frequency.value = 880;
-    gain.gain.value = 0.05;
-    oscillator.connect(gain);
-    gain.connect(intakeAudio.destination);
-    oscillator.start();
-    oscillator.stop(intakeAudio.currentTime + 0.12);
-  } catch {}
-};
-
-intakeMachine = intakeCreateProvisioningMachine({
-  eventId: () => intakeEventSelect.value,
-  location: () => intakeLocation.value.trim(),
-  recover: async (eventId) => {
-    const body = await intakeApi("/api/v1/staff/inventory/provisioning?eventId=" + encodeURIComponent(eventId));
-    intakeOfferTakeover(body.provisioning);
-    return body.provisioning;
-  },
-  start: (body) => {
-    intakeOfferTakeover(null);
-    return intakePost("/api/v1/staff/inventory/provisioning", body);
-  },
-  classify: (body) => intakePost("/api/v1/staff/inventory/provisioning/classify", body),
-  write: (tagUrl) => intakeNfcStation.write(tagUrl),
-  confirm: (body) => intakePost("/api/v1/staff/inventory/provisioning/confirm", body),
-  refresh: intakeRefreshStation,
-  accepted: intakeAddHistory,
-  message: intakeSetMessage,
-  state: (value) => {
-    intakeSetState(value);
-    intakeUpdateControls();
-  },
-  feedback: intakeFeedback,
-  changed: intakeUpdateControls,
-  beginBusy: () => globalThis.quickDucksLive.beginBusy(),
-});
-
-intakeTakeoverButton.addEventListener("click", async () => {
-  const candidate = intakeTakeoverCandidate;
-  if (candidate === null || intakeMachine.isBusy() || intakeMachine.hasPending()) return;
-  if (!await appConfirm(
-    "Take over pending Duck #" + candidate.visibleNumber
-    + "? Continue only if the previous provisioning station has been abandoned.",
-    { danger: true },
-  )) return;
-  intakeTakeoverButton.disabled = true;
-  const endBusy = globalThis.quickDucksLive.beginBusy();
-  intakeSetMessage("Taking ownership of the abandoned pending sticker.", false);
-  try {
-    const recovered = await intakePost("/api/v1/staff/inventory/provisioning/takeover", {
-      commandId: crypto.randomUUID(),
-      eventId: intakeEventSelect.value,
-      duckId: candidate.duckId,
-      provisioningCommandId: candidate.provisioningCommandId,
-    });
-    if (!intakeMachine.adoptTakeover(recovered)) throw new Error("invalid-takeover");
-    intakeOfferTakeover(null);
-    intakeSetMessage(intakeStarted
-      ? "Takeover complete. Retap that exact pending sticker to finish confirmation."
-      : "Takeover complete. Press Start, then retap that exact pending sticker.", false);
-  } catch {
-    intakeSetState("error");
-    intakeSetMessage("The pending sticker could not be taken over. Refresh its status before trying again.", true);
-  } finally {
-    intakeTakeoverButton.disabled = false;
-    endBusy();
-    intakeSubscription?.resume();
-  }
-});
-
-intakeNfcStation = intakeCreateNfcStation({
-  createReader: () => new NDEFReader(),
-  decode: (record) => new TextDecoder(record.encoding || "utf-8").decode(record.data),
-  appOrigin: intakeAppOrigin,
-  onReading: (reading) => intakeMachine.reading(reading),
-  onReadingError: () => intakeSetMessage("The NFC sticker could not be read. Remove it, then retap the same sticker.", true),
-  onStartError: () => {
-    intakeSetState("error");
-    intakeSetMessage("NFC scanning could not start. Use current Android Chrome over HTTPS, allow NFC, and keep this top-level page visible.", true);
-  },
-  onActive: () => {
-    intakeSetState("ready");
-    intakeSetMessage(intakeMachine.hasPending()
-      ? "A pending sticker was recovered. Retap that same sticker to finish it before using another."
-      : "Ready. Tap the first blank writable sticker.", false);
-  },
-});
-
-const intakeRecoverSelected = async () => {
-  intakeMachine.resetForEvent();
-  await intakeRefreshStation();
-  if (!intakeEventSelect.value) return;
-  const pending = await intakeMachine.recover();
-  intakeSetMessage(pending
-    ? "A pending sticker is waiting. Press Start, then retap that same sticker."
-    : "Press Start once, then tap one blank writable sticker per duck.", false);
-  intakeUpdateControls();
-};
-
-const intakeLoadEvents = async () => {
-  const body = await intakeApi("/api/v1/staff/events");
-  const available = body.events.filter((event) => intakePreRaceStatuses.has(event.status));
-  intakeEventsAvailable = available.length > 0;
-  intakeEventSelect.replaceChildren();
-  if (available.length !== 1) {
-    const prompt = document.createElement("option");
-    prompt.value = "";
-    prompt.textContent = available.length ? "Select an event" : "No events accepting provisioning";
-    intakeEventSelect.append(prompt);
-  }
-  for (const event of available) {
-    const option = document.createElement("option");
-    option.value = event.id;
-    option.textContent = event.name + " · " + event.status.replaceAll("_", " ").toLowerCase();
-    intakeEventSelect.append(option);
-  }
-  if (available.length === 1) intakeEventSelect.value = available[0].id;
-  await intakeRecoverSelected();
-  intakeUpdateControls();
-};
-
-intakeEventSelect.addEventListener("change", async () => {
-  if (intakeStarted) return;
-  try {
-    await intakeRecoverSelected();
-    globalThis.quickDucksLive.markClean(intakeEventSelect);
-  } catch {
-    intakeSetMessage("The selected event could not be refreshed. Stay online and try again.", true);
-  }
-});
-
-intakeUpdateControls();
-
-intakeNfcButton.addEventListener("click", async () => {
-  if (!intakeSupported || intakeStarted || intakeStarting) return;
-  const runtimeIssue = intakeRuntimeIssue();
-  if (runtimeIssue !== null) {
-    intakeSupported = false;
-    intakeSetState("error");
-    intakeSetMessage("This station no longer has a supported visible Android Chrome Web NFC context. Reload it after correcting the device or browser context.", true);
-    intakeUpdateControls();
-    return;
-  }
-  if (
-    !intakeSelectedEvent
-    || intakeSelectedEvent.id !== intakeEventSelect.value
-    || !intakePreRaceStatuses.has(intakeSelectedEvent.status)
-  ) {
-    intakeSetState("error");
-    intakeSetMessage("Select an available draft or registration-stage event before starting.", true);
-    return;
-  }
-  if (document.hidden) {
-    intakeSetState("error");
-    intakeSetMessage("Keep this page visible before starting NFC provisioning.", true);
-    return;
-  }
-  const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
-  if (AudioContextClass) {
-    try {
-      intakeAudio = new AudioContextClass();
-      void intakeAudio.resume();
-    } catch {}
-  }
-  intakeStarting = true;
-  intakeUpdateControls();
-  const started = await intakeNfcStation.start();
-  intakeStarting = false;
-  if (!started) {
-    intakeUpdateControls();
-    return;
-  }
-  intakeStarted = true;
-  intakeUpdateControls();
-  globalThis.quickDucksLive.markClean(intakeRoot);
-  intakeSubscription?.resume();
-});
-
-intakeEndNfcButton.addEventListener("click", () => {
-  if (!intakeStarted) return;
-  if (!intakeMachine.end()) {
-    intakeUpdateControls();
-    if (intakeMachine.hasPending()) {
-      intakeSetMessage("Finish the pending sticker before ending NFC provisioning.", true);
-    }
-    return;
-  }
-  intakeNfcStation.stop();
-  intakeStarted = false;
-  if (intakeAudio && typeof intakeAudio.close === "function") void intakeAudio.close().catch(() => {});
-  intakeAudio = null;
-  intakeSetState("ended");
-  intakeSetMessage("NFC provisioning ended. Press Start to resume when ready.", false);
-  intakeUpdateControls();
-});
-
-const intakeLiveRefresh = async () => {
-  try {
-    if (intakeStarted) await intakeRefreshStation();
-    else await intakeLoadEvents();
-  } catch (error) {
-    if (error.message !== "signed-out") {
-      intakeSetMessage("The station could not refresh authoritative inventory. Stay online and try again.", true);
-    }
-  }
-};
-intakeSubscription = globalThis.quickDucksLive.subscribe({
-  domains: ["event", "ducks"],
-  root: intakeRoot,
-  refresh: intakeLiveRefresh,
-  isBlocked: () => intakeMachine.isBusy() || intakeMachine.hasPending(),
-});
-}
 `;
 
 export const eventLifecycleHelpersScript = String.raw`
@@ -3827,6 +3556,788 @@ const groupInventoryDucks = (ducks) => inventoryGroupDefinitions
   .filter((group) => group.alwaysRender || group.ducks.length > 0);
 `;
 
+// The standalone /staff/inventory page: the duck list and detail panel that used
+// to be a console section, plus the blank-sticker scanning station that used to
+// be its own Android-only page.
+//
+// Only the station is device gated, and it gates itself in place. Everything
+// below it runs on any device that can sign in, which is the whole reason this
+// page exists: the old station page replaced itself with a compatibility notice
+// on a laptop and took the staff navigation down with it.
+export const staffInventoryScript = inventoryDetailHelpersScript
+  + inventoryGroupHelpersScript
+  + inventoryIntakeHelpersScript
+  + String.raw`
+const inventoryRoot = document.querySelector("[data-staff-inventory]");
+const inventoryMessageLine = document.querySelector("[data-console-message]");
+const eventSelect = document.querySelector("[data-event-select]");
+const inventoryNoRace = document.querySelector("[data-no-race]");
+const inventoryList = document.querySelector("[data-inventory-list]");
+const inventoryDetail = document.querySelector("[data-inventory-detail]");
+const inventoryFacts = document.querySelector("[data-inventory-facts]");
+const inventoryHistory = document.querySelector("[data-inventory-history]");
+const inventoryDuckNameForm = document.querySelector("[data-inventory-duck-name-form]");
+const inventoryClearNameButton = document.querySelector("[data-clear-duck-name]");
+const assignForm = document.querySelector("[data-inventory-assign-form]");
+const unassignForm = document.querySelector("[data-inventory-unassign-form]");
+const releaseReservationForm = document.querySelector("[data-reservation-release-form]");
+const deleteDuckForm = document.querySelector("[data-duck-delete-form]");
+const deleteDuckEffect = document.querySelector("[data-delete-duck-effect]");
+const inventoryCloseButton = document.querySelector("[data-close-inventory-detail]");
+
+let currentEvent = null;
+let selectedDuck = null;
+let inventoryCommandCount = 0;
+let inventorySubscription = null;
+
+// A duck or race entry handed over by another staff page. Consumed once, so a
+// later refresh does not keep yanking the panel back to it.
+const inventoryQuery = new URLSearchParams(location.search);
+let requestedDuckId = inventoryQuery.get("duck");
+const requestedRaceEntryId = inventoryQuery.get("raceEntry");
+
+const text = (tag, value, className) => {
+  const element = document.createElement(tag);
+  element.textContent = value == null ? "" : String(value);
+  if (className) element.className = className;
+  return element;
+};
+
+const humanize = (value) => String(value || "none").replaceAll("_", " ").toLowerCase()
+  .replace(/^./, (character) => character.toUpperCase());
+
+const setMessage = (message, isError = false) => {
+  if (!inventoryMessageLine) return;
+  inventoryMessageLine.textContent = message;
+  inventoryMessageLine.classList.toggle("error-text", isError);
+};
+
+const empty = (message) => text("p", message, "empty-state");
+
+const showFacts = (container, facts) => {
+  container.replaceChildren();
+  for (const [label, value] of facts) {
+    const fact = text("div", "", "fact");
+    fact.append(text("dt", label), text("dd", value == null || value === "" ? "None" : value));
+    container.append(fact);
+  }
+};
+
+const historyCard = (title, detail) => {
+  const card = text("div", "", "data-card");
+  card.append(text("h3", title), text("p", detail, "muted"));
+  return card;
+};
+
+// The duck name is free text that is published, so a moderator has to be able to
+// tell a name the read-time filter is already suppressing from one the public
+// can see. It reaches the page as text through the shared helper either way.
+const inventoryDuckNameLabel = (duck) => duck.duckNamePubliclyHidden === true
+  ? duck.duckName + " (already hidden from public surfaces)"
+  : duck.duckName;
+
+const commandOptions = (method, payload) => ({
+  method,
+  headers: { accept: "application/json", "content-type": "application/json" },
+  body: JSON.stringify(payload),
+});
+
+const api = async (url, options) => {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    document.querySelector("main")?.replaceChildren();
+    location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));
+    throw new Error("signed-out");
+  }
+  let body = null;
+  if (response.status !== 204) {
+    try { body = await response.json(); } catch { body = null; }
+  }
+  if (!response.ok) throw new Error(body && body.error ? body.error : "Request failed.");
+  return body;
+};
+
+const perform = async (button, loadingMessage, operation) => {
+  button.disabled = true;
+  inventoryCommandCount += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  setMessage(loadingMessage);
+  try {
+    const result = await operation();
+    globalThis.quickDucksLive.markClean(button.form);
+    setMessage("Saved. Current data has been refreshed.");
+    return result;
+  } catch (error) {
+    if (error.message !== "signed-out") setMessage(error.message, true);
+    return null;
+  } finally {
+    button.disabled = false;
+    inventoryCommandCount = Math.max(0, inventoryCommandCount - 1);
+    endBusy();
+    inventorySubscription?.resume();
+  }
+};
+
+const currentEventId = () => {
+  if (!currentEvent) throw new Error("There is no event to work against yet.");
+  return currentEvent.id;
+};
+
+const clearInventoryDetail = () => {
+  selectedDuck = null;
+  document.querySelector("[data-inventory-name]").textContent = "Duck detail";
+  inventoryFacts.replaceChildren();
+  inventoryHistory.replaceChildren();
+  document.querySelector("[data-label-result]").replaceChildren();
+  for (const form of inventoryDetail.querySelectorAll("form")) form.reset();
+  for (const disclosure of inventoryDetail.querySelectorAll("details")) disclosure.open = false;
+  inventoryDuckNameForm.hidden = true;
+  unassignForm.hidden = true;
+  releaseReservationForm.hidden = true;
+  globalThis.quickDucksLive.markClean(inventoryDetail);
+};
+
+const inventoryDetailController = createInventoryDetailController({
+  detail: inventoryDetail,
+  list: inventoryList,
+  closeButton: inventoryCloseButton,
+  clear: clearInventoryDetail,
+});
+
+const inventoryCard = (duck) => {
+  const eventLabel = duck.reservation && !duck.reservation.releasedAt ? " · " + duck.reservation.event.name : "";
+  const label = "Duck #" + duck.visibleNumber
+    + (duck.duckName ? " · " + inventoryDuckNameLabel(duck) : "")
+    + " · " + humanize(duck.inventoryStatus) + eventLabel;
+  const button = text("button", label, "result-button");
+  button.type = "button";
+  button.dataset.duckId = duck.id;
+  button.setAttribute("aria-controls", "inventory-detail-panel");
+  button.setAttribute("aria-expanded", "false");
+  button.addEventListener("click", () => loadDuckDetail(duck.id, button, true)
+    .catch((error) => setMessage(error.message, true)));
+  return button;
+};
+
+// The cards stay one grid of the same buttons; each group is a labelled band
+// across that grid so the detail controller still finds every [data-duck-id]
+// card and selection, focus, and live refresh behave exactly as before.
+const inventoryGroupSection = (group) => {
+  const section = text("section", "", "inventory-group");
+  section.dataset.inventoryGroup = group.key;
+  const heading = text("h3", group.title, "inventory-group-title");
+  heading.id = "inventory-group-" + group.key.toLowerCase().replaceAll("_", "-");
+  section.setAttribute("aria-labelledby", heading.id);
+  section.append(heading);
+  if (group.ducks.length === 0) {
+    section.append(empty(group.emptyMessage));
+    return section;
+  }
+  section.append(text(
+    "p",
+    group.ducks.length + (group.ducks.length === 1 ? " duck · " : " ducks · ") + group.description,
+    "muted",
+  ));
+  const cards = text("div", "", "data-list inventory-card-grid");
+  for (const duck of group.ducks) cards.append(inventoryCard(duck));
+  section.append(cards);
+  return section;
+};
+
+const loadInventory = async () => {
+  const body = await api("/api/v1/staff/inventory/ducks");
+  inventoryList.replaceChildren();
+  if (body.ducks.length === 0) {
+    inventoryList.append(empty("No ducks are in inventory. Scan a blank sticker to add the first one."));
+    inventoryDetailController.syncButtons();
+    return;
+  }
+  for (const group of groupInventoryDucks(body.ducks)) inventoryList.append(inventoryGroupSection(group));
+  inventoryDetailController.syncButtons();
+};
+
+// Deleting a paired duck also hands its participant back to the pairing queue,
+// so the confirmation says which of the two things is about to happen.
+const renderDeleteEffect = (duck) => {
+  deleteDuckEffect.textContent = duck.participant
+    ? "Removes this duck from inventory and puts its participant back in the queue for a new duck. Their heat place is kept, and that heat cannot start until they hold a duck again. This cannot be undone."
+    : "Removes this duck from inventory. Its tag can be written again. This cannot be undone.";
+};
+
+const renderDuckDetail = (body) => {
+  selectedDuck = body.duck;
+  const duck = body.duck;
+  document.querySelector("[data-inventory-name]").textContent = "Duck #" + duck.visibleNumber;
+  showFacts(inventoryFacts, [
+    ["Inventory", humanize(duck.inventoryStatus)],
+    ["Duck name", duck.duckName ? inventoryDuckNameLabel(duck) : "Not named"],
+    ["Location", duck.location || "Not set"],
+    ["Tag", duck.tag ? humanize(duck.tag.status) : "No tag"],
+    ["Reservation", duck.reservation ? duck.reservation.event.name + (duck.reservation.releasedAt ? " · released" : " · active") : "None"],
+    ["Participant", duck.participant
+      ? duck.participant.firstName
+        ? duck.participant.firstName + " " + duck.participant.lastName
+        : "Assigned race entry " + duck.participant.raceEntryId
+      : "Unpaired"],
+    ["Heat", duck.heat ? humanize(duck.heat.round) + " " + duck.heat.number : "None"],
+    ["Revision", duck.revision],
+  ]);
+  // A name labels a duck someone is racing, so the field appears only while
+  // this duck is paired. The endpoint refuses it otherwise.
+  inventoryDuckNameForm.hidden = !duck.participant;
+  inventoryDuckNameForm.elements.duckName.value = duck.duckName || "";
+  inventoryClearNameButton.hidden = !duck.duckName;
+  unassignForm.hidden = !duck.assignment;
+  releaseReservationForm.hidden = !duck.reservation || Boolean(duck.reservation.releasedAt) || Boolean(duck.assignment);
+  renderDeleteEffect(duck);
+  inventoryHistory.replaceChildren();
+  for (const item of body.history.inventoryEvents) {
+    inventoryHistory.append(historyCard(humanize(item.action), item.occurredAt + " · " + (item.actor.displayName || "Staff")));
+  }
+  for (const item of body.history.tags) {
+    inventoryHistory.append(historyCard("Tag " + humanize(item.status), item.createdAt + (item.retiredAt ? " · retired " + item.retiredAt : "")));
+  }
+  for (const item of body.history.reservations) {
+    inventoryHistory.append(historyCard("Reservation · " + item.event.name, item.releasedAt ? "Released " + item.releasedAt : "Active since " + item.reservedAt));
+  }
+  for (const item of body.history.assignments) {
+    const participant = item.participant.firstName
+      ? item.participant.firstName + " " + item.participant.lastName
+      : "Race entry " + item.participant.raceEntryId;
+    inventoryHistory.append(historyCard("Assignment · " + participant, item.validTo ? "Closed " + item.validTo : "Active since " + item.validFrom));
+  }
+  if (!inventoryHistory.childElementCount) inventoryHistory.append(empty("No inventory history is recorded."));
+};
+
+const loadDuckDetail = async (duckId, trigger = null, focusDetail = false) => {
+  const requestVersion = inventoryDetailController.beginRequest();
+  const body = await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(duckId));
+  if (!inventoryDetailController.isCurrentRequest(requestVersion)) return;
+  renderDuckDetail(body);
+  inventoryDetailController.open(duckId, trigger, focusDetail);
+};
+
+const refreshSelectedDuck = async () => {
+  const duckId = selectedDuck && !inventoryDetail.hidden ? selectedDuck.id : null;
+  const loads = [loadInventory()];
+  if (duckId) loads.push(loadDuckDetail(duckId));
+  await Promise.all(loads);
+};
+
+// A duck deleted while its panel was open has no detail left to load, so the
+// panel closes rather than reporting a 404 the actor cannot act on.
+const forgetSelectedDuck = async () => {
+  inventoryDetailController.close({ restoreFocus: false });
+  await loadInventory();
+};
+
+document.querySelector("[data-refresh-inventory]").addEventListener("click", () => loadInventory()
+  .catch((error) => setMessage(error.message, true)));
+
+document.querySelector("[data-inventory-intake-form]").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const values = new FormData(form);
+  await perform(button, "Adding duck to inventory…", async () => {
+    const result = await api("/api/v1/staff/inventory/ducks", commandOptions("POST", {
+      commandId: crypto.randomUUID(), eventId: currentEventId(),
+      visibleNumber: Number(values.get("visibleNumber")), tagToken: String(values.get("tagToken")),
+      location: String(values.get("location")) || null,
+      notes: String(values.get("notes")) || null, physicallyPresent: values.get("physicallyPresent") === "on",
+    }));
+    form.reset();
+    await loadInventory();
+    await loadDuckDetail(result.duck.id, null, true);
+  });
+});
+
+inventoryDuckNameForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const duckName = String(new FormData(form).get("duckName") || "");
+  await perform(form.querySelector("button"), "Saving duck name…", async () => {
+    await api(
+      "/api/v1/staff/registrations/" + encodeURIComponent(selectedDuck.participant.registrationId) + "/set-duck-name",
+      commandOptions("POST", { commandId: crypto.randomUUID(), duckName }),
+    );
+    await refreshSelectedDuck();
+  });
+});
+
+inventoryClearNameButton.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  if (!await appConfirm(
+    "Clear this duck's name? It goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;
+  await perform(button, "Clearing duck name…", async () => {
+    await api(
+      "/api/v1/staff/registrations/" + encodeURIComponent(selectedDuck.participant.registrationId) + "/clear-duck-name",
+      commandOptions("POST", { commandId: crypto.randomUUID() }),
+    );
+    await refreshSelectedDuck();
+  });
+});
+
+document.querySelector("[data-print-label]").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  await perform(button, "Loading label data…", async () => {
+    const result = await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/label");
+    const link = text("a", "Duck #" + result.visibleNumber + " tag URL");
+    link.href = result.tagUrl;
+    link.target = "_blank";
+    link.rel = "noopener";
+    document.querySelector("[data-label-result]").replaceChildren(link);
+  });
+});
+
+assignForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const values = new FormData(form);
+  if (!selectedDuck) {
+    setMessage("Select an inventory duck first.", true);
+    return;
+  }
+  if (!await appConfirm("Assign Duck #" + selectedDuck.visibleNumber + " to this race entry?")) return;
+  await perform(button, "Assigning duck…", async () => {
+    await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/assignments", commandOptions("POST", {
+      commandId: crypto.randomUUID(), eventId: currentEventId(), raceEntryId: String(values.get("raceEntryId")),
+      expectedRevision: selectedDuck.revision, reason: String(values.get("reason")),
+    }));
+    await refreshSelectedDuck();
+  });
+});
+
+unassignForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const values = new FormData(form);
+  if (!await appConfirm("Unpair Duck #" + selectedDuck.visibleNumber + " from its participant?", { danger: true })) return;
+  await perform(button, "Unpairing duck…", async () => {
+    await api("/api/v1/staff/inventory/assignments/" + encodeURIComponent(selectedDuck.assignment.id) + "/unassign", commandOptions("POST", {
+      commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision,
+      releaseReservation: values.get("releaseReservation") === "on", reason: String(values.get("reason")),
+    }));
+    form.reset();
+    await refreshSelectedDuck();
+  });
+});
+
+releaseReservationForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const reason = String(new FormData(form).get("reason"));
+  if (!await appConfirm("Release Duck #" + selectedDuck.visibleNumber + " from this event?", { danger: true })) return;
+  await perform(button, "Releasing reservation…", async () => {
+    await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/reservations/release", commandOptions("POST", {
+      commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision, reason,
+    }));
+    form.reset();
+    await refreshSelectedDuck();
+  });
+});
+
+deleteDuckForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector("button");
+  const reason = String(new FormData(form).get("reason"));
+  const duck = selectedDuck;
+  if (!duck) {
+    setMessage("Select an inventory duck first.", true);
+    return;
+  }
+  if (!await appConfirm(
+    duck.participant
+      ? "Delete Duck #" + duck.visibleNumber + "? Its participant goes back into the queue for a new duck, and this duck is gone for good."
+      : "Delete Duck #" + duck.visibleNumber + "? It is gone for good.",
+    { danger: true, confirmLabel: "Delete duck" },
+  )) return;
+  await perform(button, "Deleting duck…", async () => {
+    await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(duck.id) + "/delete", commandOptions("POST", {
+      commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: duck.revision, reason,
+    }));
+    form.reset();
+    await forgetSelectedDuck();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Blank NFC sticker station
+//
+// Everything below is conditional on the device. The runtime check disables the
+// station's own controls and says why; it never touches the inventory above it.
+// ---------------------------------------------------------------------------
+const intakeRoot = document.querySelector("[data-intake-station]");
+const intakeLocation = document.querySelector("[data-intake-location]");
+const intakeNfcButton = document.querySelector("[data-start-intake-nfc]");
+const intakeEndNfcButton = document.querySelector("[data-end-intake-nfc]");
+const intakeState = document.querySelector("[data-intake-state]");
+const intakeMessage = document.querySelector("[data-intake-message]");
+const intakeReservedCount = document.querySelector("[data-reserved-count]");
+const intakeSessionCount = document.querySelector("[data-session-count]");
+const intakeHistory = document.querySelector("[data-intake-history]");
+const intakeTakeoverPanel = document.querySelector("[data-intake-takeover]");
+const intakeTakeoverMessage = document.querySelector("[data-intake-takeover-message]");
+const intakeTakeoverButton = document.querySelector("[data-takeover-provisioning]");
+const intakeRuntimeNotice = document.querySelector("[data-intake-runtime]");
+const intakeRuntimeMessage = document.querySelector("[data-intake-runtime-message]");
+const intakeControls = document.querySelector("[data-intake-controls]");
+const intakeAppOrigin = inventoryRoot.dataset.appOrigin;
+
+let intakeTopLevel = false;
+try { intakeTopLevel = window.top === window.self; } catch {}
+const intakeRuntimeIssue = () => intakeProvisioningRuntimeIssue({
+  userAgent: navigator.userAgent,
+  hasNdefReader: typeof globalThis.NDEFReader === "function",
+  secureContext: isSecureContext === true,
+  topLevel: intakeTopLevel,
+  visible: document.visibilityState === "visible",
+});
+const intakeShowRuntimeIssue = (issue) => {
+  const messages = {
+    "android-chrome": "Scanning needs current Chrome on an NFC-capable Android device. It is not available on desktop, iPhone, iPad, Android WebView, or another Android browser. Everything else on this page still works here.",
+    "web-nfc": "This Android Chrome runtime does not expose Web NFC. Update Chrome or use another NFC-capable Android device.",
+    "secure-context": "Open the HTTPS QuickDucks site directly before scanning.",
+    "top-level": "Open QuickDucks in a top-level browser tab, not an embedded frame.",
+    visible: "Bring this page into view and reload it before scanning.",
+  };
+  intakeControls.hidden = true;
+  intakeRuntimeNotice.hidden = false;
+  intakeRuntimeMessage.textContent = messages[issue] || "This device cannot scan NFC stickers.";
+};
+
+let intakeAddedCount = 0;
+let intakeStarted = false;
+let intakeStarting = false;
+let intakeSupported = true;
+let intakeAudio = null;
+let intakeTakeoverCandidate = null;
+let intakeNfcStation = null;
+let intakeMachine = null;
+const intakeEnabled = intakeRuntimeIssue() === null;
+
+const intakeSetMessage = (value, isError = false) => {
+  if (!intakeEnabled) return;
+  intakeMessage.textContent = value;
+  intakeMessage.classList.toggle("error-text", isError);
+};
+
+const intakeSetState = (value) => {
+  if (!intakeEnabled) return;
+  const labels = {
+    checking: "Checking sticker",
+    confirming: "Confirming",
+    error: "Needs attention",
+    ended: "Ended",
+    ready: "Ready",
+    remove: "Remove duck",
+    reserving: "Reserving URL",
+    writing: "Writing sticker",
+  };
+  intakeState.textContent = labels[value] || "Not started";
+};
+
+const intakeCanProvision = () =>
+  currentEvent !== null && intakeOpenStatuses.has(currentEvent.status);
+
+const intakeUpdateControls = () => {
+  if (!intakeEnabled) return;
+  const active = intakeStarted && intakeNfcStation?.isActive() === true;
+  const pending = intakeMachine?.hasPending() === true;
+  const busy = intakeMachine?.isBusy() === true;
+  const running = active || intakeStarting;
+  intakeNfcButton.disabled = !intakeSupported || !intakeCanProvision() || running;
+  intakeNfcButton.textContent = active ? "NFC provisioning active" : "Start NFC provisioning";
+  intakeEndNfcButton.hidden = !active;
+  intakeEndNfcButton.disabled = !active || busy || pending;
+  eventSelect.disabled = running || pending;
+  intakeLocation.disabled = running;
+};
+
+const intakePost = (path, body) => api(path, commandOptions("POST", body));
+
+const intakeOfferTakeover = (record) => {
+  if (!intakeEnabled) return;
+  intakeTakeoverCandidate = intakeSafeTakeoverCandidate(record);
+  intakeTakeoverPanel.hidden = intakeTakeoverCandidate === null;
+  intakeTakeoverMessage.textContent = intakeTakeoverCandidate === null
+    ? ""
+    : "Pending Duck #" + intakeTakeoverCandidate.visibleNumber + " has had no ownership activity for at least 10 minutes.";
+};
+
+const intakeRefreshStation = async () => {
+  await loadInventory();
+  if (!currentEvent) {
+    if (intakeEnabled) intakeReservedCount.textContent = "0";
+    return;
+  }
+  const detail = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id));
+  currentEvent = detail.event;
+  if (!intakeEnabled) return;
+  intakeReservedCount.textContent = String(detail.summary.eventDucks);
+  if (!intakeOpenStatuses.has(detail.event.status)) {
+    intakeSetState("error");
+    intakeSetMessage("Scanning new ducks in is closed for this event.", true);
+  }
+};
+
+const intakeAddHistory = ({ outcome, duckId }) => {
+  // A sticker already in inventory is a lookup, not an intake: open its record.
+  if (outcome === "already" && typeof duckId === "string") {
+    loadDuckDetail(duckId, null, false).catch((error) => setMessage(error.message, true));
+  }
+  if (!intakeEnabled) return;
+  if (intakeHistory.children.length === 1 && intakeHistory.firstElementChild.textContent.startsWith("No ducks")) {
+    intakeHistory.replaceChildren();
+  }
+  const item = document.createElement("li");
+  item.textContent = outcome === "added" ? "Sticker provisioned and reserved" : "Already in inventory; opened its record";
+  intakeHistory.prepend(item);
+  while (intakeHistory.children.length > 12) intakeHistory.lastElementChild.remove();
+  if (outcome === "added") {
+    intakeAddedCount += 1;
+    intakeSessionCount.textContent = String(intakeAddedCount);
+  }
+};
+
+const intakeFeedback = () => {
+  if (typeof navigator.vibrate === "function") navigator.vibrate(120);
+  if (!intakeAudio) return;
+  try {
+    const oscillator = intakeAudio.createOscillator();
+    const gain = intakeAudio.createGain();
+    oscillator.frequency.value = 880;
+    gain.gain.value = 0.05;
+    oscillator.connect(gain);
+    gain.connect(intakeAudio.destination);
+    oscillator.start();
+    oscillator.stop(intakeAudio.currentTime + 0.12);
+  } catch {}
+};
+
+if (intakeEnabled) {
+  intakeRuntimeNotice.hidden = true;
+  intakeControls.hidden = false;
+
+  intakeMachine = intakeCreateProvisioningMachine({
+    eventId: () => (currentEvent ? currentEvent.id : ""),
+    location: () => intakeLocation.value.trim(),
+    recover: async (eventId) => {
+      const body = await api("/api/v1/staff/inventory/provisioning?eventId=" + encodeURIComponent(eventId));
+      intakeOfferTakeover(body.provisioning);
+      return body.provisioning;
+    },
+    start: (body) => {
+      intakeOfferTakeover(null);
+      return intakePost("/api/v1/staff/inventory/provisioning", body);
+    },
+    classify: (body) => intakePost("/api/v1/staff/inventory/provisioning/classify", body),
+    write: (tagUrl) => intakeNfcStation.write(tagUrl),
+    confirm: (body) => intakePost("/api/v1/staff/inventory/provisioning/confirm", body),
+    refresh: intakeRefreshStation,
+    accepted: intakeAddHistory,
+    message: intakeSetMessage,
+    state: (value) => {
+      intakeSetState(value);
+      intakeUpdateControls();
+    },
+    feedback: intakeFeedback,
+    changed: intakeUpdateControls,
+    beginBusy: () => globalThis.quickDucksLive.beginBusy(),
+  });
+
+  intakeNfcStation = intakeCreateNfcStation({
+    createReader: () => new NDEFReader(),
+    decode: (record) => new TextDecoder(record.encoding || "utf-8").decode(record.data),
+    appOrigin: intakeAppOrigin,
+    onReading: (reading) => intakeMachine.reading(reading),
+    onReadingError: () => intakeSetMessage("The NFC sticker could not be read. Remove it, then retap the same sticker.", true),
+    onStartError: () => {
+      intakeSetState("error");
+      intakeSetMessage("NFC scanning could not start. Use current Android Chrome over HTTPS, allow NFC, and keep this top-level page visible.", true);
+    },
+    onActive: () => {
+      intakeSetState("ready");
+      intakeSetMessage(intakeMachine.hasPending()
+        ? "A pending sticker was recovered. Retap that same sticker to finish it before using another."
+        : "Ready. Tap a sticker.", false);
+    },
+  });
+
+  intakeTakeoverButton.addEventListener("click", async () => {
+    const candidate = intakeTakeoverCandidate;
+    if (candidate === null || intakeMachine.isBusy() || intakeMachine.hasPending()) return;
+    if (!await appConfirm(
+      "Take over pending Duck #" + candidate.visibleNumber
+      + "? Continue only if the previous provisioning station has been abandoned.",
+      { danger: true },
+    )) return;
+    intakeTakeoverButton.disabled = true;
+    const endBusy = globalThis.quickDucksLive.beginBusy();
+    intakeSetMessage("Taking ownership of the abandoned pending sticker.", false);
+    try {
+      const recovered = await intakePost("/api/v1/staff/inventory/provisioning/takeover", {
+        commandId: crypto.randomUUID(),
+        eventId: currentEventId(),
+        duckId: candidate.duckId,
+        provisioningCommandId: candidate.provisioningCommandId,
+      });
+      if (!intakeMachine.adoptTakeover(recovered)) throw new Error("invalid-takeover");
+      intakeOfferTakeover(null);
+      intakeSetMessage(intakeStarted
+        ? "Takeover complete. Retap that exact pending sticker to finish confirmation."
+        : "Takeover complete. Press Start, then retap that exact pending sticker.", false);
+    } catch {
+      intakeSetState("error");
+      intakeSetMessage("The pending sticker could not be taken over. Refresh its status before trying again.", true);
+    } finally {
+      intakeTakeoverButton.disabled = false;
+      endBusy();
+      inventorySubscription?.resume();
+    }
+  });
+
+  intakeNfcButton.addEventListener("click", async () => {
+    if (!intakeSupported || intakeStarted || intakeStarting) return;
+    const runtimeIssue = intakeRuntimeIssue();
+    if (runtimeIssue !== null) {
+      intakeSupported = false;
+      intakeSetState("error");
+      intakeSetMessage("This station no longer has a supported visible Android Chrome Web NFC context. Reload it after correcting the device or browser context.", true);
+      intakeUpdateControls();
+      return;
+    }
+    if (!intakeCanProvision()) {
+      intakeSetState("error");
+      intakeSetMessage("Scanning new ducks in is closed for this event.", true);
+      return;
+    }
+    if (document.hidden) {
+      intakeSetState("error");
+      intakeSetMessage("Keep this page visible before starting NFC provisioning.", true);
+      return;
+    }
+    const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
+    if (AudioContextClass) {
+      try {
+        intakeAudio = new AudioContextClass();
+        void intakeAudio.resume();
+      } catch {}
+    }
+    intakeStarting = true;
+    intakeUpdateControls();
+    const started = await intakeNfcStation.start();
+    intakeStarting = false;
+    if (!started) {
+      intakeUpdateControls();
+      return;
+    }
+    intakeStarted = true;
+    intakeUpdateControls();
+    globalThis.quickDucksLive.markClean(inventoryRoot);
+    inventorySubscription?.resume();
+  });
+
+  intakeEndNfcButton.addEventListener("click", () => {
+    if (!intakeStarted) return;
+    if (!intakeMachine.end()) {
+      intakeUpdateControls();
+      if (intakeMachine.hasPending()) {
+        intakeSetMessage("Finish the pending sticker before ending NFC provisioning.", true);
+      }
+      return;
+    }
+    intakeNfcStation.stop();
+    intakeStarted = false;
+    if (intakeAudio && typeof intakeAudio.close === "function") void intakeAudio.close().catch(() => {});
+    intakeAudio = null;
+    intakeSetState("ended");
+    intakeSetMessage("Scanning ended. Press Start to resume when ready.", false);
+    intakeUpdateControls();
+  });
+} else {
+  intakeShowRuntimeIssue(intakeRuntimeIssue());
+}
+
+const intakeRecoverSelected = async () => {
+  if (!intakeEnabled) return;
+  intakeMachine.resetForEvent();
+  if (!intakeCanProvision()) return;
+  const pending = await intakeMachine.recover();
+  intakeSetMessage(pending
+    ? "A pending sticker is waiting. Press Start, then retap that same sticker."
+    : "Press Start once, then tap one sticker per duck.", false);
+};
+
+// ---------------------------------------------------------------------------
+// Event selection and page load
+// ---------------------------------------------------------------------------
+const applyRequestedSelection = async () => {
+  if (requestedRaceEntryId) assignForm.elements.raceEntryId.value = requestedRaceEntryId;
+  if (!requestedDuckId) return;
+  const duckId = requestedDuckId;
+  requestedDuckId = null;
+  await loadDuckDetail(duckId, null, true).catch(() => {
+    setMessage("That duck is no longer in inventory.", true);
+  });
+};
+
+const loadEvents = async () => {
+  const body = await api("/api/v1/staff/events", { headers: { accept: "application/json" } });
+  eventSelect.replaceChildren();
+  currentEvent = null;
+  if (body.events.length === 0) {
+    eventSelect.append(new Option("No event exists", ""));
+    if (inventoryNoRace) inventoryNoRace.hidden = false;
+  } else {
+    for (const eventRecord of body.events) {
+      eventSelect.append(new Option(eventRecord.name + " · " + humanize(eventRecord.status), eventRecord.id));
+    }
+    eventSelect.value = body.events[0].id;
+    currentEvent = body.events[0];
+    if (inventoryNoRace) inventoryNoRace.hidden = true;
+  }
+  await intakeRefreshStation();
+  await intakeRecoverSelected();
+  intakeUpdateControls();
+  setMessage(currentEvent
+    ? "Inventory is current."
+    : "Inventory is current. Create the race event on the staff console to reserve ducks for it.");
+};
+
+eventSelect.addEventListener("change", () => {
+  if (intakeStarted) return;
+  loadEvents()
+    .then(() => globalThis.quickDucksLive.markClean(eventSelect))
+    .catch((error) => setMessage(error.message, true));
+});
+
+const inventoryRefresh = async () => {
+  const duckId = selectedDuck && !inventoryDetail.hidden ? selectedDuck.id : null;
+  await loadEvents();
+  if (duckId) await loadDuckDetail(duckId).catch(() => inventoryDetailController.close({ restoreFocus: false }));
+};
+
+inventorySubscription = globalThis.quickDucksLive.subscribe({
+  domains: ["event", "participants", "ducks", "heats"],
+  root: inventoryRoot,
+  refresh: inventoryRefresh,
+  isBlocked: () => inventoryCommandCount > 0
+    || intakeMachine?.isBusy() === true
+    || intakeMachine?.hasPending() === true,
+});
+
+loadEvents()
+  .then(applyRequestedSelection)
+  .catch((error) => setMessage(error.message, true));
+`;
+
 // Heat roster deep links. A roster entry names the racer, shows the race-entry
 // UUID that identifies it everywhere else in the console, and offers the two
 // in-page navigations the actor's roles allow. The caller passes the element
@@ -3876,7 +4387,7 @@ const createHeatRosterEntry = ({ entry, text, openParticipant, openDuck }) => {
 };
 `;
 
-export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + inventoryDetailHelpersScript + inventoryGroupHelpersScript + heatRosterHelpersScript + String.raw`
+export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + heatRosterHelpersScript + String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
 const assignedRoles = new Set((operationsRoot.dataset.roles || "").split(",").filter(Boolean));
@@ -3892,7 +4403,6 @@ const eventSelect = document.querySelector("[data-event-select]");
 let currentEvent = null;
 let currentEventDetail = null;
 let selectedRegistration = null;
-let selectedDuck = null;
 let selectedHeat = null;
 let staffCommandCount = 0;
 let staffLiveSubscription = null;
@@ -4178,27 +4688,23 @@ const loadEvents = async (preferredId) => {
     currentEvent = null;
     currentEventDetail = null;
     selectedRegistration = null;
-    selectedDuck = null;
     selectedHeat = null;
     eventSummary.replaceChildren(empty("Create a draft event to begin."));
     readinessList.replaceChildren(empty("No lifecycle is available."));
     for (const selector of [
-      "[data-participant-list]", "[data-inventory-list]", "[data-heat-list]",
+      "[data-participant-list]", "[data-heat-list]",
       "[data-finalist-list]", "[data-support-summary]",
       "[data-notification-list]", "[data-notification-attempts]", "[data-audit-list]",
-      "[data-walkup-result]", "[data-label-result]",
+      "[data-walkup-result]",
       "[data-participant-name]", "[data-participant-facts]", "[data-participant-actions]",
-      "[data-inventory-name]", "[data-inventory-facts]", "[data-inventory-history]",
       "[data-heat-name]", "[data-heat-facts]", "[data-heat-roster]",
       "[data-heat-results]", "[data-heat-controls]",
     ]) document.querySelector(selector)?.replaceChildren();
-    for (const selector of ["[data-participant-detail]", "[data-inventory-detail]", "[data-heat-detail]"]) {
+    for (const selector of ["[data-participant-detail]", "[data-heat-detail]"]) {
       const element = document.querySelector(selector);
       if (element) element.hidden = true;
     }
-    inventoryDetailController.beginRequest();
     participantEditForm.reset();
-    inventoryEditForm.reset();
     if (eventConfigForm) {
       eventConfigForm.reset();
       eventConfigCard.hidden = true;
@@ -4216,9 +4722,6 @@ const loadEvents = async (preferredId) => {
     if (eventCreateCard) eventCreateCard.open = true;
     showEventScopedSections(false);
     setMessage("No event dataset exists. An administrator can create one.");
-    const loads = [];
-    if (canInventory) loads.push(loadInventory());
-    await Promise.allSettled(loads);
     return;
   }
   for (const eventRecord of body.events) {
@@ -4242,10 +4745,6 @@ const loadEvent = async (eventId) => {
   if (!renderEvent(detail, readiness)) return;
   const loads = [];
   if (canRegistration) loads.push(loadParticipants());
-  if (canInventory) {
-    loads.push(loadInventory());
-    if (selectedDuck && !inventoryDetail.hidden) loads.push(loadDuckDetail(selectedDuck.id));
-  }
   if (canRaceRead) loads.push(loadHeats(), loadFinalists());
   if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit());
   const results = await Promise.allSettled(loads);
@@ -4450,6 +4949,24 @@ const participantDuckNameFact = (registration) => {
     : registration.duckName;
 };
 
+// Staff naming at the registration desk, for a participant who cannot do it
+// themselves. The endpoint runs exactly the gates the public one runs, so a 422
+// here means the name itself was refused and nothing was written.
+const participantDuckNameForm = document.querySelector("[data-participant-duck-name-form]");
+
+const saveParticipantDuckName = async (button, duckName) => {
+  const registration = selectedRegistration;
+  await perform(button, "Saving duck name…", async () => {
+    const result = await api(
+      "/api/v1/staff/registrations/" + encodeURIComponent(registration.registrationId) + "/set-duck-name",
+      commandOptions("POST", { commandId: crypto.randomUUID(), duckName }),
+    );
+    selectedRegistration = result.registration;
+    renderParticipantDetail(selectedRegistration);
+    await loadParticipants();
+  });
+};
+
 const clearParticipantDuckName = async (button) => {
   const registration = selectedRegistration;
   if (!await appConfirm(
@@ -4488,6 +5005,12 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.email.value = registration.email || "";
   participantEditForm.elements.phone.value = registration.phone || "";
   participantEditForm.elements.notes.value = registration.notes || "";
+  // Naming needs a duck to name, and the endpoint refuses without one, so the
+  // field appears only once this participant is paired.
+  if (participantDuckNameForm) {
+    participantDuckNameForm.hidden = !canRegistration || !registration.assignment;
+    participantDuckNameForm.elements.duckName.value = registration.duckName || "";
+  }
   participantActions.replaceChildren();
   // Offered only when there is a name to clear. The server enforces the role.
   if (canRegistration && typeof registration.duckName === "string" && registration.duckName.length > 0) {
@@ -4497,10 +5020,11 @@ const renderParticipantDetail = (registration) => {
       (event) => clearParticipantDuckName(event.currentTarget),
     );
   }
+  // Inventory is its own page, so this hands the race entry to it rather than
+  // scrolling to a section that is no longer here.
   if (canInventory) {
     addParticipantAction("Use for duck assignment", "button secondary small", () => {
-      document.querySelector("[data-inventory-assign-form]").elements.raceEntryId.value = registration.raceEntryId;
-      document.querySelector("#inventory").scrollIntoView({ behavior: "smooth" });
+      location.assign("/staff/inventory?raceEntry=" + encodeURIComponent(registration.raceEntryId));
     });
   }
   if (["SUBMITTED", "ACTIVE"].includes(registration.status)) {
@@ -4594,281 +5118,27 @@ participantEditForm.addEventListener("submit", async (event) => {
   });
 });
 
-const inventoryList = document.querySelector("[data-inventory-list]");
-const inventoryDetail = document.querySelector("[data-inventory-detail]");
-const inventoryFacts = document.querySelector("[data-inventory-facts]");
-const inventoryHistory = document.querySelector("[data-inventory-history]");
-const inventoryEditForm = document.querySelector("[data-inventory-edit-form]");
-const unassignForm = document.querySelector("[data-inventory-unassign-form]");
-const releaseReservationForm = document.querySelector("[data-reservation-release-form]");
-const inventoryCloseButton = document.querySelector("[data-close-inventory-detail]");
+if (participantDuckNameForm) {
+  participantDuckNameForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    await saveParticipantDuckName(
+      form.querySelector("button"),
+      String(new FormData(form).get("duckName") || ""),
+    );
+  });
+}
 
-const clearInventoryDetail = () => {
-  selectedDuck = null;
-  document.querySelector("[data-inventory-name]").textContent = "Duck detail";
-  inventoryFacts.replaceChildren();
-  inventoryHistory.replaceChildren();
-  document.querySelector("[data-label-result]").replaceChildren();
-  for (const form of inventoryDetail.querySelectorAll("form")) form.reset();
-  for (const disclosure of inventoryDetail.querySelectorAll("details")) disclosure.open = false;
-  unassignForm.hidden = true;
-  releaseReservationForm.hidden = true;
-  globalThis.quickDucksLive.markClean(inventoryDetail);
-};
-
-const inventoryDetailController = createInventoryDetailController({
-  detail: inventoryDetail,
-  list: inventoryList,
-  closeButton: inventoryCloseButton,
-  clear: clearInventoryDetail,
-});
-
-const inventoryCard = (duck) => {
-  const eventLabel = duck.reservation && !duck.reservation.releasedAt ? " · " + duck.reservation.event.name : "";
-  const button = text("button", "Duck #" + duck.visibleNumber + " · " + humanize(duck.inventoryStatus) + eventLabel, "result-button");
-  button.type = "button";
-  button.dataset.duckId = duck.id;
-  button.setAttribute("aria-controls", "inventory-detail-panel");
-  button.setAttribute("aria-expanded", "false");
-  button.addEventListener("click", () => loadDuckDetail(duck.id, button, true)
-    .catch((error) => setMessage(error.message, true)));
-  return button;
-};
-
-// The cards stay one grid of the same buttons; each group is a labelled band
-// across that grid so the detail controller still finds every [data-duck-id]
-// card and selection, focus, and live refresh behave exactly as before.
-const inventoryGroupSection = (group) => {
-  const section = text("section", "", "inventory-group");
-  section.dataset.inventoryGroup = group.key;
-  const heading = text("h3", group.title, "inventory-group-title");
-  heading.id = "inventory-group-" + group.key.toLowerCase().replaceAll("_", "-");
-  section.setAttribute("aria-labelledby", heading.id);
-  section.append(heading);
-  if (group.ducks.length === 0) {
-    section.append(empty(group.emptyMessage));
-    return section;
-  }
-  section.append(text(
-    "p",
-    group.ducks.length + (group.ducks.length === 1 ? " duck · " : " ducks · ") + group.description,
-    "muted",
-  ));
-  const cards = text("div", "", "data-list inventory-card-grid");
-  for (const duck of group.ducks) cards.append(inventoryCard(duck));
-  section.append(cards);
-  return section;
-};
-
-const loadInventory = async () => {
-  const body = await api("/api/v1/staff/inventory/ducks");
-  inventoryList.replaceChildren();
-  if (body.ducks.length === 0) {
-    inventoryList.append(empty("No ducks are in inventory."));
-    inventoryDetailController.syncButtons();
-    return;
-  }
-  for (const group of groupInventoryDucks(body.ducks)) inventoryList.append(inventoryGroupSection(group));
-  inventoryDetailController.syncButtons();
-};
-
+// A small card for one history or summary line. It reads as a heading and a
+// muted detail, and every value reaches it as text.
 const historyCard = (title, detail) => {
   const card = text("div", "", "data-card");
   card.append(text("h3", title), text("p", detail, "muted"));
   return card;
 };
 
-const renderDuckDetail = (body) => {
-  selectedDuck = body.duck;
-  const duck = body.duck;
-  document.querySelector("[data-inventory-name]").textContent = "Duck #" + duck.visibleNumber;
-  showFacts(inventoryFacts, [
-    ["Inventory", humanize(duck.inventoryStatus)],
-    ["Condition", humanize(duck.condition)],
-    ["Location", duck.location || "Not set"],
-    ["Tag", duck.tag ? humanize(duck.tag.status) : "No tag"],
-    ["Reservation", duck.reservation ? duck.reservation.event.name + (duck.reservation.releasedAt ? " · released" : " · active") : "None"],
-    ["Participant", duck.participant
-      ? duck.participant.firstName
-        ? duck.participant.firstName + " " + duck.participant.lastName
-        : "Assigned race entry " + duck.participant.raceEntryId
-      : "Unassigned"],
-    ["Heat", duck.heat ? humanize(duck.heat.round) + " " + duck.heat.number : "None"],
-    ["Revision", duck.revision],
-  ]);
-  inventoryEditForm.elements.visibleNumber.value = duck.visibleNumber;
-  inventoryEditForm.elements.condition.value = duck.condition;
-  inventoryEditForm.elements.location.value = duck.location || "";
-  inventoryEditForm.elements.notes.value = duck.notes || "";
-  unassignForm.hidden = !duck.assignment;
-  releaseReservationForm.hidden = !duck.reservation || Boolean(duck.reservation.releasedAt) || Boolean(duck.assignment);
-  inventoryHistory.replaceChildren();
-  for (const item of body.history.inventoryEvents) {
-    inventoryHistory.append(historyCard(humanize(item.action), item.occurredAt + " · " + (item.actor.displayName || "Staff")));
-  }
-  for (const item of body.history.tags) {
-    inventoryHistory.append(historyCard("Tag " + humanize(item.status), item.createdAt + (item.retiredAt ? " · retired " + item.retiredAt : "")));
-  }
-  for (const item of body.history.reservations) {
-    inventoryHistory.append(historyCard("Reservation · " + item.event.name, item.releasedAt ? "Released " + item.releasedAt : "Active since " + item.reservedAt));
-  }
-  for (const item of body.history.assignments) {
-    const participant = item.participant.firstName
-      ? item.participant.firstName + " " + item.participant.lastName
-      : "Race entry " + item.participant.raceEntryId;
-    inventoryHistory.append(historyCard("Assignment · " + participant, item.validTo ? "Closed " + item.validTo : "Active since " + item.validFrom));
-  }
-  if (!inventoryHistory.childElementCount) inventoryHistory.append(empty("No inventory history is recorded."));
-};
-
-const loadDuckDetail = async (duckId, trigger = null, focusDetail = false) => {
-  const requestVersion = inventoryDetailController.beginRequest();
-  const body = await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(duckId));
-  if (!inventoryDetailController.isCurrentRequest(requestVersion)) return;
-  renderDuckDetail(body);
-  inventoryDetailController.open(duckId, trigger, focusDetail);
-};
-
-const refreshSelectedDuck = async () => {
-  const duckId = selectedDuck && !inventoryDetail.hidden ? selectedDuck.id : null;
-  const loads = [loadInventory()];
-  if (duckId) loads.push(loadDuckDetail(duckId));
-  if (canRegistration) loads.push(loadParticipants());
-  await Promise.all(loads);
-};
-
-document.querySelector("[data-refresh-inventory]").addEventListener("click", () => loadInventory()
-  .catch((error) => setMessage(error.message, true)));
-
-document.querySelector("[data-inventory-intake-form]").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const values = new FormData(form);
-  await perform(button, "Saving physical inventory intake…", async () => {
-    const result = await api("/api/v1/staff/inventory/ducks", commandOptions("POST", {
-      commandId: crypto.randomUUID(), eventId: currentEventId(),
-      visibleNumber: Number(values.get("visibleNumber")), tagToken: String(values.get("tagToken")),
-      condition: String(values.get("condition")), location: String(values.get("location")) || null,
-      notes: String(values.get("notes")) || null, physicallyPresent: values.get("physicallyPresent") === "on",
-    }));
-    form.reset();
-    await loadInventory();
-    await loadDuckDetail(result.duck.id, null, true);
-  });
-});
-
-inventoryEditForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const values = new FormData(form);
-  await perform(button, "Saving inventory changes…", async () => {
-    await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id), commandOptions("PATCH", {
-      commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision,
-      visibleNumber: Number(values.get("visibleNumber")), condition: String(values.get("condition")),
-      location: String(values.get("location")) || null, notes: String(values.get("notes")) || null,
-    }));
-    await refreshSelectedDuck();
-  });
-});
-
-document.querySelector("[data-tag-replace-form]").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const values = new FormData(form);
-  if (!await appConfirm("Retire the current tag and activate this verified replacement?", { danger: true })) return;
-  await perform(button, "Replacing active tag…", async () => {
-    await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/tags/replace", commandOptions("POST", {
-      commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision,
-      tagToken: String(values.get("tagToken")), physicalTagVerified: values.get("physicalTagVerified") === "on",
-    }));
-    form.reset();
-    await refreshSelectedDuck();
-  });
-});
-
-document.querySelector("[data-tag-retire-form]").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const values = new FormData(form);
-  if (!await appConfirm("Retire this tag without a replacement? The duck will be quarantined.", { danger: true })) return;
-  await perform(button, "Retiring active tag…", async () => {
-    await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/tags/retire", commandOptions("POST", {
-      commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision,
-      reason: String(values.get("reason")), physicalTagRemoved: values.get("physicalTagRemoved") === "on",
-    }));
-    form.reset();
-    await refreshSelectedDuck();
-  });
-});
-
-document.querySelector("[data-print-label]").addEventListener("click", async (event) => {
-  const button = event.currentTarget;
-  await perform(button, "Loading label data…", async () => {
-    const result = await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/label");
-    const link = text("a", "Duck #" + result.visibleNumber + " tag URL");
-    link.href = result.tagUrl;
-    link.target = "_blank";
-    link.rel = "noopener";
-    document.querySelector("[data-label-result]").replaceChildren(link);
-  });
-});
-
-document.querySelector("[data-inventory-assign-form]").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const values = new FormData(form);
-  if (!selectedDuck) {
-    setMessage("Select an inventory duck first.", true);
-    return;
-  }
-  if (!await appConfirm("Assign Duck #" + selectedDuck.visibleNumber + " to this race entry?")) return;
-  await perform(button, "Assigning duck…", async () => {
-    await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/assignments", commandOptions("POST", {
-      commandId: crypto.randomUUID(), eventId: currentEventId(), raceEntryId: String(values.get("raceEntryId")),
-      expectedRevision: selectedDuck.revision, reason: String(values.get("reason")),
-    }));
-    await refreshSelectedDuck();
-  });
-});
-
-unassignForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const values = new FormData(form);
-  if (!await appConfirm("Unassign Duck #" + selectedDuck.visibleNumber + " from its participant?", { danger: true })) return;
-  await perform(button, "Unassigning duck…", async () => {
-    await api("/api/v1/staff/inventory/assignments/" + encodeURIComponent(selectedDuck.assignment.id) + "/unassign", commandOptions("POST", {
-      commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision,
-      releaseReservation: values.get("releaseReservation") === "on", reason: String(values.get("reason")),
-    }));
-    form.reset();
-    await refreshSelectedDuck();
-  });
-});
-
-releaseReservationForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const reason = String(new FormData(form).get("reason"));
-  if (!await appConfirm("Release Duck #" + selectedDuck.visibleNumber + " from this event?", { danger: true })) return;
-  await perform(button, "Releasing reservation…", async () => {
-    await api("/api/v1/staff/inventory/ducks/" + encodeURIComponent(selectedDuck.id) + "/reservations/release", commandOptions("POST", {
-      commandId: crypto.randomUUID(), eventId: currentEventId(), expectedRevision: selectedDuck.revision, reason,
-    }));
-    form.reset();
-    await refreshSelectedDuck();
-  });
-});
-
-// The console is one page of anchored sections, so a roster deep link is an
-// in-page navigation: bring the target section into view, then run the same
+// The console is one page of anchored sections, so a participant deep link is
+// an in-page navigation: bring the target section into view, then run the same
 // selection code path the section's own list buttons run.
 const revealConsoleSection = (selector) => {
   const section = document.querySelector(selector);
@@ -4882,11 +5152,10 @@ const openRosterParticipant = async (registrationId) => {
   participantDetail.focus();
 };
 
-// loadDuckDetail owns the detail request versioning, so a link click that is
-// overtaken by another selection resolves without opening a stale panel.
-const openRosterDuck = async (duckId) => {
-  revealConsoleSection("#inventory");
-  await loadDuckDetail(duckId, null, true);
+// Inventory is its own page now, so a roster duck link is a real navigation
+// that asks that page to open this duck.
+const openRosterDuck = (duckId) => {
+  location.assign("/staff/inventory?duck=" + encodeURIComponent(duckId));
 };
 
 const heatList = document.querySelector("[data-heat-list]");
@@ -4896,6 +5165,7 @@ const heatRoster = document.querySelector("[data-heat-roster]");
 const heatResults = document.querySelector("[data-heat-results]");
 const heatControls = document.querySelector("[data-heat-controls]");
 const finalistList = document.querySelector("[data-finalist-list]");
+const finalistCard = document.querySelector("[data-finalist-card]");
 
 const loadHeats = async () => {
   if (!currentEvent) return;
@@ -5092,7 +5362,7 @@ const loadHeatDetail = async (heatId) => {
           .catch((error) => setMessage(error.message, true))
         : null,
       openDuck: canInventory && entry.duck && entry.duck.id
-        ? () => openRosterDuck(entry.duck.id).catch((error) => setMessage(error.message, true))
+        ? () => openRosterDuck(entry.duck.id)
         : null,
     }));
   }
@@ -5105,8 +5375,18 @@ const loadHeatDetail = async (heatId) => {
 
 document.querySelector("[data-refresh-heats]").addEventListener("click", () => loadHeats().catch((error) => setMessage(error.message, true)));
 
+// There are no finalists until the final has been started, so the card that
+// reports them is not shown before then. Verifying an empty roster and being
+// told it is "not yet verified" during round one is noise, not information.
+const finalistsExist = () => ["FINAL", "COMPLETED"].includes(currentEvent?.status);
+
 const loadFinalists = async () => {
   if (!currentEvent) return;
+  finalistCard.hidden = !finalistsExist();
+  if (finalistCard.hidden) {
+    finalistList.replaceChildren();
+    return;
+  }
   const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/finalists");
   finalistList.replaceChildren();
   finalistList.append(text("p", body.verification.verified ? "Finalist roster verified." : "Finalist roster is not yet verified.", body.verification.verified ? "status-chip ready" : "status-chip blocked"));

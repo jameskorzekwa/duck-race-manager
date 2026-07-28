@@ -7,6 +7,8 @@ import { authenticateStaff } from "./auth.ts";
 import { handleApi } from "./api.ts";
 import { handleStaffApi } from "./staff-api.ts";
 
+const staffApiSource = readFileSync(new URL("./staff-api.ts", import.meta.url), "utf8");
+
 const actor = {
   id: "staff_test",
   cognitoSub: "staff-sub",
@@ -828,6 +830,191 @@ test("staff pairs the scanned duck with a code-selected participant atomically",
   assert.match(sql, /INSERT INTO heats/);
   assert.match(sql, /INSERT INTO heat_entries/);
   assert.doesNotMatch(sql, /heat_assignment_mode/);
+});
+
+// Deleting a duck mid-race hands its participant back to the pairing queue with
+// their heat place intact. Pairing them with another duck must therefore work
+// while racing, and must reuse the heat entry they still hold rather than
+// booking them a second slot.
+test("re-pairing during a running race keeps the participant in the heat they are already in", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) return null;
+    if (sql.includes("FROM duck_tags")) {
+      return {
+        id: "duck_replacement",
+        visible_number: 77,
+        inventory_status: "AVAILABLE",
+        revision: 0,
+        active_assignment_id: null,
+      };
+    }
+    if (sql.includes("FROM registrations")) {
+      return {
+        event_id: "event_test",
+        round_one_heat_capacity: 10,
+        final_heat_capacity: 50,
+        registration_id: "registration_test",
+        registration_status: "SUBMITTED",
+        registration_revision: 2,
+        race_entry_id: "entry_test",
+        race_entry_revision: 1,
+        first_name: "Daisy",
+        last_name: "Duck",
+        email: null,
+        phone: null,
+        lookup_code: "DAASY234",
+        event_status: "ROUND_ONE",
+        existing_heat: "ROUND_ONE:3",
+      };
+    }
+    if (sql.includes("FROM event_ducks")) return null;
+    return null;
+  });
+  const response = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}/assignments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: "event_test",
+        lookupCode: "DAASY234",
+      }),
+    }),
+    makeEnv(db),
+    actor,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 201);
+  assert.deepEqual(body.heat, { round: "ROUND_ONE", number: 3 }, "they keep the heat they were already in");
+  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
+  assert.match(sql, /INSERT INTO duck_assignments/);
+  assert.match(sql, /SET status = 'ACTIVE'/);
+  // No second heat place, and no new heat, for someone who already has one.
+  assert.doesNotMatch(sql, /INSERT INTO heat_entries/);
+  assert.doesNotMatch(sql, /INSERT INTO heats/);
+});
+
+// The desk is told the race the participant is actually about to run. A finalist
+// whose duck was deleted is next in the final, not in the round-one heat they
+// already won.
+test("re-pairing a finalist reports the final, and a replay of the same command agrees", async () => {
+  const registration = (extra) => ({
+    event_id: "event_test",
+    round_one_heat_capacity: 10,
+    final_heat_capacity: 50,
+    registration_id: "registration_test",
+    registration_status: "SUBMITTED",
+    registration_revision: 2,
+    race_entry_id: "entry_test",
+    race_entry_revision: 1,
+    first_name: "Daisy",
+    last_name: "Duck",
+    email: null,
+    phone: null,
+    lookup_code: "DAASY234",
+    ...extra,
+  });
+  const request = () => new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}/assignments`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ commandId: crypto.randomUUID(), eventId: "event_test", lookupCode: "DAASY234" }),
+  });
+
+  const fresh = await handleStaffApi(request(), makeEnv(makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) return null;
+    if (sql.includes("FROM duck_tags")) {
+      return {
+        id: "duck_replacement",
+        visible_number: 77,
+        inventory_status: "AVAILABLE",
+        revision: 0,
+        active_assignment_id: null,
+      };
+    }
+    if (sql.includes("FROM registrations")) {
+      return registration({ event_status: "FINAL", existing_heat: "FINAL:1" });
+    }
+    return null;
+  })), actor);
+  assert.deepEqual((await fresh.json()).heat, { round: "FINAL", number: 1 });
+
+  // The replay resolves the heat the same way, so an identical command
+  // identifier can never report different material.
+  const replayed = await handleStaffApi(request(), makeEnv(makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) {
+      return {
+        ...registration({}),
+        assignment_id: "assignment_test",
+        visible_number: 77,
+        heat_round: "FINAL",
+        heat_number: 1,
+      };
+    }
+    return null;
+  })), actor);
+  const replayBody = await replayed.json();
+  assert.equal(replayBody.replayed, true);
+  assert.deepEqual(replayBody.heat, { round: "FINAL", number: 1 });
+});
+
+// Once racing has started, pairing repairs someone who already has a place. It
+// cannot add a newcomer: round-one rosters are locked, and a heat created from a
+// lifecycle that has moved past its round could never be started.
+test("a participant with no heat place cannot be paired into a running race", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) return null;
+    if (sql.includes("FROM duck_tags")) {
+      return {
+        id: "duck_spare",
+        visible_number: 77,
+        inventory_status: "AVAILABLE",
+        revision: 0,
+        active_assignment_id: null,
+      };
+    }
+    if (sql.includes("FROM registrations")) {
+      return {
+        event_id: "event_test",
+        event_status: "FINAL",
+        round_one_heat_capacity: 10,
+        final_heat_capacity: 50,
+        registration_id: "registration_test",
+        registration_status: "SUBMITTED",
+        registration_revision: 0,
+        race_entry_id: "entry_test",
+        race_entry_revision: 0,
+        first_name: "Daisy",
+        last_name: "Duck",
+        email: null,
+        phone: null,
+        lookup_code: "DAASY234",
+        existing_heat: null,
+      };
+    }
+    return null;
+  });
+  const response = await handleStaffApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${"a".repeat(32)}/assignments`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId: crypto.randomUUID(), eventId: "event_test", lookupCode: "DAASY234" }),
+    }),
+    makeEnv(db),
+    actor,
+  );
+
+  assert.equal(response.status, 409);
+  assert.match((await response.json()).error, /Racing has started/);
+  assert.equal(db.batches.length, 0, "no phantom round-one heat is created");
+});
+
+// The lifecycle statuses pairing accepts are what allow the repair above.
+test("pairing accepts a participant while a round is running", () => {
+  assert.match(
+    staffApiSource,
+    /AND e\.status IN \('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL'\)/,
+  );
 });
 
 test("immediate pairing rejects before creating a round-one heat beyond final capacity", async () => {

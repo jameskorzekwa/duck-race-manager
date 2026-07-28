@@ -6,8 +6,7 @@ import {
   renderDuck,
   renderFinishLine,
   renderHome,
-  renderInventoryIntake,
-  renderInventoryIntakeUnsupported,
+  renderStaffInventory,
   renderMyDucks,
   renderPublicDuck,
   renderPublicDuckNotFound,
@@ -42,8 +41,7 @@ const renderedPages = [
   renderStaffAccess("Administrator"),
   renderStartLine("Start staff", false),
   renderFinishLine("Finish staff", false),
-  renderInventoryIntake("Inventory staff", "https://quickducks.com"),
-  renderInventoryIntakeUnsupported("Inventory staff"),
+  renderStaffInventory("Inventory staff", "https://quickducks.com"),
   renderStaffDuck("a".repeat(32), "Registration staff"),
   renderStaffPairing(),
 ];
@@ -139,7 +137,12 @@ test("newer My Ducks, inventory panel, and app dialog surfaces stay contained", 
   // a readable size instead of the 12ch display treatment.
   assert.match(style, /\.page-title\.message-title \{ max-width:26ch; font-size:clamp\(1\.9rem,5vw,3\.2rem\);/);
   assert.match(style, /\.my-ducks-flow \{ display:flex; flex-direction:column; \}/);
-  assert.match(staffHome, /class="operation-card inventory-detail-panel"[^>]*data-inventory-detail hidden/);
+  // Inventory is its own page now, so the detail panel lives there.
+  assert.match(
+    renderStaffInventory("Duck Manager", "https://quickducks.com"),
+    /class="operation-card inventory-detail-panel"[^>]*data-inventory-detail hidden/,
+  );
+  assert.doesNotMatch(staffHome, /data-inventory-detail/);
   assert.match(style, /\.inventory-detail-panel \{ min-width:0;/);
   assert.match(style, /\.inventory-card-grid \{ grid-template-columns:repeat\(auto-fit,minmax\(min\(100%,14rem\),1fr\)\);/);
   assert.match(style, /\.app-confirmation \{ width:min\(34rem,calc\(100% - 2rem\)\);/);
@@ -165,7 +168,13 @@ test("every rendered form class remains covered by the shared form constraints",
   // in Support, and the staff duck page's disposition form are all gone.
   // The name-search form moved from the home page to My Ducks, and the
   // registration form now renders only in the Registration phase.
-  assert.equal(openingForms, 29);
+  //
+  // Inventory then moved off the console onto its own page: the console lost
+  // seven forms (intake, edit, replace tag, retire tag, assign, unassign,
+  // release) and gained the staff duck-name field, and the inventory page
+  // renders six of its own (intake, duck name, assign, unpair, release,
+  // delete). The unsupported-device page, which had none, is gone.
+  assert.equal(openingForms, 28);
   assert.equal(closingForms, openingForms);
   // "danger-zone" left the form vocabulary with the two purge forms; it now
   // styles only the <details>/<article> wrappers around destructive actions.
@@ -193,7 +202,7 @@ test("no rendered page ships a freshness indicator or its stylesheet rule", () =
 test("stations keep their actionable message lines after freshness removal", () => {
   const startLine = renderStartLine("Start staff", false);
   const finishLine = renderFinishLine("Finish staff", false);
-  const intake = renderInventoryIntake("Inventory staff", "https://quickducks.com");
+  const intake = renderStaffInventory("Inventory staff", "https://quickducks.com");
 
   for (const markup of [startLine, finishLine]) {
     assert.match(markup, /class="message-line muted" data-station-message aria-live="polite"/);
@@ -268,7 +277,7 @@ test("My Ducks separates participants registered here from ducks that are only f
   // The owned sections say the opposite, so the distinction is on the page and
   // not only in the card contents.
   assert.match(myDucks, /Participants you registered on this device, waiting for staff to pair a physical duck\. Their staff lookup code stays on this device\./);
-  assert.match(myDucks, /Participants you registered on this device, already paired with their race duck\. Give the duck a name/);
+  assert.match(myDucks, /Participants you registered on this device, already paired with their race duck\. Use Rename on a duck to give it a name/);
   assert.match(myDucks, /Participants you registered on this device keep their full details and staff lookup code\./);
   // The followed section still follows the shared hidden-until-data rule.
   const followed = myDucks.slice(myDucks.indexOf('data-participant-section="followed"'));
@@ -496,7 +505,7 @@ test("the tag token pattern still accepts exactly what the server accepts", () =
   // Escaping must not narrow the accepted set: this pattern mirrors
   // `validTagToken` in duck-operations.ts, and the lengths come from
   // minlength/maxlength beside it.
-  const pattern = renderStaffHome("Administrator", true, [])
+  const pattern = renderStaffInventory("Duck Manager", "https://quickducks.com")
     .match(/name="tagToken"[^>]* pattern="([^"]*)"/)[1];
   const field = new RegExp(`^(?:${pattern})$`, "v");
 

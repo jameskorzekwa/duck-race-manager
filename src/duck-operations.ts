@@ -1,5 +1,6 @@
 import type { StaffActor } from "./auth.ts";
 import { canViewParticipantPii, requireAnyRole } from "./authorization.ts";
+import { publicDuckName } from "./duck-name-filter.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -13,6 +14,13 @@ const headers = {
 const inventoryPath = "/api/v1/staff/inventory";
 const preRaceStatuses = ["DRAFT", "REGISTRATION_OPEN", "REGISTRATION_CLOSED"] as const;
 const activeRaceStatuses = [...preRaceStatuses, "ROUND_ONE", "FINAL"] as const;
+
+// `ducks.physical_condition` is no longer a field staff set or read. Nothing
+// outside this module writes anything but the two values the blank-sticker
+// station uses for itself: NEEDS_TAG while a sticker is reserved and unwritten,
+// GOOD once it is confirmed. Delete duck replaced every judgement the old
+// condition dropdown was making. The column stays until a later release drops
+// it, because a migration must be safe against the previously deployed Worker.
 const physicalConditions = ["GOOD", "NEEDS_TAG", "DAMAGED", "RETIRED"] as const;
 
 type PhysicalCondition = typeof physicalConditions[number];
@@ -97,7 +105,6 @@ interface DuckSummaryRow {
   visible_number: number;
   inventory_status: string;
   duck_revision: number;
-  physical_condition: PhysicalCondition;
   storage_location: string | null;
   notes: string | null;
   tag_id: string | null;
@@ -112,6 +119,7 @@ interface DuckSummaryRow {
   assignment_id: string | null;
   assignment_valid_from: string | null;
   race_entry_id: string | null;
+  duck_name: string | null;
   registration_id: string | null;
   first_name: string | null;
   last_name: string | null;
@@ -125,13 +133,13 @@ interface DuckSummaryRow {
 
 const duckSelect = `
   SELECT d.id AS duck_id, d.visible_number, d.inventory_status,
-         d.revision AS duck_revision, d.physical_condition,
+         d.revision AS duck_revision,
          d.storage_location, d.notes,
          dt.id AS tag_id, dt.status AS tag_status, dt.activated_at AS tag_activated_at,
          ed.id AS event_duck_id, ed.reserved_at, ed.released_at,
          e.id AS event_id, e.name AS event_name, e.status AS event_status,
          da.id AS assignment_id, da.valid_from AS assignment_valid_from,
-         da.race_entry_id, r.id AS registration_id,
+         da.race_entry_id, re.duck_name, r.id AS registration_id,
          r.first_name, r.last_name, r.status AS registration_status,
          h.id AS heat_id, h.round AS heat_round, h.heat_number,
          h.status AS heat_status, he.slot_number AS heat_slot_number
@@ -172,7 +180,6 @@ const summaryResponse = (row: DuckSummaryRow, includePii: boolean): Record<strin
   visibleNumber: row.visible_number,
   inventoryStatus: row.inventory_status,
   revision: row.duck_revision,
-  condition: row.physical_condition,
   location: row.storage_location,
   notes: row.notes,
   tag: row.tag_id === null ? null : {
@@ -195,6 +202,14 @@ const summaryResponse = (row: DuckSummaryRow, includePii: boolean): Record<strin
     validFrom: row.assignment_valid_from,
     raceEntryId: row.race_entry_id,
   },
+  // Inventory staff name and moderate this duck, so they see exactly what is
+  // stored plus whether the read-time filter is already hiding it. It is the
+  // same projection the participant console already carries, under the same
+  // authenticated inventory roles, and it names a duck rather than a person.
+  duckName: row.assignment_id === null ? null : row.duck_name,
+  duckNamePubliclyHidden: row.assignment_id !== null
+    && row.duck_name !== null
+    && publicDuckName(row.duck_name) === null,
   participant: row.registration_id === null ? null : {
     registrationId: row.registration_id,
     raceEntryId: row.race_entry_id,
@@ -213,8 +228,14 @@ const summaryResponse = (row: DuckSummaryRow, includePii: boolean): Record<strin
 const getDuckSummary = (env: Env, duckId: string): Promise<DuckSummaryRow | null> =>
   env.DB.prepare(`${duckSelect} WHERE d.id = ? LIMIT 1`).bind(duckId).first<DuckSummaryRow>();
 
+// RETIRED is now reachable only through delete duck, and only for a duck whose
+// rows have to survive a published result. Leaving it in the list would make a
+// deleted duck look like it was merely set aside, so it is excluded here and
+// the two delete paths look identical to the actor.
 const listDucks = async (env: Env, includePii: boolean): Promise<Response> => {
-  const ducks = await env.DB.prepare(`${duckSelect} ORDER BY d.visible_number`).all<DuckSummaryRow>();
+  const ducks = await env.DB.prepare(
+    `${duckSelect} WHERE d.inventory_status != 'RETIRED' ORDER BY d.visible_number`,
+  ).all<DuckSummaryRow>();
   return json({ ducks: ducks.results.map((duck) => summaryResponse(duck, includePii)) });
 };
 
@@ -536,7 +557,6 @@ interface IntakeResultRow {
   visible_number: number;
   inventory_status: string;
   revision: number;
-  physical_condition: PhysicalCondition;
   storage_location: string | null;
   notes: string | null;
   tag_id: string;
@@ -546,7 +566,7 @@ interface IntakeResultRow {
 const getIntakeResult = (env: Env, duckId: string, eventId: string): Promise<IntakeResultRow | null> =>
   env.DB.prepare(
     `SELECT d.id AS duck_id, d.visible_number, d.inventory_status, d.revision,
-            d.physical_condition, d.storage_location, d.notes,
+            d.storage_location, d.notes,
             dt.id AS tag_id, ed.id AS event_duck_id
        FROM ducks d
        JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'ACTIVE'
@@ -562,7 +582,6 @@ const intakeResponse = (row: IntakeResultRow, replayed: boolean): Response => js
     visibleNumber: row.visible_number,
     inventoryStatus: row.inventory_status,
     revision: row.revision,
-    condition: row.physical_condition,
     location: row.storage_location,
     notes: row.notes,
   },
@@ -577,24 +596,21 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
   const eventId = payload?.eventId;
   const visibleNumber = payload?.visibleNumber;
   const tagToken = payload?.tagToken;
-  const condition = payload?.condition ?? "GOOD";
   const location = cleanOptional(payload?.location ?? null, 100);
   const notes = cleanOptional(payload?.notes ?? null, 1000);
   if (
     typeof commandId !== "string" || !isCommandId(commandId)
     || !validEventId(eventId) || !validVisibleNumber(visibleNumber)
     || !validTagToken(tagToken)
-    || !physicalConditions.includes(condition as PhysicalCondition)
     || location === undefined || notes === undefined
     || payload?.physicallyPresent !== true
   ) {
-    return json({ error: "Command, event, physical-presence confirmation, duck number, condition, and valid tag are required." }, 400);
+    return json({ error: "Command, event, physical-presence confirmation, duck number, and valid tag are required." }, 400);
   }
 
   const requestDetails = {
     visibleNumber,
     tagTokenHash: await hashValue(tagToken),
-    condition,
     location,
     notes,
     physicallyPresent: true,
@@ -610,8 +626,11 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
       : intakeResponse(result, true);
   }
 
+  // Intake stays open once racing starts. Deleting a duck mid-race hands its
+  // participant back to the pairing queue, and a race with no spare duck in
+  // inventory would otherwise have no way to finish.
   const event = await env.DB.prepare(
-    `SELECT id FROM events WHERE id = ? AND status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')`,
+    `SELECT id FROM events WHERE id = ? AND status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
   ).bind(eventId).first<{ id: string }>();
   if (event === null) return json({ error: "Duck intake is closed for this event." }, 409);
 
@@ -619,16 +638,16 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
   const duckId = crypto.randomUUID();
   const tagId = crypto.randomUUID();
   const eventDuckId = crypto.randomUUID();
-  const inventoryStatus = inventoryStatusForCondition(condition as PhysicalCondition, "RESERVED_FOR_EVENT");
+  const inventoryStatus = "RESERVED_FOR_EVENT";
   const details = { request: requestDetails, tag_id: tagId, event_duck_id: eventDuckId };
   const execution = await execute(env, [
-    commandInsert(env, commandId, eventId, "REGISTER_RACE_DUCK", duckId, now, preRaceStatuses),
+    commandInsert(env, commandId, eventId, "REGISTER_RACE_DUCK", duckId, now, activeRaceStatuses),
     env.DB.prepare(
       `INSERT INTO ducks
          (id, visible_number, inventory_status, inventory_status_changed_at,
           physical_condition, storage_location, notes, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(duckId, visibleNumber, inventoryStatus, now, condition, location, notes, now, now),
+        VALUES (?, ?, ?, ?, 'GOOD', ?, ?, ?, ?)`,
+    ).bind(duckId, visibleNumber, inventoryStatus, now, location, notes, now, now),
     env.DB.prepare(
       `INSERT INTO duck_tags
         (id, duck_id, token, status, written_at, verified_at, activated_at, created_at, updated_at)
@@ -642,7 +661,6 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
     inventoryEventInsert(env, eventId, duckId, "DUCK_INTAKE", actor.id, commandId, now, details),
     auditInsert(env, eventId, commandId, "DUCK_REGISTERED_FOR_EVENT", "DUCK", duckId, actor.id, now, {
       visible_number: visibleNumber,
-      condition,
       location,
     }),
   ], commandId, eventId, "REGISTER_RACE_DUCK", requestDetails, duckId);
@@ -660,7 +678,6 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
     visible_number: visibleNumber,
     inventory_status: inventoryStatus,
     revision: 0,
-    physical_condition: condition as PhysicalCondition,
     storage_location: location,
     notes,
     tag_id: tagId,
@@ -966,7 +983,7 @@ const takeoverProvisioning = async (
             AND dt.id = json_extract(start_ae.details_json, '$.tag_id')
            JOIN audit_events owner_ae ON owner_ae.id = ?
           WHERE e.id = ?
-            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
+            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
             AND d.id = ?
             AND d.inventory_status = 'NEW'
             AND d.physical_condition = 'NEEDS_TAG'
@@ -1094,7 +1111,7 @@ const startProvisioning = async (
 
   const event = await env.DB.prepare(
     `SELECT id FROM events
-      WHERE id = ? AND status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')`,
+      WHERE id = ? AND status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
   ).bind(eventId).first<{ id: string }>();
   if (event === null) return json({ error: "Duck provisioning is closed for this event." }, 409);
 
@@ -1111,7 +1128,7 @@ const startProvisioning = async (
          SELECT ?, e.id, '${provisioningStartCommand}', ?, ?, ?, ?
            FROM events e
           WHERE e.id = ?
-            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
+            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
             AND COALESCE((SELECT MAX(visible_number) FROM ducks), 0) < 999999999
             AND NOT EXISTS (
               SELECT 1
@@ -1251,7 +1268,11 @@ const classifyProvisioningTag = async (
   ) {
     return json({ kind: "pending", duckId: tag.duck_id, provisioningCommandId: tag.provisioning_command_id });
   }
-  return json({ kind: "already" });
+  // The duck identifier travels with an already-registered verdict so the
+  // station can open that duck's record instead of only refusing to overwrite
+  // it. It is an internal identifier behind the same inventory roles as the
+  // rest of this module, and it names a duck rather than a person.
+  return json({ kind: "already", duckId: tag.duck_id });
 };
 
 const confirmProvisioning = async (
@@ -1316,7 +1337,7 @@ const confirmProvisioning = async (
 
   const event = await env.DB.prepare(
     `SELECT id FROM events
-      WHERE id = ? AND status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')`,
+      WHERE id = ? AND status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
   ).bind(eventId).first<{ id: string }>();
   if (event === null) return json({ error: "Duck provisioning confirmation is closed for this event." }, 409);
 
@@ -1345,7 +1366,7 @@ const confirmProvisioning = async (
            JOIN ducks d ON d.id = start_rc.result_id
            JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'RESERVED'
           WHERE e.id = ?
-            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
+            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
              AND d.id = ?
              AND d.inventory_status = 'NEW'
              AND d.physical_condition = 'NEEDS_TAG'
@@ -1446,314 +1467,103 @@ const confirmProvisioning = async (
     : intakeResponse(confirmed, true);
 };
 
-interface EditableDuckRow {
-  id: string;
-  visible_number: number;
-  inventory_status: string;
-  revision: number;
-  physical_condition: PhysicalCondition;
-  storage_location: string | null;
-  notes: string | null;
-  event_duck_id: string;
-  event_status: string;
-  active_assignment_id: string | null;
-}
-
-const getEditableDuck = (env: Env, duckId: string, eventId: string): Promise<EditableDuckRow | null> =>
-  env.DB.prepare(
-    `SELECT d.id, d.visible_number, d.inventory_status, d.revision,
-            d.physical_condition, d.storage_location, d.notes,
-            ed.id AS event_duck_id, e.status AS event_status,
-            da.id AS active_assignment_id
+const getLabelData = async (env: Env, duckId: string): Promise<Response> => {
+  const label = await env.DB.prepare(
+    `SELECT d.visible_number, dt.token
        FROM ducks d
-       JOIN event_ducks ed
-         ON ed.duck_id = d.id AND ed.event_id = ? AND ed.released_at IS NULL
-       JOIN events e ON e.id = ed.event_id
-       LEFT JOIN duck_assignments da ON da.duck_id = d.id AND da.valid_to IS NULL
+       JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'ACTIVE'
       WHERE d.id = ?
       LIMIT 1`,
-  ).bind(eventId, duckId).first<EditableDuckRow>();
-
-const editDuck = async (
-  request: Request,
-  env: Env,
-  actor: StaffActor,
-  duckId: string,
-): Promise<Response> => {
-  const payload = await readJson(request);
-  const commandId = payload?.commandId;
-  const eventId = payload?.eventId;
-  const expectedRevision = payload?.expectedRevision;
-  const hasVisibleNumber = payload !== null && Object.hasOwn(payload, "visibleNumber");
-  const hasCondition = payload !== null && Object.hasOwn(payload, "condition");
-  const hasLocation = payload !== null && Object.hasOwn(payload, "location");
-  const hasNotes = payload !== null && Object.hasOwn(payload, "notes");
-  const location = hasLocation ? cleanOptional(payload?.location, 100) : undefined;
-  const notes = hasNotes ? cleanOptional(payload?.notes, 1000) : undefined;
-  if (
-    typeof commandId !== "string" || !isCommandId(commandId)
-    || !validEventId(eventId) || !validRevision(expectedRevision)
-    || (!hasVisibleNumber && !hasCondition && !hasLocation && !hasNotes)
-    || (hasVisibleNumber && !validVisibleNumber(payload?.visibleNumber))
-    || (hasCondition && !physicalConditions.includes(payload?.condition as PhysicalCondition))
-    || (hasLocation && location === undefined) || (hasNotes && notes === undefined)
-  ) {
-    return json({ error: "Command, event, expected revision, and at least one valid inventory field are required." }, 400);
-  }
-
-  const changes: Record<string, unknown> = {};
-  if (hasVisibleNumber) changes.visibleNumber = payload?.visibleNumber;
-  if (hasCondition) changes.condition = payload?.condition;
-  if (hasLocation) changes.location = location;
-  if (hasNotes) changes.notes = notes;
-  const requestDetails = { duckId, expectedRevision, changes };
-  const previous = await checkCommand(env, commandId, eventId, "EDIT_DUCK_INVENTORY", requestDetails, duckId, duckId);
-  if (previous.kind === "conflict") {
-    return json({ error: "This command identifier was already used for another operation." }, 409);
-  }
-  if (previous.kind === "replay") {
-    const current = await getEditableDuck(env, duckId, eventId);
-    return current === null
-      ? json({ error: "Duck not found in this event." }, 404)
-      : json({ duck: {
-        id: current.id,
-        visibleNumber: current.visible_number,
-        inventoryStatus: current.inventory_status,
-        revision: current.revision,
-        condition: current.physical_condition,
-        location: current.storage_location,
-        notes: current.notes,
-      }, replayed: true });
-  }
-
-  const current = await getEditableDuck(env, duckId, eventId);
-  if (current === null) return json({ error: "Duck not found in this event." }, 404);
-  if (!preRaceStatuses.includes(current.event_status as typeof preRaceStatuses[number])) {
-    return json({ error: "Inventory fields can be edited only before racing begins." }, 409);
-  }
-  if (current.revision !== expectedRevision) {
-    return json({ error: "Duck inventory changed. Refresh and try again.", revision: current.revision }, 409);
-  }
-
-  const now = new Date().toISOString();
-  const nextCondition = hasCondition
-    ? payload?.condition as PhysicalCondition
-    : current.physical_condition;
-  const nextInventoryStatus = hasCondition
-    ? inventoryStatusForCondition(
-      nextCondition,
-      current.active_assignment_id === null ? "RESERVED_FOR_EVENT" : "IN_USE",
-    )
-    : current.inventory_status;
-  const assignments: string[] = [];
-  const values: unknown[] = [];
-  if (hasVisibleNumber) {
-    assignments.push("visible_number = ?");
-    values.push(payload?.visibleNumber);
-  }
-  if (hasCondition) {
-    assignments.push("physical_condition = ?");
-    values.push(payload?.condition);
-    assignments.push("inventory_status = ?", "inventory_status_changed_at = ?");
-    values.push(nextInventoryStatus, now);
-  }
-  if (hasLocation) {
-    assignments.push("storage_location = ?");
-    values.push(location);
-  }
-  if (hasNotes) {
-    assignments.push("notes = ?");
-    values.push(notes);
-  }
-  const details = { request: requestDetails, before: {
-    visibleNumber: current.visible_number,
-    condition: current.physical_condition,
-    location: current.storage_location,
-    notes: current.notes,
-  } };
-  const guardedCommand = env.DB.prepare(
-    `INSERT INTO race_commands
-      (id, event_id, command_type, result_id, requested_at, completed_at)
-     SELECT ?, ?, 'EDIT_DUCK_INVENTORY', ?, ?, ?
-       FROM events e
-       JOIN event_ducks ed ON ed.event_id = e.id AND ed.duck_id = ? AND ed.released_at IS NULL
-       JOIN ducks d ON d.id = ed.duck_id
-      WHERE e.id = ?
-        AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
-        AND d.revision = ?`,
-  ).bind(commandId, eventId, duckId, now, now, duckId, eventId, expectedRevision);
-  const execution = await execute(env, [
-    guardedCommand,
-    env.DB.prepare(
-      `UPDATE ducks SET ${assignments.join(", ")}, updated_at = ?, revision = revision + 1
-        WHERE id = ? AND revision = ?`,
-    ).bind(...values, now, duckId, expectedRevision),
-    inventoryEventInsert(env, eventId, duckId, "DUCK_EDITED", actor.id, commandId, now, details),
-    auditInsert(env, eventId, commandId, "DUCK_INVENTORY_EDITED", "DUCK", duckId, actor.id, now, {
-      expected_revision: expectedRevision,
-      changes,
-    }),
-  ], commandId, eventId, "EDIT_DUCK_INVENTORY", requestDetails, duckId, duckId);
-  if (execution === null) {
-    return json({ error: "Duck inventory changed or conflicts with another duck. Refresh and try again." }, 409);
-  }
-  if (execution.replayed) {
-    const replay = await getEditableDuck(env, duckId, eventId);
-    return replay === null ? json({ error: "Duck not found in this event." }, 404) : json({
-      duck: {
-        id: replay.id,
-        visibleNumber: replay.visible_number,
-        inventoryStatus: replay.inventory_status,
-        revision: replay.revision,
-        condition: replay.physical_condition,
-        location: replay.storage_location,
-        notes: replay.notes,
-      },
-      replayed: true,
-    });
-  }
-  return json({
-    duck: {
-      id: duckId,
-      visibleNumber: hasVisibleNumber ? payload?.visibleNumber : current.visible_number,
-      inventoryStatus: nextInventoryStatus,
-      revision: expectedRevision + 1,
-      condition: hasCondition ? payload?.condition : current.physical_condition,
-      location: hasLocation ? location : current.storage_location,
-      notes: hasNotes ? notes : current.notes,
-    },
-    replayed: false,
-  });
+  ).bind(duckId).first<{ visible_number: number; token: string }>();
+  if (label === null) return json({ error: "Duck has no active label tag." }, 404);
+  const tagUrl = new URL(`/t/${label.token}`, env.APP_ORIGIN).toString();
+  return json({ visibleNumber: label.visible_number, tagUrl });
 };
 
-interface TagContextRow {
+// ---------------------------------------------------------------------------
+// Delete duck
+//
+// The one way a duck leaves inventory. It replaces the retired tag-replacement
+// and tag-retirement commands, which asked staff to reason about tag states
+// that only ever meant "this duck is out of the race".
+//
+// A participant is never deleted with their duck. A heat entry names the race
+// entry, not the assignment, and the duck a racer is holding is resolved
+// through the currently open assignment, so closing that assignment leaves the
+// participant exactly where they were in their heat with no duck. Staff then
+// pair them with another duck through the normal flow, and `transitionHeat`
+// refuses to start a heat while anyone on its roster is holding nothing.
+//
+// Rows are removed outright when nothing published depends on them. A duck that
+// has a finalized result cannot be erased without making that result untrue, so
+// it keeps its rows and leaves inventory as RETIRED instead. Both paths look
+// the same to the actor and both end with the duck gone from every list.
+// ---------------------------------------------------------------------------
+interface DeletableDuckRow {
   duck_id: string;
   visible_number: number;
   revision: number;
-  inventory_status: string;
-  physical_condition: PhysicalCondition;
-  event_duck_id: string;
-  event_status: string;
-  tag_id: string;
+  event_duck_id: string | null;
+  event_duck_event_id: string | null;
+  event_status: string | null;
   active_assignment_id: string | null;
+  race_entry_id: string | null;
+  registration_id: string | null;
+  published_result_count: number;
+  in_flight_heat_id: string | null;
 }
 
-const getTagContext = (env: Env, duckId: string, eventId: string): Promise<TagContextRow | null> =>
+// Deleting a duck has no inventory-event row to compare a replay against — the
+// erased path removes the table those rows live in — so the command row itself
+// is the idempotency record.
+const findRaceCommand = (env: Env, commandId: string): Promise<ExistingCommand | null> =>
   env.DB.prepare(
-    `SELECT d.id AS duck_id, d.visible_number, d.revision, d.inventory_status,
-            d.physical_condition, ed.id AS event_duck_id, e.status AS event_status,
-            dt.id AS tag_id, da.id AS active_assignment_id
+    "SELECT event_id, command_type, result_id FROM race_commands WHERE id = ?",
+  ).bind(commandId).first<ExistingCommand>();
+
+// `published_result_count` counts both the live result rows and every superseded
+// revision of them. `heat_result_history` carries a `duck_assignment_id` with no
+// foreign key of its own, so erasing a corrected duck would leave that history
+// pointing at nothing and `PRAGMA foreign_key_check` would never notice.
+const getDeletableDuck = (env: Env, duckId: string): Promise<DeletableDuckRow | null> =>
+  env.DB.prepare(
+    `SELECT d.id AS duck_id, d.visible_number, d.revision,
+            ed.id AS event_duck_id, ed.event_id AS event_duck_event_id,
+            e.status AS event_status,
+            da.id AS active_assignment_id, da.race_entry_id,
+            re.registration_id,
+            (
+              (SELECT COUNT(*)
+                 FROM heat_results hr
+                 JOIN duck_assignments hda ON hda.id = hr.duck_assignment_id
+                WHERE hda.duck_id = d.id)
+              + (SELECT COUNT(*)
+                   FROM heat_result_history hh
+                   JOIN duck_assignments hda ON hda.id = hh.duck_assignment_id
+                  WHERE hda.duck_id = d.id)
+            ) AS published_result_count,
+            (
+              SELECT h.id
+                FROM heat_entries he
+                JOIN heats h ON h.id = he.heat_id
+               WHERE he.race_entry_id = da.race_entry_id
+                 AND h.status IN ('RUNNING', 'AWAITING_RESULT')
+               LIMIT 1
+            ) AS in_flight_heat_id
        FROM ducks d
-       JOIN event_ducks ed
-         ON ed.duck_id = d.id AND ed.event_id = ? AND ed.released_at IS NULL
-       JOIN events e ON e.id = ed.event_id
-       JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'ACTIVE'
+       LEFT JOIN event_ducks ed ON ed.id = (
+         SELECT ed2.id FROM event_ducks ed2
+          WHERE ed2.duck_id = d.id AND ed2.released_at IS NULL
+          LIMIT 1
+       )
+       LEFT JOIN events e ON e.id = ed.event_id
        LEFT JOIN duck_assignments da ON da.duck_id = d.id AND da.valid_to IS NULL
+       LEFT JOIN race_entries re ON re.id = da.race_entry_id
       WHERE d.id = ?
       LIMIT 1`,
-  ).bind(eventId, duckId).first<TagContextRow>();
+  ).bind(duckId).first<DeletableDuckRow>();
 
-const replaceTag = async (
-  request: Request,
-  env: Env,
-  actor: StaffActor,
-  duckId: string,
-): Promise<Response> => {
-  const payload = await readJson(request);
-  const commandId = payload?.commandId;
-  const eventId = payload?.eventId;
-  const expectedRevision = payload?.expectedRevision;
-  const newTagToken = payload?.tagToken;
-  if (
-    typeof commandId !== "string" || !isCommandId(commandId)
-    || !validEventId(eventId) || !validRevision(expectedRevision)
-    || !validTagToken(newTagToken) || payload?.physicalTagVerified !== true
-  ) {
-    return json({ error: "Command, event, expected revision, verified physical tag, and valid tag token are required." }, 400);
-  }
-  const requestDetails = {
-    duckId,
-    expectedRevision,
-    tagTokenHash: await hashValue(newTagToken),
-    physicalTagVerified: true,
-  };
-  const previous = await checkCommand(env, commandId, eventId, "REPLACE_DUCK_TAG", requestDetails, duckId, duckId);
-  if (previous.kind === "conflict") {
-    return json({ error: "This command identifier was already used for another operation." }, 409);
-  }
-  if (previous.kind === "replay") {
-    const current = await getTagContext(env, duckId, eventId);
-    return current === null
-      ? json({ error: "The saved tag replacement is no longer active." }, 409)
-      : json({ duckId, revision: current.revision, tag: { id: current.tag_id, status: "ACTIVE" }, replayed: true });
-  }
-
-  const context = await getTagContext(env, duckId, eventId);
-  if (context === null) return json({ error: "Duck has no active tag in this event." }, 404);
-  if (!activeRaceStatuses.includes(context.event_status as typeof activeRaceStatuses[number])) {
-    return json({ error: "Tags cannot be replaced after racing is complete." }, 409);
-  }
-  if (context.revision !== expectedRevision) {
-    return json({ error: "Duck inventory changed. Refresh and try again.", revision: context.revision }, 409);
-  }
-
-  const now = new Date().toISOString();
-  const tagId = crypto.randomUUID();
-  const restoredCondition = context.physical_condition === "NEEDS_TAG" ? "GOOD" : context.physical_condition;
-  const restoredInventoryStatus = context.physical_condition === "NEEDS_TAG"
-    ? context.active_assignment_id === null ? "RESERVED_FOR_EVENT" : "IN_USE"
-    : context.inventory_status;
-  const details = { request: requestDetails, retired_tag_id: context.tag_id, active_tag_id: tagId };
-  const guardedCommand = env.DB.prepare(
-    `INSERT INTO race_commands
-      (id, event_id, command_type, result_id, requested_at, completed_at)
-     SELECT ?, ?, 'REPLACE_DUCK_TAG', ?, ?, ?
-       FROM events e
-       JOIN event_ducks ed ON ed.event_id = e.id AND ed.duck_id = ? AND ed.released_at IS NULL
-       JOIN ducks d ON d.id = ed.duck_id
-       JOIN duck_tags dt ON dt.duck_id = d.id AND dt.id = ? AND dt.status = 'ACTIVE'
-      WHERE e.id = ?
-        AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
-        AND d.revision = ?`,
-  ).bind(commandId, eventId, duckId, now, now, duckId, context.tag_id, eventId, expectedRevision);
-  const execution = await execute(env, [
-    guardedCommand,
-    env.DB.prepare(
-      `UPDATE duck_tags
-          SET status = 'RETIRED', retired_at = ?, updated_at = ?
-        WHERE id = ? AND duck_id = ? AND status = 'ACTIVE'`,
-    ).bind(now, now, context.tag_id, duckId),
-    env.DB.prepare(
-      `INSERT INTO duck_tags
-        (id, duck_id, token, status, supersedes_tag_id, written_at,
-         verified_at, activated_at, created_at, updated_at)
-       VALUES (?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?)`,
-    ).bind(tagId, duckId, newTagToken, context.tag_id, now, now, now, now, now),
-    env.DB.prepare(
-      `UPDATE ducks
-          SET inventory_status = ?, inventory_status_changed_at = ?,
-              physical_condition = ?, updated_at = ?, revision = revision + 1
-        WHERE id = ? AND revision = ?`,
-    ).bind(restoredInventoryStatus, now, restoredCondition, now, duckId, expectedRevision),
-    inventoryEventInsert(env, eventId, duckId, "DUCK_TAG_REPLACED", actor.id, commandId, now, details),
-    auditInsert(env, eventId, commandId, "DUCK_TAG_REPLACED", "DUCK", duckId, actor.id, now, {
-      retired_tag_id: context.tag_id,
-      active_tag_id: tagId,
-    }),
-  ], commandId, eventId, "REPLACE_DUCK_TAG", requestDetails, duckId, duckId);
-  if (execution === null) {
-    return json({ error: "Tag replacement conflicted with another inventory update. Refresh and try again." }, 409);
-  }
-  if (execution.replayed) {
-    const replay = await getTagContext(env, duckId, eventId);
-    return replay === null
-      ? json({ error: "The saved tag replacement is no longer active." }, 409)
-      : json({ duckId, revision: replay.revision, tag: { id: replay.tag_id, status: "ACTIVE" }, replayed: true });
-  }
-  return json({ duckId, revision: expectedRevision + 1, tag: { id: tagId, status: "ACTIVE" }, replayed: false }, 201);
-};
-
-const retireTag = async (
+const deleteDuck = async (
   request: Request,
   env: Env,
   actor: StaffActor,
@@ -1767,84 +1577,175 @@ const retireTag = async (
   if (
     typeof commandId !== "string" || !isCommandId(commandId)
     || !validEventId(eventId) || !validRevision(expectedRevision)
-    || reason.length < 4 || reason.length > 500 || payload?.physicalTagRemoved !== true
+    || reason.length < 4 || reason.length > 500
   ) {
-    return json({ error: "Command, event, expected revision, removal confirmation, and a reason are required." }, 400);
-  }
-  const requestDetails = { duckId, expectedRevision, reason, physicalTagRemoved: true };
-  const previous = await checkCommand(env, commandId, eventId, "RETIRE_DUCK_TAG", requestDetails, duckId, duckId);
-  if (previous.kind === "conflict") {
-    return json({ error: "This command identifier was already used for another operation." }, 409);
-  }
-  if (previous.kind === "replay") {
-    return json({ duckId, revision: expectedRevision + 1, tag: { status: "RETIRED" }, replayed: true });
+    return json({ error: "Command, event, expected revision, and a reason are required." }, 400);
   }
 
-  const context = await getTagContext(env, duckId, eventId);
-  if (context === null) return json({ error: "Duck has no active tag in this event." }, 404);
-  if (!preRaceStatuses.includes(context.event_status as typeof preRaceStatuses[number])) {
-    return json({ error: "A tag may be retired without replacement only before racing begins." }, 409);
+  const previous = await findRaceCommand(env, commandId);
+  if (previous !== null) {
+    if (
+      previous.event_id !== eventId
+      || previous.command_type !== "DELETE_DUCK"
+      || previous.result_id !== duckId
+    ) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    return json({ duckId, deleted: true, replayed: true });
   }
-  if (context.active_assignment_id !== null) {
-    return json({ error: "Replace the tag instead; an assigned duck must retain an active tag." }, 409);
-  }
+
+  const context = await getDeletableDuck(env, duckId);
+  if (context === null) return json({ error: "Duck not found." }, 404);
   if (context.revision !== expectedRevision) {
     return json({ error: "Duck inventory changed. Refresh and try again.", revision: context.revision }, 409);
   }
+  // The command row is scoped to the event that owns the audit trail. A duck
+  // held for a different event is not this event's to delete.
+  if (context.event_duck_event_id !== null && context.event_duck_event_id !== eventId) {
+    return json({ error: "This duck is reserved for another event." }, 409);
+  }
+  if (
+    context.event_status !== null
+    && !activeRaceStatuses.includes(context.event_status as typeof activeRaceStatuses[number])
+  ) {
+    return json({ error: "This event is finished. Its ducks and results can no longer be changed." }, 409);
+  }
+  // The one window deleting a duck is genuinely unsafe: the racer's heat has
+  // been raced and its result is not published yet. Publishing needs an ACTIVE
+  // participant holding an open assignment, so unpairing there would make that
+  // result unpublishable and stall every heat waiting behind it.
+  //
+  // Everything either side is fine. Before the heat runs — including while it is
+  // being called, which is when a duck usually breaks — the heat simply refuses
+  // to start until the racer holds a duck again. After the result is published,
+  // a finalist who lost their duck just needs another one.
+  if (context.in_flight_heat_id !== null) {
+    return json({
+      error: "This racer's heat has been run. Publish its official result, then delete the duck.",
+    }, 409);
+  }
 
   const now = new Date().toISOString();
-  const details = { request: requestDetails, retired_tag_id: context.tag_id };
-  const guardedCommand = env.DB.prepare(
-    `INSERT INTO race_commands
-      (id, event_id, command_type, result_id, requested_at, completed_at)
-     SELECT ?, ?, 'RETIRE_DUCK_TAG', ?, ?, ?
-       FROM events e
-       JOIN event_ducks ed ON ed.event_id = e.id AND ed.duck_id = ? AND ed.released_at IS NULL
-       JOIN ducks d ON d.id = ed.duck_id
-       JOIN duck_tags dt ON dt.duck_id = d.id AND dt.id = ? AND dt.status = 'ACTIVE'
-      WHERE e.id = ?
-        AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
-        AND d.revision = ?
-        AND NOT EXISTS (
-          SELECT 1 FROM duck_assignments da WHERE da.duck_id = d.id AND da.valid_to IS NULL
-        )`,
-  ).bind(commandId, eventId, duckId, now, now, duckId, context.tag_id, eventId, expectedRevision);
-  const execution = await execute(env, [
-    guardedCommand,
+  const erasable = context.published_result_count === 0;
+  // Every statement below the command insert is conditional on that insert
+  // having landed. The deletes here are irreversible and span four tables, so
+  // the batch, not the preflight, is what has to decide: if the duck was paired,
+  // named, or moved between the read above and this write, the command row is
+  // never written and nothing else in the batch does anything either.
+  const committed = "AND EXISTS (SELECT 1 FROM race_commands rc WHERE rc.id = ? "
+    + "AND rc.event_id = ? AND rc.command_type = 'DELETE_DUCK' AND rc.result_id = ?)";
+  const commit = [commandId, eventId, duckId];
+  const statements: D1PreparedStatement[] = [
+    // Guarded on the revision the actor saw and on the event still being one
+    // where inventory can change at all.
     env.DB.prepare(
-      `UPDATE duck_tags
-          SET status = 'RETIRED', retired_at = ?, updated_at = ?
-        WHERE id = ? AND duck_id = ? AND status = 'ACTIVE'`,
-    ).bind(now, now, context.tag_id, duckId),
-    env.DB.prepare(
-      `UPDATE ducks
-          SET inventory_status = 'QUARANTINED', inventory_status_changed_at = ?,
-              physical_condition = 'NEEDS_TAG', updated_at = ?, revision = revision + 1
-        WHERE id = ? AND revision = ?`,
-    ).bind(now, now, duckId, expectedRevision),
-    inventoryEventInsert(env, eventId, duckId, "DUCK_TAG_RETIRED", actor.id, commandId, now, details),
-    auditInsert(env, eventId, commandId, "DUCK_TAG_RETIRED", "DUCK", duckId, actor.id, now, {
-      tag_id: context.tag_id,
+      `INSERT INTO race_commands
+        (id, event_id, command_type, result_id, requested_at, completed_at)
+       SELECT ?, ?, 'DELETE_DUCK', ?, ?, ?
+         FROM events e
+         JOIN ducks d ON d.id = ?
+        WHERE e.id = ? AND d.revision = ?
+          AND e.status IN (${activeRaceStatuses.map(() => "?").join(", ")})
+          AND NOT EXISTS (
+            SELECT 1
+              FROM duck_assignments da
+              JOIN heat_entries he ON he.race_entry_id = da.race_entry_id
+              JOIN heats h ON h.id = he.heat_id
+             WHERE da.duck_id = d.id AND da.valid_to IS NULL
+               AND h.status IN ('RUNNING', 'AWAITING_RESULT')
+          )`,
+    ).bind(
+      commandId, eventId, duckId, now, now, duckId, eventId, expectedRevision,
+      ...activeRaceStatuses,
+    ),
+    // Audit first: it is the only record that survives an erased duck, and it
+    // carries identifiers and the staff reason, never participant details.
+    auditInsert(env, eventId, commandId, "DUCK_DELETED", "DUCK", duckId, actor.id, now, {
+      visible_number: context.visible_number,
+      erased: erasable,
+      unpaired_race_entry_id: context.race_entry_id,
       reason,
     }),
-  ], commandId, eventId, "RETIRE_DUCK_TAG", requestDetails, duckId, duckId);
-  if (execution === null) {
-    return json({ error: "Tag retirement conflicted with another inventory update. Refresh and try again." }, 409);
-  }
-  return json({ duckId, revision: expectedRevision + 1, tag: { id: context.tag_id, status: "RETIRED" }, replayed: execution.replayed }, execution.replayed ? 200 : 201);
-};
+  ];
 
-const getLabelData = async (env: Env, duckId: string): Promise<Response> => {
-  const label = await env.DB.prepare(
-    `SELECT d.visible_number, dt.token
-       FROM ducks d
-       JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'ACTIVE'
-      WHERE d.id = ?
-      LIMIT 1`,
-  ).bind(duckId).first<{ visible_number: number; token: string }>();
-  if (label === null) return json({ error: "Duck has no active label tag." }, 404);
-  const tagUrl = new URL(`/t/${label.token}`, env.APP_ORIGIN).toString();
-  return json({ visibleNumber: label.visible_number, tagUrl });
+  if (context.active_assignment_id !== null) {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE duck_assignments
+            SET valid_to = ?, end_reason = 'DUCK_DELETED', ended_by_staff_profile_id = ?
+          WHERE id = ? AND valid_to IS NULL ${committed}`,
+      ).bind(now, actor.id, context.active_assignment_id, ...commit),
+      // Back to SUBMITTED is exactly where a participant sits before pairing,
+      // which is what puts them back in the queue on every staff and public
+      // surface without a status of their own.
+      env.DB.prepare(
+        `UPDATE registrations
+            SET status = 'SUBMITTED', status_changed_at = ?, updated_at = ?, revision = revision + 1
+          WHERE id = ? AND status = 'ACTIVE' ${committed}`,
+      ).bind(now, now, context.registration_id, ...commit),
+      // The duck is going; a name that described it goes with it.
+      env.DB.prepare(
+        `UPDATE race_entries SET duck_name = NULL, updated_at = ? WHERE id = ? ${committed}`,
+      ).bind(now, context.race_entry_id, ...commit),
+    );
+  }
+
+  if (erasable) {
+    statements.push(
+      // `supersedes_tag_id` is a self-referencing restricted foreign key, so a
+      // multi-row tag delete can hit a retired parent while its replacement
+      // still points at it. Clearing it first is what makes the delete
+      // survivable; this is the bug that once made force delete permanently
+      // fail for any race where a tag had been replaced. It clears every row
+      // pointing into this duck's tags, not only this duck's own rows.
+      env.DB.prepare(
+        `UPDATE duck_tags SET supersedes_tag_id = NULL
+          WHERE supersedes_tag_id IN (SELECT id FROM duck_tags WHERE duck_id = ?) ${committed}`,
+      ).bind(duckId, ...commit),
+      env.DB.prepare(`DELETE FROM duck_tags WHERE duck_id = ? ${committed}`).bind(duckId, ...commit),
+      env.DB.prepare(`DELETE FROM duck_assignments WHERE duck_id = ? ${committed}`).bind(duckId, ...commit),
+      env.DB.prepare(`DELETE FROM event_ducks WHERE duck_id = ? ${committed}`).bind(duckId, ...commit),
+      // `duck_inventory_events` cascades with the duck, so its history goes
+      // with it and the audit row above is what remains.
+      env.DB.prepare(
+        `DELETE FROM ducks WHERE id = ? AND revision = ? ${committed}`,
+      ).bind(duckId, expectedRevision, ...commit),
+    );
+  } else {
+    statements.push(
+      env.DB.prepare(
+        `UPDATE duck_tags SET status = 'RETIRED', retired_at = ?, updated_at = ?
+          WHERE duck_id = ? AND status = 'ACTIVE' ${committed}`,
+      ).bind(now, now, duckId, ...commit),
+      env.DB.prepare(
+        `UPDATE event_ducks
+            SET released_at = ?, release_reason = 'DUCK_DELETED', released_by_staff_profile_id = ?
+          WHERE duck_id = ? AND released_at IS NULL ${committed}`,
+      ).bind(now, actor.id, duckId, ...commit),
+      env.DB.prepare(
+        `UPDATE ducks
+            SET inventory_status = 'RETIRED', inventory_status_changed_at = ?,
+                updated_at = ?, revision = revision + 1
+          WHERE id = ? AND revision = ? ${committed}`,
+      ).bind(now, now, duckId, expectedRevision, ...commit),
+    );
+  }
+
+  try {
+    await env.DB.batch(statements);
+  } catch {
+    return json({ error: "Deleting this duck conflicted with another update. Refresh and try again." }, 409);
+  }
+  const saved = await findRaceCommand(env, commandId);
+  return saved === null || saved.command_type !== "DELETE_DUCK"
+    ? json({ error: "Deleting this duck conflicted with another update. Refresh and try again." }, 409)
+    : json({
+      duckId,
+      deleted: true,
+      erased: erasable,
+      unpairedRaceEntryId: context.race_entry_id,
+      replayed: false,
+    }, 201);
 };
 
 interface AssignmentContextRow {
@@ -2479,15 +2380,14 @@ export const handleDuckOperations = async (
   }
 
   const duckActionMatch = url.pathname.match(
-    /^\/api\/v1\/staff\/inventory\/ducks\/([A-Za-z0-9_-]{1,128})\/(history|label|tags\/replace|tags\/retire|assignments|reservations\/release)$/,
+    /^\/api\/v1\/staff\/inventory\/ducks\/([A-Za-z0-9_-]{1,128})\/(history|label|assignments|reservations\/release|delete)$/,
   );
   if (duckActionMatch !== null) {
     const [, duckId, action] = duckActionMatch;
     if (action === "history" && request.method === "GET") return getDuckDetail(env, duckId, true, includePii);
     if (action === "label" && request.method === "GET") return getLabelData(env, duckId);
-    if (action === "tags/replace" && request.method === "POST") return replaceTag(request, env, actor, duckId);
-    if (action === "tags/retire" && request.method === "POST") return retireTag(request, env, actor, duckId);
     if (action === "assignments" && request.method === "POST") return assignDuck(request, env, actor, duckId);
+    if (action === "delete" && request.method === "POST") return deleteDuck(request, env, actor, duckId);
     if (action === "reservations/release" && request.method === "POST") {
       return releaseReservation(request, env, actor, duckId);
     }
@@ -2498,9 +2398,9 @@ export const handleDuckOperations = async (
     /^\/api\/v1\/staff\/inventory\/ducks\/([A-Za-z0-9_-]{1,128})$/,
   );
   if (duckMatch !== null) {
-    if (request.method === "GET") return getDuckDetail(env, duckMatch[1], false, includePii);
-    if (request.method === "PATCH") return editDuck(request, env, actor, duckMatch[1]);
-    return json({ error: "Method not allowed." }, 405);
+    return request.method === "GET"
+      ? getDuckDetail(env, duckMatch[1], false, includePii)
+      : json({ error: "Method not allowed." }, 405);
   }
 
   return null;

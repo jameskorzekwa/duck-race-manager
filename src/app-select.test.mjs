@@ -4,7 +4,7 @@ import test from "node:test";
 import { appSelectHelpersScript, appSelectScript, staffHomeScript } from "./client-scripts.ts";
 import { createWorker } from "./index.ts";
 import {
-  renderInventoryIntake,
+  renderStaffInventory,
   renderStaffAccess,
   renderStaffDuck,
   renderStaffHome,
@@ -702,7 +702,7 @@ test("every page with a select loads the shared enhancement script", () => {
     renderStaffHome("Administrator", true, []),
     renderStaffHome("Registration Staff", false, ["REGISTRATION"]),
     renderStaffAccess("Administrator"),
-    renderInventoryIntake("Duck Manager", "https://quickducks.com"),
+    renderStaffInventory("Duck Manager", "https://quickducks.com"),
   ];
   for (const markup of pages) {
     assert.match(markup, /<script src="\/assets\/app-select\.js" defer><\/script>/);

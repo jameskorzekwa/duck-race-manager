@@ -39,9 +39,11 @@ not authorized.
 | --- | --- | --- |
 | Participant list/detail/search, walk-up, edits, withdrawal, scan-first search and pairing | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Delete an unpaired registration | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
+| Set or clear a participant's duck name | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Participant disqualification/reactivation | `RACE_DIRECTOR` | Yes |
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
-| Duck inventory intake/edit, tag, assignment, unassignment, reservation, and inspection | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Duck inventory intake, deletion, assignment, unassignment, reservation, and inspection | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Open `/staff/inventory` | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
 | Event list/detail context | Any operational role | Yes |
 | Event readiness, heat list/detail/announcer-roster, result, and finalist reads | `ANNOUNCER`, `HEAT_RUNNER`, `RESULT_TAKER`, or `RACE_DIRECTOR` | Yes |
@@ -221,9 +223,9 @@ live need must not spend one. The server marks public content pages — the home
 page, `/race`, `/my-ducks`, `/register`, `/duck/<number>`, `/r/<token>`, and
 `/t/<token>` — with `data-live-nav` on the navigation element, and only those
 pages register the navigation subscriber. The staff sign-in page, the not-found
-page, the unsupported-device page, and staff error pages carry no marker and no
-other live surface, so they open no socket and schedule no polls, and they keep
-the navigation exactly as the server painted it.
+page, and staff error pages carry no marker and no other live surface, so they
+open no socket and schedule no polls, and they keep the navigation exactly as the
+server painted it.
 
 The not-found page is the one public response that resolves no phase at all.
 Every unmatched path reaches it, including bot and scanner traffic, so it runs
@@ -497,10 +499,24 @@ from the authoritative collection endpoint rather than from the response.
 ### Naming Your Own Duck
 
 **Implemented:** once staff pair a duck to a participant registered on this
-device, that card offers a **Give this duck a name** form. It posts
+device, that card's **Duck** fact carries a **Rename** button, or **Name this
+duck** while it has no name. Pressing it reveals the name field in place, with
+**Save name**, **Suggest a name**, and **Cancel**. Only Save writes anything:
+Cancel discards the draft and the field reopens showing the name the server
+currently holds, and an editor left open survives a live or polling refresh
+rather than folding away mid-edit. Saving posts
 `{ commandId, registrationId, duckName }` to
 `POST /api/v1/registrations/mine/duck-name`, and the name is stored on the race
 entry.
+
+**Suggest a name** fills the field from the two word lists in
+`src/duck-name-suggestions.ts`, which `client-scripts.ts` serializes into the
+browser bundle so a suggestion costs no request. Nothing is saved until Save is
+pressed. `src/duck-name-suggestions.test.mjs` asserts that every possible pairing
+of those lists passes `cleanDuckName`, `hasSupportedDuckNameCharacters`,
+`isAllowedDuckName`, and the read-time `publicDuckName` projection unchanged, so
+an accepted suggestion can never be refused by the write endpoint or suppressed
+on the board.
 
 The value is trimmed, internally whitespace-collapsed, and must be 1 to 40
 characters; blank-after-trim, overlong, and control or format characters are
@@ -605,18 +621,41 @@ for names that only become disallowed later when the wordlists are extended. A
 suppressed name is projected as `null` and the surface falls back to "Duck #N".
 Names are at most 40 characters, so the recheck is cheap.
 
-### Clearing a Duck Name (Staff Moderation)
+### Setting and Clearing a Duck Name (Staff)
 
-**Implemented:** no filter is perfect, so staff can remove a name outright with
-`POST /api/v1/staff/registrations/<registration-id>/clear-duck-name`. It requires
-the `REGISTRATION` or `RACE_DIRECTOR` role, which administrators pass implicitly,
-and a cookie-authenticated call requires the exact application `Origin` like
+**Implemented:** staff can name a duck at the desk with
+`POST /api/v1/staff/registrations/<registration-id>/set-duck-name`, for a
+participant who cannot do it themselves — a walk-up with no phone, or a device
+that lost its saved list. It requires the `REGISTRATION` or `RACE_DIRECTOR` role,
+which administrators pass implicitly, and the same exact application `Origin` as
 every other staff mutation.
 
-The body is one RFC 4122 v4 `commandId` and nothing else. There is no expected
-revision: clearing is always safe and idempotent, and moderation must not fail
-because the owner renamed the duck a second earlier. A retry with the same
-identifier replays; reusing it for another registration returns `409`.
+The body is an RFC 4122 v4 `commandId` and the `duckName`. The endpoint applies
+exactly the gates the public endpoint applies, in the same order: the trim and
+1-to-40-character bound, the supported alphabet, and the wordlists, each with its
+own `422`. A rejected value is never echoed to the caller, logged, or audited.
+The participant must currently hold a duck; naming one who does not returns `409`
+with guidance to pair first, and the write batch is guarded on that assignment
+still being open. The write records a `SET_DUCK_NAME` command row and a redacted
+`DUCK_NAME_SET` audit event carrying the staff profile, the changed field name,
+and `named_via: "STAFF_DESK"` — never the text. A retry with the same identifier
+replays; reusing it for another registration returns `409`.
+
+Because both paths run the same gates, a name staff can set is a name the
+participant could have set. The name is public on exactly the same terms, and the
+announcer station still never receives it.
+
+**Implemented:** no filter is perfect, so staff can also remove a name outright
+with `POST /api/v1/staff/registrations/<registration-id>/clear-duck-name`. It
+requires the `REGISTRATION` or `RACE_DIRECTOR` role, which administrators pass
+implicitly, and a cookie-authenticated call requires the exact application
+`Origin` like every other staff mutation.
+
+The clear body is one RFC 4122 v4 `commandId` and nothing else. There is no
+expected revision, and none of the naming preconditions apply: clearing is always
+safe and idempotent, and moderation must not fail because the owner renamed the
+duck a second earlier. A retry with the same identifier replays; reusing it for
+another registration returns `409`.
 
 The write is one guarded batch: a `CLEAR_DUCK_NAME` command row, an `UPDATE`
 conditional on that row, and a redacted `DUCK_NAME_CLEARED` audit event recording
@@ -625,12 +664,15 @@ offending text. Clearing sets the column back to `NULL`, so the duck shows as
 "Duck #N" everywhere, and the participant may name it again afterwards, subject
 to the same filter.
 
-Two staff surfaces expose it: the participant detail panel in the console shows a
-**Duck name** fact and a **Clear duck name** action, and the staff duck scan page
-`/staff/ducks/<tag-token>` offers the same action, which is the fast path when
-someone is complaining about a duck in the water. Both show the stored text so
-staff can judge it, marked when the read-time filter is already hiding it, and
-both send those fields only to the roles the endpoint itself accepts.
+Three staff surfaces expose these actions. The participant detail panel in the
+console shows a **Duck name** fact, a **Duck name** field for a paired
+participant, and a **Clear duck name** action. The duck detail panel on
+`/staff/inventory` carries the same **Duck name** field and **Clear name** button
+for a paired duck. The staff duck scan page `/staff/ducks/<tag-token>` offers the
+clear action, which is the fast path when someone is complaining about a duck in
+the water. All three show the stored text so staff can judge it, marked when the
+read-time filter is already hiding it, and all three send those fields only to
+the roles the endpoint itself accepts.
 
 ### Private Status Link
 
@@ -797,31 +839,30 @@ provisioning and participant QR scanning remain separate from the finish station
 Response headers continue to disable browser camera access at the finish station;
 only the duck-pairing page enables the camera.
 
-`/staff/inventory-intake` is the dedicated Android station that provisions blank
-writable NDEF stickers. A duck manager, race director, or administrator selects
-the race and optional station location and presses Start once. That user gesture
-starts one `NDEFReader.scan()` in current Android Chrome over HTTPS; the top-level
-page must remain visible. Each subsequent physical reading writes and confirms
-one sticker without a per-duck form, printed number, pasted URL, condition,
-presence checkbox, or desktop fallback.
+The blank-sticker station is the **Scan ducks** section of `/staff/inventory`. A
+duck manager, race director, or administrator selects the working event and
+optional station location and presses Start once. That user gesture starts one
+`NDEFReader.scan()` in current Android Chrome over HTTPS; the top-level page must
+remain visible. Each subsequent physical reading writes and confirms one sticker
+without a per-duck form, printed number, pasted URL, presence checkbox, or
+desktop fallback.
 
-Authentication and the inventory-role check run before the page's Android
-compatibility gate. An authorized request with a missing or non-Android user
-agent receives a noindex unsupported-device response with only a link back to
-staff inventory; it does not receive station markup, configuration, or
-provisioning data. User-agent detection is an advisory compatibility check, not
-an authentication, authorization, or security boundary. A user agent can be
-spoofed.
+The page itself is not device gated. Authentication and the inventory-role check
+decide who may open it, and every device that passes them gets the whole page,
+including the staff navigation, the duck list and detail panel, and every
+inventory command. The scanning station is the only device-dependent part, and it
+turns itself off in the browser and says why.
 
-On the accepted Android page, provisioning controls remain hidden and no station
-API is called until browser runtime checks confirm Android Chrome, `NDEFReader`,
-a secure context, a top-level tab, and a visible document. The same conditions
-are checked again on Start. iPhone, iPad, desktop, Android WebView, alternate
-Android browsers, spoofed clients without Web NFC, embedded pages, insecure
-contexts, and hidden documents receive no provisioning API user experience.
-Provisioning APIs do not trust or require a user agent: they continue to enforce
-live staff authentication, inventory roles, and same-origin provenance for
-cookie-authenticated mutations, including for automated API clients.
+Station controls therefore remain hidden and no station API is called until
+browser runtime checks confirm Android Chrome, `NDEFReader`, a secure context, a
+top-level tab, and a visible document. The same conditions are checked again on
+Start. iPhone, iPad, desktop, Android WebView, alternate Android browsers,
+spoofed clients without Web NFC, embedded pages, insecure contexts, and hidden
+documents receive no provisioning API user experience, and are told that
+everything else on the page still works. Provisioning APIs do not trust or
+require a user agent: they continue to enforce live staff authentication,
+inventory roles, and same-origin provenance for cookie-authenticated mutations,
+including for automated API clients.
 
 QuickDucks generates the UUID, next globally unique positive internal number,
 and random 32-byte base64url token. The number remains an internal inventory
@@ -886,7 +927,7 @@ pages the signed-in actor may open: **Console** (`/staff`, any staff member),
 (`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), **Announcer**
 (`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Finish line**
 (`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`), and **Inventory**
-(`/staff/inventory-intake`, `DUCK_MANAGER` or `RACE_DIRECTOR`). A system
+(`/staff/inventory`, `DUCK_MANAGER` or `RACE_DIRECTOR`). A system
 administrator sees every link. The current page is marked `aria-current="page"`.
 The navigation wraps rather than scrolling, so it never overflows a 320px
 viewport. Omitting a link is convenience only; each page repeats its own check.
@@ -934,16 +975,18 @@ and system administrators.
 
 ### Console Event Existence Gating
 
-The console's **Event** section is always available. **Participants**,
-**Inventory**, **Heats**, and **Support**, and their console
-navigation anchors, are event-scoped: they are hidden in the served markup and
-are revealed only when an event loads, so no section flashes and then vanishes.
-Role gating still applies on top of event existence, so an event-scoped section
-the actor may not use stays hidden even once an event exists.
+The console's **Event** section is always available. **Participants**, **Heats**,
+and **Support**, and their console navigation anchors, are event-scoped: they are
+hidden in the served markup and are revealed only when an event loads, so no
+section flashes and then vanishes. Role gating still applies on top of event
+existence, so an event-scoped section the actor may not use stays hidden even
+once an event exists. The **Inventory** navigation link is not an anchor:
+inventory is its own page, so the link is a plain navigation offered to duck
+managers, race directors, and administrators whether or not an event exists.
 
-While no event row exists the console hides all four sections and their anchors
-and shows the Event section with a **No race yet** state and, for a system
-administrator, the **Create event** card already open.
+While no event row exists the console hides all three event-scoped sections and
+their anchors and shows the Event section with a **No race yet** state and, for a
+system administrator, the **Create event** card already open.
 
 ### Console Event Layout
 
@@ -1196,15 +1239,20 @@ contact value, lookup code, or token. The mutation publishes the `participants`,
 ### Intake
 
 Duck managers, race directors, and administrators can provision and reserve a
-duck during `DRAFT`, `REGISTRATION_OPEN`, or `REGISTRATION_CLOSED`. The normal
-staff console still exposes the older explicit inventory form for supervised
-administrative work, but it is not a fallback inside the dedicated station.
-`/staff/inventory-intake` has no per-duck number, token, URL, condition, notes,
-or physical-presence inputs. The operator selects the event and may set one
-station-level storage location of at most 100 characters. The dedicated page is
-served only after authentication, role authorization, and an Android user-agent
-compatibility check; its client does not reveal or initialize the station until
-all Android Chrome Web NFC and page-context requirements pass.
+duck during `DRAFT`, `REGISTRATION_OPEN`, `REGISTRATION_CLOSED`, `ROUND_ONE`, or
+`FINAL`. Intake stays open through racing because deleting a duck mid-race hands
+its participant back to the pairing queue, and a race with no spare duck in
+inventory would have no way to finish. Only a completed event, or no event at
+all, closes intake.
+
+`/staff/inventory` also offers an **Add a duck by hand** form for a tag that is
+already written, or a device that cannot scan. It takes a duck number, tag token,
+optional storage location and notes, and a physical-presence confirmation; there
+is no condition field. The blank-sticker station has no per-duck number, token,
+URL, notes, or physical-presence inputs at all. Its operator selects the working
+event and may set one station-level storage location of at most 100 characters,
+and its client does not reveal or initialize the station until all Android Chrome
+Web NFC and page-context requirements pass.
 
 Blank-sticker provisioning uses a durable two-phase protocol:
 
@@ -1250,8 +1298,8 @@ hold it still until the station beeps/vibrates and displays success, remove that
 duck during the short **Remove duck** state, and immediately tap the next one.
 QuickDucks automatically writes exactly one URL record containing the canonical
 `https://quickducks.com/t/<token>` URL. It uses successful `write()` resolution
-as physical-write verification and does not call `makeReadOnly`, preserving the
-controlled tag-replacement workflow.
+as physical-write verification and does not call `makeReadOnly`, so a sticker
+stays writable for reuse after the event is deleted.
 
 **End NFC provisioning** is visible only while Web NFC scanning is active. It
 aborts the browser scan and restores **Start NFC provisioning** without clearing
@@ -1275,11 +1323,13 @@ If a reading contains canonical QuickDucks URLs, the browser deduplicates them
 and classifies every distinct URL in physical record order through the protected
 provisioning endpoint before any reservation, write, or confirmation. With no
 pending operation, any classified tag row that still identifies a duck in the
-current dataset flashes **This duck is already registered in inventory**,
-immediately returns to **Ready**, and does not allocate, write, confirm, or
-increment **Added this session**. This includes active, retired, released,
-different-event, and another operator's pending tags, regardless of whether an
-absent/reusable record appears before or after the known record.
+current dataset is a lookup rather than an error: the classification carries that
+`duckId`, the page opens that duck's record in the detail panel below the
+station, and the station immediately returns to **Ready** without allocating,
+writing, confirming, or incrementing **Added this session**. This includes
+active, retired, released, different-event, and another operator's pending tags,
+regardless of whether an absent/reusable record appears before or after the known
+record.
 
 While this station owns a pending operation, only a reading containing exactly
 its one pending URL can finish it. A pending URL mixed with a reusable URL, or
@@ -1290,7 +1340,7 @@ same confirmation command instead of treating the tag as unrelated. A replayed
 confirmation response completes that current addition exactly once, increments
 session history/count once, enters **Remove duck**, and then returns to
 **Ready**. Only a separately scanned current tag receives the count-neutral
-already-registered warning.
+already-in-inventory lookup.
 
 An exact canonical URL absent from the current dataset is reusable rather than a
 permanent duplicate. This is the expected state for a physical duck after the
@@ -1310,10 +1360,18 @@ metadata; after a successful takeover, the recovered URL remains only in the
 station's in-memory provisioning state and is not placed in DOM, browser history,
 or logs.
 
-### Console Inventory Sections
+### The Inventory Page
 
-The console's Inventory list groups the duck cards into labelled sections that
-are derived from the inventory projection itself, not from any new state:
+`/staff/inventory` holds all of inventory on one page: a working-event select,
+the blank-sticker scanning station, the **Add a duck by hand** form, the duck
+list, and the duck detail panel. It accepts `?duck=<id>` and `?raceEntry=<id>`,
+so the console's heat roster and participant detail panel hand work to it: a
+`duck` opens that duck's detail panel, and a `raceEntry` fills the assignment
+form. Each is consumed once, so a later refresh does not keep pulling the panel
+back.
+
+The duck list groups the cards into labelled sections that are derived from the
+inventory projection itself, not from any new state:
 
 1. **In use** — the duck holds an unreleased event reservation, has an open
    participant assignment, or its inventory status is `IN_USE`. Reservation and
@@ -1323,40 +1381,68 @@ are derived from the inventory projection itself, not from any new state:
    inventory status is `AVAILABLE`, which is exactly the state assignment and
    scan-first pairing accept.
 3. **Not ready to reserve** — every remaining status (`NEW`, `QUARANTINED`,
-   `DAMAGED`, `MISSING`, `UNACCOUNTED_FOR`, `KEPT`, `RETIRED`) with no live
-   reservation or assignment.
+   `DAMAGED`, `MISSING`, `UNACCOUNTED_FOR`, `KEPT`) with no live reservation or
+   assignment.
 
 The first two sections are always rendered and state an explicit message when
 they are empty; the third appears only when it holds ducks. Cards keep the
 existing card grid, the sticky detail panel, selection and focus behaviour, the
-detail request versioning, and live refresh.
+detail request versioning, and live refresh. A `RETIRED` duck is excluded from
+the list entirely; see **Deleting a Duck**.
 
-### Inventory Editing and Label Data
+### Duck Detail and Label Data
 
-Duck managers, race directors, and administrators can edit visible number, condition, storage location,
-and notes only before racing begins and with the current duck revision. The
-label-data action returns only the visible number and canonical active tag URL;
-it does not generate or print a label.
+A duck's number cannot be changed, and there is no condition field anywhere staff
+can see or set one. `ducks.physical_condition` remains in the schema and is
+written only as the blank-sticker station's own `NEEDS_TAG`-then-`GOOD` marker; a
+later migration drops it. The label-data action returns only the visible number
+and canonical active tag URL; it does not generate or print a label.
 
 Inventory detail includes current state and append-only views of inventory
-events, tag versions, event reservations, and duck assignments. Raw tag tokens
+events, tag versions, event reservations, and duck assignments, plus the duck's
+stored name and whether the read-time filter is already hiding it. Raw tag tokens
 are not returned in detail/history responses. Participant names are included
 only when the actor also has `REGISTRATION`, has `RACE_DIRECTOR`, or is an
 administrator.
 
-### Tag Replacement and Retirement
+### Deleting a Duck
 
-Duck managers, race directors, and administrators can replace an active tag from draft through final.
-The operator enters a new unique token, confirms the physical tag was written
-and verified, and submits the current duck revision. The old tag becomes
-`RETIRED`; the new tag becomes `ACTIVE` and supersedes it. Participant,
-assignment, and heat state are unchanged. A duck in `NEEDS_TAG` condition is
-restored to `GOOD` with the appropriate reserved or in-use inventory state.
+Deleting is the one way a duck leaves inventory. It replaces the retired
+pre-race inventory edit, tag replacement, and tag retirement commands, which
+asked staff to reason about tag states that only ever meant "this duck is out of
+the race".
 
-Retiring a tag without replacement is allowed only before racing, only for an
-unassigned duck, and requires confirmation that the physical tag was removed
-plus a reason. The duck becomes `NEEDS_TAG` and `QUARANTINED`. An assigned duck
-must receive a replacement tag instead.
+`POST /api/v1/staff/inventory/ducks/<duck-id>/delete` requires the
+`DUCK_MANAGER` or `RACE_DIRECTOR` role, which administrators pass implicitly, and
+a body of `{ commandId, eventId, expectedRevision, reason }` with a 4-to-500
+character reason. A stale revision returns `409` without deleting anything, and a
+duck reserved for another event is not this event's to delete. The command row is
+`DELETE_DUCK` and the redacted audit event is `DUCK_DELETED`, recording the
+visible number, whether the rows were erased, the unpaired race entry, and the
+staff reason. Because an erased duck leaves no inventory-event row to compare a
+replay against, the command row itself is the idempotency record: a retry returns
+`{ deleted: true, replayed: true }` and reuse for another duck returns `409`.
+
+There are two write paths and they look identical to the actor:
+
+- A duck with no published heat result is erased outright. One batch removes its
+  `duck_tags`, `duck_assignments`, `event_ducks`, and `ducks` rows, after first
+  clearing `duck_tags.supersedes_tag_id`, because that self-referencing
+  restricted foreign key would otherwise refuse a multi-row tag delete.
+  `duck_inventory_events` cascades with the duck; the audit event is what
+  survives.
+- A duck that appears in a published heat result keeps its rows so that result
+  stays truthful. Its active tag is retired, its event reservation is released,
+  and its inventory status becomes `RETIRED`. `RETIRED` ducks are excluded from
+  the inventory list, so the duck is equally gone from every staff surface.
+
+**A paired duck's participant is not deleted with it.** The assignment closes
+with end reason `DUCK_DELETED`, the registration returns to `SUBMITTED`, and the
+duck name is cleared, which is exactly the state a participant sits in before
+pairing. They keep their place in the heat, because a heat entry names the race
+entry and the duck is resolved through whichever assignment is currently open.
+Staff then pair them with another duck through the normal flow, and no heat can
+start while anyone on its roster holds nothing.
 
 ### Scan-First Pairing
 
@@ -1382,10 +1468,15 @@ Scanning and exact-code entry only supply the lookup code; they never bypass
 authentication, role checks, event scope, tag state, inventory state, or
 registration state, and every rejection is reported the same way.
 
-Pairing is allowed while the event is `REGISTRATION_OPEN` or
-`REGISTRATION_CLOSED`. The registration must be `SUBMITTED` and unpaired. The
-duck must have an active tag, no current assignment, an eligible inventory
-state, and no reservation for another event.
+Pairing is allowed while the event is `REGISTRATION_OPEN`,
+`REGISTRATION_CLOSED`, `ROUND_ONE`, or `FINAL`. The registration must be
+`SUBMITTED` and unpaired. The duck must have an active tag, no current
+assignment, an eligible inventory state, and no reservation for another event.
+
+The two racing statuses are what make repairing a deleted duck possible: a
+participant whose duck was deleted is `SUBMITTED` with no open assignment, which
+is exactly the state pairing already expects, so replacing their duck is the
+ordinary scan-first command and not a separate workflow.
 
 Staff search accepts an exact normalized code or a case-insensitive name
 substring of at least two characters. It can show contact details, status, and
@@ -1447,13 +1538,15 @@ Camera access is granted by `Permissions-Policy: camera=(self)` on the
 authenticated `/staff/ducks/:token` page only. Every other page, station, and API
 response keeps `camera=()`.
 
-The command uses the lowest-numbered unlocked round-one heat below the
-configured ducks-per-heat size or creates the next heat inside the same atomic
-batch. It returns the heat number. Pairing rejects before creating a new heat
-when the existing round-one heat count has reached final capacity, and the
-atomic command re-checks both the open slot and that capacity with guarded SQL.
-Pairing stays available through `REGISTRATION_CLOSED` so a participant paired
-after the close still lands in a heat.
+A participant who already holds a heat place keeps it: the command reuses that
+heat entry and books no second slot, and the response reports the heat they were
+already in. Otherwise the command uses the lowest-numbered unlocked round-one
+heat below the configured ducks-per-heat size or creates the next heat inside the
+same atomic batch. It returns the heat number. Pairing rejects before creating a
+new heat when the existing round-one heat count has reached final capacity, and
+the atomic command re-checks both the open slot and that capacity with guarded
+SQL. Pairing stays available through `REGISTRATION_CLOSED` so a participant
+paired after the close still lands in a heat.
 
 **Operator step:** physically place ducks in a bag labeled with
 the returned heat number. QuickDucks records no bag placement or expected
@@ -1461,7 +1554,7 @@ physical location confirmation.
 
 ### Assignment, Reassignment, and Unassignment
 
-The inventory console can assign a selected good, actively tagged, available or
+The inventory page can assign a selected good, actively tagged, available or
 event-reserved duck to a race-entry ID. A reason and current duck revision are
 required. This route also performs pre-race reassignment: it closes the prior
 assignment, returns the old duck to event-reserved inventory, assigns the new
@@ -1469,8 +1562,9 @@ duck, and preserves the participant's heat entries.
 
 Assignment changes are allowed only in `REGISTRATION_OPEN` or
 `REGISTRATION_CLOSED` and are blocked once any participant heat is `CALLING`,
-`RUNNING`, `AWAITING_RESULT`, or `FINALIZED`, or has a result. A replacement
-during round one or the final is not implemented.
+`RUNNING`, `AWAITING_RESULT`, or `FINALIZED`, or has a result. Once racing has
+started, the repair is deleting the duck and pairing the participant with
+another one through the scan-first flow.
 
 Unassignment is subject to the same phase and dependency limits. It closes the
 assignment, changes an `ACTIVE` registration to `SUBMITTED`, and either keeps
@@ -1479,9 +1573,9 @@ choice. A separate release action is available for an unassigned reservation
 before racing.
 
 **Deferred:** there is no two-participant duck swap, lost/found workflow,
-in-race replacement, finalist-replacement policy, or physical-location event
-model. Current pre-race reassignment is the only physical-duck replacement
-workflow. Heat entries remain attached to the stable race entry.
+finalist-replacement policy, or physical-location event model. Pre-race
+reassignment and delete-then-pair are the two physical-duck replacement
+workflows. Heat entries remain attached to the stable race entry.
 
 ## Heat Planning
 
@@ -1627,6 +1721,14 @@ For each round-one and final heat, station staff perform:
 5. A result taker `Finish heat`: changes `RUNNING` to `AWAITING_RESULT`.
 6. A result taker enters and publishes the required result.
 
+A heat cannot start while any racer on its roster holds no duck. `transitionHeat`
+checks it before the write and repeats it as a SQL guard inside the atomic batch,
+so a duck deleted between the two aborts the start rather than sending a racer
+out with nothing; the refusal is `409` and names pairing the waiting racers as
+the remedy. This is what makes deleting a duck mid-race safe: the heat waits, and
+the final in particular cannot run until a heat winner whose duck was deleted has
+been paired with another one.
+
 There is no operator lock step. Starting round one moves every planned round-one
 heat to `LOADING`, stamps `roster_locked_at`, and permanently locks roster
 editing, all in the same guarded batch as the event transition; starting the
@@ -1638,18 +1740,19 @@ into the same element it already showed was a visible no-op and was removed.
 ### Console Roster Deep Links
 
 Each console roster entry shows its slot, participant name, duck number, and the
-race-entry identifier, plus up to two in-page navigation buttons. **Participant
-details** scrolls to the Participants section, loads that registration through
-the existing participant-selection path, and moves focus into the loaded detail
-panel. **Duck # in inventory** scrolls to the Inventory section and opens that
-duck through the existing duck-detail path, including its request versioning, so
-an overtaken link click never leaves a stale panel open.
+race-entry identifier, plus up to two navigation buttons. **Participant details**
+scrolls to the Participants section, loads that registration through the existing
+participant-selection path, and moves focus into the loaded detail panel.
+**Duck # in inventory** navigates to `/staff/inventory?duck=<id>`, which opens
+that duck's detail panel on arrival. The participant panel's **Use for duck
+assignment** action navigates the same way with `?raceEntry=<id>`.
 
 An entry with no assigned duck offers no duck link. Each link is offered only to
-an actor whose roles can open the target section — `REGISTRATION` or
+an actor whose roles can open the target surface — `REGISTRATION` or
 `RACE_DIRECTOR` for the participant link, `DUCK_MANAGER` or `RACE_DIRECTOR` for
-the duck link — and the target APIs enforce the same requirement regardless of
-the console. The announcer roster action still renders its own plain list.
+the duck link — and the target pages and APIs enforce the same requirement
+regardless of the console. The announcer roster action still renders its own
+plain list.
 
 ### Focused Start-Line Station
 
@@ -1756,6 +1859,11 @@ Finalist verification compares finalized round-one heats and first-place
 results with the one final roster. `verified` is true only when every round-one
 heat is finalized, exactly one final exists, every winner is present, and every
 finalist is a winner.
+
+The console's **Finalists** card in the Heats and results section appears only
+while the event is `FINAL` or `COMPLETED`. There are no finalists before the
+final has been started, and verifying an empty roster during round one reports
+"not yet verified", which is noise rather than information.
 
 The operator checks finalist verification before starting the final. There is
 no physical winners-bag scan or set-verification workflow.
@@ -2067,7 +2175,7 @@ failed.
 
 ### Optimistic Concurrency
 
-Event configuration/deletion, participant edits/status, duck edits/tag and
+Event configuration/deletion, participant edits/status, duck deletion and
 assignment operations, heat transitions/rosters, and result publication or
 correction require a current revision or preview fingerprint. A stale request
 returns `409` and no accepted partial state. The operator should refresh, review
@@ -2124,11 +2232,12 @@ clears on the next success.
   hashes; lookup codes are staff search values, not private-page credentials.
 - Public status never returns email, phone, lookup code, private link, staff
   notes, inventory location, or audit details.
-- A participant-chosen duck name is the one piece of participant free text that
-  is published. It passes an in-Worker profanity filter at write time and again
-  on every read, it never replaces the canonical duck number, it is never sent to
-  the announcer station, it is never written to a command row, an audit event, or
-  a log, and staff with the registration or race-director role can clear it.
+- A duck name is the one piece of participant free text that is published. It
+  passes an in-Worker profanity filter at write time and again on every read, it
+  never replaces the canonical duck number, it is never sent to the announcer
+  station, it is never written to a command row, an audit event, or a log, and
+  staff with the registration or race-director role can set or clear it. A name
+  staff set passes exactly the gates a participant's own name passes.
 - Exact public name search is rate-limited and event-scoped, but it is still
   public status, not identity verification.
 - Adding a search result to My Ducks is rate-limited, same-origin, and revalidated
@@ -2240,8 +2349,9 @@ The following are not current operator workflows:
   removed entirely.
 - Physical bag/location history, winners-bag verification scans, and announcer
   completion/check-off records.
-- In-race lost-duck replacement, found-duck handling, two-duck swap, and finalist
-  replacement policy.
+- Found-duck handling, two-duck swap, and finalist replacement policy. Replacing
+  a duck mid-race is deleting it and pairing that participant with another one;
+  there is no dedicated lost-duck command.
 - Heat cancellation or rerun operation.
 - Participant QR-code generation, verified private-link recovery, or removing a
   single registration from a browser collection.
@@ -2276,7 +2386,8 @@ Important reconciliations include:
 | Private status shows duck, heat, and results | Current private status also includes privacy-filtered race progress and result state. |
 | Public event pages list all heat winners and podium | This is now implemented through the privacy-filtered live race board from registration-open through completed. |
 | Role-filtered inspection hides contact data from some staff | Contact data is limited to registration, race-director, and administrator authority. |
-| Lost-duck replacement, swap, and location tracking work throughout the race | Only pre-race reassignment and tag replacement are implemented. |
+| Lost-duck replacement, swap, and location tracking work throughout the race | Pre-race reassignment and delete-then-pair are implemented; swap and location tracking are not. |
+| Damaged ducks and tags are recorded as a condition, replaced, or retired | Duck condition, tag replacement, and tag retirement are removed. Deleting the duck is the one way out of inventory. |
 | Result correction is administrator/race-director only | This is current behavior; result takers can finalize but cannot correct or reopen. |
 | Announcer checklist and physical placement are recorded | Only read-only rosters exist; these are operator steps. |
 | Multiple annual events/history are retained | Only one event dataset may exist, and the previous race is deleted before the next event. |
