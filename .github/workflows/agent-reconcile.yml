@@ -1,0 +1,93 @@
+name: Agent Reconcile
+
+on:
+  schedule:
+    - cron: "17,47 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: quickducks-agent-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: write
+      contents: read
+      id-token: write
+      issues: write
+      models: read
+      pull-requests: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install pinned OpenCode
+        run: npm install --global opencode-ai@1.18.8
+
+      - name: Configure agent commit identity
+        run: |
+          git config user.name "opencode-agent[bot]"
+          git config user.email "opencode-agent[bot]@users.noreply.github.com"
+
+      - name: Reconcile durable pipeline state
+        env:
+          AGENT: pipeline-reconciler
+          MODEL: github-models/openai/gpt-5
+          PROMPT: |
+            Reconcile the complete QuickDucks GitHub agent pipeline now.
+            Recover stale work, serialize grouped updates, and settle merge-slot releases according to the pipeline-reconciler contract.
+          SHARE: "false"
+          USE_GITHUB_TOKEN: "false"
+        run: opencode github run
+
+  queue-next:
+    needs: reconcile
+    if: needs.reconcile.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: quickducks-agent-merge-lane
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      issues: write
+      pull-requests: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Admit the oldest approved PR when the lane is free
+        shell: bash
+        run: |
+          set -euo pipefail
+          existing_slot="$(gh pr list --state all --label "agent:merge-slot" --limit 1 --json number --jq '.[0].number // empty')"
+          active_release="$(gh run list --workflow release.yml --limit 20 --json status --jq '[.[] | select(.status != "completed")] | length')"
+          if [[ -n "$existing_slot" || "$active_release" != "0" ]]; then
+            printf 'Merge lane busy: slot=%s active_release=%s.\n' "${existing_slot:-none}" "$active_release"
+            exit 0
+          fi
+
+          next_pr="$(gh pr list --state open --label "agent:approved" --limit 100 --json number,createdAt --jq 'sort_by(.createdAt)[0].number // empty')"
+          if [[ -z "$next_pr" ]]; then
+            printf 'No approved PR is waiting.\n'
+            exit 0
+          fi
+
+          gh pr edit "$next_pr" --add-label "agent:merge-slot"
+          if ! gh pr merge "$next_pr" --auto --merge; then
+            gh pr edit "$next_pr" --remove-label "agent:merge-slot" || true
+            exit 1
+          fi

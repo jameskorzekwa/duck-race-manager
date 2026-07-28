@@ -1,0 +1,83 @@
+name: Agent Task
+
+on:
+  issues:
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: Issue number to process or retry
+        required: true
+        type: number
+      canonical_pr:
+        description: Existing canonical PR for a grouped update
+        required: false
+        type: number
+
+permissions: {}
+
+concurrency:
+  group: quickducks-agent-issue-${{ github.event.issue.number || inputs.issue || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  implement:
+    if: >-
+      (github.event_name == 'issues' && github.actor == 'jameskorzekwa' && contains(github.event.issue.labels.*.name, 'agent:inbox')) ||
+      (github.event_name == 'issue_comment' && github.actor == 'jameskorzekwa' && !github.event.issue.pull_request && (startsWith(github.event.comment.body, '/agent') || startsWith(github.event.comment.body, '/oc'))) ||
+      (github.event_name == 'workflow_dispatch' && github.actor == 'jameskorzekwa') ||
+      (github.event_name == 'workflow_dispatch' && github.actor == 'github-actions[bot]')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      issues: write
+      models: read
+      pull-requests: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      OPENCODE_ENSEMBLE_TIMEOUT: "2700000"
+      PIPELINE_CANONICAL_PR: ${{ inputs.canonical_pr }}
+      PIPELINE_ISSUE: ${{ github.event.issue.number || inputs.issue }}
+      PIPELINE_TRIGGER: ${{ github.event_name }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install pinned OpenCode
+        run: npm install --global opencode-ai@1.18.8
+
+      - name: Configure agent commit identity
+        run: |
+          git config user.name "opencode-agent[bot]"
+          git config user.email "opencode-agent[bot]@users.noreply.github.com"
+
+      - name: Run implementation orchestrator
+        env:
+          AGENT: pipeline-orchestrator
+          MODEL: github-models/openai/gpt-5
+          PROMPT: |
+            Run the repository GitHub agent pipeline for issue #${{ github.event.issue.number || inputs.issue }}.
+            Trigger event: ${{ github.event_name }}.
+            Canonical PR for a serialized grouped update: ${{ inputs.canonical_pr || 'none' }}.
+            Follow the pipeline-orchestrator agent contract and current GitHub state. Do not expose credentials.
+          SHARE: "false"
+          USE_GITHUB_TOKEN: "false"
+        run: opencode github run
+
+      - name: Mark failed run
+        if: failure() && env.PIPELINE_ISSUE != ''
+        run: |
+          gh issue edit "$PIPELINE_ISSUE" --add-label "agent:failed" --remove-label "agent:running" || true
+          gh issue comment "$PIPELINE_ISSUE" --body "<!-- agent-pipeline run-failed=${GITHUB_RUN_ID} --> Agent Task failed: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" || true

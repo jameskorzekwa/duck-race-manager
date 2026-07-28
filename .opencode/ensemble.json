@@ -1,0 +1,9 @@
+{
+  "dashboardPort": 0,
+  "defaultModel": "github-models/openai/gpt-5",
+  "mergeOnCleanup": true,
+  "promptForModels": false,
+  "rateLimitCapacity": 4,
+  "stallThresholdMs": 300000,
+  "timeoutMs": 2700000
+}

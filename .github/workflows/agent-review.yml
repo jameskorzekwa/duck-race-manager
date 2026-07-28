@@ -1,0 +1,104 @@
+name: Agent Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+concurrency:
+  group: quickducks-agent-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'opencode/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      issues: write
+      models: read
+      pull-requests: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Clear stale review approval
+        run: gh pr edit "$PR_NUMBER" --remove-label "agent:approved" || true
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install pinned OpenCode
+        run: npm install --global opencode-ai@1.18.8
+
+      - name: Configure agent commit identity
+        run: |
+          git config user.name "opencode-agent[bot]"
+          git config user.email "opencode-agent[bot]@users.noreply.github.com"
+
+      - name: Run independent review
+        env:
+          AGENT: pipeline-reviewer
+          MODEL: github-models/openai/gpt-5
+          PROMPT: |
+            Independently review and, if necessary, repair PR #${{ github.event.pull_request.number }} at head ${{ github.event.pull_request.head.sha }}.
+            Follow the pipeline-reviewer contract. Add agent:approved only when this exact head requires no edits and all release gates pass.
+          SHARE: "false"
+          USE_GITHUB_TOKEN: "false"
+        run: opencode github run
+
+      - name: Mark failed review
+        if: failure()
+        run: gh pr edit "$PR_NUMBER" --add-label "agent:failed" --remove-label "agent:approved" || true
+
+  queue-merge:
+    needs: review
+    if: needs.review.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    concurrency:
+      group: quickducks-agent-merge-lane
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      issues: write
+      pull-requests: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Admit one approved PR to the merge lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          approved="$(gh pr view "$PR_NUMBER" --json labels --jq '[.labels[].name] | contains(["agent:approved"])')"
+          if [[ "$approved" != "true" ]]; then
+            printf 'PR %s is not agent-approved at its current head.\n' "$PR_NUMBER"
+            exit 0
+          fi
+
+          existing_slot="$(gh pr list --state all --label "agent:merge-slot" --limit 1 --json number --jq '.[0].number // empty')"
+          active_release="$(gh run list --workflow release.yml --limit 20 --json status --jq '[.[] | select(.status != "completed")] | length')"
+          if [[ -n "$existing_slot" || "$active_release" != "0" ]]; then
+            printf 'Merge lane busy: slot=%s active_release=%s.\n' "${existing_slot:-none}" "$active_release"
+            exit 0
+          fi
+
+          gh pr edit "$PR_NUMBER" --add-label "agent:merge-slot"
+          if ! gh pr merge "$PR_NUMBER" --auto --merge; then
+            gh pr edit "$PR_NUMBER" --remove-label "agent:merge-slot" || true
+            exit 1
+          fi
