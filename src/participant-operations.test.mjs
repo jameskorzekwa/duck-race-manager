@@ -423,6 +423,74 @@ test("withdraw, reactivate, and disqualify are authorized idempotent status comm
   database.close();
 });
 
+// Withdrawal and disqualification are the only exit a paired participant has,
+// so they must be pure bookkeeping. The duck is already sealed in a heat bag and
+// nothing on race day may move it, renumber a slot, or resort a heat.
+test("a status change writes only the command, the registration, and the audit", async (context) => {
+  const { database, env, DB } = makeContext();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO heats
+      (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-one', 'event-open', 'ROUND_ONE', 1, 'PLANNED', 2);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry-one', 'event-open', 'heat-one', 'entry-one', 'ROUND_ONE', 1,
+            'BALANCED_DRAW', '2026-07-25T01:00:00Z'),
+           ('heat-entry-two', 'event-open', 'heat-one', 'entry-two', 'ROUND_ONE', 2,
+            'BALANCED_DRAW', '2026-07-25T01:00:00Z');
+  `);
+
+  for (const [operation, actor, revision] of [
+    ["withdraw", staffActor, 0],
+    ["reactivate", adminActor, 1],
+    ["disqualify", adminActor, 2],
+  ]) {
+    const before = DB.statements.length;
+    const response = await handleParticipantOperations(
+      jsonRequest(`https://quickducks.com/api/v1/staff/registrations/registration-one/${operation}`, "POST", {
+        commandId: crypto.randomUUID(),
+        expectedRevision: revision,
+      }),
+      env,
+      actor,
+    );
+    assert.equal(response.status, 201, operation);
+
+    // No statement this operation prepared writes to any table that carries the
+    // physical race: assignments, heats, heat entries, or results.
+    const writes = DB.statements.slice(before)
+      .map((statement) => statement.sql)
+      .filter((sql) => /^\s*(INSERT|UPDATE|DELETE)/i.test(sql));
+    for (const sql of writes) {
+      assert.doesNotMatch(
+        sql,
+        /(INSERT INTO|UPDATE|DELETE FROM)\s+(duck_assignments|heats|heat_entries|heat_results)\b/i,
+        `${operation} must not write race data: ${sql}`,
+      );
+    }
+    assert.deepEqual(
+      writes.map((sql) => sql.match(/(?:INSERT INTO|UPDATE)\s+(\w+)/i)[1]),
+      ["race_commands", "registrations", "audit_events"],
+      operation,
+    );
+  }
+
+  // And the stored race data is provably identical afterwards, including the
+  // slot order of the racer who never left.
+  assert.equal(database.prepare("SELECT valid_to FROM duck_assignments WHERE id = 'assignment-one'").get().valid_to, null);
+  assert.deepEqual(
+    database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY slot_number")
+      .all().map((row) => ({ ...row })),
+    [
+      { id: "heat-entry-one", heat_id: "heat-one", race_entry_id: "entry-one", slot_number: 1 },
+      { id: "heat-entry-two", heat_id: "heat-one", race_entry_id: "entry-two", slot_number: 2 },
+    ],
+  );
+  assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-one'").get().status, "PLANNED");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("eligibility changes stop at heat lock and remain atomically blocked", async (context) => {
   const { database, env, DB } = makeContext();
   context.after(() => database.close());

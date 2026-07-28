@@ -38,7 +38,7 @@ not authorized.
 | Capability | Required regular-staff role | System administrator |
 | --- | --- | --- |
 | Participant list/detail/search, walk-up, edits, withdrawal, scan-first search and pairing | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
-| Delete an unpaired registration | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
+| Delete a never-paired registration | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Set or clear a participant's duck name | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Participant disqualification/reactivation | `RACE_DIRECTOR` | Yes |
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
@@ -108,6 +108,23 @@ Pairing changes `SUBMITTED` to `ACTIVE`. Reactivation returns a registration to
 `ACTIVE` when it still has a current duck assignment, otherwise to `SUBMITTED`.
 Withdrawal and disqualification do not themselves close an assignment or
 remove a heat entry.
+
+Pairing is also the one-way door between the two ways a participant can leave:
+
+- **Never paired:** delete the registration. It removes the row for real, and it
+  is the only removal path a participant or staff member has.
+- **Paired at any point, current or already unassigned:** delete is refused with
+  `409`. The participant is withdrawn or disqualified instead. Pairing put a
+  physical duck into a sealed heat bag, and nobody unpacks a bag on race day to
+  retrieve one duck, so the duck stays where it is and may still float past the
+  finish line.
+
+Nothing about withdrawal or disqualification touches the physical race. Heats,
+heat entries, slot numbers, lane order, duck assignments, and recorded results
+are never renumbered, rebalanced, reordered, or removed — resorting the bags
+would mean rescanning every duck. The participant simply disappears from every
+public surface and can never be published as a winner. See Public Visibility of
+Withdrawn and Disqualified Participants.
 
 ### Heat
 
@@ -768,13 +785,14 @@ that participant — whether it registered them or followed them earlier — see
 Both duck responses (`GET /api/v1/ducks/<tag-token>` and
 `GET /api/v1/ducks/number/<visible-number>`) carry the same `followId` and
 `inMyDucks` signals as a search result, and only for a participant the follow
-endpoint would actually accept: a withdrawn or disqualified registration, or one
-outside the current public event, carries neither signal and its page renders no
-control. The membership check is a read-only probe of the caller's own collection
-cookie, so a tag GET stays read-only and issues no cookie. Nothing else about
-these responses changed: they still carry no contact details, lookup code,
-private link, or staff data. They do carry the duck's filtered public
-`duckName`, always alongside its visible number.
+endpoint would actually accept. A duck whose participant is withdrawn or
+disqualified, or one outside the current public event, resolves to no public
+participant at all, so there is nothing on its page to follow. The membership
+check is a read-only probe of the caller's own collection cookie, so a tag GET
+stays read-only and issues no cookie. Nothing else about these responses changed:
+they still carry no contact details, lookup code, private link, or staff data.
+They do carry the duck's filtered public `duckName`, always alongside its visible
+number.
 
 ### Public Duck Detail View
 
@@ -796,11 +814,13 @@ notes, or audit history.
 `{ "raceStatus": ... }`. Only canonical positive integers resolve; a
 non-canonical value is rejected before any database access.
 
-Unknown numbers, ducks that exist in inventory but are not paired, and ducks
-outside the current public event are indistinguishable: all three return `404`
-from the API and one identical friendly page, sent `noindex, nofollow` like the
-other public duck and status pages. The page therefore adds no enumeration
-signal beyond the duck numbers the board already publishes.
+Unknown numbers, ducks that exist in inventory but are not paired, ducks whose
+participant is withdrawn or disqualified, and ducks outside the current public
+event are indistinguishable: all four return `404` from the API and one identical
+friendly page — "Duck #N isn't racing." — sent `noindex, nofollow` like the other
+public duck and status pages. The page therefore adds no enumeration signal
+beyond the duck numbers the board already publishes, and it is honest about a
+duck that physically exists without naming anybody.
 
 The live race board and the paired My Ducks cards link their duck numbers to
 this view as plain navigations. An entry with no duck assigned renders text and
@@ -820,10 +840,13 @@ these are true:
 
 - The token belongs to an `ACTIVE` tag.
 - The duck has a current assignment.
+- That assignment's participant is `SUBMITTED` or `ACTIVE`.
 - The event is between `REGISTRATION_OPEN` and `COMPLETED`.
 
 Otherwise the request redirects to the home page. Unknown, invalid, retired,
-unassigned, and deleted tags therefore do not expose inventory metadata. A successful status page can show the event, policy-filtered
+unassigned, and deleted tags, and tags on a duck whose participant withdrew or
+was disqualified, therefore do not expose inventory metadata or that participant.
+A successful status page can show the event, policy-filtered
 participant name, visible duck number, assigned round-one/final heat, current
 active heat, and race outcome. It never shows contact details, lookup codes,
 private links, staff history, or storage location.
@@ -1189,13 +1212,20 @@ running, awaiting a result, or finalized, both operations are blocked in
 preflight and in the atomic write. Keep the participant `ACTIVE` and ask the
 race director to resolve the heat or official result instead.
 
-Status changes do not close a duck assignment, release an event reservation, or
-remove a still-unlocked heat entry. For a pre-race active participant who should
-leave the race, the operator should also use the duck unassignment workflow and
-replace the unlocked roster if necessary. Unassignment itself preserves an
-existing heat entry. There is no current operation to replace a roster with zero
-entries or cancel an empty heat, so operators must resolve these cases before
-locking and avoid creating a stranded empty heat.
+Withdrawal and disqualification are the exit for a participant who has been
+paired, and they are deliberately bookkeeping only. Each writes exactly three
+rows — the guarded command, the registration status, and the audit event — and
+nothing else. They do not close a duck assignment, release an event reservation,
+remove a heat entry, or renumber, rebalance, or reorder any heat, slot, or lane.
+The duck is already sealed in a heat bag, and resorting the bags would mean
+physically rescanning every duck, so the bags and the rosters stay exactly as
+they are.
+
+The participant instead disappears from every public surface; see Public
+Visibility of Withdrawn and Disqualified Participants. There is no current
+operation to replace a roster with zero entries or cancel an empty heat, so
+operators must resolve these cases before locking and avoid creating a stranded
+empty heat.
 
 Because the heat entry survives, the round refuses to start while any roster
 still holds the withdrawn or disqualified racer. That is reported as a readiness
@@ -1219,22 +1249,35 @@ console. A matching retry returns `{ deleted: true, replayed: true }` from
 command history, because the registration no longer exists to be re-read;
 reusing the identifier for another operation is `409`.
 
-**Unassign first.** Deletion protects race integrity instead of tearing it down.
-It is refused with `409` and an actionable message when either of the two
-race-integrity relationships still exists:
+**Only while never paired.** Deletion protects race integrity instead of tearing
+it down. It is refused with `409` — a lifecycle conflict, the same code every
+other state refusal on this surface uses — when either race-integrity
+relationship exists, and the message names withdrawal or disqualification as the
+remedy rather than unassigning a duck:
 
-- The participant has any duck assignment, current or already ended. The message
-  directs staff to the existing inventory unassignment workflow. Note that
-  unassigning is not by itself enough for this path: an ended assignment row
-  still exists and still blocks deletion, because that participant genuinely was
-  paired.
-- The participant appears on any heat roster. The message directs staff to
-  unassign the duck and remove the participant from the heat first.
+- The participant has any duck assignment, current or already ended. Unassigning
+  the duck afterwards does **not** reopen deletion: the ended assignment row
+  still exists and still means that participant's duck went into a heat bag.
+- The participant appears on any heat roster.
+
+The guard is on the duck, never on the registration status. A reactivated
+participant can be `SUBMITTED` again while still holding their duck, and
+`SUBMITTED` alone never makes a registration deletable.
 
 Because a participant with any heat entry is refused outright, deletion can never
 reach the roster-lock trigger and can never remove a locked, running, or
-finalized roster row. The duck assignment and heat entry are left exactly as they
-were on a refusal.
+finalized roster row, and no heat is ever renumbered by this path. The duck
+assignment and heat entry are left exactly as they were on a refusal.
+
+The staff participant list and detail projections both carry the two booleans the
+console reads to choose between the actions:
+
+- `currentlyPaired` — a duck assignment with `valid_to IS NULL` exists. It is
+  exactly `assignment !== null` and is independent of registration status.
+- `deletable` — the exact predicate the delete endpoint re-checks inside its
+  guarded write: never paired, no heat place, and a deletable event status. Only
+  a `deletable` participant may be offered a Delete control; every other
+  participant is offered Withdraw or Disqualify instead.
 
 Deletion is also refused with `409` while the event is `DRAFT`, and `404` for an
 unknown registration.
@@ -1971,7 +2014,9 @@ page must not carry the `/register` call to action. The board includes:
 Visible duck numbers come only from a current assignment with `valid_to IS
 NULL`; a historical assignment closed by pre-race unassignment is never revived
 on the board. A roster entry with no current duck number carries no duck name
-either.
+either. Racers whose registration is `WITHDRAWN` or `DISQUALIFIED` are omitted
+from every roster, finalist list, and podium without shifting anybody else; see
+Public Visibility of Withdrawn and Disqualified Participants.
 
 The board returns no event, heat, race-entry, registration, assignment, or
 result IDs; no contacts, lookup/private/tag tokens, staff data, notes, inventory,
@@ -1993,7 +2038,46 @@ tag, exact public name search, and browser collection cards. It exposes:
 
 The outcome gives withdrawal/disqualification priority, then podium, final
 completion/finalist state, round-one winner/elimination, running state, pairing,
-and heat assignment.
+and heat assignment. Only the two owner-facing surfaces named below ever render
+the withdrawn or disqualified outcome.
+
+### Public Visibility of Withdrawn and Disqualified Participants
+
+**Implemented:** a `WITHDRAWN` or `DISQUALIFIED` participant keeps their duck —
+it is sealed in a heat bag and may still float past the finish line — but
+publicly the application behaves as if they are not in the race. This is a
+projection rule everywhere and a data change nowhere: no row is deleted, no heat
+is reordered, and no recorded result is altered.
+
+Hidden from them entirely:
+
+| Surface | Behaviour |
+| --- | --- |
+| Public name search (`GET /api/v1/race-status/search`) | Not returned at all |
+| Follow (`POST /api/v1/registrations/mine/follow`) | `404`, so they cannot be followed |
+| Live race board and `/race` (`GET /api/v1/race-board`) | Omitted from every round-one and final roster |
+| Podium and finalists on that board | Omitted, so they can never be published as a winner |
+| Anonymous tag scan `/t/<tag-token>` and `GET /api/v1/ducks/<tag-token>` | Redirects home / `{ "destination": "HOME" }` |
+| Public duck page `/duck/<number>` and `GET /api/v1/ducks/number/<number>` | The shared "Duck #N isn't racing." page and `404` |
+| A **followed** card in another browser's My Ducks, and that browser's presence probe | The card is absent while they are away |
+
+Still shown, because the participant is entitled to know their own status:
+
+| Surface | Behaviour |
+| --- | --- |
+| Private status link `/r/<token>` and `GET /api/v1/registrations/<token>` | True `WITHDRAWN`/`DISQUALIFIED` status and outcome |
+| My Ducks card for a registration **this device created** (`added_via = 'REGISTRATION'`) | True status and outcome, and the device's presence probe still reports it |
+| Every staff surface | Unchanged |
+
+Omitting an entry never shifts anything else. The remaining racers keep their
+stored slot order, their printed duck numbers, and their official places: if the
+finalist who withdrew held first place, second place is **not** promoted to
+first, it is simply the only place still published. A heat whose whole roster
+withdrew is still published as a heat, with its number and status and an empty
+roster, because its bags physically still exist.
+
+A followed collection link is never deleted by this rule, so reactivating the
+participant restores the followed card by itself with nothing to re-follow.
 
 Every rendered application page loads one shared browser live-update hub. The
 hub connects to same-origin `/api/v1/live` lazily when its first live

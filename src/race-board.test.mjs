@@ -226,6 +226,162 @@ test("official winners lead both heat rounds while non-winner slot order stays s
   assert.deepEqual(board.event.finalHeats[0].roster.map((entry) => entry.place), [1, null, null]);
 });
 
+// A withdrawn or disqualified racer's duck is sealed in its heat bag and may
+// still float past the finish line, but publicly it is not in the race. The
+// board must omit it without moving anything else: the bags are not resorted, so
+// the surviving entries keep their stored slot order, their printed duck
+// numbers, and their official places exactly as they were.
+test("withdrawn and disqualified racers vanish from every board surface without shifting the rest", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, is_system_admin)
+    VALUES ('staff', 'staff-sub', 'operator@example.com', 1);
+    INSERT INTO events (id, slug, name, timezone, status, public_name_policy)
+    VALUES ('event', 'exit-race', 'Exit Race', 'UTC', 'COMPLETED', 'FIRST_NAME_ONLY');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES
+      ('registration-1', 'event', 'Alpha', 'Duck', 'ACTIVE', 'EXIT0001', 'hash-1', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'),
+      ('registration-2', 'event', 'Bravo', 'Duck', 'ACTIVE', 'EXIT0002', 'hash-2', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'),
+      ('registration-3', 'event', 'Charlie', 'Duck', 'ACTIVE', 'EXIT0003', 'hash-3', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'),
+      ('registration-4', 'event', 'Delta', 'Duck', 'ACTIVE', 'EXIT0004', 'hash-4', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-1', 'event', 'registration-1'),
+           ('entry-2', 'event', 'registration-2'),
+           ('entry-3', 'event', 'registration-3'),
+           ('entry-4', 'event', 'registration-4');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck-1', 1, 'IN_USE', '2026-07-26T00:00:00Z'),
+           ('duck-2', 2, 'IN_USE', '2026-07-26T00:00:00Z'),
+           ('duck-3', 3, 'IN_USE', '2026-07-26T00:00:00Z'),
+           ('duck-4', 4, 'IN_USE', '2026-07-26T00:00:00Z');
+    INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck-1', 'event', 'duck-1', '2026-07-26T00:00:00Z', 'staff'),
+           ('event-duck-2', 'event', 'duck-2', '2026-07-26T00:00:00Z', 'staff'),
+           ('event-duck-3', 'event', 'duck-3', '2026-07-26T00:00:00Z', 'staff'),
+           ('event-duck-4', 'event', 'duck-4', '2026-07-26T00:00:00Z', 'staff');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('assign-1', 'event', 'ASSIGN_DUCK', 'assignment-1', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff'),
+           ('assign-2', 'event', 'ASSIGN_DUCK', 'assignment-2', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff'),
+           ('assign-3', 'event', 'ASSIGN_DUCK', 'assignment-3', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff'),
+           ('assign-4', 'event', 'ASSIGN_DUCK', 'assignment-4', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff'),
+           ('round-result', 'event', 'FINALIZE_HEAT_RESULT', 'round', '2026-07-26T01:00:00Z', '2026-07-26T01:00:00Z', 'staff'),
+           ('final-result', 'event', 'FINALIZE_HEAT_RESULT', 'final', '2026-07-26T02:00:00Z', '2026-07-26T02:00:00Z', 'staff');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES ('assignment-1', 'event', 'entry-1', 'event-duck-1', 'duck-1', '2026-07-26T00:00:00Z', 'staff', 'assign-1'),
+           ('assignment-2', 'event', 'entry-2', 'event-duck-2', 'duck-2', '2026-07-26T00:00:00Z', 'staff', 'assign-2'),
+           ('assignment-3', 'event', 'entry-3', 'event-duck-3', 'duck-3', '2026-07-26T00:00:00Z', 'staff', 'assign-3'),
+           ('assignment-4', 'event', 'entry-4', 'event-duck-4', 'duck-4', '2026-07-26T00:00:00Z', 'staff', 'assign-4');
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('round', 'event', 'ROUND_ONE', 1, 'PLANNED', 4),
+           ('final', 'event', 'FINAL', 1, 'PLANNED', 4);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('round-1', 'event', 'round', 'entry-1', 'ROUND_ONE', 1, 'PAIRING', '2026-07-26T00:00:00Z'),
+           ('round-2', 'event', 'round', 'entry-2', 'ROUND_ONE', 2, 'PAIRING', '2026-07-26T00:00:00Z'),
+           ('round-3', 'event', 'round', 'entry-3', 'ROUND_ONE', 3, 'PAIRING', '2026-07-26T00:00:00Z'),
+           ('round-4', 'event', 'round', 'entry-4', 'ROUND_ONE', 4, 'PAIRING', '2026-07-26T00:00:00Z'),
+           ('final-1', 'event', 'final', 'entry-1', 'FINAL', 1, 'WINNER_PROMOTION', '2026-07-26T01:00:00Z'),
+           ('final-2', 'event', 'final', 'entry-2', 'FINAL', 2, 'WINNER_PROMOTION', '2026-07-26T01:00:00Z'),
+           ('final-3', 'event', 'final', 'entry-3', 'FINAL', 3, 'WINNER_PROMOTION', '2026-07-26T01:00:00Z'),
+           ('final-4', 'event', 'final', 'entry-4', 'FINAL', 4, 'WINNER_PROMOTION', '2026-07-26T01:00:00Z');
+    UPDATE heats SET status = 'FINALIZED', roster_locked_at = '2026-07-26T00:30:00Z',
+                     finalized_at = '2026-07-26T02:00:00Z';
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('round-winner', 'event', 'round', 'entry-1', 'assignment-1', 1, 1, '2026-07-26T01:00:00Z', 'staff', 'round-result'),
+           ('final-1st', 'event', 'final', 'entry-2', 'assignment-2', 1, 1, '2026-07-26T02:00:00Z', 'staff', 'final-result'),
+           ('final-2nd', 'event', 'final', 'entry-3', 'assignment-3', 2, 1, '2026-07-26T02:00:00Z', 'staff', 'final-result'),
+           ('final-3rd', 'event', 'final', 'entry-4', 'assignment-4', 3, 1, '2026-07-26T02:00:00Z', 'staff', 'final-result');
+  `);
+
+  const before = await responseBoard(database);
+  assert.deepEqual(before.event.roundOneHeats[0].roster.map((entry) => entry.duckNumber), [1, 2, 3, 4]);
+  assert.deepEqual(before.event.finalHeats[0].roster.map((entry) => entry.duckNumber), [2, 1, 3, 4]);
+  assert.deepEqual(before.event.podium.map((entry) => [entry.place, entry.duckNumber]), [[1, 2], [2, 3], [3, 4]]);
+
+  // The round-one heat winner withdraws and a podium finisher is disqualified.
+  database.exec(`
+    UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1';
+    UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-3';
+  `);
+  const after = await responseBoard(database);
+
+  // Both are gone from the round-one roster, the final roster, and the podium.
+  assert.deepEqual(after.event.roundOneHeats[0].roster.map((entry) => entry.duckNumber), [2, 4]);
+  assert.deepEqual(after.event.finalHeats[0].roster.map((entry) => entry.duckNumber), [2, 4]);
+  assert.deepEqual(after.event.podium.map((entry) => [entry.place, entry.duckNumber]), [[1, 2], [3, 4]]);
+  // Nothing was renumbered to close the gap: the surviving finisher keeps third
+  // place, not second, because the physical bags and the official results are
+  // unchanged.
+  assert.deepEqual(after.event.finalHeats[0].roster.map((entry) => entry.place), [1, 3]);
+  assert.equal(after.event.roundOneHeats[0].roster[0].participantDisplayName, "Bravo");
+
+  // Neither participant appears anywhere in the payload.
+  assert.equal(/Alpha|Charlie/.test(JSON.stringify(after)), false);
+
+  // The heats themselves still exist and keep their numbers and statuses.
+  assert.deepEqual(after.event.roundOneHeats.map((heat) => [heat.number, heat.status]), [[1, "FINALIZED"]]);
+  assert.deepEqual(after.event.finalHeats.map((heat) => [heat.number, heat.status]), [[1, "FINALIZED"]]);
+
+  // Not one stored row moved: the exclusion is a projection rule only.
+  assert.deepEqual(
+    database.prepare("SELECT id, heat_id, slot_number FROM heat_entries ORDER BY id").all().map((row) => ({ ...row })),
+    [
+      { id: "final-1", heat_id: "final", slot_number: 1 },
+      { id: "final-2", heat_id: "final", slot_number: 2 },
+      { id: "final-3", heat_id: "final", slot_number: 3 },
+      { id: "final-4", heat_id: "final", slot_number: 4 },
+      { id: "round-1", heat_id: "round", slot_number: 1 },
+      { id: "round-2", heat_id: "round", slot_number: 2 },
+      { id: "round-3", heat_id: "round", slot_number: 3 },
+      { id: "round-4", heat_id: "round", slot_number: 4 },
+    ],
+  );
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM duck_assignments WHERE valid_to IS NULL").get().count,
+    4,
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// A heat every one of whose racers has left is still a heat. It keeps its
+// number and status on the board with an empty roster rather than disappearing,
+// because the bags for that heat physically still exist.
+test("a heat whose whole roster withdrew is still published, with no entries", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status, public_name_policy)
+    VALUES ('event', 'empty-heat', 'Empty Heat', 'UTC', 'ROUND_ONE', 'FIRST_NAME_ONLY');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES ('registration', 'event', 'Solo', 'Duck', 'WITHDRAWN', 'EMPTY001', 'hash',
+            '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry', 'event', 'registration');
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat', 'event', 'ROUND_ONE', 1, 'PLANNED', 3);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry', 'event', 'heat', 'entry', 'ROUND_ONE', 1, 'PAIRING', '2026-07-26T00:00:00Z');
+    UPDATE heats SET status = 'CALLING' WHERE id = 'heat';
+  `);
+
+  const board = await responseBoard(database);
+  assert.deepEqual(board.event.roundOneHeats.map((heat) => [heat.number, heat.status]), [[1, "CALLING"]]);
+  assert.deepEqual(board.event.roundOneHeats[0].roster, []);
+  assert.deepEqual(board.event.currentHeat, { round: "ROUND_ONE", number: 1, status: "CALLING" });
+  assert.equal(JSON.stringify(board).includes("Solo"), false);
+});
+
 test("public board is usable when no current event exists", async (context) => {
   const database = createDatabase();
   context.after(() => database.close());

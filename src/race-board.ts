@@ -100,6 +100,24 @@ export const getPublicRaceBoard = async (env: Env): Promise<PublicRaceBoard> => 
   const event = await getCurrentPublicEvent(env);
   if (event === null) return { event: null };
 
+  // A withdrawn or disqualified participant is publicly not racing. Their duck
+  // stays physically in its heat bag and may still float past the finish line,
+  // but the board, the current-heat roster, the finalists, and the podium must
+  // all behave as if it is not there.
+  //
+  // The exclusion sits on the `registrations` join rather than in the WHERE
+  // clause for two reasons. The heat row itself survives, because a LEFT JOIN
+  // that matches nothing still yields the heat, so a heat whose every racer left
+  // is still published as a heat instead of vanishing from the board. And the
+  // participant's name is never fetched at all, so it cannot leak through a
+  // later change to this projection. The existing first/last name null check
+  // below is what drops the roster entry, and it is the same check that already
+  // drops a heat with no entries.
+  //
+  // Omission never renumbers anything: the remaining entries keep their stored
+  // slot order and their printed duck numbers exactly as the physical bags hold
+  // them, and the podium is derived from the surviving final rosters, so a
+  // participant who left can never be published as a winner.
   const rows = await env.DB.prepare(
     `SELECT h.id AS heat_id, h.round, h.heat_number, h.status AS heat_status,
             he.slot_number, r.first_name, r.last_name, d.visible_number,
@@ -108,7 +126,8 @@ export const getPublicRaceBoard = async (env: Env): Promise<PublicRaceBoard> => 
        FROM heats h
        LEFT JOIN heat_entries he ON he.heat_id = h.id AND he.event_id = h.event_id
        LEFT JOIN race_entries re ON re.id = he.race_entry_id
-       LEFT JOIN registrations r ON r.id = re.registration_id
+       LEFT JOIN registrations r
+         ON r.id = re.registration_id AND r.status IN ('SUBMITTED', 'ACTIVE')
         LEFT JOIN duck_assignments da ON da.id = (
           SELECT da2.id FROM duck_assignments da2
            WHERE da2.event_id = he.event_id AND da2.race_entry_id = he.race_entry_id
