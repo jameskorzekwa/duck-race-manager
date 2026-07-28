@@ -17,6 +17,7 @@ import {
   renderStaffHome,
   renderStaffLogin,
   renderStaffPairing,
+  renderStaffRegistration,
   renderStartLine,
   renderStatus,
   searchScript,
@@ -39,6 +40,7 @@ const renderedPages = [
   renderStaffLogin(),
   renderStaffHome("Administrator", true, []),
   renderStaffAccess("Administrator"),
+  renderStaffRegistration("Registration staff", false, ["REGISTRATION"]),
   renderStartLine("Start staff", false),
   renderFinishLine("Finish staff", false),
   renderStaffInventory("Inventory staff", "https://quickducks.com"),
@@ -202,7 +204,10 @@ test("every rendered form class remains covered by the shared form constraints",
   // renders six of its own (intake, duck name, assign, unpair, release,
   // delete). The unsupported-device page, which had none, is gone. Retiring
   // the duplicate empty-draft deletion path removed one more console form.
-  assert.equal(openingForms, 27);
+  //
+  // The registration desk then added five: the shared participants surface's
+  // filter, walk-up, duck-name, and edit forms, plus its own sign-out form.
+  assert.equal(openingForms, 32);
   assert.equal(closingForms, openingForms);
   // "danger-zone" left the form vocabulary with the two purge forms; it now
   // styles only the <details>/<article> wrappers around destructive actions.

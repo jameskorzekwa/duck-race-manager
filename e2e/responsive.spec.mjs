@@ -43,6 +43,7 @@ test.describe("responsive race surfaces", () => {
     await verifyWidths(page, [
       "/race",
       "/staff",
+      "/staff/registration",
       "/staff/start-line",
       "/staff/finish-line",
       "/staff/announcer",

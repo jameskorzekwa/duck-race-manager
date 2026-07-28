@@ -109,21 +109,24 @@ test.describe("race edge cases", () => {
   test("keeps role pages least-privileged", async ({ browser }) => {
     const seeded = await seedState("round-one");
     const protectedPages = [
+      ["Registration", "/staff/registration"],
       ["Announcer", "/staff/announcer"],
       ["Start line", "/staff/start-line"],
       ["Finish line", "/staff/finish-line"],
       ["Inventory", "/staff/inventory"],
-      ["Access", "/staff/access"],
     ];
+    // Every regular staff member now lands on the page their own role opens,
+    // and the persistent nav is role-oriented: `Admin` is administrator-only and
+    // Access left the top-level nav for the Admin menu bar.
     const matrix = [
-      ["ANNOUNCER", "/staff/announcer", "Read this out loud", ["Console", "Announcer"]],
-      ["HEAT_RUNNER", "/staff/start-line", "Prepare the next heat", ["Console", "Start line"]],
-      ["RESULT_TAKER", "/staff/finish-line", "Record one official result", ["Console", "Finish line"]],
-      ["DUCK_MANAGER", "/staff/inventory", "Inventory", ["Console", "Inventory"]],
-      ["REGISTRATION", "/staff", "Race control, in one place", ["Console"]],
+      ["ANNOUNCER", "/staff/announcer", "Read this out loud", ["Announcer"]],
+      ["HEAT_RUNNER", "/staff/start-line", "Prepare the next heat", ["Start line"]],
+      ["RESULT_TAKER", "/staff/finish-line", "Record one official result", ["Finish line"]],
+      ["DUCK_MANAGER", "/staff/inventory", "Inventory", ["Inventory"]],
+      ["REGISTRATION", "/staff/registration", "Get people into the race", ["Registration"]],
       [
-        "RACE_DIRECTOR", "/staff", "Race control, in one place",
-        ["Console", "Announcer", "Start line", "Finish line", "Inventory"],
+        "RACE_DIRECTOR", "/staff/registration", "Get people into the race",
+        ["Registration", "Announcer", "Start line", "Finish line", "Inventory"],
       ],
     ];
 
@@ -138,6 +141,13 @@ test.describe("race edge cases", () => {
         const response = await page.goto(protectedPath);
         expect(response.status(), `${role} opening ${label}`).toBe(expectedNavigation.includes(label) ? 200 : 403);
       }
+      // The Admin console and the access page stay administrator-only, and
+      // `/staff` redirects rather than refusing so sign-in never dead-ends.
+      const access = await page.goto("/staff/access");
+      expect(access.status(), `${role} opening Access`).toBe(403);
+      const landing = await page.request.get("/staff", { maxRedirects: 0 });
+      expect(landing.status(), `${role} opening the Admin console`).toBe(303);
+      expect(landing.headers().location, `${role} landing page`).toBe(path);
       await context.close();
     }
   });

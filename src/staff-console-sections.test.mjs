@@ -127,6 +127,10 @@ class FakeDocument {
   querySelector(selector) {
     return this.hooks.get(selector) ?? null;
   }
+
+  getElementById(id) {
+    return this.hooks.get(`#${id}`) ?? null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +178,8 @@ const consoleParts = {
   loadInventory: fromInventory(/const loadInventory = async \(\) => \{[\s\S]*?\n\};/),
   loadDuckDetail: fromInventory(/const loadDuckDetail = async \(duckId, trigger = null, focusDetail = false\) => \{[\s\S]*?\n\};/),
   loadParticipantDetail: fromConsole(/const loadParticipantDetail = async \(registrationId\) => \{[\s\S]*?\n\};/),
-  revealConsoleSection: fromConsole(/const revealConsoleSection = \(selector\) => \{[\s\S]*?\n\};/),
+  revealConsoleSection: fromConsole(/const revealConsoleSection = \(view\) => \{[\s\S]*?\n\};/),
+  participantIsPaired: fromConsole(/const participantIsPaired = \(registration\) =>\n[\s\S]*?;\n/),
   openRosterParticipant: fromConsole(/const openRosterParticipant = async \(registrationId\) => \{[\s\S]*?\n\};/),
   openRosterDuck: fromConsole(/const openRosterDuck = \(duckId\) => \{[\s\S]*?\n\};/),
   loadHeatDetail: fromConsole(/const loadHeatDetail = async \(heatId\) => \{[\s\S]*?\n\};/),
@@ -543,6 +548,8 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
   const participantDetail = document.hook("[data-participant-detail]", "article");
   const opened = [];
   const navigations = [];
+  const appliedViews = [];
+  const location = { hash: "", assign: (url) => navigations.push(url) };
   const runtime = build(
     [
       heatRosterHelpersScript,
@@ -559,6 +566,11 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
       document,
       canRegistration,
       canInventory,
+      // The Admin view switcher: the roster deep link goes through the same
+      // hash path the menu bar uses, so it is injected rather than stubbed out.
+      consoleViewSections: [Object.assign(participants, { dataset: { consoleView: "participants" } })],
+      applyConsoleView: (view) => appliedViews.push(view),
+      location,
       heatDetail,
       heatRoster,
       heatFacts,
@@ -573,7 +585,6 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
         participantDetail.hidden = false;
         opened.push(["participant-rendered", registration.registrationId]);
       },
-      location: { assign: (url) => navigations.push(url) },
       setMessage: (message, isError) => opened.push(["message", message, Boolean(isError)]),
       api: async (url) => {
         opened.push(["api", url]);
@@ -588,6 +599,8 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
   return {
     document,
     heatRoster,
+    appliedViews,
+    location,
     navigations,
     opened,
     participantDetail,
@@ -694,6 +707,8 @@ test("the participant link reveals the participants section and loads that parti
 
   await participantLink.dispatch("click");
 
+  // The deep link switches the Admin view through the hash, then scrolls.
+  assert.equal(harness.location.hash, "participants");
   assert.deepEqual(harness.participants.scrollCalls, [{ behavior: "smooth", block: "start" }]);
   assert.ok(harness.opened.some(([kind, value]) => kind === "api" && value === "/api/v1/staff/registrations/registration-1"));
   assert.ok(harness.opened.some(([kind, value]) => kind === "participant-rendered" && value === "registration-1"));
@@ -774,7 +789,7 @@ const registrationDetail = (overrides = {}) => ({
   ...overrides,
 });
 
-const participantDetailHarness = ({ canRegistration = true, clearResponse = null } = {}) => {
+const participantDetailHarness = ({ canRegistration = true, canDirectRace = false, clearResponse = null } = {}) => {
   const document = new FakeDocument();
   const participantDetail = document.hook("[data-participant-detail]", "article");
   const participantFacts = document.hook("[data-participant-facts]", "dl");
@@ -805,13 +820,14 @@ const participantDetailHarness = ({ canRegistration = true, clearResponse = null
       "addParticipantAction",
       "participantDuckNameFact",
       "clearParticipantDuckName",
+      "participantIsPaired",
       "renderParticipantDetail",
     ],
     {
       document,
       canRegistration,
       canInventory: false,
-      canDirectRace: false,
+      canDirectRace,
       participantDetail,
       participantFacts,
       participantActions,
@@ -844,8 +860,70 @@ const participantDetailHarness = ({ canRegistration = true, clearResponse = null
     participantDuckNameForm,
     setConfirmAnswer: (value) => { confirmAnswer = value; },
     action: (label) => participantActions.children.find((child) => child.textContent === label) ?? null,
+    actionLabels: () => participantActions.children
+      .filter((child) => child.tagName === "BUTTON")
+      .map((child) => child.textContent),
+    note: () => participantActions.children
+      .find((child) => child.dataset.participantActionNote !== undefined) ?? null,
   };
 };
+
+// Pairing, not status, decides which destructive action a staffer is offered.
+// An unpaired registration has nothing physical in the race, so removing it is
+// all that makes sense. A paired one has a duck sealed in a heat bag, so it
+// stays in the water and can only be made ineligible to win.
+test("an unpaired participant offers Delete and neither Withdraw nor Disqualify", () => {
+  for (const status of ["SUBMITTED", "ACTIVE", "WITHDRAWN"]) {
+    const harness = participantDetailHarness({ canDirectRace: true });
+    harness.renderParticipantDetail(registrationDetail({ assignment: null, status }));
+    const labels = harness.actionLabels();
+    assert.ok(labels.includes("Delete registration"), `${status}: delete is the destructive action`);
+    assert.equal(labels.includes("Withdraw"), false, status);
+    assert.equal(labels.includes("Disqualify"), false, status);
+    // Nothing is in the water, so there is nothing to explain.
+    assert.equal(harness.note(), null, status);
+  }
+
+  // Reactivation is not destructive and is unaffected by pairing.
+  const withdrawn = participantDetailHarness({ canDirectRace: true });
+  withdrawn.renderParticipantDetail(registrationDetail({ assignment: null, status: "WITHDRAWN" }));
+  assert.ok(withdrawn.actionLabels().includes("Reactivate"));
+});
+
+test("a paired participant offers Withdraw and Disqualify, never Delete, and says why", () => {
+  const harness = participantDetailHarness({ canDirectRace: true });
+  harness.renderParticipantDetail(registrationDetail({ status: "ACTIVE" }));
+  const labels = harness.actionLabels();
+  assert.deepEqual(labels.filter((label) => label !== "Reactivate"), ["Withdraw", "Disqualify"]);
+  assert.equal(labels.includes("Delete registration"), false);
+
+  // One short sentence beside the actions, naming the duck and the reason.
+  const note = harness.note();
+  assert.ok(note, "a paired participant is told why delete is unavailable");
+  assert.equal(note.tagName, "P");
+  assert.equal(note.className, "muted participant-action-note");
+  assert.match(note.textContent, /Duck #12 is already sealed in a heat bag/);
+  assert.match(note.textContent, /ineligible to be counted as a winner/);
+  assert.match(note.textContent, /cannot be deleted/);
+
+  // Disqualification stays a race-director action; withdrawal does not.
+  const desk = participantDetailHarness();
+  desk.renderParticipantDetail(registrationDetail({ status: "ACTIVE" }));
+  assert.deepEqual(desk.actionLabels(), ["Withdraw"]);
+
+  // SUBMITTED versus ACTIVE is not the question: a reactivated participant can
+  // be SUBMITTED while still holding the duck, and is still undeletable.
+  const reactivated = participantDetailHarness({ canDirectRace: true });
+  reactivated.renderParticipantDetail(registrationDetail({ status: "SUBMITTED" }));
+  assert.equal(reactivated.actionLabels().includes("Delete registration"), false);
+  assert.deepEqual(reactivated.actionLabels(), ["Withdraw", "Disqualify"]);
+
+  // Already out of the race: no status change is offered, and still no delete.
+  const disqualified = participantDetailHarness({ canDirectRace: true });
+  disqualified.renderParticipantDetail(registrationDetail({ status: "DISQUALIFIED" }));
+  assert.deepEqual(disqualified.actionLabels(), ["Reactivate"]);
+  assert.ok(disqualified.note(), "the explanation stays while the duck is still paired");
+});
 
 test("the participant panel shows the stored duck name and whether it is already hidden", () => {
   const named = participantDetailHarness();
@@ -1056,6 +1134,9 @@ const participantListHarness = () => {
       participantDetail,
       participantFacts,
       participantActions,
+      // This client also runs on `/staff/registration`, so the participants
+      // code paths first check that their own markup is on the page.
+      participantsPresent: true,
       rendered,
       currentEvent: { id: "event" },
       participantQuery: () => new URLSearchParams({ limit: "200" }),
