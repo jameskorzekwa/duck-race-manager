@@ -24,7 +24,7 @@ import {
   startLineScript,
 } from "./client-scripts.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
-import { publicPhaseForRender, type PublicPhase } from "./public-phase.ts";
+import { phaseShowsMyDucks, publicPhaseForRender, type PublicPhase } from "./public-phase.ts";
 import {
   faviconSvg,
   manifestJson,
@@ -129,6 +129,7 @@ interface StationPage {
     displayName: string,
     isSystemAdmin: boolean,
     roles: readonly OperationalRole[],
+    phase: PublicPhase,
   ) => string;
 }
 
@@ -136,17 +137,17 @@ const stationPages = new Map<string, StationPage>([
   ["/staff/start-line", {
     roles: ["HEAT_RUNNER", "RACE_DIRECTOR"],
     name: "start-line",
-    render: (displayName, isSystemAdmin, roles) => renderStartLine(displayName, true, isSystemAdmin, roles),
+    render: (displayName, isSystemAdmin, roles, phase) => renderStartLine(displayName, true, isSystemAdmin, roles, phase),
   }],
   ["/staff/announcer", {
     roles: ["ANNOUNCER", "RACE_DIRECTOR"],
     name: "announcer",
-    render: (displayName, isSystemAdmin, roles) => renderAnnouncer(displayName, true, isSystemAdmin, roles),
+    render: (displayName, isSystemAdmin, roles, phase) => renderAnnouncer(displayName, true, isSystemAdmin, roles, phase),
   }],
   ["/staff/finish-line", {
     roles: ["RESULT_TAKER", "RACE_DIRECTOR"],
     name: "finish-line",
-    render: (displayName, isSystemAdmin, roles) => renderFinishLine(displayName, true, isSystemAdmin, roles),
+    render: (displayName, isSystemAdmin, roles, phase) => renderFinishLine(displayName, true, isSystemAdmin, roles, phase),
   }],
 ]);
 
@@ -162,7 +163,11 @@ export const createWorker = (
       html(body, status, true, new URL(env.COGNITO_DOMAIN).origin);
     // One lightweight current-event query per HTML request. Every page renders
     // its navigation, and the public pages their whole body, from this phase, so
-    // the first paint is already correct. `publicPhaseForRender` degrades a
+    // the first paint is already correct. Staff pages resolve it too: their
+    // primary site navigation is the same one a visitor sees, so it has to be
+    // built from the same phase. They still set no `data-live-nav` marker, so
+    // they take no live-navigation subscription and hold no socket.
+    // `publicPhaseForRender` degrades a
     // database failure to the Preparing phase instead of failing the render, so
     // no page on this path can 500 because of the phase query alone.
     let phaseResolution: Promise<PublicPhase> | undefined;
@@ -314,8 +319,16 @@ export const createWorker = (
     if (url.pathname === "/race" && request.method === "GET") {
       return html(renderRace(await publicPhase()), 200, true);
     }
+    // My Ducks exists only once there is a public race to have ducks in. Before
+    // registration opens the nav does not offer it, so a visitor who reaches it
+    // from a bookmark or an old link is sent home rather than shown an empty
+    // page for a race that is still being prepared.
     if (url.pathname === "/my-ducks" && request.method === "GET") {
-      return html(renderMyDucks(await publicPhase()), 200, true);
+      const phase = await publicPhase();
+      if (!phaseShowsMyDucks(phase)) {
+        return new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } });
+      }
+      return html(renderMyDucks(phase), 200, true);
     }
     if (url.pathname === "/r/mock" && request.method === "GET") {
       return html(renderStatus(undefined, await publicPhase()), 200, true);
@@ -327,22 +340,22 @@ export const createWorker = (
       return new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } });
     }
     if (url.pathname === "/mock/staff/ducks/128/pair" && request.method === "GET") {
-      return html(renderStaffPairing(), 200, true);
+      return html(renderStaffPairing(await publicPhase()), 200, true);
     }
     if (url.pathname === "/mock/staff/ducks/128/working" && request.method === "GET") {
-      return staffHtml(renderStaffDuck("a".repeat(32), "Staff Preview"));
+      return staffHtml(renderStaffDuck("a".repeat(32), "Staff Preview", false, [], await publicPhase()));
     }
     if (url.pathname === "/mock/staff/home" && request.method === "GET") {
-      return staffHtml(renderStaffHome("Administrator Preview", true, []));
+      return staffHtml(renderStaffHome("Administrator Preview", true, [], await publicPhase()));
     }
     if (url.pathname === "/mock/staff/start-line" && request.method === "GET") {
-      return staffHtml(renderStartLine("Start-line Preview", false));
+      return staffHtml(renderStartLine("Start-line Preview", false, false, [], await publicPhase()));
     }
     if (url.pathname === "/mock/staff/announcer" && request.method === "GET") {
-      return staffHtml(renderAnnouncer("Announcer Preview", false));
+      return staffHtml(renderAnnouncer("Announcer Preview", false, false, [], await publicPhase()));
     }
     if (url.pathname === "/mock/staff/finish-line" && request.method === "GET") {
-      return staffHtml(renderFinishLine("Finish-line Preview", false));
+      return staffHtml(renderFinishLine("Finish-line Preview", false, false, [], await publicPhase()));
     }
 
     if (url.pathname === "/staff/login/start" && request.method === "GET") {
@@ -371,9 +384,10 @@ export const createWorker = (
 
     if (url.pathname === "/staff" && request.method === "GET") {
       const actor = await authenticateRequest(request, env);
+      const phase = await publicPhase();
       return withSessionCookies(actor === null
-        ? staffHtml(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo"))))
-        : staffHtml(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles)));
+        ? staffHtml(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo")), phase))
+        : staffHtml(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles, phase)));
     }
 
     // Staff account and role management is event-independent administrator work,
@@ -392,6 +406,7 @@ export const createWorker = (
         actor.displayName ?? actor.email,
         actor.isSystemAdmin,
         actor.roles,
+        await publicPhase(),
       )));
     }
 
@@ -415,6 +430,7 @@ export const createWorker = (
         appOrigin.origin,
         actor.isSystemAdmin,
         actor.roles,
+        await publicPhase(),
       )));
     }
 
@@ -436,6 +452,7 @@ export const createWorker = (
         actor.displayName ?? actor.email,
         actor.isSystemAdmin,
         actor.roles,
+        await publicPhase(),
       )));
     }
 
@@ -458,6 +475,7 @@ export const createWorker = (
         actor.displayName ?? actor.email,
         actor.isSystemAdmin,
         actor.roles,
+        await publicPhase(),
       ))));
     }
 
