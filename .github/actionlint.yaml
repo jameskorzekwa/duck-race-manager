@@ -1,5 +1,7 @@
+self-hosted-runner:
+  labels:
+    - quickducks-model
 paths:
   .github/workflows/release.yml:
     ignore:
-      # GitHub supports queue: max; actionlint 1.7.12 has not added it to its schema yet.
-      - '^unexpected key "queue" for "concurrency" section\.'
+      - 'unexpected key "queue" for "concurrency" section'

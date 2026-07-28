@@ -1,9 +1,22 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["./.opencode/ensemble-package/node_modules/@hueyexe/opencode-ensemble/dist/index.js"],
-  "permission": {
-    "external_directory": {
-      "~/.local/share/opencode/worktree/**": "allow"
+  "formatter": false,
+  "lsp": false,
+  "mcp": {
+    "google-workspace": {
+      "enabled": false
+    },
+    "james-agent-config": {
+      "enabled": false
+    },
+    "pocketcasts": {
+      "enabled": false
+    },
+    "pocketcasts-personal": {
+      "enabled": false
     }
+  },
+  "permission": {
+    "*": "deny"
   }
 }

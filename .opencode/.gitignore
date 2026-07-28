@@ -3,7 +3,3 @@ package.json
 package-lock.json
 bun.lock
 .gitignore
-!ensemble-package/
-ensemble-package/node_modules/
-!ensemble-package/package.json
-!ensemble-package/package-lock.json
