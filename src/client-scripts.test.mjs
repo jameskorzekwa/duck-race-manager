@@ -191,10 +191,10 @@ test("the pairing search lists the unpaired by default and puts the keyboard awa
 
   // The list is the resting state: opening the pairing work area runs the same
   // search with whatever is typed, which on arrival is nothing.
-  assert.match(staffDuckScript, /void runRegistrationSearch\(registrationSearchInput\.value, false\)/);
+  assert.match(staffDuckScript, /void runRegistrationSearch\(registrationSearchInput\?\.value \|\| "", false\)/);
   assert.match(
     staffDuckScript,
-    /workArea\.hidden = false;[\s\S]*?void runRegistrationSearch\(registrationSearchInput\.value, false\);/,
+    /workArea\.hidden = false;[\s\S]*?void runRegistrationSearch\(registrationSearchInput\?\.value \|\| "", false\);/,
   );
   // An empty query is sent as an empty query rather than suppressed.
   assert.match(staffDuckScript, /new URLSearchParams\(\{ eventId: currentEvent\.id, q: query \}\)/);
@@ -208,7 +208,7 @@ test("the pairing search lists the unpaired by default and puts the keyboard awa
   // Enter must not submit the form natively, and must drop the soft keyboard.
   assert.match(
     staffDuckScript,
-    /const submitRegistrationSearch = \(\) => \{\s*\n\s*clearTimeout\(registrationSearchTimer\);\s*\n\s*registrationSearchInput\.blur\(\);/,
+    /const submitRegistrationSearch = \(\) => \{\s*\n\s*if \(!registrationSearchInput\) return;\s*\n\s*clearTimeout\(registrationSearchTimer\);\s*\n\s*registrationSearchInput\.blur\(\);/,
   );
   assert.match(
     staffDuckScript,
