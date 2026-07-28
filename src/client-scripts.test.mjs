@@ -12,7 +12,6 @@ import {
   finishScanSerializationScript,
   finishSelectionValidationScript,
   inventoryIntakeHelpersScript,
-  inventoryIntakeScript,
   liveBoardStageScript,
   liveScript,
   liveRuntimeHelpersScript,
@@ -27,8 +26,11 @@ import {
   staffAccessScript,
   staffDuckScript,
   staffHomeScript,
+  staffInventoryScript,
   startLineScript,
 } from "./client-scripts.ts";
+import { isAllowedDuckName } from "./duck-name-filter.ts";
+import { DUCK_NAME_ADJECTIVES } from "./duck-name-suggestions.ts";
 import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
 import { searchScript } from "./site.ts";
 
@@ -258,7 +260,7 @@ test("the public pages' classic scripts share one global scope without collision
     "start line": startLineScript,
     announcer: announcerScript,
     "finish line": finishLineScript,
-    "inventory intake": inventoryIntakeScript,
+    "staff inventory": staffInventoryScript,
   };
   for (const [name, script] of Object.entries(pageClients)) {
     assert.doesNotThrow(
@@ -279,7 +281,7 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotThrow(() => new Function(startLineScript));
   assert.doesNotThrow(() => new Function(announcerScript));
   assert.doesNotThrow(() => new Function(finishLineScript));
-  assert.doesNotThrow(() => new Function(inventoryIntakeScript));
+  assert.doesNotThrow(() => new Function(staffInventoryScript));
   assert.doesNotThrow(() => new Function(liveUiScript));
   assert.match(registrationScript, /\/api\/v1\/registrations/);
   assert.match(registrationScript, /publicNamePolicy/);
@@ -327,21 +329,30 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(staffAccessScript, /System administrator/);
   assert.doesNotMatch(staffAccessScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   assert.doesNotMatch(staffHomeScript, /\/api\/v1\/staff\/profiles/);
-  assert.match(inventoryIntakeScript, /\/api\/v1\/staff\/inventory\/provisioning/);
-  assert.match(inventoryIntakeScript, /provisioning\/classify/);
-  assert.match(inventoryIntakeScript, /provisioning\/confirm/);
-  assert.match(inventoryIntakeScript, /provisioning\/takeover/);
-  assert.match(inventoryIntakeScript, /appConfirm/);
-  assert.match(inventoryIntakeScript, /data-takeover-provisioning/);
-  assert.match(inventoryIntakeScript, /data-end-intake-nfc/);
-  assert.match(inventoryIntakeScript, /new AbortController/);
-  assert.match(inventoryIntakeScript, /scan\(\{ signal: candidateController\.signal \}\)/);
-  assert.match(inventoryIntakeScript, /This duck is already registered in inventory/);
-  assert.match(inventoryIntakeScript, /if \(outcome === "added"\)/);
-  assert.match(inventoryIntakeScript, /recordType: "url", data: tagUrl/);
-  assert.doesNotMatch(inventoryIntakeScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
-  assert.doesNotMatch(inventoryIntakeScript, /localStorage|sessionStorage|serviceWorker|makeReadOnly|console\./);
-  assert.doesNotMatch(inventoryIntakeScript, /tagToken|physicallyPresent|console\./);
+  assert.match(staffInventoryScript, /\/api\/v1\/staff\/inventory\/provisioning/);
+  assert.match(staffInventoryScript, /provisioning\/classify/);
+  assert.match(staffInventoryScript, /provisioning\/confirm/);
+  assert.match(staffInventoryScript, /provisioning\/takeover/);
+  assert.match(staffInventoryScript, /appConfirm/);
+  assert.match(staffInventoryScript, /data-takeover-provisioning/);
+  assert.match(staffInventoryScript, /data-end-intake-nfc/);
+  assert.match(staffInventoryScript, /new AbortController/);
+  assert.match(staffInventoryScript, /scan\(\{ signal: candidateController\.signal \}\)/);
+  assert.match(staffInventoryScript, /This duck is already in inventory\. Its record is open below/);
+  // Scanning an already-registered duck opens its record rather than only
+  // refusing to overwrite it.
+  assert.match(staffInventoryScript, /outcome === "already" && typeof duckId === "string"/);
+  assert.match(staffInventoryScript, /\/api\/v1\/staff\/inventory\/ducks\//);
+  assert.match(staffInventoryScript, /\/delete", commandOptions\("POST"/);
+  assert.match(staffInventoryScript, /\/set-duck-name/);
+  assert.match(staffInventoryScript, /\/clear-duck-name/);
+  // Every command staff can no longer run is gone from the client too.
+  assert.doesNotMatch(staffInventoryScript, /tags\/replace|tags\/retire|data-inventory-edit-form/);
+  assert.doesNotMatch(staffInventoryScript, /Physical condition|elements\.condition|condition: String/);
+  assert.match(staffInventoryScript, /if \(outcome === "added"\)/);
+  assert.match(staffInventoryScript, /recordType: "url", data: tagUrl/);
+  assert.doesNotMatch(staffInventoryScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  assert.doesNotMatch(staffInventoryScript, /localStorage|sessionStorage|serviceWorker|makeReadOnly|console\./);
 });
 
 class FakeElement {
@@ -608,21 +619,29 @@ test("confirmation requests serialize without overlapping dialogs", async () => 
 const confirmationCallsites = [
   [startLineScript, 'if (!await appConfirm(readback, { danger: true })) return;'],
   [finishLineScript, 'if (!await appConfirm("Submit this official result now? Read back: " + readback + ". This publishes immediately.", { danger: true })) return;'],
-  [inventoryIntakeScript, `if (!await appConfirm(
-    "Take over pending Duck #" + candidate.visibleNumber
-    + "? Continue only if the previous provisioning station has been abandoned.",
-    { danger: true },
+  [staffInventoryScript, `if (!await appConfirm(
+      "Take over pending Duck #" + candidate.visibleNumber
+      + "? Continue only if the previous provisioning station has been abandoned.",
+      { danger: true },
+    )) return;`],
+  [staffInventoryScript, `if (!await appConfirm(
+    "Clear this duck's name? It goes back to showing its number everywhere. This is recorded in the audit trail.",
+    { danger: true, confirmLabel: "Clear duck name" },
+  )) return;`],
+  [staffInventoryScript, 'if (!await appConfirm("Assign Duck #" + selectedDuck.visibleNumber + " to this race entry?")) return;'],
+  [staffInventoryScript, 'if (!await appConfirm("Unpair Duck #" + selectedDuck.visibleNumber + " from its participant?", { danger: true })) return;'],
+  [staffInventoryScript, 'if (!await appConfirm("Release Duck #" + selectedDuck.visibleNumber + " from this event?", { danger: true })) return;'],
+  [staffInventoryScript, `if (!await appConfirm(
+    duck.participant
+      ? "Delete Duck #" + duck.visibleNumber + "? Its participant goes back into the queue for a new duck, and this duck is gone for good."
+      : "Delete Duck #" + duck.visibleNumber + "? It is gone for good.",
+    { danger: true, confirmLabel: "Delete duck" },
   )) return;`],
   [staffHomeScript, 'if (!await appConfirm("Run “" + button.textContent + "” for " + event.name + "?")) return;'],
   [staffHomeScript, 'if (!await appConfirm("Delete this empty draft? This cannot be undone.", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Permanently delete this event and every record for it, in any state? This cannot be undone.", { danger: true })) return;'],
   [staffHomeScript, 'if (dangerous && !await appConfirm(label + " for " + selectedRegistration.firstName + " " + selectedRegistration.lastName + "?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Reactivate this participant?")) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Retire the current tag and activate this verified replacement?", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Retire this tag without a replacement? The duck will be quarantined.", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Assign Duck #" + selectedDuck.visibleNumber + " to this race entry?")) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Unassign Duck #" + selectedDuck.visibleNumber + " from its participant?", { danger: true })) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Release Duck #" + selectedDuck.visibleNumber + " from this event?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;'],
   [staffHomeScript, 'if (!await appConfirm(confirmation)) return;'],
   [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
@@ -652,10 +671,11 @@ test("every confirmation callsite preserves its warning and returns before mutat
   }
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  assert.equal((inventoryIntakeScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // 19 minus the four retired returns/purge confirmations, minus the retired
-  // balanced-plan commit, plus participant deletion, plus clearing a duck name.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 16);
+  // Inventory owns takeover, clearing a duck name, assign, unpair, release,
+  // and delete duck. Every one of them is destructive or irreversible.
+  assert.equal((staffInventoryScript.match(/\bappConfirm\(/g) ?? []).length, 6);
+  // 16 minus the five inventory confirmations that moved to /staff/inventory.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 11);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The staff duck scan has exactly one destructive action of its own:
   // moderating away a duck name. Pairing confirms through its own review step.
@@ -675,8 +695,7 @@ test("every confirmation callsite preserves its warning and returns before mutat
     startLineScript,
     announcerScript,
     finishLineScript,
-    inventoryIntakeScript,
-  ]) assert.doesNotMatch(script, /const appConfirm = |appConfirmationQueue/);
+    ]) assert.doesNotMatch(script, /const appConfirm = |appConfirmationQueue/);
 
   let mutations = 0;
   const harness = confirmationHarness();
@@ -701,8 +720,7 @@ test("browser clients contain no native confirmation calls", () => {
     startLineScript,
     announcerScript,
     finishLineScript,
-    inventoryIntakeScript,
-  ]) assert.doesNotMatch(script, /\b(?:window\.)?confirm\s*\(/);
+    ]) assert.doesNotMatch(script, /\b(?:window\.)?confirm\s*\(/);
 });
 
 // The announcer is read-only, so it must never grow a confirmation prompt: a
@@ -801,38 +819,76 @@ test("inventory runtime gate requires visible top-level Android Chrome Web NFC",
   assert.equal(intakeProvisioningRuntimeIssue({ ...supported, visible: false }), "visible");
 });
 
-test("spoofed Android user agent without Web NFC reveals nothing and calls no API", () => {
+// The inventory page itself is not device gated: it lists ducks and runs every
+// inventory command anywhere. Only the scanning station is conditional, and a
+// spoofed Android user agent without Web NFC must leave it shut and silent.
+test("spoofed Android user agent without Web NFC keeps the station shut and calls no provisioning API", () => {
   const runtimeNotice = { hidden: true };
   const runtimeMessage = { textContent: "" };
   const controls = { hidden: true };
+  const stub = () => ({
+    hidden: false,
+    dataset: {},
+    classList: { toggle() {} },
+    elements: {},
+    children: [],
+    textContent: "",
+    style: {},
+    addEventListener() {},
+    append() {},
+    replaceChildren() {},
+    querySelector: () => stub(),
+    querySelectorAll: () => [],
+    focus() {},
+    reset() {},
+  });
+  const root = stub();
+  root.dataset.appOrigin = "https://quickducks.com";
   const elements = new Map([
     ["[data-intake-runtime]", runtimeNotice],
     ["[data-intake-runtime-message]", runtimeMessage],
     ["[data-intake-controls]", controls],
+    ["[data-staff-inventory]", root],
   ]);
   const document = {
     visibilityState: "visible",
-    querySelector: (selector) => elements.get(selector) ?? {},
-    createElement: () => ({ setAttribute: () => {}, append: () => {} }),
+    querySelector: (selector) => elements.get(selector) ?? stub(),
+    querySelectorAll: () => [],
+    createElement: () => stub(),
     body: { append: () => {} },
   };
   const window = {};
   window.top = window;
   window.self = window;
-  let apiCalls = 0;
+  const requests = [];
 
-  new Function("document", "navigator", "window", "isSecureContext", "fetch", inventoryIntakeScript)(
+  new Function(
+    "document", "navigator", "window", "isSecureContext", "fetch", "location", "globalThis", "Option",
+    staffInventoryScript,
+  )(
     document,
     { userAgent: androidChromeUserAgent },
     window,
     true,
-    () => { apiCalls += 1; },
+    (url) => {
+      requests.push(String(url));
+      return Promise.resolve({ status: 200, json: () => Promise.resolve({ events: [] }) });
+    },
+    { search: "", pathname: "/staff/inventory", assign() {} },
+    {
+      quickDucksLive: {
+        beginBusy: () => () => {},
+        markClean() {},
+        subscribe: () => ({ resume() {} }),
+      },
+    },
+    function Option() {},
   );
 
-  assert.equal(apiCalls, 0);
-  assert.equal(controls.hidden, true);
+  assert.equal(controls.hidden, true, "the station controls stay shut");
   assert.equal(runtimeNotice.hidden, false);
   assert.match(runtimeMessage.textContent, /does not expose Web NFC/);
+  assert.equal(requests.some((url) => url.includes("/provisioning")), false, "no provisioning API is touched");
 });
 
 test("inventory takeover metadata is redacted and never auto-adopted", async () => {
@@ -1230,18 +1286,22 @@ test("all NFC record orders classify known URLs before any mutation", async () =
   ];
   for (const entry of cases) {
     const current = makeProvisioningMachine({
-      classify: async ({ tagUrl }) => ({ kind: tagUrl === knownUrl ? "already" : "reusable" }),
+      classify: async ({ tagUrl }) => tagUrl === knownUrl
+        ? { kind: "already", duckId: "duck-known" }
+        : { kind: "reusable" },
     });
+    // The identifier of the duck already in inventory travels back with the
+    // verdict, which is what lets the page open its record.
     assert.deepEqual(
       await current.machine.reading({ serialNumber: entry.name, canonicalUrls: entry.urls }),
-      { accepted: true, outcome: "already" },
+      { accepted: true, outcome: "already", duckId: "duck-known" },
       entry.name,
     );
     assert.deepEqual(current.calls.classifications.map(({ tagUrl }) => tagUrl), entry.classified, entry.name);
     assert.deepEqual(current.calls.starts, [], entry.name);
     assert.deepEqual(current.calls.writes, [], entry.name);
     assert.deepEqual(current.calls.confirms, [], entry.name);
-    assert.deepEqual(current.calls.accepted, [{ outcome: "already" }], entry.name);
+    assert.deepEqual(current.calls.accepted, [{ outcome: "already", duckId: "duck-known" }], entry.name);
   }
 });
 
@@ -1290,19 +1350,21 @@ test("multiple different known URLs fail safely without mutation", async () => {
 });
 
 test("canonical existing URLs are classified before any write or allocation", async () => {
-  const active = makeProvisioningMachine({ classify: async () => ({ kind: "already" }) });
+  const active = makeProvisioningMachine({
+    classify: async () => ({ kind: "already", duckId: "duck-known" }),
+  });
   assert.deepEqual(
     await active.machine.reading({ serialNumber: "active", canonicalUrls: [active.pending.tagUrl] }),
-    { accepted: true, outcome: "already" },
+    { accepted: true, outcome: "already", duckId: "duck-known" },
   );
   assert.equal(active.calls.starts.length, 0);
   assert.equal(active.calls.writes.length, 0);
   assert.equal(active.calls.confirms.length, 0);
-  assert.deepEqual(active.calls.accepted, [{ outcome: "already" }]);
+  assert.deepEqual(active.calls.accepted, [{ outcome: "already", duckId: "duck-known" }]);
   assert.equal(active.calls.accepted.some(({ outcome }) => outcome === "added"), false);
   assert.equal(active.calls.ready.length, 0);
   assert.equal(active.calls.states.at(-1), "ready");
-  assert.match(active.calls.messages.at(-1)[0], /already registered in inventory/);
+  assert.match(active.calls.messages.at(-1)[0], /already in inventory/);
 
   const reusableUrl = `https://quickducks.com/t/${"r".repeat(43)}`;
   const secondReusableUrl = `https://quickducks.com/t/${"s".repeat(43)}`;
@@ -1337,8 +1399,7 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
     startLineScript,
     announcerScript,
     finishLineScript,
-    inventoryIntakeScript,
-    staffHomeScript,
+      staffHomeScript,
     staffDuckScript,
   ]) {
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
@@ -1401,7 +1462,6 @@ const liveScripts = [
   startLineScript,
   announcerScript,
   finishLineScript,
-  inventoryIntakeScript,
   staffHomeScript,
   staffDuckScript,
   searchScript,
@@ -1427,7 +1487,7 @@ test("hard failures stay visible through error-only lines and station message li
   assert.match(startLineScript, /if \(error\.message !== "signed-out"\) startMessage\.textContent = error\.message;/);
   assert.match(finishLineScript, /data-station-message/);
   assert.match(finishLineScript, /if \(error\.message !== "signed-out"\) finishMessage\.textContent = error\.message;/);
-  assert.match(inventoryIntakeScript, /data-intake-message/);
+  assert.match(staffInventoryScript, /data-intake-message/);
 
   // The public board and My Ducks have no other message surface, so each keeps a
   // minimal error-only line that is cleared on the next successful refresh.
@@ -1467,6 +1527,7 @@ class QuickNode {
     this.scrollCalls = 0;
     this.scrollLeft = 0;
     this.scrollWidth = 0;
+    this.selectCalls = 0;
     this.tabIndex = 0;
     this.textContent = "";
     this.type = "";
@@ -1504,6 +1565,10 @@ class QuickNode {
 
   focus() {
     this.focusCalls += 1;
+  }
+
+  select() {
+    this.selectCalls += 1;
   }
 
   scrollIntoView() {
@@ -1861,6 +1926,12 @@ const unfollowButton = (card) => card.descendants()
 const nameForm = (card) => card.descendants()
   .find((node) => node.tagName === "FORM" && node.dataset.duckNameForm !== undefined) ?? null;
 
+const nameToggle = (card) => card.descendants()
+  .find((node) => node.tagName === "BUTTON" && node.dataset.duckNameToggle !== undefined) ?? null;
+
+const suggestButton = (card) => card.descendants()
+  .find((node) => node.tagName === "BUTTON" && node.dataset.duckNameSuggest !== undefined) ?? null;
+
 const duckFact = (card) => card.descendants()
   .find((node) => node.className === "fact" && node.children[0]?.textContent === "Duck") ?? null;
 
@@ -2143,12 +2214,155 @@ test("the owner's card shows the chosen duck name and keeps the number beside it
   // The number stays visible so the card matches the physical duck.
   assert.equal(value.children[1].textContent, "Duck #12");
   assert.equal(value.children[1].className, "duck-number-note");
-  // The naming form is pre-filled for renaming, and now says plainly that the
-  // name is public and that staff can remove it.
+  // Renaming lives with the duck's identity: the control is a Rename button in
+  // this same fact, and the field it reveals starts folded away and pre-filled.
+  const toggle = nameToggle(card);
+  assert.ok(value.descendants().includes(toggle), "the Rename button belongs to the Duck fact");
+  assert.equal(toggle.textContent, "Rename");
+  assert.equal(toggle.type, "button");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
   const form = nameForm(card);
-  assert.match(form.text(), /Rename this duck/);
+  assert.equal(form.hidden, true, "the field stays folded away until Rename is pressed");
+  assert.equal(toggle.getAttribute("aria-controls"), form.id);
+  const input = form.descendants().find((node) => node.tagName === "INPUT");
+  assert.equal(input.value, "Sir Quacks-a-Lot");
   assert.match(form.text(), /shown publicly beside this duck’s number/);
   assert.match(form.text(), /race staff can remove a name that is not/);
+});
+
+test("an unnamed duck offers naming rather than renaming", async () => {
+  const harness = await renderMyDucks([
+    collected("22222222-2222-4222-8222-222222222222", true, {
+      nameable: true,
+      duckName: null,
+      raceStatus: pairedStatus(12),
+    }),
+  ]);
+
+  const [card] = harness.paired.track.children;
+  assert.equal(nameToggle(card).textContent, "Name this duck");
+  const input = nameForm(card).descendants().find((node) => node.tagName === "INPUT");
+  assert.equal(input.value, "");
+});
+
+test("the Rename button reveals the field, and Cancel folds it away again", async () => {
+  const harness = await renderMyDucks([
+    collected("22222222-2222-4222-8222-222222222222", true, {
+      nameable: true,
+      duckName: "Sir Quacks-a-Lot",
+      raceStatus: pairedStatus(12),
+    }),
+  ]);
+
+  const [card] = harness.paired.track.children;
+  const toggle = nameToggle(card);
+  const form = nameForm(card);
+  const input = form.descendants().find((node) => node.tagName === "INPUT");
+
+  await toggle.dispatch("click");
+  assert.equal(form.hidden, false);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(input.focusCalls, 1, "the field takes focus so the keyboard opens");
+  assert.equal(input.selectCalls, 1, "the existing name is selected, ready to be replaced");
+
+  input.value = "A Draft Nobody Kept";
+  const cancel = form.descendants()
+    .find((node) => node.tagName === "BUTTON" && node.textContent === "Cancel");
+  await cancel.dispatch("click");
+  assert.equal(form.hidden, true);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(input.value, "Sir Quacks-a-Lot", "cancelling discards the draft");
+  assert.equal(toggle.focusCalls, 1, "focus returns to the button that opened the field");
+  assert.equal(harness.cleaned.at(-1), form, "the abandoned edit stops deferring live refreshes");
+  assert.equal(harness.requests.some((item) => item.url.includes("duck-name")), false);
+});
+
+// The open editor has to survive a background repaint: My Ducks rebuilds every
+// card whenever the collection response changes, and folding the field away
+// mid-edit would look like the site had thrown the name away.
+test("an open name field stays open across a live refresh", async () => {
+  const registrationId = "22222222-2222-4222-8222-222222222222";
+  let heatStatus = "PLANNED";
+  const harness = myDucksHarness(() => Response.json({
+    registrations: [collected(registrationId, true, {
+      nameable: true,
+      duckName: null,
+      raceStatus: {
+        ...pairedStatus(12),
+        assignedHeat: { roundOne: { number: 3, status: heatStatus }, final: null },
+      },
+    })],
+  }));
+  await harness.subscriptions[0].refresh();
+
+  await nameToggle(harness.paired.track.children[0]).dispatch("click");
+  assert.equal(nameForm(harness.paired.track.children[0]).hidden, false);
+
+  heatStatus = "RUNNING";
+  await harness.subscriptions[0].refresh();
+  const repainted = harness.paired.track.children[0];
+  assert.equal(nameForm(repainted).hidden, false, "the repainted card keeps the field open");
+  assert.equal(nameToggle(repainted).getAttribute("aria-expanded"), "true");
+});
+
+test("Suggest a name fills the field with a name the endpoint would accept", async () => {
+  const harness = await renderMyDucks([
+    collected("22222222-2222-4222-8222-222222222222", true, {
+      nameable: true,
+      duckName: null,
+      raceStatus: pairedStatus(12),
+    }),
+  ]);
+
+  const [card] = harness.paired.track.children;
+  const form = nameForm(card);
+  const input = form.descendants().find((node) => node.tagName === "INPUT");
+  const suggest = suggestButton(card);
+  assert.equal(suggest.type, "button");
+  assert.equal(suggest.textContent, "Suggest a name");
+
+  const seen = new Set();
+  for (let press = 0; press < 25; press += 1) {
+    const previous = input.value;
+    await suggest.dispatch("click");
+    assert.notEqual(input.value, previous, "pressing again always changes the suggestion");
+    assert.ok(input.value.length > 0 && input.value.length <= 40);
+    assert.equal(input.value, input.value.trim().replace(/\s+/g, " "));
+    assert.ok(DUCK_NAME_ADJECTIVES.includes(input.value.split(" ")[0]));
+    assert.ok(isAllowedDuckName(input.value), `the filter refuses "${input.value}"`);
+    seen.add(input.value);
+  }
+  assert.ok(seen.size > 1, "the generator is not returning one fixed name");
+  // A suggestion is an edit, so it defers live refreshes exactly like typing.
+  assert.equal(input.dataset.liveDirty, "true");
+  assert.equal(input.focusCalls > 0, true);
+  // Nothing is saved until the participant presses Save.
+  assert.equal(harness.requests.some((item) => item.url.includes("duck-name")), false);
+});
+
+test("saving a name folds the field away again", async () => {
+  const registrationId = "22222222-2222-4222-8222-222222222222";
+  let duckName = null;
+  const harness = myDucksHarness((url) => url.endsWith("/mine/duck-name")
+    ? Response.json({ named: true, replayed: false })
+    : Response.json({
+      registrations: [collected(registrationId, true, {
+        nameable: true,
+        duckName,
+        raceStatus: pairedStatus(12),
+      })],
+    }));
+  await harness.subscriptions[0].refresh();
+
+  await nameToggle(harness.paired.track.children[0]).dispatch("click");
+  const form = nameForm(harness.paired.track.children[0]);
+  form.descendants().find((node) => node.tagName === "INPUT").value = "Bubbles";
+  duckName = "Bubbles";
+  await form.dispatch("submit");
+
+  const repainted = harness.paired.track.children[0];
+  assert.equal(nameForm(repainted).hidden, true);
+  assert.equal(nameToggle(repainted).textContent, "Rename");
 });
 
 test("a followed entry never renders a duck name even if one is sent", async () => {

@@ -1012,3 +1012,88 @@ test("the heat roster projection exposes exactly its documented identifier field
     assert.doesNotMatch(payload, /email|phone|lookupCode|CODE000|private|token|notes/i);
   }
 });
+
+// A duck can be deleted at any point, including after a roster is locked. The
+// participant keeps their place in the heat and holds nothing, so the heat must
+// not go off without them. This is the rule that makes deleting a duck mid-race
+// safe rather than quietly ruinous.
+test("a heat refuses to start while any racer in it holds no duck", async () => {
+  const database = createDatabase();
+  seedRace(database);
+  seedRoundOneHeats(database);
+  const env = { DB: d1(database) };
+  const handle = (request) => handleHeatOperations(request, env, actor);
+  const handleEvent = (request) => handleEventOperations(request, env, actor);
+
+  await handleEvent(jsonRequest("/api/v1/staff/events/event/start-round-one", "POST", {
+    commandId: commandId(),
+  }));
+
+  const detail = async (heatId) => (await (await handle(new Request(
+    `https://quickducks.com/api/v1/staff/events/event/heats/${heatId}`,
+  ))).json()).heat;
+  const move = async (heatId, operation, revision) => {
+    const response = await handle(jsonRequest(
+      `/api/v1/staff/events/event/heats/${heatId}/${operation}`,
+      "POST",
+      { commandId: commandId(), revision },
+    ));
+    return { status: response.status, body: await response.json() };
+  };
+
+  let revision = (await detail("heat-1")).revision;
+  revision = (await move("heat-1", "ready", revision)).body.heat.revision;
+  revision = (await move("heat-1", "call", revision)).body.heat.revision;
+
+  // Exactly what deleting a duck does to a paired participant: the assignment
+  // closes and the roster entry is left untouched.
+  database.exec(`
+    UPDATE duck_assignments
+       SET valid_to = '2026-07-26T11:00:00Z', end_reason = 'DUCK_DELETED'
+     WHERE race_entry_id = 'entry-2'
+  `);
+
+  const blocked = await move("heat-1", "start", revision);
+  assert.equal(blocked.status, 409);
+  assert.match(blocked.body.error, /Every racer in this heat needs a duck/);
+  assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-1'").get().status, "CALLING");
+  // The racer is still in the heat: they are waiting for a duck, not removed.
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE race_entry_id = 'entry-2'").get().count,
+    1,
+  );
+
+  // Another heat is unaffected, because the rule is about the heat being run.
+  const otherRevision = (await detail("heat-2")).revision;
+  const otherReady = await move("heat-2", "ready", otherRevision);
+  assert.equal(otherReady.status, 201);
+
+  // Pairing a replacement duck is the whole repair; the heat then starts.
+  database.exec(`
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck-replacement', 99, 'IN_USE', '2026-07-26T11:05:00Z');
+    INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck-replacement', 'event', 'duck-replacement', '2026-07-26T11:05:00Z', 'staff');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('replacement-command', 'event', 'ASSIGN_DUCK', 'assignment-replacement',
+            '2026-07-26T11:05:00Z', '2026-07-26T11:05:00Z', 'staff');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES ('assignment-replacement', 'event', 'entry-2', 'event-duck-replacement', 'duck-replacement',
+            '2026-07-26T11:05:00Z', 'staff', 'replacement-command');
+  `);
+
+  const started = await move("heat-1", "start", revision);
+  assert.equal(started.status, 201, JSON.stringify(started.body));
+  assert.equal(started.body.heat.status, "RUNNING");
+  // The roster reports the replacement duck, because the duck is resolved
+  // through whichever assignment is open rather than stored on the entry.
+  const roster = (await (await handle(new Request(
+    "https://quickducks.com/api/v1/staff/events/event/heats/heat-1",
+  ))).json()).roster;
+  assert.equal(roster.find((entry) => entry.raceEntryId === "entry-2").duck.visibleNumber, 99);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});

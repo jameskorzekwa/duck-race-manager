@@ -160,10 +160,11 @@ or when a local database drifted while a migration was being written.
 
 - **Outbound email.** The queue producer runs, but there is no consumer and no
   SES path in any environment, so nothing sends.
-- **Real NFC writing.** `/staff/inventory-intake` needs Web NFC on Android
-  Chrome. The station's HTTP API works locally, and the seeding script uses it to
-  create tags, so every downstream page — `/t/:token`, pairing, staff duck
-  inspection — is fully testable without hardware.
+- **Real NFC writing.** The scanning station on `/staff/inventory` needs Web NFC
+  on Android Chrome; the rest of that page works on any device. The station's
+  HTTP API works locally, and the seeding script uses it to create tags, so every
+  downstream page — `/t/:token`, pairing, staff duck inspection — is fully
+  testable without hardware.
 - **Cloudflare Web Analytics**, which is injected at the edge after the Worker
   responds.
 

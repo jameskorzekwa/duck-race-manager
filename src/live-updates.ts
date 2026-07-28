@@ -216,7 +216,9 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/registrations$/.test(pathname)) {
     return domains("participants");
   }
-  if (["DELETE", "PATCH", "POST"].includes(method) && /^\/api\/v1\/staff\/registrations\/[^/]{1,128}(?:\/(withdraw|reactivate|disqualify))?$/.test(pathname)) {
+  // Naming and clearing a name are included: the chosen name is shown on the
+  // public board and both duck pages, so every screen holding one has to refetch.
+  if (["DELETE", "PATCH", "POST"].includes(method) && /^\/api\/v1\/staff\/registrations\/[^/]{1,128}(?:\/(withdraw|reactivate|disqualify|set-duck-name|clear-duck-name))?$/.test(pathname)) {
     return domains("participants", "ducks", "heats");
   }
 
@@ -227,10 +229,10 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && pathname === "/api/v1/staff/inventory/ducks") {
     return domains("ducks", "event");
   }
-  if (method === "PATCH" && /^\/api\/v1\/staff\/inventory\/ducks\/[^/]{1,128}$/.test(pathname)) {
-    return domains("ducks", "participants", "heats");
-  }
-  if (method === "POST" && /^\/api\/v1\/staff\/inventory\/(?:ducks\/[^/]{1,128}\/(?:tags\/(?:replace|retire)|assignments|reservations\/release)|assignments\/[^/]{1,128}\/unassign)$/.test(pathname)) {
+  // Deleting a duck reaches all three: the duck leaves inventory, its
+  // participant goes back to the pairing queue, and their heat is left with a
+  // racer holding nothing.
+  if (method === "POST" && /^\/api\/v1\/staff\/inventory\/(?:ducks\/[^/]{1,128}\/(?:assignments|reservations\/release|delete)|assignments\/[^/]{1,128}\/unassign)$/.test(pathname)) {
     return domains("ducks", "participants", "heats");
   }
   if (method === "POST" && /^\/api\/v1\/staff\/ducks\/[A-Za-z0-9_-]+\/assignments$/.test(pathname)) {

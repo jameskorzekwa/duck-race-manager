@@ -150,7 +150,7 @@ test("serves registration and staff pairing browser clients", async () => {
   const startLine = await worker.fetch(new Request("https://quickducks.com/assets/start-line.js"), env);
   const announcer = await worker.fetch(new Request("https://quickducks.com/assets/announcer.js"), env);
   const finishLine = await worker.fetch(new Request("https://quickducks.com/assets/finish-line.js"), env);
-  const inventoryIntake = await worker.fetch(new Request("https://quickducks.com/assets/inventory-intake.js"), env);
+  const staffInventory = await worker.fetch(new Request("https://quickducks.com/assets/staff-inventory.js"), env);
   const liveUiBody = await liveUi.text();
 
   assert.equal(registration.status, 200);
@@ -182,8 +182,10 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(announcer.headers.get("cache-control"), "no-store");
   assert.match(await finishLine.text(), /NDEFReader/);
   assert.equal(finishLine.headers.get("cache-control"), "no-store");
-  assert.match(await inventoryIntake.text(), /intakeCreateProvisioningMachine/);
-  assert.equal(inventoryIntake.headers.get("cache-control"), "no-store");
+  const staffInventoryBody = await staffInventory.text();
+  assert.match(staffInventoryBody, /intakeCreateProvisioningMachine/);
+  assert.match(staffInventoryBody, /\/api\/v1\/staff\/inventory\/ducks/);
+  assert.equal(staffInventory.headers.get("cache-control"), "no-store");
 });
 
 test("renders the private My Ducks page with two accessible horizontal sections", async () => {
@@ -216,61 +218,68 @@ test("renders the private My Ducks page with two accessible horizontal sections"
   assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);
 });
 
-test("gates the Android inventory intake station after authentication and role checks", async () => {
+// Inventory is a normal staff page. It is gated on the inventory roles like any
+// other, but never on the device: NFC scanning is the only device-dependent
+// part and the page turns that part off in the browser. The old station page
+// answered a laptop with a 400 compatibility page that also dropped the staff
+// navigation, which left no way back.
+test("the inventory page is role gated and renders on every device", async () => {
   const actor = (roles, isSystemAdmin = false) => ({
     id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Inventory Staff",
     isSystemAdmin, roles, authentication: "bearer",
   });
   const page = (currentActor, userAgent) => createWorker(async () => currentActor).fetch(
-    new Request("https://quickducks.com/staff/inventory-intake", {
+    new Request("https://quickducks.com/staff/inventory", {
       headers: userAgent === undefined ? {} : { "user-agent": userAgent },
     }), env,
   );
 
   const anonymous = await page(null, iPhoneUserAgent);
   assert.equal(anonymous.status, 303);
-  assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Finventory-intake");
+  assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Finventory");
 
   const denied = await page(actor(["REGISTRATION"]), desktopChromeUserAgent);
   assert.equal(denied.status, 403);
   assert.equal(denied.headers.get("x-robots-tag"), "noindex, nofollow");
-  assert.match(await denied.text(), /permission to use the inventory intake station/);
-
-  for (const userAgent of [iPhoneUserAgent, desktopChromeUserAgent, undefined]) {
-    const unsupported = await page(actor(["DUCK_MANAGER"]), userAgent);
-    const body = await unsupported.text();
-    assert.equal(unsupported.status, 400);
-    assert.equal(unsupported.headers.get("x-robots-tag"), "noindex, nofollow");
-    assert.equal(unsupported.headers.get("vary"), "User-Agent");
-    assert.match(body, /Unsupported device/);
-    assert.match(body, /Back to staff inventory/);
-    assert.match(body, /compatibility check, not an authorization control/);
-    assert.doesNotMatch(body, /data-inventory-intake|data-app-origin|inventory-intake\.js|\/api\/v1\/|\/t\//);
-  }
+  assert.match(await denied.text(), /permission to use duck inventory/);
 
   for (const currentActor of [actor(["DUCK_MANAGER"]), actor(["RACE_DIRECTOR"]), actor([], true)]) {
-    const allowed = await page(currentActor, androidChromeUserAgent);
-    const body = await allowed.text();
-    assert.equal(allowed.status, 200);
-    assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow");
-    assert.equal(allowed.headers.get("vary"), "User-Agent");
-    assert.match(body, /data-inventory-intake/);
-    assert.match(body, /data-app-origin="https:\/\/quickducks\.com"/);
-    assert.match(body, /data-intake-controls hidden/);
-    assert.match(body, /Checking this device/);
-    assert.match(body, /Reserved for race/);
-    assert.match(body, /Added this session/);
-    assert.match(body, /Start NFC provisioning/);
-    assert.match(body, /End NFC provisioning/);
-    assert.match(body, /data-end-intake-nfc hidden disabled/);
-    assert.match(body, /role="status" aria-live="polite" aria-atomic="true"/);
-    assert.match(body, /data-end-intake-nfc[^>]*class="button secondary station-control"|class="button secondary station-control"[^>]*data-end-intake-nfc/);
-    assert.match(body, /Android Chrome over HTTPS only/);
-    assert.match(body, /data-intake-takeover hidden/);
-    assert.match(body, /Take over pending sticker/);
-    assert.doesNotMatch(body, /name="visibleNumber"|name="tagUrl"|name="condition"|name="physicallyPresent"/);
-    assert.match(body, /src="\/assets\/inventory-intake\.js"/);
+    for (const userAgent of [androidChromeUserAgent, iPhoneUserAgent, desktopChromeUserAgent, undefined]) {
+      const allowed = await page(currentActor, userAgent);
+      const body = await allowed.text();
+      const where = `${currentActor.roles.join(",") || "admin"} @ ${userAgent ?? "no user agent"}`;
+      assert.equal(allowed.status, 200, where);
+      assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow", where);
+      // The staff navigation is on the page whatever the device is.
+      assert.match(body, /<nav class="staff-nav" aria-label="Staff pages">/, where);
+      assert.match(body, /<a href="\/staff\/inventory" aria-current="page">Inventory<\/a>/, where);
+      // The inventory work itself is unconditional.
+      assert.match(body, /data-inventory-list/, where);
+      assert.match(body, /data-inventory-detail hidden/, where);
+      assert.match(body, /data-duck-delete-form/, where);
+      assert.match(body, /src="\/assets\/staff-inventory\.js"/, where);
+      // The scanning station ships shut and explains itself in the browser.
+      assert.match(body, /data-intake-controls hidden/, where);
+      assert.match(body, /Checking this device/, where);
+      assert.match(body, /Start NFC provisioning/, where);
+      assert.match(body, /data-end-intake-nfc hidden disabled/, where);
+      assert.match(body, /data-intake-takeover hidden/, where);
+      assert.match(body, /data-app-origin="https:\/\/quickducks\.com"/, where);
+      // Retired inventory controls are gone from the markup entirely.
+      assert.doesNotMatch(body, /data-inventory-edit-form|data-tag-replace-form|data-tag-retire-form/, where);
+      assert.doesNotMatch(body, /name="condition"/, where);
+    }
   }
+});
+
+// The old Android-only station path is gone rather than redirected, so a stale
+// bookmark fails visibly instead of half working.
+test("the retired inventory intake path is no longer routed", async () => {
+  const response = await createWorker(async () => ({
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Inventory Staff",
+    isSystemAdmin: true, roles: [], authentication: "bearer",
+  })).fetch(new Request("https://quickducks.com/staff/inventory-intake"), env);
+  assert.equal(response.status, 404);
 });
 
 test("gates the standalone staff access page to system administrators", async () => {
@@ -984,7 +993,9 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.match(staffHomeBody, /<a href="\/staff\/access">Access<\/a>/);
   assert.match(staffHomeBody, /id="events"/);
   assert.match(staffHomeBody, /id="participants"/);
-  assert.match(staffHomeBody, /id="inventory"/);
+  // Inventory left the console for its own page; the console links out to it.
+  assert.doesNotMatch(staffHomeBody, /id="inventory"/);
+  assert.match(staffHomeBody, /<a href="\/staff\/inventory">Inventory<\/a>/);
   assert.match(staffHomeBody, /id="heats"/);
   assert.match(staffHomeBody, /id="support"/);
   // The Returns section and the whole purge ceremony are removed; Delete event
@@ -1019,7 +1030,10 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.doesNotMatch(regularStaffHome, /id="returns"|Returns/);
   assert.doesNotMatch(regularStaffHome, /<a href="#participants"/);
   assert.match(regularStaffHome, /id="participants"[^>]* hidden/);
-  assert.match(regularStaffHome, /<a href="#inventory" data-event-scoped hidden>Inventory<\/a>/);
+  // Inventory is a page of its own, so the console nav links out to it rather
+  // than anchoring into a section that no longer exists here.
+  assert.match(regularStaffHome, /<a href="\/staff\/inventory">Inventory<\/a>/);
+  assert.doesNotMatch(regularStaffHome, /id="inventory"/);
 
   // The retired role is gone from the schema and the vocabulary, so no account
   // can carry it. An account with no operational roles gets the empty console,
@@ -1031,7 +1045,7 @@ test("renders protected staff pairing preview with code and contact lookup", asy
 
   const announcerHome = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
   assert.match(announcerHome, /<a href="#heats" data-event-scoped hidden>Heats<\/a>/);
-  assert.match(announcerHome, /id="inventory"[^>]* hidden/);
+  assert.doesNotMatch(announcerHome, /\/staff\/inventory/);
   assert.match(announcerHome, /data-roles="ANNOUNCER"/);
   assert.match(announcerHome, /href="\/staff\/announcer"/);
   assert.doesNotMatch(announcerHome, /href="\/staff\/start-line"|href="\/staff\/finish-line"/);
@@ -1046,9 +1060,8 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.doesNotMatch(resultTakerHome, /href="\/staff\/announcer"/);
 
   const duckManagerHome = renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]);
-  assert.match(duckManagerHome, /href="\/staff\/inventory-intake"/);
-  assert.match(duckManagerHome, /Blank NFC provisioning station/);
-  assert.doesNotMatch(announcerHome, /href="\/staff\/inventory-intake"/);
+  assert.match(duckManagerHome, /href="\/staff\/inventory"/);
+  assert.doesNotMatch(announcerHome, /href="\/staff\/inventory"/);
 
   const noRoleHome = renderStaffHome("No Role", false, []);
   assert.match(noRoleHome, /No operational roles assigned/);

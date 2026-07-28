@@ -19,6 +19,7 @@ import {
   type PublicFollowState,
   type PublicRaceStatus,
 } from "./race-status.ts";
+import { DUCK_NAME_MAX_LENGTH } from "./registration.ts";
 import type { RegistrationStatusRecord } from "./types.ts";
 
 export const escapeHtml = (value: string): string =>
@@ -214,7 +215,9 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .duck-number-link:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
 .duck-number-note { display:block; margin-top:.2rem; color:var(--muted); font-size:.8rem; font-weight:800; letter-spacing:.04em; }
 .duck-name-note { color:var(--water-dark); font-weight:850; }
-.duck-name-form { gap:.6rem; margin-top:.9rem; padding-top:.9rem; border-top:2px dashed #b8c6c9; }
+.duck-name-toggle { margin-top:.7rem; font-size:.85rem; }
+.duck-name-form { gap:.6rem; margin-top:.9rem; padding-top:.9rem; border-top:2px dashed #b8c6c9; font-size:.95rem; font-weight:750; }
+.duck-name-form .actions { gap:.5rem; }
 .duck-name-form .message-line { margin:0; }
 .page-panel > .actions[data-duck-follow] { margin:1.2rem 0; }
 .privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
@@ -558,7 +561,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
             <button class="button secondary small" type="button" data-carousel-next aria-controls="paired-participants">Next</button>
           </div>
         </div>
-        <p class="muted">Participants you registered on this device, already paired with their race duck. Give the duck a name to see it here instead of its number.</p>
+        <p class="muted">Participants you registered on this device, already paired with their race duck. Use Rename on a duck to give it a name, and it appears here instead of the number.</p>
         <div class="participant-track" id="paired-participants" data-participant-track tabindex="0" aria-label="Paired participant registrations" hidden></div>
       </section>
 
@@ -906,7 +909,7 @@ const staffNavLinks: readonly StaffNavLink[] = [
   { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
   { href: "/staff/announcer", label: "Announcer", access: { anyOf: ["ANNOUNCER", "RACE_DIRECTOR"] } },
   { href: "/staff/finish-line", label: "Finish line", access: { anyOf: ["RESULT_TAKER", "RACE_DIRECTOR"] } },
-  { href: "/staff/inventory-intake", label: "Inventory", access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"] } },
+  { href: "/staff/inventory", label: "Inventory", access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"] } },
 ];
 
 const staffNav = (
@@ -951,7 +954,7 @@ export const renderStaffHome = (
       ${(canStartLine || canFinishLine) ? `<div class="actions station-links" aria-label="Race-day stations">${canStartLine ? '<a class="button station-control" href="/staff/start-line">Open start line</a>' : ""}${canFinishLine ? '<a class="button secondary station-control" href="/staff/finish-line">Open finish line</a>' : ""}</div>` : ""}
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
       <div class="actions"><a class="button secondary" href="/mock/staff/ducks/128/pair">Preview pairing layout</a></div>
-      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants" data-event-scoped hidden>Participants</a>' : ""}${canInventory ? '<a href="#inventory" data-event-scoped hidden>Inventory</a>' : ""}${canRaceRead ? '<a href="#heats" data-event-scoped hidden>Heats</a>' : ""}${isSystemAdmin ? '<a href="#support" data-event-scoped hidden>Support</a>' : ""}</nav>
+      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants" data-event-scoped hidden>Participants</a>' : ""}${canInventory ? '<a href="/staff/inventory">Inventory</a>' : ""}${canRaceRead ? '<a href="#heats" data-event-scoped hidden>Heats</a>' : ""}${isSystemAdmin ? '<a href="#support" data-event-scoped hidden>Support</a>' : ""}</nav>
       <p class="message-line muted" data-console-message aria-live="polite">Loading operations…</p>
 
       <section class="console-section" id="events" aria-labelledby="events-title"${canUseConsole ? "" : " hidden"}>
@@ -1018,6 +1021,7 @@ export const renderStaffHome = (
           </details><div class="data-list" data-participant-list></div></div>
           <article class="operation-card" tabindex="-1" data-participant-detail hidden>
             <h3 data-participant-name>Participant detail</h3><dl class="facts compact-facts" data-participant-facts></dl>
+            <form data-participant-duck-name-form hidden><label>Duck name<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Shown publicly beside the duck’s number. Staff names go through the same wordlist as a participant’s own.</span></label><button class="button secondary" type="submit">Save duck name</button></form>
             <form data-participant-edit-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
               <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
@@ -1029,42 +1033,10 @@ export const renderStaffHome = (
         </div>
       </section>
 
-      <section class="console-section" id="inventory" aria-labelledby="inventory-title" data-event-scoped data-role-allowed="${canInventory ? "true" : "false"}" hidden>
-        <p class="eyebrow">Physical ducks</p><h2 id="inventory-title">Inventory</h2>
-        <p class="muted">Intake reserves a new duck for the selected event. Assigning an available duck reserves it automatically; there is no separate reserve command.</p>
-        ${canInventory ? '<article class="operation-card"><h3>Blank NFC provisioning station</h3><p class="muted">Use a dedicated Android Chrome device to write and register blank writable stickers, one tap per duck.</p><a class="button" href="/staff/inventory-intake">Open NFC provisioning station</a></article>' : ""}
-        <details class="operation-card"><summary>Intake duck and active tag</summary>
-          <form data-inventory-intake-form>
-            <div class="field-grid"><label>Visible duck number<input name="visibleNumber" type="number" min="1" max="999999999" required></label><label>Physical condition<select name="condition"><option value="GOOD">Good</option><option value="NEEDS_TAG">Needs tag</option><option value="DAMAGED">Damaged</option><option value="RETIRED">Retired</option></select></label></div>
-            <label>Tag token<input name="tagToken" minlength="22" maxlength="128" pattern="[A-Za-z0-9_-]+" required autocomplete="off"><span>Read or write the physical NFC/QR token before intake.</span></label>
-            <div class="field-grid"><label>Storage location<input name="location" maxlength="100"></label><label>Notes<input name="notes" maxlength="1000"></label></div>
-            <label class="check"><input name="physicallyPresent" type="checkbox" required><span class="label-text">I have the physical duck and tag in hand.</span></label>
-            <button class="button" type="submit">Intake and reserve duck</button>
-          </form>
-        </details>
-        <div class="section-tools"><button class="button secondary small" type="button" data-refresh-inventory>Refresh inventory</button></div>
-        <div class="inventory-layout"><div class="data-list inventory-card-grid" data-inventory-list></div>
-          <aside class="operation-card inventory-detail-panel" id="inventory-detail-panel" role="region" aria-labelledby="inventory-detail-title" data-inventory-detail hidden>
-            <div class="inventory-detail-heading"><h3 id="inventory-detail-title" data-inventory-name>Duck detail</h3><button class="button secondary small" type="button" data-close-inventory-detail>Close</button></div><dl class="facts compact-facts" data-inventory-facts></dl>
-            <div class="actions"><button class="button secondary small" type="button" data-print-label>Open label data</button><span class="muted" data-label-result></span></div>
-            <details class="operation-card"><summary>Edit pre-race inventory</summary><form data-inventory-edit-form>
-              <div class="field-grid"><label>Visible number<input name="visibleNumber" type="number" min="1" max="999999999" required></label><label>Condition<select name="condition"><option value="GOOD">Good</option><option value="NEEDS_TAG">Needs tag</option><option value="DAMAGED">Damaged</option><option value="RETIRED">Retired</option></select></label></div>
-              <label>Storage location<input name="location" maxlength="100"></label><label>Notes<textarea name="notes" maxlength="1000"></textarea></label><button class="button secondary" type="submit">Save inventory</button>
-            </form></details>
-            <details class="operation-card"><summary>Replace active tag</summary><form data-tag-replace-form><label>New tag token<input name="tagToken" minlength="22" maxlength="128" required autocomplete="off"></label><label class="check"><input name="physicalTagVerified" type="checkbox" required><span class="label-text">I wrote and verified this physical tag.</span></label><button class="button" type="submit">Retire old tag and activate new tag</button></form></details>
-            <details class="operation-card danger-zone"><summary>Retire tag without replacement</summary><form data-tag-retire-form><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><label class="check"><input name="physicalTagRemoved" type="checkbox" required><span class="label-text">I removed or destroyed the physical tag.</span></label><button class="button danger" type="submit">Retire active tag</button></form></details>
-            <details class="operation-card"><summary>Assign or reassign duck</summary><form data-inventory-assign-form><label>Participant race-entry ID<input name="raceEntryId" maxlength="128" required></label><label>Reason<input name="reason" minlength="4" maxlength="500" required placeholder="Walk-up pairing correction"></label><button class="button" type="submit">Assign selected duck</button></form></details>
-            <form class="operation-card" data-inventory-unassign-form hidden><h3>Unassign duck</h3><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><label class="check"><input name="releaseReservation" type="checkbox"><span class="label-text">Also release this duck from the event</span></label><button class="button danger" type="submit">Unassign duck</button></form>
-            <form class="operation-card" data-reservation-release-form hidden><h3>Release event reservation</h3><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><button class="button danger" type="submit">Release reservation</button></form>
-            <h3>History</h3><div class="data-list" data-inventory-history></div>
-          </aside>
-        </div>
-      </section>
-
       <section class="console-section" id="heats" aria-labelledby="heats-title" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
         <p class="eyebrow">Race control</p><h2 id="heats-title">Heats and results</h2>
-        <div class="console-grid">
-          <article class="operation-card"><h3>Finalists</h3><button class="button secondary small" type="button" data-refresh-finalists>Verify finalists</button><div class="data-list" data-finalist-list></div></article>
+        <div class="console-grid" data-finalist-card hidden>
+          <article class="operation-card"><h3>Finalists</h3><p class="muted">Who won a round-one heat and is racing the final.</p><button class="button secondary small" type="button" data-refresh-finalists>Verify finalists</button><div class="data-list" data-finalist-list></div></article>
         </div>
         <div class="section-tools"><button class="button secondary small" type="button" data-refresh-heats>Refresh heats</button></div>
         <div class="console-grid wide"><div class="data-list" data-heat-list></div><article class="operation-card" data-heat-detail hidden><h3 data-heat-name>Heat detail</h3><dl class="facts compact-facts" data-heat-facts></dl><div data-heat-controls></div><h3>Roster</h3><ul class="roster-list" data-heat-roster></ul><h3>Published results</h3><div class="data-list" data-heat-results></div></article></div>
@@ -1205,59 +1177,98 @@ export const renderFinishLine = (
   </section>`,
 });
 
-export const renderInventoryIntake = (
+// The whole of inventory on one page: the duck list and its detail panel, which
+// used to be a console section, plus the blank-sticker scanning station, which
+// used to be a separate Android-only page.
+//
+// The page itself is not device gated. Every device that can sign in can read
+// inventory, select a duck, and run every inventory command; only the scanning
+// station is conditional, and it explains itself in place rather than replacing
+// the page with a compatibility notice that also took the staff navigation with
+// it.
+export const renderStaffInventory = (
   displayName: string,
   appOrigin: string,
   isSystemAdmin = false,
   roles: readonly OperationalRole[] = [],
 ): string => page({
-  title: "NFC provisioning",
-  description: "Focused protected QuickDucks blank NFC provisioning station.",
+  title: "Inventory",
+  description: "Protected QuickDucks duck inventory and NFC provisioning.",
   robots: "noindex,nofollow",
-  content: `<section class="page-panel station-panel" data-inventory-intake data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
-    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · NFC provisioning</p><div class="staff-bar-actions"><a href="/staff#inventory">Staff inventory</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
-    ${staffNav(isSystemAdmin, roles, "/staff/inventory-intake")}
-    <div class="notice" data-intake-runtime aria-live="polite"><strong>Checking this device.</strong><span data-intake-runtime-message>The station remains unavailable until its Android NFC requirements are confirmed.</span></div>
-    <div data-intake-controls hidden>
-      <p class="eyebrow">Blank sticker station</p><h1 class="page-title">Tap, write, and move on.</h1>
-      <p class="lede">Choose the race and press Start once. Then hold one blank writable NFC sticker to this Android device until success, remove it, and present the next duck.</p>
-      <div class="notice"><strong>Android Chrome over HTTPS only.</strong> Keep this top-level page visible and online. QuickDucks generates the duck UUID, internal number, and permanent URL automatically; there is no offline queue or manual token fallback.</div>
-      <label>Race event<select data-intake-event aria-describedby="intake-event-help"><option value="">Loading available events…</option></select><span id="intake-event-help">Only draft or registration-stage events accept inventory intake.</span></label>
-      <label>Station location (optional)<input data-intake-location maxlength="100" autocomplete="off" placeholder="Intake table"><span>This one location is applied automatically to stickers provisioned during this station run.</span></label>
-      <div class="actions">
-        <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
-        <button class="button secondary station-control" type="button" data-end-intake-nfc hidden disabled>End NFC provisioning</button>
+  content: `
+    <section class="page-panel operations-panel" data-staff-inventory data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
+      <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · Inventory</p><div class="staff-bar-actions"><a href="/staff">Staff home</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
+      ${staffNav(isSystemAdmin, roles, "/staff/inventory")}
+      <p class="eyebrow">Physical ducks</p>
+      <h1 class="page-title operations-title">Inventory</h1>
+      <p class="lede">Every duck QuickDucks knows about. Scan a blank sticker to add one; scan a duck already in inventory and it opens here.</p>
+      <div class="section-tools">
+        <label>Working event<select data-event-select aria-label="Working event"><option value="">Loading events…</option></select></label>
+        <button class="button secondary small" type="button" data-refresh-inventory>Refresh inventory</button>
       </div>
-      <article class="operation-card danger-zone" data-intake-takeover hidden>
-        <h2>Abandoned sticker recovery</h2>
-        <p class="muted" data-intake-takeover-message></p>
-        <p>Race directors and administrators can explicitly take ownership. Do this only after confirming the previous station is no longer working on the sticker.</p>
-        <button class="button danger" type="button" data-takeover-provisioning>Take over pending sticker</button>
-      </article>
-      <article class="operation-card station-state" role="status" aria-live="polite" aria-atomic="true"><p class="eyebrow">Station state</p><h2 data-intake-state>Not started</h2><p class="message-line muted" data-intake-message>Select a race, then press Start once.</p></article>
-      <div class="station-counters" aria-label="Inventory counts">
-        <div class="station-counter"><span>Reserved for race</span><strong data-reserved-count>0</strong></div>
-        <div class="station-counter"><span>Added this session</span><strong data-session-count>0</strong></div>
-      </div>
-      <h2>Session history</h2><p class="muted">Only provisioning outcomes appear here. Permanent URLs and tokens are never displayed or stored by the browser.</p>
-      <ul class="station-history" data-intake-history><li>No ducks added in this page session.</li></ul>
-    </div>
-    <script src="/assets/app-select.js" defer></script>
-    <script src="/assets/inventory-intake.js" defer></script>
-  </section>`,
-});
+      <p class="message-line muted" data-console-message aria-live="polite">Loading inventory…</p>
+      <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>An administrator creates the race event on the staff console. Ducks are reserved for an event, so inventory work starts there.</span></div>
 
-export const renderInventoryIntakeUnsupported = (displayName: string): string => page({
-  title: "Unsupported NFC device",
-  description: "QuickDucks NFC provisioning requires a supported Android device.",
-  robots: "noindex,nofollow",
-  content: `<section class="page-panel station-panel">
-    <div class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong> · NFC provisioning</p><div class="staff-bar-actions"><a href="/staff#inventory">Staff inventory</a><span aria-hidden="true">·</span>${staffLogoutForm()}</div></div>
-    <p class="eyebrow">Unsupported device</p><h1 class="page-title">Open this station on Android.</h1>
-    <p class="lede">This page is available only on an NFC-capable Android device using current Chrome. Return to staff inventory, then open this station on that device.</p>
-    <div class="notice"><strong>This is a compatibility check, not an authorization control.</strong><span>Staff authentication and inventory permissions are checked before this device message.</span></div>
-    <a class="button secondary" href="/staff#inventory">Back to staff inventory</a>
-  </section>`,
+      <section class="console-section" id="scan" aria-labelledby="scan-title" data-intake-station>
+        <p class="eyebrow">Blank sticker station</p><h2 id="scan-title">Scan ducks</h2>
+        <div class="notice" data-intake-runtime aria-live="polite"><strong>Checking this device.</strong> <span data-intake-runtime-message>Scanning stays unavailable until this device’s NFC requirements are confirmed. Everything else on this page still works.</span></div>
+        <div data-intake-controls hidden>
+          <p class="lede">Press Start once. Then hold one blank writable NFC sticker to this device until success, remove it, and present the next duck. A sticker already in inventory opens its duck below instead.</p>
+          <label>Station location (optional)<input data-intake-location maxlength="100" autocomplete="off" placeholder="Intake table"><span>This one location is applied automatically to stickers provisioned during this station run.</span></label>
+          <div class="actions">
+            <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
+            <button class="button secondary station-control" type="button" data-end-intake-nfc hidden disabled>End NFC provisioning</button>
+          </div>
+          <article class="operation-card danger-zone" data-intake-takeover hidden>
+            <h3>Abandoned sticker recovery</h3>
+            <p class="muted" data-intake-takeover-message></p>
+            <p>Race directors and administrators can explicitly take ownership. Do this only after confirming the previous station is no longer working on the sticker.</p>
+            <button class="button danger" type="button" data-takeover-provisioning>Take over pending sticker</button>
+          </article>
+          <article class="operation-card station-state" role="status" aria-live="polite" aria-atomic="true"><p class="eyebrow">Station state</p><h3 data-intake-state>Not started</h3><p class="message-line muted" data-intake-message>Press Start once when you are ready to scan.</p></article>
+          <div class="station-counters" aria-label="Inventory counts">
+            <div class="station-counter"><span>Reserved for race</span><strong data-reserved-count>0</strong></div>
+            <div class="station-counter"><span>Added this session</span><strong data-session-count>0</strong></div>
+          </div>
+          <details class="operation-card"><summary>Session history</summary>
+            <p class="muted">Only provisioning outcomes appear here. Permanent URLs and tokens are never displayed or stored by the browser.</p>
+            <ul class="station-history" data-intake-history><li>No ducks added in this page session.</li></ul>
+          </details>
+        </div>
+      </section>
+
+      <section class="console-section" id="ducks" aria-labelledby="ducks-title">
+        <p class="eyebrow">Duck records</p><h2 id="ducks-title">Ducks</h2>
+        <p class="muted">Assigning an available duck reserves it for the working event automatically; there is no separate reserve command.</p>
+        <details class="operation-card"><summary>Add a duck by hand</summary>
+          <p class="muted">For a tag that is already written, or a device that cannot scan. Scanning a blank sticker does all of this in one tap.</p>
+          <form data-inventory-intake-form>
+            <label>Visible duck number<input name="visibleNumber" type="number" min="1" max="999999999" required></label>
+            <label>Tag token<input name="tagToken" minlength="22" maxlength="128" pattern="[A-Za-z0-9_-]+" required autocomplete="off"><span>Read or write the physical NFC/QR token before intake.</span></label>
+            <div class="field-grid"><label>Storage location<input name="location" maxlength="100"></label><label>Notes<input name="notes" maxlength="1000"></label></div>
+            <label class="check"><input name="physicallyPresent" type="checkbox" required><span class="label-text">I have the physical duck and tag in hand.</span></label>
+            <button class="button" type="submit">Add duck</button>
+          </form>
+        </details>
+        <div class="inventory-layout"><div class="data-list inventory-card-grid" data-inventory-list></div>
+          <aside class="operation-card inventory-detail-panel" id="inventory-detail-panel" role="region" aria-labelledby="inventory-detail-title" data-inventory-detail hidden>
+            <div class="inventory-detail-heading"><h3 id="inventory-detail-title" data-inventory-name>Duck detail</h3><button class="button secondary small" type="button" data-close-inventory-detail>Close</button></div><dl class="facts compact-facts" data-inventory-facts></dl>
+            <div class="actions"><button class="button secondary small" type="button" data-print-label>Open label data</button><span class="muted" data-label-result></span></div>
+            <form class="operation-card" data-inventory-duck-name-form hidden><h3>Duck name</h3><label>Name shown beside the number<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Public. Staff names go through the same wordlist as a participant’s own.</span></label><div class="actions"><button class="button secondary small" type="submit">Save duck name</button><button class="button danger small" type="button" data-clear-duck-name hidden>Clear name</button></div></form>
+            <details class="operation-card"><summary>Assign or reassign duck</summary><form data-inventory-assign-form><label>Participant race-entry ID<input name="raceEntryId" maxlength="128" required></label><label>Reason<input name="reason" minlength="4" maxlength="500" required placeholder="Walk-up pairing correction"></label><button class="button" type="submit">Assign selected duck</button></form></details>
+            <form class="operation-card" data-inventory-unassign-form hidden><h3>Unpair duck</h3><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><label class="check"><input name="releaseReservation" type="checkbox"><span class="label-text">Also release this duck from the event</span></label><button class="button danger" type="submit">Unpair duck</button></form>
+            <form class="operation-card" data-reservation-release-form hidden><h3>Release event reservation</h3><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><button class="button danger" type="submit">Release reservation</button></form>
+            <details class="operation-card danger-zone"><summary>Delete duck</summary>
+              <p class="muted" data-delete-duck-effect>Removes this duck from inventory and retires its tag. This cannot be undone.</p>
+              <form data-duck-delete-form><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><button class="button danger" type="submit">Delete duck</button></form>
+            </details>
+            <details class="operation-card"><summary>History</summary><div class="data-list" data-inventory-history></div></details>
+          </aside>
+        </div>
+      </section>
+      <script src="/assets/app-select.js" defer></script>
+      <script src="/assets/staff-inventory.js" defer></script>
+    </section>`,
 });
 
 export const renderStaffDuck = (

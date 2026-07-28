@@ -508,13 +508,25 @@ const pairDuck = async (
   if (duck === null) return json({ error: "This tag is not an active race duck." }, 404);
   if (duck.active_assignment_id !== null) return json({ error: "This duck is already paired." }, 409);
 
+  // Pairing is allowed once racing has started, because a duck can be deleted
+  // mid-race and its participant then has to be given another one. It is the
+  // same command either way: the participant is SUBMITTED with no open
+  // assignment, which is exactly the state deleting their duck left them in.
   const context = await env.DB.prepare(
     `SELECT e.id AS event_id, e.round_one_heat_capacity,
             e.final_heat_capacity,
             r.id AS registration_id, r.status AS registration_status,
             r.revision AS registration_revision,
             re.id AS race_entry_id, re.revision AS race_entry_revision,
-            r.first_name, r.last_name, r.email, r.phone, r.lookup_code
+            r.first_name, r.last_name, r.email, r.phone, r.lookup_code,
+            (
+              SELECT h.heat_number
+                FROM heat_entries he
+                JOIN heats h ON h.id = he.heat_id
+               WHERE he.race_entry_id = re.id
+               ORDER BY CASE h.round WHEN 'FINAL' THEN 0 ELSE 1 END, h.heat_number
+               LIMIT 1
+            ) AS existing_heat_number
        FROM registrations r
        JOIN race_entries re ON re.registration_id = r.id
        JOIN events e ON e.id = r.event_id
@@ -524,9 +536,9 @@ const pairDuck = async (
         AND r.lookup_code = ? COLLATE NOCASE
         AND r.status = 'SUBMITTED'
         AND da.id IS NULL
-        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED')
+        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
       LIMIT 1`,
-  ).bind(eventId, lookupCode).first<PairingContext>();
+  ).bind(eventId, lookupCode).first<PairingContext & { existing_heat_number: number | null }>();
   if (context === null) {
     return json({ error: "No unpaired participant matches that code in this event." }, 404);
   }
@@ -586,8 +598,20 @@ const pairDuck = async (
   // post-close balanced planner is gone, so an event row that still carries the
   // retired mode value is paired into heats exactly like every other event
   // rather than being left with no route to a heat at all.
+  //
+  // A participant who already holds a heat place keeps it. That is what makes
+  // replacing a deleted duck mid-race possible at all: the heat roster names the
+  // race entry, and the duck is resolved through whichever assignment is
+  // currently open, so a new assignment is the whole repair.
   let heat: { id: string; number: number; slot: number; isNew: boolean } | null = null;
-  {
+  if (typeof context.existing_heat_number === "number") {
+    heat = {
+      id: "",
+      number: context.existing_heat_number,
+      slot: 0,
+      isNew: false,
+    };
+  } else {
     const existingHeat = await env.DB.prepare(
       `SELECT h.id, h.heat_number, COUNT(he.id) AS entry_count
          FROM heats h

@@ -160,8 +160,11 @@ pass, but say so in the response rather than merging quietly.
 
 - Email delivery is not operational until a queue consumer and SES send path
   exist; only a queue producer and support records are implemented.
-- Blank writable NFC provisioning is implemented only through the protected,
-  online Android Chrome inventory station. Older documents may describe offline
-  operation, physical random draw, and in-race duck replacement; do not claim
-  those as current without implementing and testing them.
+- Blank writable NFC provisioning is implemented only through the online
+  Android Chrome scanning station on the protected `/staff/inventory` page. The
+  rest of that page works on any device. Older documents may describe offline
+  operation, physical random draw, duck condition, and tag replacement or
+  retirement; do not claim those as current without implementing and testing
+  them. Replacing a duck mid-race is deleting it and pairing that participant
+  with another one.
 - Generated local state under `node_modules/` and `.wrangler/` is not source.

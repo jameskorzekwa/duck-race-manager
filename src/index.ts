@@ -13,7 +13,6 @@ import {
   announcerScript,
   appSelectScript,
   finishLineScript,
-  inventoryIntakeScript,
   liveScript,
   liveUiScript,
   participantScript,
@@ -21,6 +20,7 @@ import {
   staffAccessScript,
   staffDuckScript,
   staffHomeScript,
+  staffInventoryScript,
   startLineScript,
 } from "./client-scripts.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
@@ -39,11 +39,10 @@ import {
   renderStaffDuck,
   renderAnnouncer,
   renderFinishLine,
-  renderInventoryIntake,
-  renderInventoryIntakeUnsupported,
   renderMyDucks,
   renderStaffAccess,
   renderStaffHome,
+  renderStaffInventory,
   renderStaffLogin,
   renderStaffPairing,
   renderStartLine,
@@ -118,10 +117,6 @@ const safeReturnTo = (value: string | null): string =>
   value !== null && value.startsWith("/") && !value.startsWith("//") && value.length <= 512
     ? value
     : "/staff";
-
-// Compatibility-only page routing. Authorization and API protections never trust this value.
-const hasAndroidUserAgent = (request: Request): boolean =>
-  /\bAndroid\b/i.test(request.headers.get("user-agent") ?? "");
 
 // Focused race-day station pages. Each is one path, one role set, one renderer,
 // so a new station cannot drift from the shared 303/403/noindex treatment. A Map
@@ -240,7 +235,7 @@ export const createWorker = (
       });
     }
 
-    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/live.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)) {
+    if (["/assets/live-ui.js", "/assets/register.js", "/assets/participant.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/live.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/staff-inventory.js", "/assets/app-select.js"].includes(url.pathname)) {
       const script = url.pathname === "/assets/live-ui.js"
         ? liveUiScript
         : url.pathname === "/assets/register.js"
@@ -261,11 +256,11 @@ export const createWorker = (
                         ? finishLineScript
                         : url.pathname === "/assets/app-select.js"
                           ? appSelectScript
-                          : url.pathname === "/assets/inventory-intake.js" ? inventoryIntakeScript : staffDuckScript;
+                          : url.pathname === "/assets/staff-inventory.js" ? staffInventoryScript : staffDuckScript;
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/inventory-intake.js", "/assets/app-select.js"].includes(url.pathname)
+          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/staff-inventory.js", "/assets/app-select.js"].includes(url.pathname)
             ? "no-store"
             : "public, max-age=3600",
           "content-type": "text/javascript; charset=utf-8",
@@ -400,7 +395,12 @@ export const createWorker = (
       )));
     }
 
-    if (url.pathname === "/staff/inventory-intake" && request.method === "GET") {
+    // Inventory is a normal staff page on every device. NFC scanning is the only
+    // part that needs Android Chrome, and the page turns that part off in the
+    // browser rather than being refused here: a device check that replaced the
+    // whole page also removed the staff navigation from it, which is how a
+    // laptop ended up on a dead end with no way back.
+    if (url.pathname === "/staff/inventory" && request.method === "GET") {
       const actor = await authenticateRequest(request, env);
       if (actor === null) {
         const login = new URL("/staff", env.APP_ORIGIN);
@@ -408,21 +408,14 @@ export const createWorker = (
         return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
       }
       if (!hasAnyRole(actor, ["DUCK_MANAGER", "RACE_DIRECTOR"])) {
-        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use the inventory intake station.", actor), 403, true));
+        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use duck inventory.", actor), 403, true));
       }
-      if (!hasAndroidUserAgent(request)) {
-        const response = staffHtml(renderInventoryIntakeUnsupported(actor.displayName ?? actor.email), 400);
-        response.headers.set("vary", "User-Agent");
-        return withSessionCookies(response);
-      }
-      const response = staffHtml(renderInventoryIntake(
+      return withSessionCookies(staffHtml(renderStaffInventory(
         actor.displayName ?? actor.email,
         appOrigin.origin,
         actor.isSystemAdmin,
         actor.roles,
-      ));
-      response.headers.set("vary", "User-Agent");
-      return withSessionCookies(response);
+      )));
     }
 
     const station = stationPages.get(url.pathname);

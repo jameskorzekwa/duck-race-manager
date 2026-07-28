@@ -272,7 +272,6 @@ const seed = async (options) => {
       visibleNumber: 101 + index,
       tagToken,
       physicallyPresent: true,
-      condition: "GOOD",
       location: index % 2 === 0 ? "Intake table A" : "Intake table B",
     }, { label: `intake duck ${101 + index}` });
     participant.tagToken = tagToken;

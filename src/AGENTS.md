@@ -29,7 +29,7 @@ scan-first pairing.
 | Worker/pages/assets | `index.ts`, `site.ts`, `client-scripts.ts` |
 | Public site phase | `public-phase.ts` |
 | Public registration/status | `api.ts`, `registration.ts`, `browser-collection.ts`, `race-status.ts` |
-| Public duck-name filtering | `duck-name-filter.ts` |
+| Public duck-name filtering and suggestions | `duck-name-filter.ts`, `duck-name-suggestions.ts` |
 | Public live board/signaling | `race-board.ts`, `live-updates.ts` |
 | Cognito/session/access | `auth.ts`, `staff-session.ts`, `staff-access.ts` |
 | Staff roles/lifecycle | `authorization.ts`, `staff-lifecycle-operations.ts` |
@@ -69,10 +69,13 @@ an environment variable or a build flag can be set by mistake in production.
   are authoritative.
 - Audit safe identifiers and changed field names, never participant PII or raw
   credentials/tokens.
-- Participant free text that is published — currently only `race_entries.duck_name`
-  — passes `duck-name-filter.ts` both when it is written and wherever it is
-  projected, so a row stored earlier or a later wordlist change cannot leak one.
-  A rejected value is never echoed to the caller, logged, or audited.
+- Free text that is published — currently only `race_entries.duck_name`, whether
+  a participant or a staff member wrote it — passes `duck-name-filter.ts` both
+  when it is written and wherever it is projected, so a row stored earlier or a
+  later wordlist change cannot leak one. The staff endpoint applies the same
+  gates in the same order as the public one. A rejected value is never echoed to
+  the caller, logged, or audited. `duck-name-suggestions.ts` holds the offered
+  names, and its test proves every pairing survives all of those gates.
 - An administrator implicitly passes role checks. Regular actors must have
   explicit validated roles; do not add a broad missing-role fallback.
 - `RaceUpdates` accepts same-origin WebSockets and broadcasts only finite-domain
@@ -105,8 +108,8 @@ an environment variable or a build flag can be set by mistake in production.
   subscriber must therefore be registered conditionally. The navigation
   subscriber ships in `live-ui.js`, which every page loads, so it is gated on the
   server-rendered `data-live-nav` marker that only public content pages set.
-  Staff sign-in, not-found, unsupported-device, and staff error pages carry no
-  marker and no other live surface, so they hold no connection.
+  Staff sign-in, not-found, and staff error pages carry no marker and no other
+  live surface, so they hold no connection.
 - The catch-all not-found response resolves no phase and runs no query, so
   unmatched paths cannot amplify database reads.
 - Escape every dynamic server value with `escapeHtml`.

@@ -6,8 +6,9 @@ import {
   inventoryDetailHelpersScript,
   inventoryGroupHelpersScript,
   staffHomeScript,
+  staffInventoryScript,
 } from "./client-scripts.ts";
-import { renderStaffHome } from "./site.ts";
+import { renderStaffHome, renderStaffInventory } from "./site.ts";
 
 // ---------------------------------------------------------------------------
 // A small DOM double. Only the APIs the console actually uses are implemented,
@@ -133,30 +134,55 @@ class FakeDocument {
 // tests exercise the shipped browser code, never a copy of it.
 // ---------------------------------------------------------------------------
 
-const lift = (label, pattern) => {
-  const match = staffHomeScript.match(pattern);
-  assert.ok(match, `the console script defines ${label}`);
+// Inventory moved to its own page, so each lifted function names the shipped
+// bundle it belongs to. Lifting from the wrong one fails here rather than
+// silently testing the other page's copy.
+const lift = (label, { pattern, from }) => {
+  const match = from.match(pattern);
+  assert.ok(match, `the shipped client defines ${label}`);
   return match[0];
 };
 
+// The two standalone staff pages each carry their own copy of the tiny shared
+// helpers, because a classic script cannot import. They must stay identical, or
+// the same control would behave differently depending on which page it is on.
+test("the two staff bundles share byte-identical copies of the common helpers", () => {
+  for (const [label, pattern] of [
+    ["text", /const text = \(tag, value, className\) => \{[\s\S]*?\n\};/],
+    ["humanize", /const humanize = \(value\) => [^;]+;/],
+    ["empty", /const empty = \(message\) => .*;/],
+    ["commandOptions", /const commandOptions = \(method, payload\) => \(\{[\s\S]*?\n\}\);/],
+    ["historyCard", /const historyCard = \(title, detail\) => \{[\s\S]*?\n\};/],
+  ]) {
+    const consoleCopy = staffHomeScript.match(pattern);
+    const inventoryCopy = staffInventoryScript.match(pattern);
+    assert.ok(consoleCopy, `the console defines ${label}`);
+    assert.ok(inventoryCopy, `the inventory page defines ${label}`);
+    assert.equal(inventoryCopy[0], consoleCopy[0], `${label} has drifted between the two bundles`);
+  }
+});
+
+const fromConsole = (pattern) => ({ pattern, from: staffHomeScript });
+const fromInventory = (pattern) => ({ pattern, from: staffInventoryScript });
+
 const consoleParts = {
-  text: /const text = \(tag, value, className\) => \{[\s\S]*?\n\};/,
-  humanize: /const humanize = \(value\) => [^;]+;/,
-  empty: /const empty = \(message\) => .*;/,
-  inventoryCard: /const inventoryCard = \(duck\) => \{[\s\S]*?\n\};/,
-  inventoryGroupSection: /const inventoryGroupSection = \(group\) => \{[\s\S]*?\n\};/,
-  loadInventory: /const loadInventory = async \(\) => \{[\s\S]*?\n\};/,
-  loadDuckDetail: /const loadDuckDetail = async \(duckId, trigger = null, focusDetail = false\) => \{[\s\S]*?\n\};/,
-  loadParticipantDetail: /const loadParticipantDetail = async \(registrationId\) => \{[\s\S]*?\n\};/,
-  revealConsoleSection: /const revealConsoleSection = \(selector\) => \{[\s\S]*?\n\};/,
-  openRosterParticipant: /const openRosterParticipant = async \(registrationId\) => \{[\s\S]*?\n\};/,
-  openRosterDuck: /const openRosterDuck = async \(duckId\) => \{[\s\S]*?\n\};/,
-  loadHeatDetail: /const loadHeatDetail = async \(heatId\) => \{[\s\S]*?\n\};/,
-  commandOptions: /const commandOptions = \(method, payload\) => \(\{[\s\S]*?\n\}\);/,
-  addParticipantAction: /const addParticipantAction = \(label, className, action\) => \{[\s\S]*?\n\};/,
-  participantDuckNameFact: /const participantDuckNameFact = \(registration\) => \{[\s\S]*?\n\};/,
-  clearParticipantDuckName: /const clearParticipantDuckName = async \(button\) => \{[\s\S]*?\n\};/,
-  renderParticipantDetail: /const renderParticipantDetail = \(registration\) => \{[\s\S]*?\n\};/,
+  text: fromConsole(/const text = \(tag, value, className\) => \{[\s\S]*?\n\};/),
+  humanize: fromConsole(/const humanize = \(value\) => [^;]+;/),
+  empty: fromConsole(/const empty = \(message\) => .*;/),
+  inventoryCard: fromInventory(/const inventoryCard = \(duck\) => \{[\s\S]*?\n\};/),
+  inventoryGroupSection: fromInventory(/const inventoryGroupSection = \(group\) => \{[\s\S]*?\n\};/),
+  loadInventory: fromInventory(/const loadInventory = async \(\) => \{[\s\S]*?\n\};/),
+  loadDuckDetail: fromInventory(/const loadDuckDetail = async \(duckId, trigger = null, focusDetail = false\) => \{[\s\S]*?\n\};/),
+  loadParticipantDetail: fromConsole(/const loadParticipantDetail = async \(registrationId\) => \{[\s\S]*?\n\};/),
+  revealConsoleSection: fromConsole(/const revealConsoleSection = \(selector\) => \{[\s\S]*?\n\};/),
+  openRosterParticipant: fromConsole(/const openRosterParticipant = async \(registrationId\) => \{[\s\S]*?\n\};/),
+  openRosterDuck: fromConsole(/const openRosterDuck = \(duckId\) => \{[\s\S]*?\n\};/),
+  loadHeatDetail: fromConsole(/const loadHeatDetail = async \(heatId\) => \{[\s\S]*?\n\};/),
+  commandOptions: fromConsole(/const commandOptions = \(method, payload\) => \(\{[\s\S]*?\n\}\);/),
+  addParticipantAction: fromConsole(/const addParticipantAction = \(label, className, action\) => \{[\s\S]*?\n\};/),
+  participantDuckNameFact: fromConsole(/const participantDuckNameFact = \(registration\) => \{[\s\S]*?\n\};/),
+  clearParticipantDuckName: fromConsole(/const clearParticipantDuckName = async \(button\) => \{[\s\S]*?\n\};/),
+  renderParticipantDetail: fromConsole(/const renderParticipantDetail = \(registration\) => \{[\s\S]*?\n\};/),
 };
 
 const build = (parts, injected, returned) => {
@@ -377,7 +403,10 @@ test("an empty inventory keeps the single no-ducks message and no group scaffold
 
   assert.equal(harness.inventoryList.children.length, 1);
   assert.equal(harness.inventoryList.children[0].className, "empty-state");
-  assert.equal(harness.inventoryList.children[0].textContent, "No ducks are in inventory.");
+  assert.equal(
+    harness.inventoryList.children[0].textContent,
+    "No ducks are in inventory. Scan a blank sticker to add the first one.",
+  );
   assert.equal(groupSections(harness.inventoryList).length, 0);
   assert.deepEqual(harness.selections, [["sync"]], "the detail controller is still resynchronised");
 });
@@ -507,9 +536,9 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
   const heatResults = document.hook("[data-heat-results]");
   const heatName = document.hook("[data-heat-name]", "h3");
   const participants = document.hook("#participants", "section");
-  const inventory = document.hook("#inventory", "section");
   const participantDetail = document.hook("[data-participant-detail]", "article");
   const opened = [];
+  const navigations = [];
   const runtime = build(
     [
       heatRosterHelpersScript,
@@ -540,7 +569,7 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
         participantDetail.hidden = false;
         opened.push(["participant-rendered", registration.registrationId]);
       },
-      loadDuckDetail: async (...args) => opened.push(["duck", ...args]),
+      location: { assign: (url) => navigations.push(url) },
       setMessage: (message, isError) => opened.push(["message", message, Boolean(isError)]),
       api: async (url) => {
         opened.push(["api", url]);
@@ -555,7 +584,7 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
   return {
     document,
     heatRoster,
-    inventory,
+    navigations,
     opened,
     participantDetail,
     participants,
@@ -670,16 +699,16 @@ test("the participant link reveals the participants section and loads that parti
   assert.equal(harness.document.activeElement, harness.participantDetail);
 });
 
-test("the duck link reveals the inventory section and opens that duck's detail panel", async () => {
+test("the duck link navigates to the inventory page with that duck selected", async () => {
   const harness = heatHarness({ roster: [rosterEntry()] });
   await harness.loadHeatDetail("heat-1");
   const [duckLink] = harness.links("duck");
 
   await duckLink.dispatch("click");
 
-  assert.deepEqual(harness.inventory.scrollCalls, [{ behavior: "smooth", block: "start" }]);
-  // The existing duck-detail path is reused, including its focus-the-panel flag.
-  assert.deepEqual(harness.opened.at(-1), ["duck", "duck-12", null, true]);
+  // Inventory is its own page now, so the roster hands the duck to it rather
+  // than scrolling to a console section that no longer exists.
+  assert.deepEqual(harness.navigations, ["/staff/inventory?duck=duck-12"]);
 });
 
 test("a failed roster navigation reports the error instead of throwing", async () => {
@@ -695,36 +724,26 @@ test("a failed roster navigation reports the error instead of throwing", async (
 // Deep links and the inventory detail request version
 // ---------------------------------------------------------------------------
 
-test("a duck deep link cannot leave a stale inventory panel open", async () => {
+test("an inventory selection overtaken by the panel closing never renders into it", async () => {
   const pending = new Map();
   const harness = detailHarness({
     ducks: [duck(1, "IN_USE", { reservation: activeReservation }), duck(2, "AVAILABLE")],
     detailDelay: (duckId) => new Promise((resolve) => pending.set(duckId, resolve)),
   });
-  const navigation = build(
-    ["revealConsoleSection", "openRosterDuck"],
-    {
-      document: harness.document,
-      loadDuckDetail: harness.loadDuckDetail,
-    },
-    ["openRosterDuck"],
-  );
-  harness.document.hook("#inventory", "section");
   await harness.loadInventory();
 
-  // A link click that is overtaken by the panel closing resolves quietly.
-  const linkClick = navigation.openRosterDuck("duck-1");
+  const firstSelection = harness.loadDuckDetail("duck-1");
   harness.inventoryDetailController.close();
   pending.get("duck-1")();
-  await linkClick;
+  await firstSelection;
 
   assert.deepEqual(harness.rendered, [], "a superseded request never renders into the panel");
   assert.equal(harness.detail.hidden, true);
 
-  // The next click still opens normally.
-  const secondClick = navigation.openRosterDuck("duck-2");
+  // The next selection still opens normally.
+  const secondSelection = harness.loadDuckDetail("duck-2");
   pending.get("duck-2")();
-  await secondClick;
+  await secondSelection;
   assert.deepEqual(harness.rendered, ["duck-2"]);
   assert.equal(harness.detail.hidden, false);
 });
@@ -757,7 +776,9 @@ const participantDetailHarness = ({ canRegistration = true, clearResponse = null
   const participantFacts = document.hook("[data-participant-facts]", "dl");
   const participantActions = document.hook("[data-participant-actions]", "div");
   document.hook("[data-participant-name]", "h3");
-  document.hook("#inventory", "section");
+  const participantDuckNameForm = document.hook("[data-participant-duck-name-form]", "form");
+  participantDuckNameForm.hidden = true;
+  participantDuckNameForm.elements = { duckName: { value: "" } };
   const facts = [];
   const requests = [];
   const confirmations = [];
@@ -791,6 +812,7 @@ const participantDetailHarness = ({ canRegistration = true, clearResponse = null
       participantFacts,
       participantActions,
       participantEditForm,
+      participantDuckNameForm,
       selectedRegistration: null,
       showFacts: (container, entries) => facts.push(...entries),
       appConfirm: async (message, options) => {
@@ -815,6 +837,7 @@ const participantDetailHarness = ({ canRegistration = true, clearResponse = null
     requests,
     confirmations,
     participantActions,
+    participantDuckNameForm,
     setConfirmAnswer: (value) => { confirmAnswer = value; },
     action: (label) => participantActions.children.find((child) => child.textContent === label) ?? null,
   };
@@ -900,6 +923,30 @@ test("clearing a duck name confirms first, then posts one idempotent command", a
   assert.deepEqual(harness.facts.filter(([label]) => label === "Duck name").at(-1), ["Duck name", "Not named"]);
 });
 
+// A duck name is what labels a duck someone is racing, so the desk can only set
+// one for a participant who already holds a duck. The endpoint refuses it
+// otherwise, and the field follows that rule rather than offering a control that
+// could only fail.
+test("the desk duck-name field appears only for a paired participant with the registration role", () => {
+  const paired = participantDetailHarness();
+  paired.renderParticipantDetail(registrationDetail({ duckName: "Sir Quacks-a-Lot" }));
+  assert.equal(paired.participantDuckNameForm.hidden, false);
+  assert.equal(paired.participantDuckNameForm.elements.duckName.value, "Sir Quacks-a-Lot");
+
+  const unnamed = participantDetailHarness();
+  unnamed.renderParticipantDetail(registrationDetail());
+  assert.equal(unnamed.participantDuckNameForm.hidden, false);
+  assert.equal(unnamed.participantDuckNameForm.elements.duckName.value, "");
+
+  const unpaired = participantDetailHarness();
+  unpaired.renderParticipantDetail(registrationDetail({ assignment: null }));
+  assert.equal(unpaired.participantDuckNameForm.hidden, true, "nothing to name without a duck");
+
+  const readOnly = participantDetailHarness({ canRegistration: false });
+  readOnly.renderParticipantDetail(registrationDetail({ duckName: "Sir Quacks-a-Lot" }));
+  assert.equal(readOnly.participantDuckNameForm.hidden, true);
+});
+
 // ---------------------------------------------------------------------------
 // Shipped script and markup guarantees
 // ---------------------------------------------------------------------------
@@ -927,20 +974,23 @@ test("the console gates roster deep links on the same roles that gate the sectio
   // targets are still the role-gated ones.
   const announcer = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
   assert.match(announcer, /<section class="console-section" id="participants"[^>]*data-role-allowed="false"/);
-  assert.match(announcer, /<section class="console-section" id="inventory"[^>]*data-role-allowed="false"/);
   assert.match(announcer, /<section class="console-section" id="heats"[^>]*data-role-allowed="true"/);
   const director = renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]);
-  for (const id of ["participants", "inventory", "heats"]) {
+  for (const id of ["participants", "heats"]) {
     assert.match(director, new RegExp(`<section class="console-section" id="${id}"[^>]*data-role-allowed="true"`));
   }
+  // The duck link targets the inventory page, which is role-gated at the route.
+  assert.doesNotMatch(announcer, /href="\/staff\/inventory"/);
+  assert.match(director, /href="\/staff\/inventory"/);
 });
 
-test("the console markup keeps the inventory layout and supports focusing the participant panel", () => {
+test("the inventory page keeps the inventory layout and the console keeps its focusable participant panel", () => {
   const markup = renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]);
+  const inventory = renderStaffInventory("Race Director", "https://quickducks.com", false, ["RACE_DIRECTOR"]);
 
-  // The inventory card grid and sticky detail panel are untouched; groups are
-  // rendered inside the existing list container.
-  assert.match(markup, /<div class="inventory-layout"><div class="data-list inventory-card-grid" data-inventory-list><\/div>/);
+  // The inventory card grid and sticky detail panel are untouched by the move;
+  // groups are still rendered inside the existing list container.
+  assert.match(inventory, /<div class="inventory-layout"><div class="data-list inventory-card-grid" data-inventory-list><\/div>/);
   assert.match(markup, /\.inventory-group \{ grid-column:1\/-1; display:grid; gap:\.5rem; \}/);
   assert.match(markup, /\.inventory-group-title \{ margin:0; font-size:1\.05rem; overflow-wrap:anywhere; \}/);
   // Roster entries wrap long identifiers instead of overflowing a phone screen.

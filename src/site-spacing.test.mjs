@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { staffAccessScript } from "./client-scripts.ts";
 import {
-  renderInventoryIntake,
+  renderStaffInventory,
   renderMyDucks,
   renderStaffAccess,
   renderStaffDuck,
@@ -31,7 +31,7 @@ test("shared staff styles keep card and status rhythm without empty whitespace",
 });
 
 test("NFC station renders scoped control, state, history, and logout spacing", () => {
-  const markup = renderInventoryIntake("Inventory Staff", "https://quickducks.com");
+  const markup = renderStaffInventory("Inventory Staff", "https://quickducks.com");
   const css = stylesheetFrom(markup);
 
   assert.match(markup, /class="operation-card station-state"/);
@@ -54,7 +54,10 @@ test("pairing, readiness, inventory, and staff-role renderers expose spacing hoo
 
   // One work area now: pairing. The disposition work area went with returns.
   assert.equal((duckMarkup.match(/class="work-area"/g) ?? []).length, 1);
-  assert.match(homeMarkup, /class="operation-card inventory-detail-panel"[^>]*data-inventory-detail hidden/);
+  assert.match(
+    renderStaffInventory("Duck Manager", "https://quickducks.com"),
+    /class="operation-card inventory-detail-panel"[^>]*data-inventory-detail hidden/,
+  );
   assert.match(css, /\.result-button > \* \{ display:block; \}/);
   assert.match(css, /\.pairing-review > \* \+ \* \{ margin-top:var\(--space-xs\); \}/);
   assert.match(css, /\[data-event-readiness\] \.data-card \{[^}]*gap:var\(--space-sm\)/);

@@ -5,14 +5,16 @@ import { liveUiScript, staffAccessScript, staffHomeScript } from "./client-scrip
 import {
   renderAnnouncer,
   renderFinishLine,
-  renderInventoryIntake,
+  renderStaffInventory,
   renderStaffAccess,
   renderStaffDuck,
   renderStaffHome,
   renderStartLine,
 } from "./site.ts";
 
-const eventScopedIds = ["participants", "inventory", "heats", "support"];
+// Inventory left the console for /staff/inventory, so it is no longer one of
+// the sections the console reveals when an event exists.
+const eventScopedIds = ["participants", "heats", "support"];
 
 const sectionTag = (markup, id) => {
   const match = markup.match(new RegExp(`<section class="console-section" id="${id}"[^>]*>`));
@@ -115,27 +117,31 @@ test("role gating is recorded on each event-scoped section and survives event ex
   const announcer = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
 
   assert.match(sectionTag(registration, "participants"), /data-role-allowed="true"/);
-  assert.match(sectionTag(registration, "inventory"), /data-role-allowed="false"/);
   assert.match(sectionTag(registration, "heats"), /data-role-allowed="false"/);
 
   assert.match(sectionTag(announcer, "heats"), /data-role-allowed="true"/);
   assert.match(sectionTag(announcer, "participants"), /data-role-allowed="false"/);
-  assert.match(sectionTag(announcer, "inventory"), /data-role-allowed="false"/);
 
-  // The Returns section is gone from every console, for every role.
-  for (const markup of [registration, announcer]) assert.equal(sectionTag(markup, "returns"), null);
+  // The Returns section is gone from every console, for every role, and
+  // Inventory is a page of its own rather than a section here.
+  for (const markup of [registration, announcer]) {
+    assert.equal(sectionTag(markup, "returns"), null);
+    assert.equal(sectionTag(markup, "inventory"), null);
+  }
 
   // A race director may use every event-scoped section except administrator support.
   const director = renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]);
-  for (const id of ["participants", "inventory", "heats"]) {
+  for (const id of ["participants", "heats"]) {
     assert.match(sectionTag(director, id), /data-role-allowed="true"/, id);
   }
+  assert.equal(sectionTag(director, "inventory"), null);
   assert.equal(sectionTag(director, "support"), null);
 });
 
 test("console-nav anchors are event-scoped, ship hidden, and stay role filtered", () => {
   const admin = consoleNav(renderStaffHome("Administrator", true, []));
-  assert.deepEqual(navHrefs(admin), ["#events", "#participants", "#inventory", "#heats", "#support"]);
+  // Inventory is a real link out to its own page; the rest are in-page anchors.
+  assert.deepEqual(navHrefs(admin), ["#events", "#participants", "/staff/inventory", "#heats", "#support"]);
   // Access left the console nav for its own page.
   assert.doesNotMatch(admin, /#access/);
   for (const anchor of admin.matchAll(/<a href="#([a-z]+)"([^>]*)>/g)) {
@@ -154,7 +160,10 @@ test("console-nav anchors are event-scoped, ship hidden, and stay role filtered"
     navHrefs(consoleNav(renderStaffHome("Registration Staff", false, ["REGISTRATION"]))),
     ["#events", "#participants"],
   );
-  assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]))), ["#events", "#inventory"]);
+  assert.deepEqual(
+    navHrefs(consoleNav(renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]))),
+    ["#events", "/staff/inventory"],
+  );
 });
 
 test("the console renders a hidden No race yet state that the no-events branch reveals", () => {
@@ -225,17 +234,17 @@ test("the console drives gating from the event load and the no-events branch", (
 
 test("the staff nav lists only the pages the actor may open", () => {
   const cases = [
-    [renderStaffHome("Administrator", true, []), ["/staff", "/staff/access", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory-intake"]],
-    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), ["/staff", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory-intake"]],
+    [renderStaffHome("Administrator", true, []), ["/staff", "/staff/access", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory"]],
+    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), ["/staff", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory"]],
     [renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"]), ["/staff", "/staff/start-line"]],
     [renderStaffHome("Result Taker", false, ["RESULT_TAKER"]), ["/staff", "/staff/finish-line"]],
-    [renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]), ["/staff", "/staff/inventory-intake"]],
+    [renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]), ["/staff", "/staff/inventory"]],
     [renderStaffHome("Announcer", false, ["ANNOUNCER"]), ["/staff", "/staff/announcer"]],
     [renderStaffHome("Registration Staff", false, ["REGISTRATION"]), ["/staff"]],
     [renderStaffHome("No Role", false, []), ["/staff"]],
-    [renderStaffHome("Mixed Staff", false, ["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff", "/staff/finish-line", "/staff/inventory-intake"]],
+    [renderStaffHome("Mixed Staff", false, ["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff", "/staff/finish-line", "/staff/inventory"]],
     [renderStaffHome("Mixed Race Staff", false, ["ANNOUNCER", "HEAT_RUNNER"]), ["/staff", "/staff/start-line", "/staff/announcer"]],
-    [renderStaffAccess("Administrator"), ["/staff", "/staff/access", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory-intake"]],
+    [renderStaffAccess("Administrator"), ["/staff", "/staff/access", "/staff/start-line", "/staff/announcer", "/staff/finish-line", "/staff/inventory"]],
   ];
 
   for (const [markup, expected] of cases) {
@@ -292,7 +301,7 @@ test("the staff nav is on every operational staff page and marks the current one
     [renderStartLine("Heat Runner", true, false, ["HEAT_RUNNER"]), "/staff/start-line"],
     [renderAnnouncer("Announcer", true, false, ["ANNOUNCER"]), "/staff/announcer"],
     [renderFinishLine("Result Taker", true, false, ["RESULT_TAKER"]), "/staff/finish-line"],
-    [renderInventoryIntake("Duck Manager", "https://quickducks.com", false, ["DUCK_MANAGER"]), "/staff/inventory-intake"],
+    [renderStaffInventory("Duck Manager", "https://quickducks.com", false, ["DUCK_MANAGER"]), "/staff/inventory"],
   ];
 
   for (const [markup, current] of pages) {

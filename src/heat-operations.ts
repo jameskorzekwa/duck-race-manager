@@ -530,6 +530,21 @@ const updateRoster = async (
   return json({ ...body, replayed: false });
 };
 
+// One roster entry that holds no open duck assignment. The heat roster names the
+// race entry and the duck is resolved through whichever assignment is currently
+// open, so a deleted or unpaired duck shows up here with no change to the roster
+// itself.
+const unpairedRosterSql = `SELECT 1 AS missing
+     FROM heat_entries he
+    WHERE he.event_id = ? AND he.heat_id = ?
+      AND NOT EXISTS (
+        SELECT 1 FROM duck_assignments da
+         WHERE da.event_id = he.event_id
+           AND da.race_entry_id = he.race_entry_id
+           AND da.valid_to IS NULL
+      )
+    LIMIT 1`;
+
 const transitionDefinitions = {
   lock: { command: "LOCK_HEAT", expected: "PLANNED", next: "LOADING", audit: "HEAT_LOCKED" },
   ready: { command: "READY_HEAT", expected: "LOADING", next: "READY", audit: "HEAT_READY" },
@@ -605,6 +620,16 @@ const transitionHeat = async (
           : "Another heat is still running. Finish it and publish its result before starting this heat.",
       }, 409);
     }
+    // Everyone on the water needs a duck. A duck can be deleted at any point,
+    // including after a roster is locked, and the participant keeps their place
+    // in the heat with nothing to race. This is the gate that stops the heat
+    // going off without them, and it is repeated as SQL inside the batch below.
+    const missingDuck = await env.DB.prepare(unpairedRosterSql).bind(eventId, heatId).first<{ missing: number }>();
+    if (missingDuck !== null) {
+      return json({
+        error: "Every racer in this heat needs a duck. Pair the racers still waiting, then start the heat.",
+      }, 409);
+    }
   }
 
   const now = new Date().toISOString();
@@ -628,19 +653,35 @@ const transitionHeat = async (
           WHERE he.heat_id = heats.id AND r.status != 'ACTIVE'
        )`
     : "";
+  // The everyone-holds-a-duck rule is repeated here as SQL, so a duck deleted
+  // between the preflight above and this batch aborts the start rather than
+  // sending a racer out with nothing. It correlates on the heat the surrounding
+  // statement already identifies rather than binding the identifier twice.
+  const fullyPairedGuard = (heatColumn: string): string => `AND NOT EXISTS (
+         SELECT 1 FROM heat_entries he
+          WHERE he.heat_id = ${heatColumn}
+            AND NOT EXISTS (
+              SELECT 1 FROM duck_assignments da
+               WHERE da.event_id = he.event_id
+                 AND da.race_entry_id = he.race_entry_id
+                 AND da.valid_to IS NULL
+            )
+       )`;
   const commandStartGuard = transition === "start"
     ? `AND NOT EXISTS (
          SELECT 1 FROM heats other
           WHERE other.event_id = h.event_id AND other.id != h.id
             AND other.status IN ('RUNNING', 'AWAITING_RESULT')
-       )`
+       )
+       ${fullyPairedGuard("h.id")}`
     : "";
   const updateStartGuard = transition === "start"
     ? `AND NOT EXISTS (
          SELECT 1 FROM heats other
           WHERE other.event_id = heats.event_id AND other.id != heats.id
             AND other.status IN ('RUNNING', 'AWAITING_RESULT')
-       )`
+       )
+       ${fullyPairedGuard("heats.id")}`
     : "";
   let updateSql = `UPDATE heats SET status = ?, revision = revision + 1,
       source_command_id = ?, updated_at = ?`;
@@ -688,7 +729,7 @@ const transitionHeat = async (
     ]);
   } catch {
     const message = transition === "start"
-      ? "Another heat is running or awaiting its official result, or this heat changed. Refresh both stations before trying again."
+      ? "Another heat is running or awaiting its official result, a racer lost their duck, or this heat changed. Refresh both stations before trying again."
       : "The heat transition conflicted with another update. Refresh and try again.";
     return json({ error: message }, 409);
   }

@@ -5,7 +5,11 @@
 > batches, the `RETURN_STEWARD` role, and the `RETURN_PROCESSING`/`ARCHIVED`
 > statuses no longer exist. The lifecycle is `DRAFT -> REGISTRATION_OPEN ->
 > REGISTRATION_CLOSED -> ROUND_ONE -> FINAL -> COMPLETED`, and the
-> administrator "Delete event" action is the only cleanup path. See
+> administrator "Delete event" action is the only cleanup path.
+>
+> Duck condition is also gone. Staff never choose `Good`, `Needs tag`,
+> `Damaged`, or `Retire`, and `ducks.physical_condition` is no longer a field
+> staff see or set. Deleting a duck is the one way it leaves inventory. See
 > `docs/WORKFLOWS.md` for implemented behavior.
 
 ## Purpose
