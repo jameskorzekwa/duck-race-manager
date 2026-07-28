@@ -644,6 +644,10 @@ const confirmationCallsites = [
   [staffHomeScript, 'if (!await appConfirm("Reactivate this participant?")) return;'],
   [staffHomeScript, 'if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;'],
   [staffHomeScript, 'if (!await appConfirm(confirmation)) return;'],
+  [staffHomeScript, `if (!await appConfirm(
+        "Reset this heat to Loading? Its locked roster and lock details will remain. Start and finish progress and any unsubmitted result entry will be cleared.",
+        { danger: true, confirmLabel: "Reset Heat" },
+      )) return;`],
   [staffHomeScript, 'if (!await appConfirm("Reopen this published result and remove downstream finalist promotion when applicable?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm(label + " this notification?", { danger: action !== "retry" })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Permanently delete the registration for " + registration.firstName + " " + registration.lastName + "? This removes the participant and their race entry. This cannot be undone.", { danger: true })) return;'],
@@ -674,8 +678,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
   // Inventory owns takeover, clearing a duck name, assign, unpair, release,
   // and delete duck. Every one of them is destructive or irreversible.
   assert.equal((staffInventoryScript.match(/\bappConfirm\(/g) ?? []).length, 6);
-  // 16 minus the five inventory confirmations that moved to /staff/inventory.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 11);
+  // 16 minus the five inventory confirmations that moved to /staff/inventory,
+  // plus the race-director heat reset.
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 12);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The staff duck scan has exactly one destructive action of its own:
   // moderating away a duck name. Pairing confirms through its own review step.
@@ -1441,6 +1446,57 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
   assert.match(finishLineScript, /That duck is not in the selected heat/);
   assert.match(finishLineScript, /finishSelected\.length !== finishRequiredPlaces/);
   assert.match(finishLineScript, /\/results\/finalize/);
+});
+
+test("heat controls use the exact flow labels and gate the race-director reset", () => {
+  for (const script of [startLineScript, staffHomeScript]) {
+    assert.match(script, /LOADING: \["ready", "Mark Heat Ready"\]/);
+    assert.match(script, /READY: \["call", "Heat Has Been Announced"\]/);
+    assert.match(script, /CALLING: \["start", "Start This Heat"\]/);
+    assert.doesNotMatch(script, /Mark heat ready|Call this heat|Start this heat|Mark ready|Call heat|Start heat/);
+    assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+  }
+  assert.equal(publicHeatStatusLabels.CALLING, "Heat has been announced");
+
+  const source = staffHomeScript.match(/const heatResetAllowed = \(heat\) => [\s\S]*?;\n/)?.[0];
+  assert.ok(source, "the console defines the heat reset visibility gate");
+  const allowedFor = (canDirectRace) => new Function(
+    "canDirectRace",
+    `${source}\nreturn heatResetAllowed;`,
+  )(canDirectRace);
+  const resettable = {
+    status: "READY",
+    rosterLocked: true,
+    rosterSize: 3,
+    publishedResultCount: 0,
+  };
+  for (const status of ["READY", "CALLING", "RUNNING", "AWAITING_RESULT"]) {
+    assert.equal(allowedFor(true)({ ...resettable, status }), true, status);
+    assert.equal(allowedFor(false)({ ...resettable, status }), false, `non-director ${status}`);
+  }
+  for (const status of ["PLANNED", "LOADING", "FINALIZED", "CANCELLED"]) {
+    assert.equal(allowedFor(true)({ ...resettable, status }), false, status);
+  }
+  assert.equal(allowedFor(true)({ ...resettable, rosterLocked: false }), false);
+  assert.equal(allowedFor(true)({ ...resettable, rosterSize: 0 }), false);
+  assert.equal(allowedFor(true)({ ...resettable, publishedResultCount: 1 }), false);
+
+  assert.match(staffHomeScript, /text\("button", "Reset Heat", "button danger small"\)/);
+  assert.match(
+    staffHomeScript,
+    /encodeURIComponent\(selectedHeat\.id\) \+ "\/reset"/,
+  );
+  assert.match(staffHomeScript, /commandOptions\("POST", \{ commandId: crypto\.randomUUID\(\), revision: selectedHeat\.revision \}\)/);
+  assert.match(staffHomeScript, /\{ danger: true, confirmLabel: "Reset Heat" \}/);
+  assert.match(staffHomeScript, /locked roster and lock details will remain/);
+  assert.match(staffHomeScript, /unsubmitted result entry will be cleared/);
+  assert.match(staffHomeScript, /await loadHeats\(\);/);
+
+  // A reset publishes a heat refresh. The finish station must accept it even
+  // with a reviewed selection, then clear that selection on the new revision.
+  assert.match(finishLineScript, /if \(changedHeatContext\) finishSelected = \[\];/);
+  assert.match(finishLineScript, /isBlocked: \(\) => finishScanBusy \|\| finishCommandBusy/);
+  assert.doesNotMatch(finishLineScript, /isBlocked: \(\) =>[^\n]*finishSelected/);
 });
 
 const freshnessStrings = [

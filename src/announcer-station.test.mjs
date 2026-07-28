@@ -244,7 +244,8 @@ test("announcer helpers choose the racing event and speak plain race-day languag
   assert.equal(announcerHeatLabel({ round: "ROUND_ONE", number: 4 }), "Round one · Heat 4");
   assert.equal(announcerHeatLabel({ round: "FINAL", number: 1 }), "The final");
 
-  assert.match(announcerCue("READY"), /Read these racers out now/);
+  assert.match(announcerCue("READY"), /Announce these racers now/);
+  assert.match(announcerCue("CALLING"), /Heat announced/);
   assert.match(announcerCue("RUNNING"), /Racing now/);
   assert.match(announcerCue("AWAITING_RESULT"), /Hold for the official result/);
   // Unknown and prototype-shaped statuses degrade to a safe sentence.
@@ -402,7 +403,7 @@ test("the announcer station reads out the upcoming heat with full names and duck
 
   assert.equal(harness.eventLine.textContent, "Duck Derby · Round one");
   assert.equal(harness.heatTitle.textContent, "Round one · Heat 2");
-  assert.match(harness.cue.textContent, /Read these racers out now/);
+  assert.match(harness.cue.textContent, /Announce these racers now/);
 
   assert.equal(harness.roster.children.length, 3);
   const [first, second, third] = harness.roster.children;

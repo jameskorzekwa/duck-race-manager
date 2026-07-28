@@ -737,6 +737,119 @@ const transitionHeat = async (
   return json({ heat: updated === null ? null : heatSummary(updated), replayed: false }, 201);
 };
 
+const resettableHeatStatuses = ["READY", "CALLING", "RUNNING", "AWAITING_RESULT"] as const;
+
+const resetHeat = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  eventId: string,
+  heatId: string,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const revision = payload?.revision;
+  if (typeof commandId !== "string" || !isCommandId(commandId) || !validRevision(revision)) {
+    return json({ error: "Command identifier and heat revision are required." }, 400);
+  }
+  const requestFingerprint = await fingerprint({ heatId, operation: "reset" });
+  const previous = await findCommand(env, commandId);
+  if (previous !== null) {
+    if (!commandMatches(previous, eventId, heatId, "RESET_HEAT", requestFingerprint)) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const heat = await getHeatSummary(env, eventId, heatId);
+    return heat === null
+      ? json({ error: "Heat not found." }, 404)
+      : json({ heat: heatSummary(heat), replayed: true });
+  }
+
+  const heat = await getHeatSummary(env, eventId, heatId);
+  if (heat === null) return json({ error: "Heat not found." }, 404);
+  if (heat.revision !== revision) return json({ error: "The heat changed. Refresh and try again." }, 409);
+  if (!(resettableHeatStatuses as readonly string[]).includes(heat.status)) {
+    return json({ error: "Only a READY, CALLING, RUNNING, or AWAITING_RESULT heat can be reset." }, 409);
+  }
+  if (heat.roster_locked_at === null || heat.roster_size === 0) {
+    return json({ error: "A heat can be reset only with its locked roster intact." }, 409);
+  }
+  if (heat.published_result_count !== 0) {
+    return json({ error: "Published results must be reopened or corrected; they cannot be reset." }, 409);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at,
+           actor_staff_profile_id, request_fingerprint)
+         SELECT ?, ?, 'RESET_HEAT', ?, ?, ?, ?, ?
+           FROM heats h JOIN events e ON e.id = h.event_id
+          WHERE h.id = ? AND h.event_id = ? AND h.revision = ?
+            AND h.status IN ('READY', 'CALLING', 'RUNNING', 'AWAITING_RESULT')
+            AND h.roster_locked_at IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM heat_entries he
+               WHERE he.event_id = h.event_id AND he.heat_id = h.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM heat_results hr
+               WHERE hr.event_id = h.event_id AND hr.heat_id = h.id
+                 AND hr.status = 'FINALIZED'
+            )
+            AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
+              OR (h.round = 'FINAL' AND e.status = 'FINAL'))`,
+      ).bind(
+        commandId, eventId, heatId, now, now, actor.id, requestFingerprint,
+        heatId, eventId, revision,
+      ),
+      env.DB.prepare(
+        `UPDATE heats
+            SET status = 'LOADING', started_at = NULL, finished_at = NULL,
+                finalized_at = NULL, revision = revision + 1,
+                source_command_id = ?, updated_at = ?
+          WHERE id = ? AND event_id = ? AND revision = ?
+            AND status IN ('READY', 'CALLING', 'RUNNING', 'AWAITING_RESULT')
+            AND roster_locked_at IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM heat_entries he
+               WHERE he.event_id = heats.event_id AND he.heat_id = heats.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM heat_results hr
+               WHERE hr.event_id = heats.event_id AND hr.heat_id = heats.id
+                 AND hr.status = 'FINALIZED'
+            )
+            AND EXISTS (
+              SELECT 1 FROM events e
+               WHERE e.id = heats.event_id
+                 AND ((heats.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
+                   OR (heats.round = 'FINAL' AND e.status = 'FINAL'))
+            )
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = 'RESET_HEAT'
+                 AND rc.result_id = heats.id
+            )`,
+      ).bind(commandId, now, heatId, eventId, revision, commandId, eventId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         VALUES (?, ?, ?, 'HEAT_RESET', 'HEAT', ?, 'STAFF', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(), eventId, commandId, heatId, now,
+        JSON.stringify({ staff_profile_id: actor.id, from: heat.status, to: "LOADING" }),
+      ),
+    ]);
+  } catch {
+    return json({ error: "The heat changed, lost its locked roster, or gained a published result. Refresh and try again." }, 409);
+  }
+  const updated = await getHeatSummary(env, eventId, heatId);
+  return json({ heat: updated === null ? null : heatSummary(updated), replayed: false }, 201);
+};
+
 interface ResultInput {
   raceEntryId: string;
   place: number;
@@ -1460,6 +1573,11 @@ export const handleHeatOperations = async (
     const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
     if (denied !== null) return denied;
     return correctResults(request, env, actor, eventId, heatId);
+  }
+  if (operation === "/reset" && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
+    return resetHeat(request, env, actor, eventId, heatId);
   }
   const transition = operation.match(/^\/(lock|ready|call|start|finish)$/)?.[1] as TransitionName | undefined;
   if (transition !== undefined && request.method === "POST") {

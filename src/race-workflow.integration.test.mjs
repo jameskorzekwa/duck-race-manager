@@ -500,6 +500,27 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   );
   assert.equal(concurrentStart.status, 409);
 
+  const resetRunning = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeats[0].id}/reset`,
+    { commandId: crypto.randomUUID(), revision: roundOneHeats[0].revision },
+  ), 201, "reset running heat");
+  assert.equal(resetRunning.heat.status, "LOADING");
+  assert.equal(resetRunning.heat.startedAt, null);
+  assert.equal(resetRunning.heat.rosterLocked, true);
+  roundOneHeats[0].revision = resetRunning.heat.revision;
+  roundOneHeats[0].status = resetRunning.heat.status;
+  const resetDetail = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeats[0].id}`,
+    { token: staffToken },
+  ), 200, "reset heat detail");
+  assert.deepEqual(
+    resetDetail.roster.map((entry) => entry.raceEntryId),
+    roundOneHeats[0].roster.map((entry) => entry.raceEntryId),
+  );
+  await transition(roundOneHeats[0], "ready");
+  await transition(roundOneHeats[0], "call");
+  await transition(roundOneHeats[0], "start");
+
   for (const heat of roundOneHeats) {
     if (heat.status === "CALLING") await transition(heat, "start");
     await transition(heat, "finish");

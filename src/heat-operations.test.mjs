@@ -172,6 +172,24 @@ const jsonRequest = (path, method, body) => new Request(`https://quickducks.com$
 
 const commandId = () => crypto.randomUUID();
 
+const startedRoundHarness = async (database) => {
+  seedRace(database);
+  seedRoundOneHeats(database);
+  const DB = d1(database);
+  const env = { DB };
+  const started = await handleEventOperations(jsonRequest(
+    "/api/v1/staff/events/event/start-round-one",
+    "POST",
+    { commandId: commandId() },
+  ), env, actor);
+  assert.equal(started.status, 201, JSON.stringify(await started.clone().json()));
+  return {
+    DB,
+    env,
+    handle: (request) => handleHeatOperations(request, env, actor),
+  };
+};
+
 test("heat operations cover the paired-heat lifecycle, results, corrections, and verification", async () => {
   const database = createDatabase();
   seedRace(database);
@@ -466,6 +484,266 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
   database.exec("DELETE FROM heats WHERE event_id = 'event'");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_result_history").get().count, 0);
   database.close();
+});
+
+test("a heat reset accepts every post-lock pre-result state and preserves its locked roster", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { handle } = await startedRoundHarness(database);
+  const rosterBefore = database.prepare(
+    "SELECT id, race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-1' ORDER BY slot_number",
+  ).all();
+  const lockBefore = database.prepare(
+    "SELECT roster_locked_at, roster_locked_by_staff_profile_id, round FROM heats WHERE id = 'heat-1'",
+  ).get();
+
+  let replayedCommand = null;
+  let replayedRevision = null;
+  for (const status of ["READY", "CALLING", "RUNNING", "AWAITING_RESULT"]) {
+    database.prepare(
+      `UPDATE heats
+          SET status = ?, started_at = '2026-07-26T11:00:00Z',
+              finished_at = '2026-07-26T11:05:00Z', finalized_at = '2026-07-26T11:10:00Z'
+        WHERE id = 'heat-1'`,
+    ).run(status);
+    const revision = database.prepare("SELECT revision FROM heats WHERE id = 'heat-1'").get().revision;
+    const resetCommand = commandId();
+    const requestBody = { commandId: resetCommand, revision };
+    const response = await handle(jsonRequest(
+      "/api/v1/staff/events/event/heats/heat-1/reset",
+      "POST",
+      requestBody,
+    ));
+    const body = await response.json();
+    assert.equal(response.status, 201, `${status}: ${JSON.stringify(body)}`);
+    assert.equal(body.replayed, false);
+    assert.equal(body.heat.status, "LOADING");
+    assert.equal(body.heat.revision, revision + 1);
+    assert.equal(body.heat.startedAt, null);
+    assert.equal(body.heat.finishedAt, null);
+    assert.equal(body.heat.finalizedAt, null);
+
+    const stored = database.prepare(
+      `SELECT status, round, revision, roster_locked_at,
+              roster_locked_by_staff_profile_id, started_at, finished_at, finalized_at
+         FROM heats WHERE id = 'heat-1'`,
+    ).get();
+    assert.equal(stored.status, "LOADING");
+    assert.equal(stored.round, lockBefore.round);
+    assert.equal(stored.roster_locked_at, lockBefore.roster_locked_at);
+    assert.equal(stored.roster_locked_by_staff_profile_id, lockBefore.roster_locked_by_staff_profile_id);
+    assert.equal(stored.started_at, null);
+    assert.equal(stored.finished_at, null);
+    assert.equal(stored.finalized_at, null);
+    assert.deepEqual(
+      database.prepare(
+        "SELECT id, race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-1' ORDER BY slot_number",
+      ).all(),
+      rosterBefore,
+    );
+    assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "ROUND_ONE");
+    const audit = database.prepare(
+      "SELECT action, subject_type, subject_id, details_json FROM audit_events WHERE command_id = ?",
+    ).get(resetCommand);
+    assert.deepEqual(
+      { action: audit.action, subjectType: audit.subject_type, subjectId: audit.subject_id },
+      { action: "HEAT_RESET", subjectType: "HEAT", subjectId: "heat-1" },
+    );
+    assert.deepEqual(JSON.parse(audit.details_json), {
+      staff_profile_id: "staff",
+      from: status,
+      to: "LOADING",
+    });
+
+    if (replayedCommand === null) {
+      replayedCommand = resetCommand;
+      replayedRevision = body.heat.revision;
+      const replay = await handle(jsonRequest(
+        "/api/v1/staff/events/event/heats/heat-1/reset",
+        "POST",
+        requestBody,
+      ));
+      assert.equal(replay.status, 200);
+      const replayBody = await replay.json();
+      assert.equal(replayBody.replayed, true);
+      assert.equal(replayBody.heat.revision, replayedRevision);
+
+      const mismatchedReuse = await handle(jsonRequest(
+        "/api/v1/staff/events/event/heats/heat-2/reset",
+        "POST",
+        { commandId: replayedCommand, revision: 1 },
+      ));
+      assert.equal(mismatchedReuse.status, 409);
+      assert.match((await mismatchedReuse.json()).error, /already used for another operation/i);
+    }
+  }
+
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'RESET_HEAT'").get().count,
+    4,
+  );
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'HEAT_RESET'").get().count,
+    4,
+  );
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-1'").get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("heat reset validates input and rejects non-resettable, unlocked, empty, stale, and published heats", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { handle } = await startedRoundHarness(database);
+  database.exec("UPDATE heats SET status = 'READY' WHERE id = 'heat-1'");
+  const revision = database.prepare("SELECT revision FROM heats WHERE id = 'heat-1'").get().revision;
+
+  const malformedRequests = [
+    new Request("https://quickducks.com/api/v1/staff/events/event/heats/heat-1/reset", {
+      method: "POST",
+      body: JSON.stringify({ commandId: commandId(), revision }),
+    }),
+    jsonRequest("/api/v1/staff/events/event/heats/heat-1/reset", "POST", { commandId: "not-a-uuid", revision }),
+    jsonRequest("/api/v1/staff/events/event/heats/heat-1/reset", "POST", { commandId: commandId(), revision: -1 }),
+    jsonRequest("/api/v1/staff/events/event/heats/heat-1/reset", "POST", { commandId: commandId(), revision: 1.5 }),
+  ];
+  for (const request of malformedRequests) {
+    const response = await handle(request);
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /Command identifier and heat revision/i);
+  }
+
+  const stale = await handle(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/reset",
+    "POST",
+    { commandId: commandId(), revision: revision + 1 },
+  ));
+  assert.equal(stale.status, 409);
+  assert.match((await stale.json()).error, /heat changed/i);
+
+  for (const status of ["LOADING", "PLANNED", "FINALIZED", "CANCELLED"]) {
+    database.prepare(
+      "UPDATE heats SET status = ?, finalized_at = ? WHERE id = 'heat-1'",
+    ).run(status, status === "FINALIZED" ? "2026-07-26T11:10:00Z" : null);
+    const response = await handle(jsonRequest(
+      "/api/v1/staff/events/event/heats/heat-1/reset",
+      "POST",
+      { commandId: commandId(), revision },
+    ));
+    assert.equal(response.status, 409, status);
+    assert.match((await response.json()).error, /Only a READY, CALLING, RUNNING, or AWAITING_RESULT/i);
+    assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-1'").get().status, status);
+  }
+
+  database.exec("UPDATE heats SET status = 'READY', finalized_at = NULL, roster_locked_at = NULL WHERE id = 'heat-1'");
+  const unlocked = await handle(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/reset",
+    "POST",
+    { commandId: commandId(), revision },
+  ));
+  assert.equal(unlocked.status, 409);
+  assert.match((await unlocked.json()).error, /locked roster intact/i);
+
+  database.exec(`
+    INSERT INTO heats
+      (id, event_id, round, heat_number, status, target_size, roster_locked_at,
+       roster_locked_by_staff_profile_id)
+    VALUES ('heat-empty', 'event', 'ROUND_ONE', 3, 'READY', 3,
+            '2026-07-26T10:45:00Z', 'staff');
+  `);
+  const empty = await handle(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-empty/reset",
+    "POST",
+    { commandId: commandId(), revision: 0 },
+  ));
+  assert.equal(empty.status, 409);
+  assert.match((await empty.json()).error, /locked roster intact/i);
+
+  database.exec(`
+    UPDATE heats
+       SET status = 'AWAITING_RESULT', roster_locked_at = '2026-07-26T10:45:00Z',
+           roster_locked_by_staff_profile_id = 'staff'
+     WHERE id = 'heat-1';
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('published-result-command', 'event', 'FINALIZE_HEAT_RESULT', 'heat-1',
+            '2026-07-26T11:10:00Z', '2026-07-26T11:10:00Z', 'staff');
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status,
+       revision, finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('published-result', 'event', 'heat-1', 'entry-1', 'assignment-1', 1,
+            'FINALIZED', 1, '2026-07-26T11:10:00Z', 'staff', 'published-result-command');
+  `);
+  const published = await handle(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/reset",
+    "POST",
+    { commandId: commandId(), revision },
+  ));
+  assert.equal(published.status, 409);
+  assert.match((await published.json()).error, /Published results must be reopened or corrected/i);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-1'").get().count, 1);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-1'").get().count, 0);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'RESET_HEAT'").get().count,
+    0,
+  );
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'HEAT_RESET'").get().count, 0);
+});
+
+test("heat reset repeats state, lock, roster, and result guards inside its atomic batch", async () => {
+  for (const conflict of ["state", "lock", "result"]) {
+    const database = createDatabase();
+    try {
+      const { DB, handle } = await startedRoundHarness(database);
+      database.exec(`
+        UPDATE heats
+           SET status = 'RUNNING', started_at = '2026-07-26T11:00:00Z'
+         WHERE id = 'heat-1';
+      `);
+      const revision = database.prepare("SELECT revision FROM heats WHERE id = 'heat-1'").get().revision;
+      DB.beforeBatch = () => {
+        if (conflict === "state") {
+          database.exec("UPDATE heats SET status = 'CANCELLED' WHERE id = 'heat-1'");
+        } else if (conflict === "lock") {
+          database.exec("UPDATE heats SET roster_locked_at = NULL WHERE id = 'heat-1'");
+        } else {
+          database.exec(`
+            INSERT INTO race_commands
+              (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+            VALUES ('concurrent-result-command', 'event', 'FINALIZE_HEAT_RESULT', 'heat-1',
+                    '2026-07-26T11:05:00Z', '2026-07-26T11:05:00Z', 'staff');
+            INSERT INTO heat_results
+              (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status,
+               revision, finalized_at, recorded_by_staff_profile_id, source_command_id)
+            VALUES ('concurrent-result', 'event', 'heat-1', 'entry-1', 'assignment-1', 1,
+                    'FINALIZED', 1, '2026-07-26T11:05:00Z', 'staff', 'concurrent-result-command');
+          `);
+        }
+      };
+
+      const response = await handle(jsonRequest(
+        "/api/v1/staff/events/event/heats/heat-1/reset",
+        "POST",
+        { commandId: commandId(), revision },
+      ));
+      assert.equal(response.status, 409, conflict);
+      assert.equal(
+        database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'RESET_HEAT'").get().count,
+        0,
+        conflict,
+      );
+      assert.equal(database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'HEAT_RESET'").get().count, 0, conflict);
+      if (conflict === "state") {
+        assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-1'").get().status, "CANCELLED");
+      } else if (conflict === "lock") {
+        assert.equal(database.prepare("SELECT roster_locked_at FROM heats WHERE id = 'heat-1'").get().roster_locked_at, null);
+      } else {
+        assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-1'").get().count, 1);
+      }
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally {
+      database.close();
+    }
+  }
 });
 
 test("heat lock, finish scan, validation, and atomic finalization require ACTIVE registrations", async (context) => {
