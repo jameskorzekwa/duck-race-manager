@@ -78,8 +78,7 @@ test("renders the responsive landing page", async () => {
   assert.match(body, /\.hero-water \{[^}]*z-index:1/);
   assert.match(body, /\.hero-duck-scene \{[^}]*z-index:2;[^}]*bottom:2\.5rem/);
   assert.match(body, /\.hero-duck-slit \{[^}]*z-index:2;[^}]*height:2\.75rem/);
-  assert.match(body, /\.hero-duck-slit::before \{[^}]*background-image:url\("data:image\/svg\+xml,[^}]*stroke='%23fffdf3'/);
-  assert.match(body, /\.hero-duck-slit::before \{[^}]*background-size:100% 100%/);
+  assert.match(body, /\.hero-duck-slit::before \{[^}]*background:var\(--water\)/);
   assert.doesNotMatch(body, /\.hero-duck-slit(?:::before|::after)? \{[^}]*background:var\(--water-dark\)/);
   assert.match(body, /hero-duck-scene \{[^}]*bottom:4rem;[^}]*width:13\.5rem/);
   assert.match(body, /\.hero-duck \{ --duck-lift:-\.75rem; \}/);
