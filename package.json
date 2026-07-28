@@ -16,11 +16,14 @@
     "seed:local": "node scripts/seed-local.mjs",
     "release:validate-tag": "node scripts/release-version.mjs",
     "test": "node --test src/*.test.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:install": "playwright install chromium",
     "typecheck": "tsc --noEmit",
     "wrangler:validate": "node scripts/validate-wrangler-configs.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "latest",
+    "@playwright/test": "^1.61.0",
     "jsqr": "1.4.0",
     "semver": "^7.8.5",
     "typescript": "latest",
