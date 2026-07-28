@@ -7,6 +7,7 @@ import {
   type OperationalRole,
 } from "./authorization.ts";
 import { publicDuckName } from "./duck-name-filter.ts";
+import { winnerByTagCandidate } from "./heat-operations.ts";
 import { isLookupCode, normalizeLookupCode } from "./participant-qr.ts";
 import { isCommandId } from "./registration.ts";
 import {
@@ -266,6 +267,11 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
   if (duck === null) return json({ error: "Duck not found." }, 404);
 
   const includePii = canViewParticipantPii(actor);
+  const winnerAction = hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"])
+    && duck.assignment_id !== null
+    && duck.event_status === "ROUND_ONE"
+    ? await winnerByTagCandidate(env, token)
+    : null;
   const assignment = duck.assignment_id === null ? null : {
     id: duck.assignment_id,
     active: duck.assignment_valid_to === null,
@@ -311,6 +317,7 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
       status: duck.event_status,
     },
     assignment,
+    winnerAction,
   });
 };
 
@@ -792,7 +799,7 @@ export const handleStaffApi = async (
 
   const duckMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
   if (duckMatch !== null && request.method === "GET") {
-    const denied = requireAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RACE_DIRECTOR"]);
+    const denied = requireAnyRole(actor, ["REGISTRATION", "DUCK_MANAGER", "RESULT_TAKER", "RACE_DIRECTOR"]);
     if (denied !== null) return denied;
     return getStaffDuck(duckMatch[1], env, actor);
   }

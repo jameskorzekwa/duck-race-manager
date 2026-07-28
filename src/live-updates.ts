@@ -238,6 +238,9 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && /^\/api\/v1\/staff\/ducks\/[A-Za-z0-9_-]+\/assignments$/.test(pathname)) {
     return domains("ducks", "participants", "heats");
   }
+  if (method === "POST" && /^\/api\/v1\/staff\/ducks\/[A-Za-z0-9_-]+\/heat-winner$/.test(pathname)) {
+    return domains("event", "participants", "heats");
+  }
 
   if (["POST", "PUT"].includes(method) && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/heats\/(?:round-one\/plan-commit|[^/]{1,128}\/(?:roster|results\/(?:finalize|reopen|correct)|lock|ready|call|start|finish))$/.test(pathname)) {
     return domains("event", "participants", "heats");

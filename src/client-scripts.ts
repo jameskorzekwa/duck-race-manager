@@ -1778,7 +1778,10 @@ const liveHeatCard = (heat, currentHeat) => {
   } else {
     for (const entry of heat.roster) {
       const row = liveText("p", "", "board-entry");
-      row.append(liveText("span", entry.participantDisplayName), liveBoardDuckCell(entry));
+      const participant = liveText("span", "", "board-participant");
+      participant.append(liveText("span", entry.participantDisplayName));
+      if (entry.place === 1) participant.append(liveText("span", "Winner", "winner-ribbon"));
+      row.append(participant, liveBoardDuckCell(entry));
       card.append(row);
     }
   }
@@ -2325,58 +2328,6 @@ const finishSelectionProblem = (selected, roster, raceEntryId) => {
 };
 `;
 
-export const finishHandoffHelpersScript = String.raw`
-const finishParseHandoff = (search) => {
-  const parameters = new URLSearchParams(search);
-  const tag = parameters.get("tag");
-  const eventId = parameters.get("eventId");
-  const heatId = parameters.get("heatId");
-  const revisionText = parameters.get("revision");
-  const expiresText = parameters.get("expiresAt");
-  const revision = revisionText === null ? NaN : Number(revisionText);
-  const expiresAt = expiresText === null ? NaN : Number(expiresText);
-  if (
-    !tag || !/^[A-Za-z0-9_-]{22,128}$/.test(tag)
-    || !eventId || eventId.length > 128 || !heatId || heatId.length > 128
-    || !Number.isSafeInteger(revision) || revision < 0
-    || !Number.isFinite(expiresAt)
-  ) return null;
-  return { tag, eventId, heatId, revision, expiresAt };
-};
-const finishBuildHandoffSearch = (stored, tag) => {
-  if (
-    !stored || stored.returnPath !== "/staff/finish-line"
-    || typeof stored.eventId !== "string" || stored.eventId.length === 0 || stored.eventId.length > 128
-    || typeof stored.heatId !== "string" || stored.heatId.length === 0 || stored.heatId.length > 128
-    || !Number.isSafeInteger(stored.revision) || stored.revision < 0
-    || !Number.isFinite(stored.expiresAt)
-    || !/^[A-Za-z0-9_-]{22,128}$/.test(tag)
-  ) return null;
-  return new URLSearchParams({
-    tag,
-    eventId: stored.eventId,
-    heatId: stored.heatId,
-    revision: String(stored.revision),
-    expiresAt: String(stored.expiresAt),
-  }).toString();
-};
-const finishHandoffProblem = (handoff, current, now = Date.now()) => {
-  if (!handoff) return "invalid";
-  if (handoff.expiresAt <= now) return "expired";
-  if (!current || handoff.eventId !== current.eventId || handoff.heatId !== current.heatId) return "wrong-heat";
-  if (handoff.revision !== current.revision) return "stale-revision";
-  if (current.status !== "AWAITING_RESULT") return "not-awaiting";
-  return null;
-};
-const finishHandoffMessage = (problem) => ({
-  invalid: "That handoff was invalid. Return to this finish station and scan the duck again.",
-  expired: "That handoff expired. Scan the duck again from the current finish station.",
-  "wrong-heat": "That scan belongs to a different heat. Check the displayed heat and scan the duck again.",
-  "stale-revision": "The heat changed after that scan. Review the current heat and scan the duck again.",
-  "not-awaiting": "Mark the displayed heat finished, then scan the duck again.",
-})[problem] || "The scan could not be used. Review the current heat and scan the duck again.";
-`;
-
 export const finishScanSerializationScript = String.raw`
 const finishSameScanContext = (left, right) => Boolean(left && right
   && left.eventId === right.eventId
@@ -2464,7 +2415,7 @@ const finishCreateNfcScanner = ({ createReader, createController, decode, onValu
 `;
 
 export const finishLineScript = stationStateHelpersScript
-  + finishSelectionValidationScript + finishHandoffHelpersScript + finishScanSerializationScript
+  + finishSelectionValidationScript + finishScanSerializationScript
   + finishNfcHelpersScript + String.raw`
 const finishRoot = document.querySelector("[data-finish-line]");
 const finishEventLabel = document.querySelector("[data-station-event]");
@@ -2477,7 +2428,6 @@ const finishSelections = document.querySelector("[data-finish-selections]");
 const finishSubmit = document.querySelector("[data-submit-result]");
 const finishMessage = document.querySelector("[data-station-message]");
 const finishNfcButton = document.querySelector("[data-start-nfc]");
-const finishStorageKey = "quickducks.finishStation";
 let finishEvent = null;
 let finishHeat = null;
 let finishRosterEntries = [];
@@ -2487,10 +2437,6 @@ let finishScanBusy = false;
 let finishScanEndBusy = null;
 let finishCommandBusy = false;
 let finishSubscription = null;
-const finishInitialSearch = location.search;
-let finishPendingHandoff = finishParseHandoff(finishInitialSearch);
-let finishPendingHandoffProblem = finishInitialSearch && finishPendingHandoff === null ? "invalid" : null;
-if (finishInitialSearch) history.replaceState(null, "", location.pathname);
 
 const finishText = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -2500,19 +2446,6 @@ const finishText = (tag, value, className) => {
 };
 const finishHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
 const finishPlaceLabel = (place) => place === 1 ? "1st place" : place === 2 ? "2nd place" : "3rd place";
-const finishKeepContext = () => {
-  if (!finishEvent || !finishHeat || !["RUNNING", "AWAITING_RESULT"].includes(finishHeat.status)) return;
-  try {
-    localStorage.setItem(finishStorageKey, JSON.stringify({
-      returnPath: "/staff/finish-line",
-      eventId: finishEvent.id,
-      heatId: finishHeat.id,
-      revision: finishHeat.revision,
-      expiresAt: Date.now() + 60 * 1000,
-    }));
-  } catch {}
-};
-const finishClearContext = () => { try { localStorage.removeItem(finishStorageKey); } catch {} };
 const finishApi = async (url, options) => {
   const response = await fetch(url, options);
   if (response.status === 401) {
@@ -2636,10 +2569,7 @@ const finishSelectValue = async (value) => {
 };
 const finishRender = (event, detail) => {
   const renderKey = stationHeatRenderKey(event, detail);
-  if (renderKey === finishRenderKey) {
-    finishKeepContext();
-    return;
-  }
+  if (renderKey === finishRenderKey) return;
   const changedHeatContext = !finishHeat
     || finishHeat.id !== detail.heat.id
     || finishHeat.revision !== detail.heat.revision
@@ -2662,7 +2592,10 @@ const finishRender = (event, detail) => {
       + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned")));
   }
   finishAction.replaceChildren();
-  finishScanForm.hidden = finishHeat.status !== "AWAITING_RESULT";
+  const finalPodiumFlow = finishHeat.round === "FINAL";
+  finishScanForm.hidden = finishHeat.status !== "AWAITING_RESULT" || !finalPodiumFlow;
+  finishSelections.hidden = finishHeat.status !== "AWAITING_RESULT" || !finalPodiumFlow;
+  finishSubmit.hidden = finishHeat.status !== "AWAITING_RESULT" || !finalPodiumFlow;
   if (finishHeat.status === "RUNNING") {
     const button = finishText("button", "Mark heat finished", "button station-control");
     button.type = "button";
@@ -2678,7 +2611,9 @@ const finishRender = (event, detail) => {
           body: JSON.stringify({ commandId: crypto.randomUUID(), revision: finishHeat.revision }),
         });
         await finishLoad();
-        finishMessage.textContent = "Heat finished. Select every required place, review it, then submit once.";
+        finishMessage.textContent = finishHeat.round === "ROUND_ONE"
+          ? "Heat finished. Scan the winning duck's permanent NFC or QR tag to open its inspection page."
+          : "Heat finished. Select every required place, review it, then submit once.";
       } catch (error) {
         if (error.message !== "signed-out") finishMessage.textContent = error.message;
         button.disabled = false;
@@ -2692,10 +2627,11 @@ const finishRender = (event, detail) => {
     if (restoreActionFocus) button.focus();
     finishMessage.textContent = "When the race physically finishes, press the one finish button.";
   } else {
-    finishMessage.textContent = "Select " + finishRequiredPlaces() + " distinct " + (finishRequiredPlaces() === 1 ? "duck" : "ducks") + ", then review every place before submitting.";
+    finishMessage.textContent = finishHeat.round === "ROUND_ONE"
+      ? "Scan the winning duck's permanent NFC or QR tag. Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner."
+      : "Select " + finishRequiredPlaces() + " distinct ducks, then review every place before submitting.";
   }
   finishRenderSelections();
-  finishKeepContext();
 };
 const finishEmpty = (message) => {
   const emptyKey = "empty:" + message;
@@ -2711,40 +2647,18 @@ const finishEmpty = (message) => {
   finishRoster.replaceChildren(finishText("li", "A running or just-finished heat will appear here."));
   finishAction.replaceChildren();
   finishScanForm.hidden = true;
+  finishSelections.hidden = true;
+  finishSubmit.hidden = true;
   finishRenderSelections();
   finishMessage.textContent = "This station will keep checking for a running heat.";
 };
-const finishConsumeHandoff = async () => {
-  if (finishPendingHandoffProblem) {
-    const problem = finishPendingHandoffProblem;
-    finishPendingHandoffProblem = null;
-    finishMessage.textContent = finishHandoffMessage(problem);
-    return;
-  }
-  if (!finishPendingHandoff) return;
-  const handoff = finishPendingHandoff;
-  finishPendingHandoff = null;
-  const problem = finishHandoffProblem(handoff, finishEvent && finishHeat ? {
-    eventId: finishEvent.id,
-    heatId: finishHeat.id,
-    revision: finishHeat.revision,
-    status: finishHeat.status,
-  } : null);
-  if (problem) {
-    finishMessage.textContent = finishHandoffMessage(problem);
-    return;
-  }
-  await finishSelectValue(location.origin + "/t/" + handoff.tag);
-};
 const finishLoadWork = async () => {
-  finishKeepContext();
   try {
     const events = await finishApi("/api/v1/staff/events");
     if (document.hidden) return;
     const event = events.events.find((item) => ["ROUND_ONE", "FINAL"].includes(item.status));
     if (!event) {
       finishEmpty("No race round is active right now.");
-      await finishConsumeHandoff();
       return;
     }
     const listed = await finishApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats");
@@ -2753,13 +2667,11 @@ const finishLoadWork = async () => {
     const heat = finishPickHeat(listed.heats, round);
     if (!heat) {
       finishEmpty(event.name + " has no running heat or result waiting.");
-      await finishConsumeHandoff();
       return;
     }
     const detail = await finishApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats/" + encodeURIComponent(heat.id));
     if (document.hidden) return;
     finishRender(event, detail);
-    await finishConsumeHandoff();
   } catch (error) {
     // The station message line remains the actionable operational error surface.
     if (error.message !== "signed-out") finishMessage.textContent = error.message;
@@ -2795,7 +2707,6 @@ finishSubmit.addEventListener("click", async () => {
         results: captured.results,
       }),
     });
-    finishClearContext();
     finishSelected = [];
     await finishLoad();
     finishMessage.textContent = "Official result saved. The station has moved to the next available heat.";
@@ -2832,7 +2743,6 @@ if ("NDEFReader" in globalThis) {
   finishNfcButton.addEventListener("click", finishStartNfcScan);
 }
 if (finishRoot) {
-  finishKeepContext();
   finishSubscription = globalThis.quickDucksLive.subscribe({
     domains: ["event", "participants", "ducks", "heats"],
     root: finishRoot,
@@ -5354,9 +5264,12 @@ const renderHeatControls = (body) => {
     heatControls.append(button);
   }
   addRosterForm(body);
-  if (canTakeResults && body.heat.status === "AWAITING_RESULT") heatControls.append(resultForm(body, "finalize"));
+  if (canTakeResults && body.heat.status === "AWAITING_RESULT" && body.heat.round === "FINAL") {
+    heatControls.append(resultForm(body, "finalize"));
+  }
   if (canDirectRace && body.heat.status === "FINALIZED" && body.results.length > 0) {
-    heatControls.append(resultForm(body, "correct"));
+    if (body.heat.resultCorrectionAllowed) heatControls.append(resultForm(body, "correct"));
+    if (!body.heat.resultReopenAllowed) return;
     const reopenForm = text("form", "", "operation-card danger-zone");
     const label = text("label", "Reason to reopen result");
     const reason = document.createElement("input");
@@ -5413,10 +5326,7 @@ const loadHeatDetail = async (heatId) => {
 
 document.querySelector("[data-refresh-heats]").addEventListener("click", () => loadHeats().catch((error) => setMessage(error.message, true)));
 
-// There are no finalists until the final has been started, so the card that
-// reports them is not shown before then. Verifying an empty roster and being
-// told it is "not yet verified" during round one is noise, not information.
-const finalistsExist = () => ["FINAL", "COMPLETED"].includes(currentEvent?.status);
+const finalistsExist = () => ["ROUND_ONE", "FINAL", "COMPLETED"].includes(currentEvent?.status);
 
 const loadFinalists = async () => {
   if (!currentEvent) return;
@@ -5427,10 +5337,9 @@ const loadFinalists = async () => {
   }
   const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/finalists");
   finalistList.replaceChildren();
-  finalistList.append(text("p", body.verification.verified ? "Finalist roster verified." : "Finalist roster is not yet verified.", body.verification.verified ? "status-chip ready" : "status-chip blocked"));
   for (const finalist of body.finalists) finalistList.append(historyCard("Slot " + finalist.slotNumber + " · Duck #" + finalist.duck.visibleNumber, finalist.participant.firstName + " " + finalist.participant.lastName + " · won Heat " + finalist.qualifiedFrom.heatNumber + (finalist.podiumPlace ? " · podium " + finalist.podiumPlace : "")));
+  if (body.finalists.length === 0) finalistList.append(empty("No round-one winner has been recorded yet."));
 };
-document.querySelector("[data-refresh-finalists]").addEventListener("click", () => loadFinalists().catch((error) => setMessage(error.message, true)));
 
 const supportSummary = document.querySelector("[data-support-summary]");
 const notificationList = document.querySelector("[data-notification-list]");
@@ -5838,39 +5747,22 @@ const qrLoadDecoder = (documentRef, scope) => {
 };
 `;
 
-export const staffDuckScript = finishHandoffHelpersScript
-  + participantQrHelpersScript
+export const staffDuckScript = participantQrHelpersScript
   + participantQrDecoderScript
   + String.raw`
-const finishStationStorageKey = "quickducks.finishStation";
-const finishStationTagMatch = location.pathname.match(/^\/staff\/ducks\/([A-Za-z0-9_-]{22,128})$/);
-let finishStationHandoff = false;
-try {
-  const stored = JSON.parse(localStorage.getItem(finishStationStorageKey) || "null");
-  const handoffSearch = finishStationTagMatch
-    ? finishBuildHandoffSearch(stored, finishStationTagMatch[1])
-    : null;
-  if (handoffSearch === null) localStorage.removeItem(finishStationStorageKey);
-  else {
-    localStorage.removeItem(finishStationStorageKey);
-    finishStationHandoff = true;
-    location.replace("/staff/finish-line?" + handoffSearch);
-  }
-} catch {
-  try { localStorage.removeItem(finishStationStorageKey); } catch {}
-}
-if (!finishStationHandoff) {
 const root = document.querySelector("[data-staff-duck]");
 const token = root.dataset.token;
 const pageTitle = document.querySelector("[data-staff-title]");
 const summary = document.querySelector("[data-duck-summary]");
 const workArea = document.querySelector("[data-pairing-work]");
+const winnerAction = document.querySelector("[data-winner-action]");
 const message = document.querySelector("[data-staff-message]");
 let currentEvent = null;
 let selectedRegistration = null;
 let staffDuckBusy = 0;
 let staffDuckSubscription = null;
 let justPairedCode = null;
+let winnerSuccess = null;
 
 const text = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -5899,6 +5791,67 @@ const addFact = (label, value) => {
   const fact = text("div", "", "fact");
   fact.append(text("dt", label), text("dd", value));
   summary.append(fact);
+};
+
+const renderWinnerAction = (data) => {
+  winnerAction.replaceChildren();
+  if (winnerSuccess !== null) {
+    winnerAction.hidden = false;
+    winnerAction.append(
+      text("strong", "Official winner saved"),
+      text("p", "Duck #" + winnerSuccess.duckNumber + " is the official Heat " + winnerSuccess.heatNumber + " winner."),
+    );
+    return;
+  }
+  const candidate = data.winnerAction;
+  if (!candidate) {
+    winnerAction.hidden = true;
+    return;
+  }
+  winnerAction.hidden = false;
+  winnerAction.append(
+    text("strong", "Result waiting"),
+    text("p", candidate.participantDisplayName + " and Duck #" + data.duck.visibleNumber + " are on the official Heat " + candidate.heatNumber + " roster."),
+  );
+  const button = text("button", "Mark Duck as Heat " + candidate.heatNumber + " Winner", "button station-control");
+  button.type = "button";
+  button.addEventListener("click", async () => {
+    if (!await appConfirm(
+      "Mark Duck #" + data.duck.visibleNumber + " as the official Heat " + candidate.heatNumber + " winner? This publishes immediately.",
+      { danger: true, confirmLabel: "Mark winner" },
+    )) return;
+    button.disabled = true;
+    staffDuckBusy += 1;
+    const endBusy = globalThis.quickDucksLive.beginBusy();
+    message.textContent = "Publishing the official Heat " + candidate.heatNumber + " winner…";
+    try {
+      await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/heat-winner", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          commandId: crypto.randomUUID(),
+          eventId: candidate.eventId,
+          heatId: candidate.heatId,
+          raceEntryId: candidate.raceEntryId,
+          revision: candidate.revision,
+        }),
+      });
+      winnerSuccess = { duckNumber: data.duck.visibleNumber, heatNumber: candidate.heatNumber };
+      await load();
+      pageTitle.textContent = "Duck #" + data.duck.visibleNumber + " won Heat " + candidate.heatNumber;
+      message.textContent = "Official winner saved. Live race screens have been notified.";
+    } catch (error) {
+      if (error.message !== "signed-out") {
+        button.disabled = false;
+        message.textContent = error.message;
+      }
+    } finally {
+      staffDuckBusy = Math.max(0, staffDuckBusy - 1);
+      endBusy();
+      staffDuckSubscription?.resume();
+    }
+  });
+  winnerAction.append(button);
 };
 
 // Scanning the duck someone is complaining about is the fastest way for staff
@@ -6005,7 +5958,7 @@ const pairWithLookupCode = async (lookupCode) => {
         lookupCode,
       }),
     });
-    workArea.hidden = true;
+    if (workArea) workArea.hidden = true;
     summary.replaceChildren();
     addFact("Duck", "#" + result.duck.visibleNumber);
     addFact("Participant", result.participant.firstName + " " + result.participant.lastName);
@@ -6031,7 +5984,7 @@ const qrLaunch = document.querySelector("[data-qr-launch]");
 const qrPanel = document.querySelector("[data-qr-scanner]");
 const qrVideo = document.querySelector("[data-qr-video]");
 const qrMessage = document.querySelector("[data-qr-message]");
-const qrSupported = qrScannerSupported(globalThis);
+const qrSupported = qrLaunch !== null && qrScannerSupported(globalThis);
 let qrStream = null;
 let qrDetector = null;
 let qrTimer = null;
@@ -6047,11 +6000,12 @@ const qrReleaseCamera = () => {
     for (const track of qrStream.getTracks()) track.stop();
     qrStream = null;
   }
-  qrVideo.srcObject = null;
+  if (qrVideo) qrVideo.srcObject = null;
 };
 
 const qrStop = () => {
   qrReleaseCamera();
+  if (!qrPanel || !qrLaunch) return;
   qrPanel.hidden = true;
   qrLaunch.hidden = !qrSupported;
 };
@@ -6126,11 +6080,13 @@ const qrStart = async () => {
   }
 };
 
-qrLaunch.querySelector("[data-scan-qr]").addEventListener("click", qrStart);
-document.querySelector("[data-qr-cancel]").addEventListener("click", () => {
-  qrStop();
-  message.textContent = "Find the participant, review both records, then confirm once.";
-});
+if (qrLaunch) {
+  qrLaunch.querySelector("[data-scan-qr]").addEventListener("click", qrStart);
+  document.querySelector("[data-qr-cancel]").addEventListener("click", () => {
+    qrStop();
+    message.textContent = "Find the participant, review both records, then confirm once.";
+  });
+}
 addEventListener("pagehide", qrReleaseCamera);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) qrStop();
@@ -6142,7 +6098,7 @@ document.addEventListener("visibilitychange", () => {
 // anyone already paired from every response, so nothing in this file has to
 // decide who is eligible.
 const registrationSearchForm = document.querySelector("[data-registration-search]");
-const registrationSearchInput = registrationSearchForm.querySelector("[data-registration-search-input]");
+const registrationSearchInput = registrationSearchForm?.querySelector("[data-registration-search-input]") || null;
 const registrationResults = document.querySelector("[data-registration-results]");
 const registrationSearchStatus = document.querySelector("[data-registration-search-status]");
 const registrationSearchDebounceMs = 250;
@@ -6150,15 +6106,17 @@ let registrationSearchSequence = 0;
 let registrationSearchTimer = null;
 
 const setRegistrationStatus = (value, isError) => {
+  if (!registrationSearchStatus) return;
   registrationSearchStatus.className = isError ? "error-text" : "muted";
   registrationSearchStatus.textContent = value;
 };
 
 const clearRegistrationSelection = () => {
   selectedRegistration = null;
-  document.querySelector("[data-confirm-pairing]").disabled = true;
+  const confirm = document.querySelector("[data-confirm-pairing]");
+  if (confirm) confirm.disabled = true;
   document.querySelector("[data-pairing-review]")
-    .replaceChildren(text("p", "Choose one registration to review.", "muted"));
+    ?.replaceChildren(text("p", "Choose one registration to review.", "muted"));
 };
 
 const registrationRow = (registration) => {
@@ -6192,7 +6150,7 @@ const describeRegistrationList = (body, query) => {
 // A debounced keystroke only ever refreshes the list. Pairing on an exactly
 // typed code is reserved for an explicit submit, so no one is paired mid-word.
 const runRegistrationSearch = async (rawQuery, autoPair) => {
-  if (!currentEvent) return;
+  if (!currentEvent || !registrationSearchForm || !registrationResults) return;
   const query = String(rawQuery == null ? "" : rawQuery).trim();
   const sequence = ++registrationSearchSequence;
   clearRegistrationSelection();
@@ -6232,6 +6190,7 @@ const runRegistrationSearch = async (rawQuery, autoPair) => {
 };
 
 const queueRegistrationSearch = () => {
+  if (!registrationSearchInput) return;
   clearTimeout(registrationSearchTimer);
   registrationSearchTimer = setTimeout(
     () => { void runRegistrationSearch(registrationSearchInput.value, false); },
@@ -6244,22 +6203,25 @@ const queueRegistrationSearch = () => {
 // the field — so both the key and the submit event are cancelled and the input
 // is blurred before the request goes out.
 const submitRegistrationSearch = () => {
+  if (!registrationSearchInput) return;
   clearTimeout(registrationSearchTimer);
   registrationSearchInput.blur();
   void runRegistrationSearch(registrationSearchInput.value, true);
 };
 
-registrationSearchInput.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter") return;
-  event.preventDefault();
-  submitRegistrationSearch();
-});
-registrationSearchInput.addEventListener("input", queueRegistrationSearch);
-registrationSearchInput.addEventListener("search", queueRegistrationSearch);
-registrationSearchForm.addEventListener("submit", (event) => {
-  event.preventDefault();
-  submitRegistrationSearch();
-});
+if (registrationSearchInput && registrationSearchForm) {
+  registrationSearchInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    submitRegistrationSearch();
+  });
+  registrationSearchInput.addEventListener("input", queueRegistrationSearch);
+  registrationSearchInput.addEventListener("search", queueRegistrationSearch);
+  registrationSearchForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitRegistrationSearch();
+  });
+}
 
 const showPairing = (data) => {
   pageTitle.textContent = "Pair Duck #" + data.duck.visibleNumber;
@@ -6267,6 +6229,10 @@ const showPairing = (data) => {
   addFact("Inventory", data.duck.inventoryStatus.replaceAll("_", " ").toLowerCase());
   if (!data.pairingRequired) {
     message.textContent = "This duck cannot be paired in its current inventory or tag state.";
+    return;
+  }
+  if (!workArea || !qrLaunch) {
+    message.textContent = "This staff role can inspect this duck but cannot pair it.";
     return;
   }
   if (!currentEvent || !["REGISTRATION_OPEN", "REGISTRATION_CLOSED"].includes(currentEvent.status)) {
@@ -6281,7 +6247,7 @@ const showPairing = (data) => {
   document.querySelector("[data-pairing-event]").textContent = currentEvent.name;
   // The unpaired list is the resting state of this screen, so it is painted
   // from whatever is currently typed rather than waiting for a first search.
-  void runRegistrationSearch(registrationSearchInput.value, false);
+  void runRegistrationSearch(registrationSearchInput?.value || "", false);
 };
 
 const load = async () => {
@@ -6293,28 +6259,30 @@ const load = async () => {
     currentEvent = eventResponse.event;
     summary.replaceChildren();
     qrStop();
-    workArea.hidden = true;
+    if (workArea) workArea.hidden = true;
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
+    renderWinnerAction(duck);
   } catch (error) {
     if (error.message !== "signed-out") {
       if (error.status === 403 || error.status === 404) {
         selectedRegistration = null;
         currentEvent = null;
         summary.replaceChildren();
-        workArea.hidden = true;
+        if (workArea) workArea.hidden = true;
         registrationSearchSequence += 1;
         clearTimeout(registrationSearchTimer);
-        registrationResults.replaceChildren();
+        registrationResults?.replaceChildren();
         setRegistrationStatus("");
-        document.querySelector("[data-pairing-review]").replaceChildren();
+        document.querySelector("[data-pairing-review]")?.replaceChildren();
       }
       message.textContent = error.message;
     }
   }
 };
 
-document.querySelector("[data-confirm-pairing]").addEventListener("click", async (event) => {
+const confirmPairing = document.querySelector("[data-confirm-pairing]");
+if (confirmPairing) confirmPairing.addEventListener("click", async (event) => {
   if (!selectedRegistration || !currentEvent) return;
   const button = event.currentTarget;
   button.disabled = true;
@@ -6328,7 +6296,6 @@ staffDuckSubscription = globalThis.quickDucksLive.subscribe({
   refresh: load,
   isBlocked: () => staffDuckBusy > 0 || selectedRegistration !== null || qrScanning,
 });
-}
 `;
 
 // Progressive enhancement that replaces visible native selects with an

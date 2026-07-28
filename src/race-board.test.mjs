@@ -136,6 +136,7 @@ test("public board stays ordered, current, and privacy-filtered through the race
   assert.equal(completed.event.status, "COMPLETED");
   assert.equal(completed.event.currentHeat, null);
   assert.deepEqual(completed.event.podium.map((entry) => [entry.place, entry.duckNumber]), [[1, 22], [2, 11]]);
+  assert.deepEqual(completed.event.finalHeats[0].roster.map((entry) => entry.duckNumber), [22, 11]);
 
   // Participant-chosen duck names ride beside the number on the roster and the
   // podium, and the read-time filter decides which of them a visitor sees.
@@ -157,6 +158,72 @@ test("public board stays ordered, current, and privacy-filtered through the race
     /email|phone|lookup|private|token|staff|note|inventory|audit|registrationId|raceEntry|assignmentId/i,
   );
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("official winners lead both heat rounds while non-winner slot order stays stable", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, is_system_admin)
+    VALUES ('staff', 'staff-sub', 'operator@example.com', 1);
+    INSERT INTO events (id, slug, name, timezone, status, public_name_policy)
+    VALUES ('event', 'ordered-race', 'Ordered Race', 'UTC', 'ROUND_ONE', 'FIRST_NAME_ONLY');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES
+      ('registration-1', 'event', 'One', 'Duck', 'ACTIVE', 'ORDER001', 'hash-1', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'),
+      ('registration-2', 'event', 'Two', 'Duck', 'ACTIVE', 'ORDER002', 'hash-2', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'),
+      ('registration-3', 'event', 'Three', 'Duck', 'ACTIVE', 'ORDER003', 'hash-3', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-1', 'event', 'registration-1'),
+           ('entry-2', 'event', 'registration-2'),
+           ('entry-3', 'event', 'registration-3');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck-1', 1, 'IN_USE', '2026-07-26T00:00:00Z'),
+           ('duck-2', 2, 'IN_USE', '2026-07-26T00:00:00Z'),
+           ('duck-3', 3, 'IN_USE', '2026-07-26T00:00:00Z');
+    INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck-1', 'event', 'duck-1', '2026-07-26T00:00:00Z', 'staff'),
+           ('event-duck-2', 'event', 'duck-2', '2026-07-26T00:00:00Z', 'staff'),
+           ('event-duck-3', 'event', 'duck-3', '2026-07-26T00:00:00Z', 'staff');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('assign-1', 'event', 'ASSIGN_DUCK', 'assignment-1', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff'),
+           ('assign-2', 'event', 'ASSIGN_DUCK', 'assignment-2', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff'),
+           ('assign-3', 'event', 'ASSIGN_DUCK', 'assignment-3', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff'),
+           ('round-result', 'event', 'FINALIZE_HEAT_RESULT', 'round', '2026-07-26T01:00:00Z', '2026-07-26T01:00:00Z', 'staff'),
+           ('final-result', 'event', 'FINALIZE_HEAT_RESULT', 'final', '2026-07-26T02:00:00Z', '2026-07-26T02:00:00Z', 'staff');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES ('assignment-1', 'event', 'entry-1', 'event-duck-1', 'duck-1', '2026-07-26T00:00:00Z', 'staff', 'assign-1'),
+           ('assignment-2', 'event', 'entry-2', 'event-duck-2', 'duck-2', '2026-07-26T00:00:00Z', 'staff', 'assign-2'),
+           ('assignment-3', 'event', 'entry-3', 'event-duck-3', 'duck-3', '2026-07-26T00:00:00Z', 'staff', 'assign-3');
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('round', 'event', 'ROUND_ONE', 1, 'PLANNED', 3),
+           ('final', 'event', 'FINAL', 1, 'PLANNED', 3);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('round-1', 'event', 'round', 'entry-1', 'ROUND_ONE', 1, 'PAIRING', '2026-07-26T00:00:00Z'),
+           ('round-2', 'event', 'round', 'entry-2', 'ROUND_ONE', 2, 'PAIRING', '2026-07-26T00:00:00Z'),
+           ('round-3', 'event', 'round', 'entry-3', 'ROUND_ONE', 3, 'PAIRING', '2026-07-26T00:00:00Z'),
+           ('final-1', 'event', 'final', 'entry-1', 'FINAL', 1, 'WINNER_PROMOTION', '2026-07-26T01:00:00Z'),
+           ('final-2', 'event', 'final', 'entry-2', 'FINAL', 2, 'WINNER_PROMOTION', '2026-07-26T01:00:00Z'),
+           ('final-3', 'event', 'final', 'entry-3', 'FINAL', 3, 'WINNER_PROMOTION', '2026-07-26T01:00:00Z');
+    UPDATE heats SET status = 'FINALIZED', finalized_at = '2026-07-26T02:00:00Z';
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('round-winner', 'event', 'round', 'entry-3', 'assignment-3', 1, 1, '2026-07-26T01:00:00Z', 'staff', 'round-result'),
+           ('final-winner', 'event', 'final', 'entry-2', 'assignment-2', 1, 1, '2026-07-26T02:00:00Z', 'staff', 'final-result');
+  `);
+
+  const board = await responseBoard(database);
+  assert.deepEqual(board.event.roundOneHeats[0].roster.map((entry) => entry.duckNumber), [3, 1, 2]);
+  assert.deepEqual(board.event.finalHeats[0].roster.map((entry) => entry.duckNumber), [2, 1, 3]);
+  assert.deepEqual(board.event.roundOneHeats[0].roster.map((entry) => entry.place), [1, null, null]);
+  assert.deepEqual(board.event.finalHeats[0].roster.map((entry) => entry.place), [1, null, null]);
 });
 
 test("public board is usable when no current event exists", async (context) => {

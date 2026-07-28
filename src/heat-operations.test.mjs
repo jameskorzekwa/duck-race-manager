@@ -5,7 +5,7 @@ import test from "node:test";
 
 import { staffHomeScript } from "./client-scripts.ts";
 import { handleEventOperations } from "./event-operations.ts";
-import { handleHeatOperations } from "./heat-operations.ts";
+import { handleHeatOperations, winnerByTagCandidate } from "./heat-operations.ts";
 
 // The full ordered chain, so heat behavior is always exercised against the
 // schema production actually runs.
@@ -332,8 +332,8 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
 
   const finalistResponse = await handle(new Request("https://quickducks.com/api/v1/staff/events/event/finalists"));
   const finalistBody = await finalistResponse.json();
-  assert.equal(finalistBody.verification.verified, true);
   assert.equal(finalistBody.finalists.length, 2);
+  assert.equal("verification" in finalistBody, false);
   assert.equal(finalistBody.finalists[0].raceEntryId, rosters[0][1]);
   const verification = await handle(new Request(
     "https://quickducks.com/api/v1/staff/events/event/finalists/verification",
@@ -355,6 +355,31 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
   assert.notEqual(finalHeat.roster_locked_at, null);
   let finalRevision = finalHeat.revision;
 
+  const loadingCorrectionDetail = await handle(new Request(
+    `https://quickducks.com/api/v1/staff/events/event/heats/${firstHeatId}`,
+  ));
+  assert.equal((await loadingCorrectionDetail.json()).heat.resultCorrectionAllowed, true);
+  const loadingCorrection = await handle(jsonRequest(
+    `/api/v1/staff/events/event/heats/${firstHeatId}/results/correct`,
+    "POST",
+    {
+      commandId: commandId(),
+      revision: firstRevision,
+      reason: "Finish judge corrected the winner before final readiness.",
+      results: [{ raceEntryId: rosters[0][2], place: 1 }],
+    },
+  ));
+  assert.equal(loadingCorrection.status, 201, JSON.stringify(await loadingCorrection.clone().json()));
+  firstRevision = (await loadingCorrection.json()).heat.revision;
+  const refreshedFinalists = await (await handle(new Request(
+    "https://quickducks.com/api/v1/staff/events/event/finalists",
+  ))).json();
+  assert.equal(refreshedFinalists.finalists[0].raceEntryId, rosters[0][2]);
+  const refreshedFinal = await (await handle(new Request(
+    `https://quickducks.com/api/v1/staff/events/event/heats/${finalHeat.id}`,
+  ))).json();
+  assert.equal(refreshedFinal.roster[0].raceEntryId, rosters[0][2]);
+
   const dependentReopen = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${firstHeatId}/results/reopen`,
     "POST",
@@ -363,11 +388,25 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
   assert.equal(dependentReopen.status, 409);
 
   finalRevision = await transition(finalHeat.id, "ready", finalRevision, "READY");
+  const readyCorrectionDetail = await handle(new Request(
+    `https://quickducks.com/api/v1/staff/events/event/heats/${firstHeatId}`,
+  ));
+  assert.equal((await readyCorrectionDetail.json()).heat.resultCorrectionAllowed, false);
+  const readyCorrection = await handle(jsonRequest(
+    `/api/v1/staff/events/event/heats/${firstHeatId}/results/correct`,
+    "POST",
+    {
+      commandId: commandId(), revision: firstRevision,
+      reason: "This correction is too late.",
+      results: [{ raceEntryId: rosters[0][0], place: 1 }],
+    },
+  ));
+  assert.equal(readyCorrection.status, 409);
   finalRevision = await transition(finalHeat.id, "call", finalRevision, "CALLING");
   finalRevision = await transition(finalHeat.id, "start", finalRevision, "RUNNING");
   finalRevision = await transition(finalHeat.id, "finish", finalRevision, "AWAITING_RESULT");
 
-  const finalistIds = finalistBody.finalists.map((entry) => entry.raceEntryId);
+  const finalistIds = refreshedFinalists.finalists.map((entry) => entry.raceEntryId);
   const podium = finalistIds.map((raceEntryId, index) => ({ raceEntryId, place: index + 1 }));
   const finalResult = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${finalHeat.id}/results/finalize`,
@@ -541,6 +580,65 @@ test("heat lock, finish scan, validation, and atomic finalization require ACTIVE
   assert.equal(racedFinalization.status, 409);
   assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-active'").get().status, "AWAITING_RESULT");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-active'").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'").get().count, 0);
+});
+
+test("winner-by-tag candidates require one awaiting heat, its roster, and the current assignment", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  const winningToken = "a".repeat(32);
+  const otherToken = "b".repeat(32);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    INSERT INTO duck_tags (id, duck_id, token, status, activated_at)
+    VALUES ('tag-1', 'duck-1', '${winningToken}', 'ACTIVE', '2026-07-26T11:00:00Z'),
+           ('tag-2', 'duck-2', '${otherToken}', 'ACTIVE', '2026-07-26T11:00:00Z');
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size, revision)
+    VALUES ('heat-awaiting', 'event', 'ROUND_ONE', 4, 'PLANNED', 1, 7),
+           ('heat-other', 'event', 'ROUND_ONE', 5, 'PLANNED', 1, 2);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('candidate-entry', 'event', 'heat-awaiting', 'entry-1', 'ROUND_ONE', 1, 'PAIRING', '2026-07-26T11:00:00Z'),
+           ('other-entry', 'event', 'heat-other', 'entry-2', 'ROUND_ONE', 1, 'PAIRING', '2026-07-26T11:00:00Z');
+    UPDATE heats SET status = 'AWAITING_RESULT' WHERE id = 'heat-awaiting';
+    UPDATE heats SET status = 'READY' WHERE id = 'heat-other';
+  `);
+  const DB = d1(database);
+  const env = { DB };
+
+  assert.deepEqual(await winnerByTagCandidate(env, winningToken), {
+    eventId: "event",
+    heatId: "heat-awaiting",
+    raceEntryId: "entry-1",
+    revision: 7,
+    heatNumber: 4,
+    round: "ROUND_ONE",
+    participantDisplayName: "Daisy D.",
+  });
+  assert.equal(await winnerByTagCandidate(env, otherToken), null, "wrong-heat duck");
+  assert.equal(await winnerByTagCandidate(env, "z".repeat(32)), null, "unknown duck");
+
+  database.exec("UPDATE duck_assignments SET valid_to = '2026-07-26T11:05:00Z', end_reason = 'UNASSIGNED' WHERE id = 'assignment-1'");
+  assert.equal(await winnerByTagCandidate(env, winningToken), null, "unassigned duck");
+  database.exec("UPDATE duck_assignments SET valid_to = NULL, end_reason = NULL WHERE id = 'assignment-1'");
+  database.exec("UPDATE heats SET status = 'AWAITING_RESULT' WHERE id = 'heat-other'");
+  assert.equal(await winnerByTagCandidate(env, winningToken), null, "ambiguous awaiting heat");
+  database.exec("UPDATE heats SET status = 'READY' WHERE id = 'heat-other'");
+
+  DB.beforeBatch = () => {
+    database.exec("UPDATE duck_assignments SET valid_to = '2026-07-26T11:06:00Z', end_reason = 'UNASSIGNED' WHERE id = 'assignment-1'");
+  };
+  const response = await handleHeatOperations(jsonRequest(
+    `/api/v1/staff/ducks/${winningToken}/heat-winner`,
+    "POST",
+    {
+      commandId: commandId(), eventId: "event", heatId: "heat-awaiting",
+      raceEntryId: "entry-1", revision: 7,
+    },
+  ), env, actor);
+  assert.equal(response.status, 409);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'").get().count, 0);
 });
 

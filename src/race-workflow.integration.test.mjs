@@ -102,6 +102,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0013_followed_collection_entries.sql",
     "0014_simplified_lifecycle_schema.sql",
     "0015_participant_duck_names.sql",
+    "0016_locked_final_winner_correction.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -512,7 +513,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       assert.match((await pendingResultStart.json()).error, /Publish the official result/i);
     }
     const winner = heat.roster[0].raceEntryId;
-    const winningParticipant = participants.find((participant) => participant.raceEntryId === winner);
+    let winningParticipant = participants.find((participant) => participant.raceEntryId === winner);
     const scannedWinner = await jsonBody(await api(
       `/api/v1/staff/events/${eventId}/heats/${heat.id}/finish-scan?value=${encodeURIComponent(`https://quickducks.com/t/${winningParticipant.tagToken}`)}`,
       { token: staffToken },
@@ -527,33 +528,113 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       );
       assert.equal(wrongHeat.status, 422);
       assert.match((await wrongHeat.json()).error, /not in the selected heat/i);
+      const wrongInspection = await jsonBody(await api(
+        `/api/v1/staff/ducks/${wrongHeatParticipant.tagToken}`,
+        { token: staffToken },
+      ), 200, "inspect a duck from the wrong heat");
+      assert.equal(wrongInspection.winnerAction, null);
     }
+    const taggedGet = await api(`/t/${winningParticipant.tagToken}`, { token: staffToken });
+    assert.equal(taggedGet.status, 303);
+    assert.equal(taggedGet.headers.get("location"), `/staff/ducks/${winningParticipant.tagToken}`);
+    const inspection = await jsonBody(await api(
+      `/api/v1/staff/ducks/${winningParticipant.tagToken}`,
+      { token: staffToken },
+    ), 200, `inspect round-one winner ${heat.number}`);
+    assert.deepEqual(inspection.winnerAction, {
+      eventId,
+      heatId: heat.id,
+      raceEntryId: winner,
+      revision: heat.revision,
+      heatNumber: heat.number,
+      round: "ROUND_ONE",
+      participantDisplayName: `${winningParticipant.firstName} ${winningParticipant.lastName[0]}.`,
+    });
+    if (heat === roundOneHeats[0]) {
+      const forged = await post(`/api/v1/staff/ducks/${winningParticipant.tagToken}/heat-winner`, {
+        commandId: crypto.randomUUID(), eventId,
+        heatId: roundOneHeats[1].id, raceEntryId: winner, revision: heat.revision,
+      });
+      assert.equal(forged.status, 409);
+    }
+    const winnerCommand = crypto.randomUUID();
+    const winnerPayload = {
+      commandId: winnerCommand, eventId, heatId: heat.id,
+      raceEntryId: winner, revision: heat.revision,
+    };
     const finalized = await jsonBody(await post(
-      `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`,
-      {
-        commandId: crypto.randomUUID(),
-        revision: heat.revision,
-        results: [{ raceEntryId: winner, place: 1 }],
-      },
-    ), 201, `finalize round-one heat ${heat.number}`);
+      `/api/v1/staff/ducks/${winningParticipant.tagToken}/heat-winner`,
+      winnerPayload,
+    ), 201, `publish scanned round-one winner ${heat.number}`);
+    const replayedWinner = await jsonBody(await post(
+      `/api/v1/staff/ducks/${winningParticipant.tagToken}/heat-winner`,
+      winnerPayload,
+    ), 200, `replay scanned round-one winner ${heat.number}`);
+    assert.equal(replayedWinner.replayed, true);
+    const winnerAudit = database.prepare(
+      "SELECT details_json FROM audit_events WHERE command_id = ? AND action = 'HEAT_RESULT_FINALIZED'",
+    ).get(winnerCommand);
+    assert.ok(winnerAudit);
+    assert.equal(winnerAudit.details_json.includes(winningParticipant.tagToken), false);
+    assert.equal(winnerAudit.details_json.includes(winningParticipant.firstName), false);
+    assert.equal(winnerAudit.details_json.includes(`${winningParticipant.firstName.toLowerCase()}@example.com`), false);
     heat.revision = finalized.heat.revision;
     heat.status = finalized.heat.status;
     assert.equal(finalized.results.length, 1);
+    if (heat === roundOneHeats[0]) {
+      const plannedWinner = heat.roster[1].raceEntryId;
+      const plannedCorrection = await jsonBody(await post(
+        `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/correct`,
+        {
+          commandId: crypto.randomUUID(), revision: heat.revision,
+          reason: "Finish judge corrected the first heat winner.",
+          results: [{ raceEntryId: plannedWinner, place: 1 }],
+        },
+      ), 201, "correct first winner while final is planned");
+      heat.revision = plannedCorrection.heat.revision;
+      winningParticipant = participants.find((participant) => participant.raceEntryId === plannedWinner);
+      const refreshed = await jsonBody(await api(`/api/v1/staff/events/${eventId}/finalists`, {
+        token: staffToken,
+      }), 200, "refresh planned finalists");
+      assert.equal(refreshed.finalists[0].raceEntryId, plannedWinner);
+    }
     const winnerBoard = await jsonBody(await api("/api/v1/race-board"), 200, `published board winner ${heat.number}`);
-    assert.equal(winnerBoard.event.roundOneHeats[heat.number - 1].roster.find((entry) => entry.place === 1).duckNumber, winningParticipant.visibleNumber);
+    assert.equal(winnerBoard.event.roundOneHeats[heat.number - 1].roster[0].duckNumber, winningParticipant.visibleNumber);
+    assert.equal(winnerBoard.event.roundOneHeats[heat.number - 1].roster[0].place, 1);
   }
 
-  const finalists = await jsonBody(await api(`/api/v1/staff/events/${eventId}/finalists`, {
+  let finalists = await jsonBody(await api(`/api/v1/staff/events/${eventId}/finalists`, {
     token: staffToken,
-  }), 200, "verify finalists");
-  assert.equal(finalists.verification.verified, true);
+  }), 200, "list finalists");
+  assert.equal("verification" in finalists, false);
   assert.equal(finalists.finalists.length, 3);
-  const finalistIds = finalists.finalists.map((entry) => entry.raceEntryId);
+  let finalistIds = finalists.finalists.map((entry) => entry.raceEntryId);
 
   const finalStarted = await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-final`, {
     commandId: crypto.randomUUID(),
   }), 201, "start final");
   assert.equal(finalStarted.event.status, "FINAL");
+  const firstHeat = roundOneHeats[0];
+  const loadingWinner = firstHeat.roster[2].raceEntryId;
+  const loadingCapability = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${firstHeat.id}`,
+    { token: staffToken },
+  ), 200, "loading winner correction capability");
+  assert.equal(loadingCapability.heat.resultCorrectionAllowed, true);
+  const loadingCorrection = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${firstHeat.id}/results/correct`,
+    {
+      commandId: crypto.randomUUID(), revision: firstHeat.revision,
+      reason: "Final preflight confirmed a different first-heat winner.",
+      results: [{ raceEntryId: loadingWinner, place: 1 }],
+    },
+  ), 201, "correct first winner while final is locked loading");
+  firstHeat.revision = loadingCorrection.heat.revision;
+  finalists = await jsonBody(await api(`/api/v1/staff/events/${eventId}/finalists`, {
+    token: staffToken,
+  }), 200, "refresh finalists after loading correction");
+  finalistIds = finalists.finalists.map((entry) => entry.raceEntryId);
+  assert.equal(finalistIds[0], loadingWinner);
   const finalBoard = await jsonBody(await api("/api/v1/race-board"), 200, "planned final public board");
   assert.equal(finalBoard.event.finalHeats.length, 1);
   const finalistNumbers = participants
@@ -569,9 +650,27 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   // The final locks when the final round starts, for the same reason.
   assert.equal(finalHeat.status, "LOADING");
   assert.equal(finalHeat.rosterLocked, true);
-  for (const operation of ["ready", "call", "start", "finish"]) {
-    await transition(finalHeat, operation);
-  }
+  const refreshedFinalDetail = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "refresh final roster after loading correction");
+  assert.equal(refreshedFinalDetail.roster[0].raceEntryId, loadingWinner);
+  await transition(finalHeat, "ready");
+  const readyCapability = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${firstHeat.id}`,
+    { token: staffToken },
+  ), 200, "ready winner correction capability");
+  assert.equal(readyCapability.heat.resultCorrectionAllowed, false);
+  const lateCorrection = await post(
+    `/api/v1/staff/events/${eventId}/heats/${firstHeat.id}/results/correct`,
+    {
+      commandId: crypto.randomUUID(), revision: firstHeat.revision,
+      reason: "This change is after final readiness.",
+      results: [{ raceEntryId: firstHeat.roster[0].raceEntryId, place: 1 }],
+    },
+  );
+  assert.equal(lateCorrection.status, 409);
+  for (const operation of ["call", "start", "finish"]) await transition(finalHeat, operation);
   const podium = [];
   for (const [index, raceEntryId] of finalistIds.entries()) {
     const participant = participants.find((item) => item.raceEntryId === raceEntryId);

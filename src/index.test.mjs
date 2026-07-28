@@ -437,6 +437,7 @@ test("the staff duck page opens for exactly the roles the staff duck API allows"
   for (const currentActor of [
     staffActor(["REGISTRATION"]),
     staffActor(["DUCK_MANAGER"]),
+    staffActor(["RESULT_TAKER"]),
     staffActor(["RACE_DIRECTOR"]),
     staffActor([], true),
   ]) {
@@ -446,8 +447,7 @@ test("the staff duck page opens for exactly the roles the staff duck API allows"
     assert.notEqual((await api(currentActor)).status, 403, label);
   }
 
-  // RESULT_TAKER used to open this page while the API refused it.
-  for (const roles of [["RESULT_TAKER"], ["ANNOUNCER"], ["HEAT_RUNNER"], []]) {
+  for (const roles of [["ANNOUNCER"], ["HEAT_RUNNER"], []]) {
     const currentActor = staffActor(roles);
     const label = roles.join(",");
     const denied = await page(currentActor);
@@ -867,6 +867,10 @@ test("camera access is granted only to the authenticated duck-pairing page", asy
     authentication: "cookie",
   }));
   const pairing = await authenticated.fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
+  const resultInspection = await createWorker(async () => ({
+    id: "result_test", cognitoSub: "result-sub", email: "result@example.com",
+    displayName: "Result Staff", isSystemAdmin: false, roles: ["RESULT_TAKER"], authentication: "cookie",
+  })).fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
 
   assert.equal(pairing.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
 
@@ -878,6 +882,7 @@ test("camera access is granted only to the authenticated duck-pairing page", asy
     authenticated.fetch(new Request("https://quickducks.com/staff/finish-line"), env),
     authenticated.fetch(new Request("https://quickducks.com/api/v1/events/current"), env),
     authenticated.fetch(new Request("https://quickducks.com/assets/staff-duck.js"), env),
+    Promise.resolve(resultInspection),
   ]);
   for (const response of others) {
     assert.match(response.headers.get("permissions-policy") ?? "", /(^|, )camera=\(\)/);

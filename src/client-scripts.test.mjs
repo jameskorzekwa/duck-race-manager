@@ -7,7 +7,6 @@ import {
   duckDetailHelpersScript,
   eventSlugHelpersScript,
   finishLineScript,
-  finishHandoffHelpersScript,
   finishNfcHelpersScript,
   finishScanSerializationScript,
   finishSelectionValidationScript,
@@ -704,6 +703,10 @@ const confirmationCallsites = [
     "Clear this duck's chosen name? It goes back to showing its number everywhere. This is recorded in the audit trail.",
     { danger: true, confirmLabel: "Clear duck name" },
   )) return;`],
+  [staffDuckScript, `if (!await appConfirm(
+      "Mark Duck #" + data.duck.visibleNumber + " as the official Heat " + candidate.heatNumber + " winner? This publishes immediately.",
+      { danger: true, confirmLabel: "Mark winner" },
+    )) return;`],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
   [participantScript, `  const confirmed = await appConfirm(
     "Delete the registration for " + participantDisplayName(registration)
@@ -725,9 +728,8 @@ test("every confirmation callsite preserves its warning and returns before mutat
   // 16 minus the five inventory confirmations that moved to /staff/inventory.
   assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 11);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // The staff duck scan has exactly one destructive action of its own:
-  // moderating away a duck name. Pairing confirms through its own review step.
-  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  // The staff duck scan confirms both name moderation and winner publication.
+  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 2);
   // My Ducks has exactly one destructive action: self-service deletion.
   assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The dialog is defined once, by the one bundle every page loads first, so
@@ -3263,64 +3265,23 @@ test("NFC scanning cleans up unsupported records and read errors so one retry ca
   assert.deepEqual(readers.map((reader) => reader.scanCalls), [1, 1, 1]);
 });
 
-test("handoff helpers reject expired, wrong-heat, and stale-revision scans", () => {
-  const helpers = new Function(
-    `${finishHandoffHelpersScript}; return { finishParseHandoff, finishBuildHandoffSearch, finishHandoffProblem };`,
-  )();
-  const stored = {
-    returnPath: "/staff/finish-line",
-    eventId: "event-1",
-    heatId: "heat-1",
-    revision: 7,
-    expiresAt: 10_000,
-  };
-  const token = "a".repeat(32);
-  const handoff = helpers.finishParseHandoff("?" + helpers.finishBuildHandoffSearch(stored, token));
-  const current = { eventId: "event-1", heatId: "heat-1", revision: 7, status: "AWAITING_RESULT" };
-
-  assert.equal(helpers.finishHandoffProblem(handoff, current, 9_000), null);
-  assert.equal(helpers.finishHandoffProblem(handoff, current, 10_000), "expired");
-  assert.equal(helpers.finishHandoffProblem(handoff, { ...current, heatId: "heat-2" }, 9_000), "wrong-heat");
-  assert.equal(helpers.finishHandoffProblem(handoff, { ...current, revision: 8 }, 9_000), "stale-revision");
-  assert.equal(helpers.finishHandoffProblem(handoff, { ...current, status: "RUNNING" }, 9_000), "not-awaiting");
+test("round-one tag scans stay on inspection while the final keeps multi-place entry", () => {
+  assert.doesNotMatch(staffDuckScript, /quickducks\.finishStation|finishStationHandoff|location\.replace\("\/staff\/finish-line/);
+  assert.match(staffDuckScript, /"Mark Duck as Heat " \+ candidate\.heatNumber \+ " Winner"/);
+  assert.match(staffDuckScript, /\/heat-winner/);
+  assert.match(staffDuckScript, /winnerSuccess = \{ duckNumber: data\.duck\.visibleNumber, heatNumber: candidate\.heatNumber \}/);
+  assert.match(finishLineScript, /Scan the winning duck's permanent NFC or QR tag/);
+  assert.match(finishLineScript, /finishHeat\.round === "FINAL"/);
+  assert.match(finishLineScript, /Submit official podium/);
+  assert.doesNotMatch(finishLineScript, /quickducks\.finishStation|finishPendingHandoff|finishConsumeHandoff/);
 });
 
-test("staff duck scan hands complete iPhone context back without submitting", () => {
-  const token = "a".repeat(32);
-  const context = {
-    returnPath: "/staff/finish-line",
-    eventId: "event-1",
-    heatId: "heat-1",
-    revision: 7,
-    expiresAt: Date.now() + 60_000,
-  };
-  const values = new Map([[
-    "quickducks.finishStation",
-    JSON.stringify(context),
-  ]]);
-  const localStorage = {
-    getItem(key) { return values.get(key) ?? null; },
-    removeItem(key) { values.delete(key); },
-  };
-  let destination = null;
-  const location = {
-    pathname: `/staff/ducks/${token}`,
-    replace(value) { destination = value; },
-  };
-
-  new Function("document", "location", "localStorage", staffDuckScript)(null, location, localStorage);
-
-  const destinationUrl = new URL(destination, "https://quickducks.com");
-  assert.equal(destinationUrl.pathname, "/staff/finish-line");
-  assert.deepEqual(Object.fromEntries(destinationUrl.searchParams), {
-    tag: token,
-    eventId: context.eventId,
-    heatId: context.heatId,
-    revision: String(context.revision),
-    expiresAt: String(context.expiresAt),
-  });
-  assert.equal(values.has("quickducks.finishStation"), false);
-  assert.doesNotMatch(destination, /submit|result/i);
+test("the staff console shows accumulating finalists and obeys server correction capabilities", () => {
+  assert.match(staffHomeScript, /\["ROUND_ONE", "FINAL", "COMPLETED"\]\.includes\(currentEvent\?\.status\)/);
+  assert.match(staffHomeScript, /No round-one winner has been recorded yet/);
+  assert.doesNotMatch(staffHomeScript, /Finalist roster verified|not yet verified|data-refresh-finalists/);
+  assert.match(staffHomeScript, /if \(body\.heat\.resultCorrectionAllowed\) heatControls\.append\(resultForm\(body, "correct"\)\)/);
+  assert.match(staffHomeScript, /if \(!body\.heat\.resultReopenAllowed\) return/);
 });
 
 const nodeText = (node) => node.textContent + node.children.map(nodeText).join("");
@@ -3414,7 +3375,7 @@ const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = nu
     "fetch",
     "globalThis",
     "location",
-    `${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell };`,
+    `${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell, liveHeatCard };`,
   )(
     document,
     fetchStub,
@@ -3506,6 +3467,25 @@ test("live board entries link a visible duck number and stay plain text when una
   assert.equal(pending.children.length, 0);
   assert.equal(nodeText(pending), "Duck number pending");
   assert.equal(pending.children.some((child) => child.tagName === "A"), false);
+});
+
+test("official heat winners render an accessible gold text marker beside the participant", () => {
+  const { api } = liveDuckPage();
+  const card = api.liveHeatCard({
+    round: "ROUND_ONE",
+    number: 3,
+    status: "FINALIZED",
+    roster: [
+      { participantDisplayName: "Daisy D.", duckNumber: 4, duckName: null, place: 1 },
+      { participantDisplayName: "Donald M.", duckNumber: 5, duckName: null, place: null },
+    ],
+  }, null);
+  const winnerRow = card.children.find((child) => child.className === "board-entry");
+  const participant = winnerRow.children[0];
+  assert.equal(participant.className, "board-participant");
+  assert.equal(participant.children[1].textContent, "Winner");
+  assert.equal(participant.children[1].className, "winner-ribbon");
+  assert.equal(nodeText(participant), "Daisy D.Winner");
 });
 
 test("a board entry shows the chosen duck name beside the number it never replaces", () => {
