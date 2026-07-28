@@ -110,8 +110,10 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .page-panel.my-ducks-panel { max-width:70rem; }
 .participant-section { margin:2rem 0; padding-top:1.5rem; border-top:3px solid var(--ink); }
 .participant-section-head { display:flex; flex-wrap:wrap; align-items:end; justify-content:space-between; gap:.8rem; margin-bottom:.8rem; }
-.participant-section-head h2 { margin:0; }
-.carousel-controls { display:flex; gap:.55rem; }
+.participant-section-head h2 { min-width:0; margin:0; overflow-wrap:anywhere; }
+.participant-section-head-actions { display:flex; flex:1 1 auto; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:.55rem; min-width:0; }
+.participant-section-head-actions > .button { flex:0 1 auto; }
+.carousel-controls { display:flex; flex-wrap:wrap; gap:.55rem; min-width:0; }
 .participant-track { position:relative; display:flex; gap:1rem; padding:.25rem .25rem 1rem; overflow-x:auto; overscroll-behavior-inline:contain; scroll-padding-inline:.25rem; scroll-snap-type:x mandatory; scrollbar-color:var(--water-dark) #dce9e9; }
 .participant-track:focus-visible { border-radius:.8rem; outline:4px solid #83d8ec; outline-offset:2px; }
 .participant-card { flex:0 0 min(30rem,calc(100% - 3rem)); min-width:0; scroll-snap-align:start; scroll-snap-stop:always; }
@@ -188,6 +190,7 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .result-button:hover,.result-button:focus-visible { outline:4px solid #83d8ec; outline-offset:1px; }
 .result-button:active:not(:disabled) { background:#e4f4f8; filter:brightness(.97); transform:translate(1px,1px); }
 .result-button:disabled { opacity:.55; cursor:not-allowed; }
+.result-button.is-selected { border-color:var(--water-dark); background:var(--cream); box-shadow:inset .35rem 0 0 var(--water-dark); }
 .pairing-review { margin:1rem 0; padding:1rem; border:2px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; }
 .pairing-review > * { margin-bottom:0; overflow-wrap:anywhere; }
 .pairing-review > * + * { margin-top:var(--space-xs); }
@@ -356,7 +359,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 [data-event-readiness] .button { margin-top:var(--space-xs); }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,minmax(0,1fr)); } .field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .inventory-layout { grid-template-columns:minmax(0,1.15fr) minmax(20rem,.85fr); } .inventory-detail-panel { position:sticky; top:5.75rem; max-height:calc(100vh - 6.75rem); overflow:auto; } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .search-form { grid-template-columns:1fr; } .staff-bar { align-items:flex-start; } .staff-bar-actions { width:100%; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck { --duck-center:50%; right:50%; bottom:1rem; width:13.5rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .staff-bar { align-items:flex-start; } .staff-bar-actions { width:100%; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
 @media (prefers-reduced-motion:no-preference) { .button,.result-button { transition:transform 80ms ease-out,box-shadow 80ms ease-out,filter 80ms ease-out,background-color 80ms ease-out; } .hero-duck { animation:duck-rock 3.1s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-rock { 0%,100% { transform:translateX(var(--duck-center)) translateY(-3px) rotate(-3deg); } 25% { transform:translateX(var(--duck-center)) translateY(-8px) rotate(0deg); } 50% { transform:translateX(var(--duck-center)) translateY(-12px) rotate(3deg); } 75% { transform:translateX(var(--duck-center)) translateY(-7px) rotate(-1deg); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
 @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } .hero-water::before { background-position:-2.5rem 0; } }
 `;
@@ -546,9 +549,11 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
       <section class="participant-section" data-participant-section="awaiting" aria-labelledby="awaiting-participants-title" hidden>
         <div class="participant-section-head">
           <h2 id="awaiting-participants-title">Awaiting Participants</h2>
-          <div class="carousel-controls" data-carousel-controls hidden>
-            <button class="button secondary small" type="button" data-carousel-previous aria-controls="awaiting-participants">Previous</button>
-            <button class="button secondary small" type="button" data-carousel-next aria-controls="awaiting-participants">Next</button>
+          <div class="participant-section-head-actions">
+${phaseAllowsRegistration(phase) ? '            <a class="button small" href="/register" data-register-another>Register another participant</a>\n' : ""}            <div class="carousel-controls" data-carousel-controls hidden>
+              <button class="button secondary small" type="button" data-carousel-previous aria-controls="awaiting-participants">Previous</button>
+              <button class="button secondary small" type="button" data-carousel-next aria-controls="awaiting-participants">Next</button>
+            </div>
           </div>
         </div>
         <p class="muted">Participants you registered on this device, waiting for staff to pair a physical duck. Their staff lookup code stays on this device.</p>
@@ -578,7 +583,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
         <p class="muted">Participants you followed from a duck tag, a duck page, or the search below. These are someone else’s registration, so they show public race status only — no staff lookup code and no duck name.</p>
         <div class="participant-track" id="followed-participants" data-participant-track tabindex="0" aria-label="Followed participants" hidden></div>
       </section>
-${phaseAllowsRegistration(phase) ? '\n      <div class="actions"><a class="button" href="/register">Register another participant</a></div>\n' : ""}      </div>
+      </div>
 ${nameSearchSection()}
       </div>
     </section>
@@ -1299,9 +1304,10 @@ export const renderStaffDuck = (
           <div class="actions"><button class="button secondary" type="button" data-qr-cancel>Cancel and search manually</button></div>
         </section>
         <form method="post" action="/staff" data-registration-search>
-          <label>Participant code, name, phone, or email<input name="query" autocomplete="off" minlength="2" maxlength="80" required placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com"><span>An exact lookup code pairs immediately. Anything else searches by name, code, phone, or email. Contact details are visible only to authorized registration staff.</span></label>
+          <label>Participant code, name, phone, or email<input name="query" type="search" enterkeyhint="search" autocomplete="off" maxlength="80" placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com" data-registration-search-input><span>Everyone still waiting for a duck is listed below; typing narrows that list. An exact lookup code pairs immediately. Contact details are visible only to authorized registration staff.</span></label>
           <button class="button secondary" type="submit">Find participant</button>
         </form>
+        <p class="muted" data-registration-search-status aria-live="polite">Loading participants who still need a duck…</p>
         <div class="result-list" data-registration-results></div>
         <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
         <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>

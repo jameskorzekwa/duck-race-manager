@@ -82,6 +82,15 @@ test("the staff pairing page offers scanning, manual search, and a cancel path",
   // Manual search always remains present as the fallback path.
   assert.match(page, /data-registration-search/);
   assert.match(page, /An exact lookup code pairs immediately/);
+  // The field is a search box that narrows an already-visible list, so it is
+  // neither required nor gated on a minimum length, and Enter reads as "search".
+  assert.match(page, /<input name="query" type="search" enterkeyhint="search" autocomplete="off" maxlength="80"[^>]*data-registration-search-input>/);
+  assert.doesNotMatch(page, /<input name="query"[^>]*minlength=/);
+  assert.doesNotMatch(page, /<input name="query"[^>]*\srequired/);
+  assert.match(page, /Everyone still waiting for a duck is listed below; typing narrows that list/);
+  // The list has a live status line of its own, above the results.
+  assert.match(page, /<p class="muted" data-registration-search-status aria-live="polite">Loading participants who still need a duck…<\/p>/);
+  assert.ok(page.indexOf("data-registration-search-status") < page.indexOf("data-registration-results"));
   // The page itself never renders a participant or a QR payload.
   assert.doesNotMatch(page, /QD1:/);
 });

@@ -187,6 +187,54 @@ test("staff pairing pairs from a scan or an exact code and always keeps a manual
   assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
 });
 
+test("the pairing search lists the unpaired by default and puts the keyboard away on Enter", () => {
+  assert.doesNotThrow(() => new Function(staffDuckScript));
+
+  // The list is the resting state: opening the pairing work area runs the same
+  // search with whatever is typed, which on arrival is nothing.
+  assert.match(staffDuckScript, /void runRegistrationSearch\(registrationSearchInput\.value, false\)/);
+  assert.match(
+    staffDuckScript,
+    /workArea\.hidden = false;[\s\S]*?void runRegistrationSearch\(registrationSearchInput\.value, false\);/,
+  );
+  // An empty query is sent as an empty query rather than suppressed.
+  assert.match(staffDuckScript, /new URLSearchParams\(\{ eventId: currentEvent\.id, q: query \}\)/);
+  assert.equal(staffDuckScript.match(/registrations\/search\?/g).length, 1);
+
+  // Typing narrows the same list, debounced, and never fires a pairing command.
+  assert.match(staffDuckScript, /registrationSearchInput\.addEventListener\("input", queueRegistrationSearch\)/);
+  assert.match(staffDuckScript, /registrationSearchTimer = setTimeout\(\s*\n?\s*\(\) => \{ void runRegistrationSearch\(registrationSearchInput\.value, false\); \}/);
+  assert.match(staffDuckScript, /if \(autoPair && body\.exactMatch && body\.exactMatch\.assignedDuckNumber === null\)/);
+
+  // Enter must not submit the form natively, and must drop the soft keyboard.
+  assert.match(
+    staffDuckScript,
+    /const submitRegistrationSearch = \(\) => \{\s*\n\s*clearTimeout\(registrationSearchTimer\);\s*\n\s*registrationSearchInput\.blur\(\);/,
+  );
+  assert.match(
+    staffDuckScript,
+    /registrationSearchInput\.addEventListener\("keydown", \(event\) => \{\s*\n\s*if \(event\.key !== "Enter"\) return;\s*\n\s*event\.preventDefault\(\);\s*\n\s*submitRegistrationSearch\(\);/,
+  );
+  assert.match(
+    staffDuckScript,
+    /registrationSearchForm\.addEventListener\("submit", \(event\) => \{\s*\n\s*event\.preventDefault\(\);\s*\n\s*submitRegistrationSearch\(\);/,
+  );
+
+  // Only unpaired participants are ever drawn, and the browser says so rather
+  // than re-deciding it: there is no "already paired with Duck #" row left.
+  assert.match(staffDuckScript, /text\("span", contact \+ " · waiting for a duck", "muted"\)/);
+  assert.doesNotMatch(staffDuckScript, /already paired with Duck #/);
+  assert.doesNotMatch(staffDuckScript, /button\.disabled = registration\.assignedDuckNumber !== null/);
+  assert.match(staffDuckScript, /Anyone already paired is not listed here/);
+  assert.match(staffDuckScript, /body\.truncated === true/);
+
+  // A slower earlier request must never repaint over a newer one.
+  assert.match(staffDuckScript, /const sequence = \+\+registrationSearchSequence/);
+  assert.match(staffDuckScript, /if \(sequence !== registrationSearchSequence\) return/);
+
+  assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+});
+
 test("fallback decoding reads a centred, downscaled crop of the camera frame", () => {
   const { qrCropFrame } = participantQrHelpers();
   const calls = [];

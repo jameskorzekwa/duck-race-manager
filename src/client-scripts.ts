@@ -4869,7 +4869,37 @@ const participantQuery = () => {
   return parameters;
 };
 
-const loadParticipants = async () => {
+// The open participant is marked in the list so staff can see what the detail
+// card belongs to, and so the row they press again is obviously the one they
+// are putting down.
+const markParticipantSelection = () => {
+  const openId = selectedRegistration === null ? null : selectedRegistration.registrationId;
+  for (const button of participantList.querySelectorAll("[data-registration-id]")) {
+    const isOpen = button.dataset.registrationId === openId;
+    button.className = isOpen ? "result-button is-selected" : "result-button";
+    button.setAttribute("aria-pressed", isOpen ? "true" : "false");
+  }
+};
+
+const toggleParticipantDetail = (registrationId) => {
+  // Pressing the open participant again closes it. Staff read a row, decide it
+  // is not the person, and want the card out of the way without picking a
+  // different one.
+  if (selectedRegistration !== null && selectedRegistration.registrationId === registrationId) {
+    clearParticipantDetail();
+    markParticipantSelection();
+    return;
+  }
+  loadParticipantDetail(registrationId)
+    .then(markParticipantSelection)
+    .catch((error) => setMessage(error.message, true));
+};
+
+// The pruneSelection flag is set by the explicit list reloads — the "List
+// participants" button and the filter form. If the open participant is not in
+// the list the operator just asked for, the detail card is stale, so it clears
+// and hides instead of describing someone the list no longer shows.
+const loadParticipants = async (pruneSelection = false) => {
   if (!currentEvent) return;
   const body = await api(
     "/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/registrations?" + participantQuery(),
@@ -4885,10 +4915,18 @@ const loadParticipants = async () => {
       "result-button",
     );
     button.type = "button";
-    button.addEventListener("click", () => loadParticipantDetail(registration.registrationId)
-      .catch((error) => setMessage(error.message, true)));
+    button.dataset.registrationId = registration.registrationId;
+    button.addEventListener("click", () => toggleParticipantDetail(registration.registrationId));
     participantList.append(button);
   }
+  if (
+    pruneSelection
+    && selectedRegistration !== null
+    && !body.registrations.some((registration) => registration.registrationId === selectedRegistration.registrationId)
+  ) {
+    clearParticipantDetail();
+  }
+  markParticipantSelection();
 };
 
 const addParticipantAction = (label, className, action) => {
@@ -5056,7 +5094,7 @@ const loadParticipantDetail = async (registrationId) => {
 
 participantFilterForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  loadParticipants()
+  loadParticipants(true)
     .then(() => globalThis.quickDucksLive.markClean(participantFilterForm))
     .catch((error) => setMessage(error.message, true));
 });
@@ -6098,6 +6136,131 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) qrStop();
 });
 
+// Staff arrive here holding a duck that needs a person, so the list is the
+// default state and the search only narrows it. One endpoint answers both: an
+// empty query lists everyone still waiting for a duck, and the server excludes
+// anyone already paired from every response, so nothing in this file has to
+// decide who is eligible.
+const registrationSearchForm = document.querySelector("[data-registration-search]");
+const registrationSearchInput = registrationSearchForm.querySelector("[data-registration-search-input]");
+const registrationResults = document.querySelector("[data-registration-results]");
+const registrationSearchStatus = document.querySelector("[data-registration-search-status]");
+const registrationSearchDebounceMs = 250;
+let registrationSearchSequence = 0;
+let registrationSearchTimer = null;
+
+const setRegistrationStatus = (value, isError) => {
+  registrationSearchStatus.className = isError ? "error-text" : "muted";
+  registrationSearchStatus.textContent = value;
+};
+
+const clearRegistrationSelection = () => {
+  selectedRegistration = null;
+  document.querySelector("[data-confirm-pairing]").disabled = true;
+  document.querySelector("[data-pairing-review]")
+    .replaceChildren(text("p", "Choose one registration to review.", "muted"));
+};
+
+const registrationRow = (registration) => {
+  const contact = [registration.email, registration.phone].filter(Boolean).join(" · ")
+    || "No email or phone provided";
+  const button = text("button", "", "result-button");
+  button.type = "button";
+  button.append(
+    text("strong", registration.firstName + " " + registration.lastName + " · " + registration.lookupCode),
+    text("span", contact + " · waiting for a duck", "muted"),
+  );
+  button.addEventListener("click", () => renderSelection(registration));
+  return button;
+};
+
+const describeRegistrationList = (body, query) => {
+  const count = body.registrations.length;
+  if (count === 0) {
+    return query.length === 0
+      ? "Every participant in this event already has a duck."
+      : "No participant waiting for a duck matches that search. Anyone already paired is not listed here.";
+  }
+  const listed = count === 1
+    ? "1 participant is waiting for a duck."
+    : count + " participants are waiting for a duck.";
+  return body.truncated === true
+    ? "Showing the first " + count + " participants waiting for a duck. Type to narrow the list."
+    : listed;
+};
+
+// A debounced keystroke only ever refreshes the list. Pairing on an exactly
+// typed code is reserved for an explicit submit, so no one is paired mid-word.
+const runRegistrationSearch = async (rawQuery, autoPair) => {
+  if (!currentEvent) return;
+  const query = String(rawQuery == null ? "" : rawQuery).trim();
+  const sequence = ++registrationSearchSequence;
+  clearRegistrationSelection();
+  try {
+    const parameters = new URLSearchParams({ eventId: currentEvent.id, q: query });
+    const body = await fetchJson("/api/v1/staff/registrations/search?" + parameters);
+    if (sequence !== registrationSearchSequence) return;
+    globalThis.quickDucksLive.markClean(registrationSearchForm);
+    // An exactly typed lookup code identifies one participant with no
+    // ambiguity, so pair straight away instead of showing a one-row list to
+    // click. The server never reports a paired participant, so a code that
+    // already holds a duck simply is not found here.
+    if (autoPair && body.exactMatch && body.exactMatch.assignedDuckNumber === null) {
+      registrationResults.replaceChildren();
+      setRegistrationStatus(
+        "Exact code match: " + body.exactMatch.firstName + " " + body.exactMatch.lastName + ". Pairing…",
+      );
+      const outcome = await pairWithLookupCode(body.exactMatch.lookupCode);
+      if (outcome.ok) {
+        registrationSearchForm.reset();
+        registrationResults.replaceChildren();
+        setRegistrationStatus("");
+      } else if (!outcome.signedOut) {
+        setRegistrationStatus(outcome.error, true);
+      }
+      return;
+    }
+    registrationResults.replaceChildren(...body.registrations.map(registrationRow));
+    setRegistrationStatus(describeRegistrationList(body, query));
+  } catch (error) {
+    if (sequence !== registrationSearchSequence) return;
+    if (error.message !== "signed-out") {
+      registrationResults.replaceChildren();
+      setRegistrationStatus(error.message, true);
+    }
+  }
+};
+
+const queueRegistrationSearch = () => {
+  clearTimeout(registrationSearchTimer);
+  registrationSearchTimer = setTimeout(
+    () => { void runRegistrationSearch(registrationSearchInput.value, false); },
+    registrationSearchDebounceMs,
+  );
+};
+
+// Enter on a phone must put the keyboard away. The form is never allowed to
+// submit natively — that would reload the page and hand focus straight back to
+// the field — so both the key and the submit event are cancelled and the input
+// is blurred before the request goes out.
+const submitRegistrationSearch = () => {
+  clearTimeout(registrationSearchTimer);
+  registrationSearchInput.blur();
+  void runRegistrationSearch(registrationSearchInput.value, true);
+};
+
+registrationSearchInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  submitRegistrationSearch();
+});
+registrationSearchInput.addEventListener("input", queueRegistrationSearch);
+registrationSearchInput.addEventListener("search", queueRegistrationSearch);
+registrationSearchForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitRegistrationSearch();
+});
+
 const showPairing = (data) => {
   pageTitle.textContent = "Pair Duck #" + data.duck.visibleNumber;
   addFact("Duck", "#" + data.duck.visibleNumber);
@@ -6116,6 +6279,9 @@ const showPairing = (data) => {
   workArea.hidden = false;
   qrLaunch.hidden = !qrSupported;
   document.querySelector("[data-pairing-event]").textContent = currentEvent.name;
+  // The unpaired list is the resting state of this screen, so it is painted
+  // from whatever is currently typed rather than waiting for a first search.
+  void runRegistrationSearch(registrationSearchInput.value, false);
 };
 
 const load = async () => {
@@ -6137,69 +6303,16 @@ const load = async () => {
         currentEvent = null;
         summary.replaceChildren();
         workArea.hidden = true;
-        document.querySelector("[data-registration-results]").replaceChildren();
+        registrationSearchSequence += 1;
+        clearTimeout(registrationSearchTimer);
+        registrationResults.replaceChildren();
+        setRegistrationStatus("");
         document.querySelector("[data-pairing-review]").replaceChildren();
       }
       message.textContent = error.message;
     }
   }
 };
-
-document.querySelector("[data-registration-search]").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (!currentEvent) return;
-  const query = new FormData(event.currentTarget).get("query");
-  const results = document.querySelector("[data-registration-results]");
-  results.replaceChildren();
-  selectedRegistration = null;
-  document.querySelector("[data-confirm-pairing]").disabled = true;
-  try {
-    const parameters = new URLSearchParams({ eventId: currentEvent.id, q: String(query) });
-    const body = await fetchJson("/api/v1/staff/registrations/search?" + parameters);
-    globalThis.quickDucksLive.markClean(event.currentTarget);
-    // An exactly typed lookup code identifies one participant with no
-    // ambiguity, so pair straight away instead of showing a one-row list to
-    // click. A code that is already paired falls through to the normal list,
-    // which explains which duck holds it.
-    if (body.exactMatch && body.exactMatch.assignedDuckNumber === null) {
-      const form = event.currentTarget;
-      results.append(text(
-        "p",
-        "Exact code match: " + body.exactMatch.firstName + " " + body.exactMatch.lastName + ". Pairing…",
-        "muted",
-      ));
-      const outcome = await pairWithLookupCode(body.exactMatch.lookupCode);
-      if (outcome.ok) {
-        form.reset();
-        results.replaceChildren();
-      } else if (!outcome.signedOut) {
-        results.replaceChildren(text("p", outcome.error, "error-text"));
-      }
-      return;
-    }
-    if (body.registrations.length === 0) {
-      results.append(text("p", "No matching registration was found.", "muted"));
-      return;
-    }
-    for (const registration of body.registrations) {
-      const assignment = registration.assignedDuckNumber === null
-        ? "unpaired"
-        : "already paired with Duck #" + registration.assignedDuckNumber;
-      const contact = [registration.email, registration.phone].filter(Boolean).join(" · ") || "No email or phone provided";
-      const button = text("button", "", "result-button");
-      button.type = "button";
-      button.disabled = registration.assignedDuckNumber !== null;
-      button.append(
-        text("strong", registration.firstName + " " + registration.lastName + " · " + registration.lookupCode),
-        text("span", contact + " · " + assignment, "muted"),
-      );
-      button.addEventListener("click", () => renderSelection(registration));
-      results.append(button);
-    }
-  } catch (error) {
-    if (error.message !== "signed-out") results.append(text("p", error.message, "error-text"));
-  }
-});
 
 document.querySelector("[data-confirm-pairing]").addEventListener("click", async (event) => {
   if (!selectedRegistration || !currentEvent) return;
