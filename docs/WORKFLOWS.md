@@ -45,6 +45,7 @@ not authorized.
 | Duck inventory intake, deletion, assignment, unassignment, and reservation | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open a staff duck inspection | `REGISTRATION`, `DUCK_MANAGER`, `RESULT_TAKER`, or `RACE_DIRECTOR`; projection stays role-narrow | Yes |
 | Open `/staff/inventory` | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Open `/staff/registration` | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
 | Event list/detail context | Any operational role | Yes |
 | Event readiness, heat list/detail/announcer-roster, result, and finalist reads | `ANNOUNCER`, `HEAT_RUNNER`, `RESULT_TAKER`, or `RACE_DIRECTOR` | Yes |
@@ -56,7 +57,7 @@ not authorized.
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
 | Create/configure draft; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
-| Open `/staff/access` | None | Yes |
+| Open `/staff/access` and the `/staff` Admin console | None | Yes |
 | Delete event: the whole dataset in any state | None | Yes |
 
 The operational role vocabulary is `REGISTRATION`, `DUCK_MANAGER`, `ANNOUNCER`,
@@ -934,17 +935,31 @@ Hidden links are only a convenience; each page and every API it calls repeat
 authentication, active-profile, role, event-state, heat-state, and revision
 checks.
 
-Every staff page also renders one persistent staff navigation listing only the
-pages the signed-in actor may open: **Console** (`/staff`, any staff member),
-**Announcer** (`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Start
-line** (`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), **Finish line**
-(`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`), **Inventory**
-(`/staff/inventory`, `DUCK_MANAGER` or `RACE_DIRECTOR`), and **Access**
-(`/staff/access`, system administrator). Access is always the right-most item.
-A system administrator sees every link. The current page is marked
-`aria-current="page"`. The navigation wraps rather than scrolling, so it never
-overflows a 320px viewport. Omitting a link is convenience only; each page
-repeats its own check.
+Every staff page also renders one persistent staff navigation, organised by the
+job a staffer is doing and listing only the pages the signed-in actor may open:
+**Admin** (`/staff`, system administrator), **Registration**
+(`/staff/registration`, `REGISTRATION` or `RACE_DIRECTOR`), **Announcer**
+(`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Start line**
+(`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), and **Finish line**
+(`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`).
+
+Inventory and Access are reached from the Admin console's own menu bar rather
+than from this navigation. The one exception is a **non-administrator** holding
+`DUCK_MANAGER` or `RACE_DIRECTOR`: they have no Admin menu bar, so they keep an
+**Inventory** (`/staff/inventory`) link here as the last item. The current page
+is marked `aria-current="page"`. The navigation wraps rather than scrolling, so
+it never overflows a 320px viewport. Omitting a link is convenience only; each
+page repeats its own check.
+
+`/staff` is the return target of staff sign-in, so it never refuses a regular
+staff member. A signed-in system administrator receives the Admin console. A
+signed-in non-administrator receives `303` to the first page their own roles
+open, in this order: `/staff/registration`, `/staff/start-line`,
+`/staff/finish-line`, `/staff/announcer`, `/staff/inventory`. Each target is a
+distinct path with its own role check and none of them redirects back to
+`/staff` while authenticated, so the redirect cannot loop. A staff member with
+no operational role at all receives the console page and its **No operational
+roles assigned** notice instead of a redirect.
 
 The signed-in identity bar is the last element of each operational staff page,
 not a header. It contains only the escaped display name on the left and the
@@ -992,25 +1007,48 @@ staff console. Event readiness and heat, announcer-roster, result, and finalist
 reads are limited to announcers, heat runners, result takers, race directors,
 and system administrators.
 
+### The Admin Console and Its Views
+
+`/staff` is the administrator console. Its menu bar lists, in this order,
+**Event Details**, **Heats**, **Participants**, **Inventory**, **Support**, and
+**Access**. Event Details, Heats, Participants, and Support are separate views
+inside `/staff`; Inventory and Access are links to `/staff/inventory` and
+`/staff/access`, which render the same menu bar so an administrator can navigate
+back.
+
+The views are not one stacked page: exactly one is displayed at a time. The URL
+hash names the displayed view — `#event`, `#heats`, `#participants`, `#support` —
+so a view is linkable, survives a reload, and moves with browser back and
+forward. The displayed item is marked `aria-current="page"`. The switcher only
+ever chooses among views the actor's role gating and the current event existence
+already permit, and falls back to the first permitted, currently-available view
+when the requested one is unavailable. Data loading is independent of display:
+hidden views stay populated, so refresh, live signals, and the readiness and
+lifecycle controls behave exactly as before.
+
 ### Console Event Existence Gating
 
-The console's **Event** section is always available. **Participants**, **Heats**,
-and **Support**, and their console navigation anchors, are event-scoped: they are
+The console's **Event Details** view is always available. **Participants**,
+**Heats**, and **Support**, and their menu-bar items, are event-scoped: they are
 hidden in the served markup and are revealed only when an event loads, so no
 section flashes and then vanishes. Role gating still applies on top of event
-existence, so an event-scoped section the actor may not use stays hidden even
-once an event exists. Inventory is its own page in the persistent staff
-navigation and is not repeated in the console's section navigation.
+existence, so an event-scoped view the actor may not use stays hidden even once
+an event exists.
 
-While no event row exists the console hides all three event-scoped sections and
-their anchors and shows the Event section with a **No race yet** state and, for a
-system administrator, the **Create event** card already open.
+While no event row exists the console hides all three event-scoped views and
+their menu items and shows Event Details with a **No race yet** state and, for a
+system administrator, the **Create event** card revealed and already open.
 
 ### Console Event Layout
 
-The console's Event section is ordered setup-first. A system administrator sees
-the collapsed **Create event** card directly under the section heading; other
-roles see no create card. The **Working event** picker and its refresh button
+The console's Event Details view is ordered setup-first. A system administrator
+sees the **Create event** card directly under the heading; other roles see no
+create card. QuickDucks holds one event dataset at a time, so that card is
+rendered hidden and is revealed only while no event exists: it disappears as
+soon as an event is created and reappears the moment the event is deleted,
+without a manual reload. It is removed with `hidden` rather than dimmed, and the
+client refuses a create submission while an event exists, so it is never hidden
+but still submittable. The **Working event** picker and its refresh button
 follow. Everything about the chosen event then appears in one labelled
 "Selected event details" region below the picker, in this order: the summary
 facts, **Configure draft**, **Readiness and lifecycle**, and **Delete event**.
@@ -1183,6 +1221,16 @@ disqualify a `SUBMITTED` or `ACTIVE` registration or reactivate a
 withdrawn/disqualified registration. These
 operations are revision-checked, idempotent, and audited.
 
+The participant detail pane offers **Withdraw** and **Disqualify** only for a
+participant who currently holds a duck assignment, because that duck is already
+sealed into a heat bag and physically stays in the race; all staff can do is
+make the participant ineligible to be counted as a winner, and the pane says so
+in one sentence beside the actions. **Reactivate** is unaffected by pairing. The
+pane reads the projection's current-assignment field, not the status, because a
+reactivated participant can be `SUBMITTED` while still holding their duck. This
+is console convenience only: the API accepts a withdrawal or disqualification
+for an unpaired registration as well.
+
 Withdrawal or disqualification is allowed while every heat containing that
 participant remains `PLANNED` and unlocked. Once any containing heat is locked,
 running, awaiting a result, or finalized, both operations are blocked in
@@ -1211,6 +1259,13 @@ registration from the participant detail pane with
 mistaken entry. It is not a substitute for withdrawal or disqualification, which
 are the correct tools for someone who registered legitimately and then stopped
 racing.
+
+The pane offers **Delete registration** only while the participant holds no
+current duck assignment, and offers it as the only destructive action there, so
+a paired participant is never shown a button whose command the server refuses.
+The console filter is narrower than the server rule described below in one case:
+a participant whose assignment has already ended keeps the button and receives
+the server's actionable `409` instead.
 
 The request follows the other staff participant mutations: an RFC 4122 v4
 `commandId`, the currently loaded `expectedRevision`, the exact application
@@ -1772,8 +1827,9 @@ deleted by reset.
 
 Each console roster entry shows its slot, participant name, duck number, and the
 race-entry identifier, plus up to two navigation buttons. **Participant details**
-scrolls to the Participants section, loads that registration through the existing
-participant-selection path, and moves focus into the loaded detail panel.
+switches the console to the Participants view through the same `#participants`
+hash the menu bar uses, scrolls to it, loads that registration through the
+existing participant-selection path, and moves focus into the loaded detail panel.
 **Duck # in inventory** navigates to `/staff/inventory?duck=<id>`, which opens
 that duck's detail panel on arrival. The participant panel's **Use for duck
 assignment** action navigates the same way with `?raceEntry=<id>`.

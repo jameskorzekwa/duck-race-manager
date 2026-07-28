@@ -273,6 +273,10 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .console-nav { position:sticky; z-index:5; top:.5rem; display:flex; gap:.45rem; margin:1.3rem 0; padding:.65rem; overflow-x:auto; border:2px solid var(--ink); border-radius:.9rem; background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
 .console-nav a { flex:none; padding:.55rem .7rem; border-radius:.55rem; font-size:.85rem; font-weight:900; text-decoration:none; }
 .console-nav a:hover,.console-nav a:focus-visible { background:var(--yellow); outline:2px solid var(--ink); }
+.console-nav a[aria-current="page"] { background:var(--yellow); box-shadow:2px 2px 0 var(--ink); }
+.staff-steps { display:grid; gap:.55rem; margin:0; padding-left:1.35rem; line-height:1.5; }
+.staff-steps li { min-width:0; font-weight:750; overflow-wrap:anywhere; }
+.participant-action-note { flex:1 1 100%; min-width:0; margin:0; line-height:1.5; }
 .staff-nav { display:flex; flex-wrap:wrap; gap:.45rem; max-width:100%; margin:0 0 1.2rem; padding:.55rem; border:2px solid var(--ink); border-radius:.9rem; background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
 .staff-nav a { display:inline-flex; min-width:0; max-width:100%; min-height:2.75rem; align-items:center; padding:.5rem .7rem; border-radius:.55rem; font-size:.85rem; font-weight:900; overflow-wrap:anywhere; text-decoration:none; }
 .staff-nav a:hover,.staff-nav a:focus-visible { background:var(--yellow); outline:2px solid var(--ink); }
@@ -964,27 +968,55 @@ const staffLogoutForm = (): string =>
 const staffFooter = (displayName: string): string =>
   `<footer class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</footer>`;
 
-// Persistent staff navigation. It lists only the pages this actor may open, so a
-// missing link is a convenience filter; every page and API repeats the check.
-// `anyStaff` is open to every signed-in staff member, an empty `anyOf` is
-// administrator-only, and an administrator implicitly passes every entry.
+// Persistent staff navigation. It is organised by the job a staffer is doing,
+// not by the shape of the application: Admin, Registration, and the three
+// race-day stations. It lists only the pages this actor may open, so a missing
+// link is a convenience filter; every page and API repeats the check.
+//
+// `anyOf` names the operational roles that may open the page and an
+// administrator implicitly passes it, so an empty list is administrator-only.
+// `adminReachesElsewhere` marks the one link that is not a plain role check.
+// Inventory has its own item in the Admin menu bar, so an administrator already
+// has a route to it and a second top-level link would only duplicate that. A
+// non-administrator duck manager or race director has no Admin menu bar at all
+// and would otherwise be left with no link to `/staff/inventory`, so the link
+// is rendered for exactly that case.
 interface StaffNavLink {
   href: string;
   label: string;
-  access: "anyStaff" | { anyOf: readonly OperationalRole[] };
+  access: {
+    anyOf: readonly OperationalRole[];
+    adminReachesElsewhere?: true;
+  };
 }
 
-// Order is race-day reading order: the console first, then the three stations in
-// the order the announcer reports on them — Announcer, Start line, Finish line —
-// then Inventory, and administrator Access last.
+// Order is race-day reading order: the administrator console first, then the
+// registration desk that runs before the race, then the three stations in the
+// order the announcer reports on them — Announcer, Start line, Finish line —
+// and finally the Inventory link a non-administrator duck manager needs.
 const staffNavLinks: readonly StaffNavLink[] = [
-  { href: "/staff", label: "Console", access: "anyStaff" },
+  { href: "/staff", label: "Admin", access: { anyOf: [] } },
+  { href: "/staff/registration", label: "Registration", access: { anyOf: ["REGISTRATION", "RACE_DIRECTOR"] } },
   { href: "/staff/announcer", label: "Announcer", access: { anyOf: ["ANNOUNCER", "RACE_DIRECTOR"] } },
   { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
   { href: "/staff/finish-line", label: "Finish line", access: { anyOf: ["RESULT_TAKER", "RACE_DIRECTOR"] } },
-  { href: "/staff/inventory", label: "Inventory", access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"] } },
-  { href: "/staff/access", label: "Access", access: { anyOf: [] } },
+  {
+    href: "/staff/inventory",
+    label: "Inventory",
+    access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"], adminReachesElsewhere: true },
+  },
 ];
+
+const staffNavLinkVisible = (
+  { access }: StaffNavLink,
+  isSystemAdmin: boolean,
+  roles: readonly OperationalRole[],
+): boolean => {
+  const holdsRole = access.anyOf.some((role) => roles.includes(role));
+  return access.adminReachesElsewhere === true
+    ? !isSystemAdmin && holdsRole
+    : isSystemAdmin || holdsRole;
+};
 
 const staffNav = (
   isSystemAdmin: boolean,
@@ -992,14 +1024,111 @@ const staffNav = (
   current?: string,
 ): string => {
   const links = staffNavLinks
-    .filter(({ access }) =>
-      access === "anyStaff" || isSystemAdmin || access.anyOf.some((role) => roles.includes(role)))
+    .filter((link) => staffNavLinkVisible(link, isSystemAdmin, roles))
     .map(({ href, label }) =>
       `<a href="${href}"${href === current ? ' aria-current="page"' : ""}>${label}</a>`)
     .join("");
   return `<nav class="staff-nav" aria-label="Staff pages">${links}</nav>`;
 };
 
+// The Admin console's own menu bar. Four items are separate views inside
+// `/staff` that switch through the URL hash, so a view is linkable and works
+// with browser back and forward; Inventory and Access are whole pages of their
+// own, and they render this same bar so an administrator can navigate back.
+//
+// Each item carries exactly the gating of the surface it opens, so the bar can
+// never offer a view the actor is not allowed to see. The three event-scoped
+// items ship hidden for the same reason their sections do: nothing flashes and
+// then vanishes while the first event query is still in flight.
+interface AdminMenuItem {
+  href: string;
+  label: string;
+  view?: "event" | "heats" | "participants" | "support";
+  eventScoped?: true;
+}
+
+const adminMenuItems: readonly AdminMenuItem[] = [
+  { href: "#event", label: "Event Details", view: "event" },
+  { href: "#heats", label: "Heats", view: "heats", eventScoped: true },
+  { href: "#participants", label: "Participants", view: "participants", eventScoped: true },
+  { href: "/staff/inventory", label: "Inventory" },
+  { href: "#support", label: "Support", view: "support", eventScoped: true },
+  { href: "/staff/access", label: "Access" },
+];
+
+// `current` is the in-page hash on `/staff` and the page path on the two pages
+// the bar links out to. Event Details is the default view, so it carries
+// `aria-current` in the served markup and the view switcher moves it from there.
+//
+// Only the console's own bar is event-scoped: `/staff/inventory` and
+// `/staff/access` run no console client, so hiding their hash links would strand
+// them hidden forever. There the bar is a plain set of links back into `/staff`,
+// each of which lands on that view or falls back to Event Details.
+const adminMenu = (
+  isSystemAdmin: boolean,
+  roles: readonly OperationalRole[],
+  current = "#event",
+): string => {
+  const inConsole = current.startsWith("#");
+  const hasRole = (role: OperationalRole): boolean => isSystemAdmin || roles.includes(role);
+  const allowed: Record<string, boolean> = {
+    "#event": isSystemAdmin || roles.length > 0,
+    "#heats": hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER") || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR"),
+    "#participants": hasRole("REGISTRATION") || hasRole("RACE_DIRECTOR"),
+    "/staff/inventory": hasRole("DUCK_MANAGER") || hasRole("RACE_DIRECTOR"),
+    "#support": isSystemAdmin,
+    "/staff/access": isSystemAdmin,
+  };
+  const links = adminMenuItems
+    .filter(({ href }) => allowed[href] === true)
+    .map(({ href, label, view, eventScoped }) => {
+      const target = inConsole || !href.startsWith("#") ? href : `/staff${href}`;
+      const hooks = inConsole && view !== undefined ? ` data-console-view-link="${view}"` : "";
+      const scoped = inConsole && eventScoped === true ? " data-event-scoped hidden" : "";
+      return `<a href="${target}"${hooks}${scoped}${href === current ? ' aria-current="page"' : ""}>${label}</a>`;
+    })
+    .join("");
+  return `<nav class="console-nav" aria-label="Admin views">${links}</nav>`;
+};
+
+// The one copy of the participants surface: the filter form, the walk-up card,
+// the participant list, and the detail card with its edit form, duck-name form
+// and action row. The Admin console's Participants view and `/staff/registration`
+// both render exactly this, so the console client binds identical hooks on
+// either page and the registration desk can never drift from the console.
+const participantsSurface = (): string => `
+        <form class="operation-card" data-participant-filter-form>
+          <div class="field-grid"><label>Search<input name="q" maxlength="80" placeholder="Name, code, email, or phone"></label><label>Status<select name="status"><option value="">All statuses</option><option value="SUBMITTED">Submitted</option><option value="ACTIVE">Active</option><option value="WITHDRAWN">Withdrawn</option><option value="DISQUALIFIED">Disqualified</option></select></label></div>
+          <div class="field-grid"><label>Created via<select name="createdVia"><option value="">Public and staff</option><option value="PUBLIC">Public</option><option value="STAFF">Staff walk-up</option></select></label><label>Assignment<select name="assignment"><option value="">Assigned and unassigned</option><option value="ASSIGNED">Assigned</option><option value="UNASSIGNED">Unassigned</option></select></label></div>
+          <button class="button secondary" type="submit">List participants</button>
+        </form>
+        <div class="console-grid wide">
+          <div><details class="operation-card"><summary>Add walk-up participant</summary>
+            <form data-walkup-form>
+              <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
+              <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
+              <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
+              <button class="button" type="submit">Create walk-up</button>
+            </form><p class="private-result muted" data-walkup-result aria-live="polite"></p>
+          </details><div class="data-list" data-participant-list></div></div>
+          <article class="operation-card" tabindex="-1" data-participant-detail hidden>
+            <h3 data-participant-name>Participant detail</h3><dl class="facts compact-facts" data-participant-facts></dl>
+            <form data-participant-duck-name-form hidden><label>Duck name<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Shown publicly beside the duck’s number. Staff names go through the same wordlist as a participant’s own.</span></label><button class="button secondary" type="submit">Save duck name</button></form>
+            <form data-participant-edit-form>
+              <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
+              <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
+              <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
+              <button class="button secondary" type="submit">Save participant details</button>
+            </form>
+            <div class="actions" data-participant-actions></div>
+          </article>
+        </div>`;
+
+// The administrator console. Its menu bar switches between four separate views —
+// Event Details, Heats, Participants, Support — and links out to the Inventory
+// and Access pages. Exactly one view is displayed at a time; the sections keep
+// their existing event-scope and role gating, and the switcher only ever chooses
+// among the sections that gating already permits.
 export const renderStaffHome = (
   displayName: string,
   isSystemAdmin: boolean,
@@ -1024,13 +1153,13 @@ export const renderStaffHome = (
       <h1 class="page-title operations-title">Race control, in one place.</h1>
       <p class="lede">Open the duck’s NFC or QR tag. QuickDucks will take you to pairing when it is available, or inspection when it is already assigned.</p>
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
-      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants" data-event-scoped hidden>Participants</a>' : ""}${canRaceRead ? '<a href="#heats" data-event-scoped hidden>Heats</a>' : ""}${isSystemAdmin ? '<a href="#support" data-event-scoped hidden>Support</a>' : ""}</nav>
+      ${adminMenu(isSystemAdmin, roles)}
       <p class="message-line muted" data-console-message aria-live="polite">Loading operations…</p>
 
-      <section class="console-section" id="events" aria-labelledby="events-title"${canUseConsole ? "" : " hidden"}>
-        <p class="eyebrow">Event control</p><h2 id="events-title">Event</h2>
-        <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>Create the race event to open participants, inventory, heats, and support. Until then this is the only section with anything to do.</span></div>
-        ${isSystemAdmin ? `<details class="operation-card event-create-card" data-event-create-card><summary>Create event</summary>
+      <section class="console-section" id="event" aria-labelledby="event-title" data-console-view="event" data-role-allowed="${canUseConsole ? "true" : "false"}"${canUseConsole ? "" : " hidden"}>
+        <p class="eyebrow">Event control</p><h2 id="event-title">Event Details</h2>
+        <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>Create the race event to open participants, inventory, heats, and support. Until then this is the only view with anything to do.</span></div>
+        ${isSystemAdmin ? `<details class="operation-card event-create-card" data-event-create-card hidden><summary>Create event</summary>
           <form data-event-create-form>
             <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
             <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
@@ -1078,37 +1207,11 @@ export const renderStaffHome = (
         </div>
       </section>
 
-      <section class="console-section" id="participants" aria-labelledby="participants-title" data-event-scoped data-role-allowed="${canRegistration ? "true" : "false"}" hidden>
-        <p class="eyebrow">Registration desk</p><h2 id="participants-title">Participants</h2>
-        <form class="operation-card" data-participant-filter-form>
-          <div class="field-grid"><label>Search<input name="q" maxlength="80" placeholder="Name, code, email, or phone"></label><label>Status<select name="status"><option value="">All statuses</option><option value="SUBMITTED">Submitted</option><option value="ACTIVE">Active</option><option value="WITHDRAWN">Withdrawn</option><option value="DISQUALIFIED">Disqualified</option></select></label></div>
-          <div class="field-grid"><label>Created via<select name="createdVia"><option value="">Public and staff</option><option value="PUBLIC">Public</option><option value="STAFF">Staff walk-up</option></select></label><label>Assignment<select name="assignment"><option value="">Assigned and unassigned</option><option value="ASSIGNED">Assigned</option><option value="UNASSIGNED">Unassigned</option></select></label></div>
-          <button class="button secondary" type="submit">List participants</button>
-        </form>
-        <div class="console-grid wide">
-          <div><details class="operation-card"><summary>Add walk-up participant</summary>
-            <form data-walkup-form>
-              <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
-              <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
-              <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
-              <button class="button" type="submit">Create walk-up</button>
-            </form><p class="private-result muted" data-walkup-result aria-live="polite"></p>
-          </details><div class="data-list" data-participant-list></div></div>
-          <article class="operation-card" tabindex="-1" data-participant-detail hidden>
-            <h3 data-participant-name>Participant detail</h3><dl class="facts compact-facts" data-participant-facts></dl>
-            <form data-participant-duck-name-form hidden><label>Duck name<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Shown publicly beside the duck’s number. Staff names go through the same wordlist as a participant’s own.</span></label><button class="button secondary" type="submit">Save duck name</button></form>
-            <form data-participant-edit-form>
-              <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
-              <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
-              <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
-              <button class="button secondary" type="submit">Save participant details</button>
-            </form>
-            <div class="actions" data-participant-actions></div>
-          </article>
-        </div>
+      <section class="console-section" id="participants" aria-labelledby="participants-title" data-console-view="participants" data-event-scoped data-role-allowed="${canRegistration ? "true" : "false"}" hidden>
+        <p class="eyebrow">Registration desk</p><h2 id="participants-title">Participants</h2>${participantsSurface()}
       </section>
 
-      <section class="console-section" id="heats" aria-labelledby="heats-title" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
+      <section class="console-section" id="heats" aria-labelledby="heats-title" data-console-view="heats" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
         <p class="eyebrow">Race control</p><h2 id="heats-title">Heats and results</h2>
         <div class="console-grid" data-finalist-card hidden>
           <article class="operation-card"><h3>Finalists</h3><p class="muted">The current round-one winners promoted into the final.</p><div class="data-list" data-finalist-list></div></article>
@@ -1117,9 +1220,9 @@ export const renderStaffHome = (
         <div class="console-grid wide"><div class="data-list" data-heat-list></div><article class="operation-card" data-heat-detail hidden><h3 data-heat-name>Heat detail</h3><dl class="facts compact-facts" data-heat-facts></dl><div data-heat-controls></div><h3>Roster</h3><ul class="roster-list" data-heat-roster></ul><h3>Published results</h3><div class="data-list" data-heat-results></div></article></div>
       </section>
 
-      ${isSystemAdmin ? `<section class="console-section" id="support" aria-labelledby="support-title" data-support data-event-scoped data-role-allowed="true" hidden>
+      ${isSystemAdmin ? `<section class="console-section" id="support" aria-labelledby="support-title" data-support data-console-view="support" data-event-scoped data-role-allowed="true" hidden>
         <p class="eyebrow">Administrator support</p><h2 id="support-title">Support</h2>
-        <div class="privacy"><strong>Administrator-only diagnostics.</strong><span>Notification actions and audit records are intentionally explicit. Clearing a race is done with Delete event in the Event section.</span></div>
+        <div class="privacy"><strong>Administrator-only diagnostics.</strong><span>Notification actions and audit records are intentionally explicit. Clearing a race is done with Delete event in the Event Details view.</span></div>
         <div class="console-grid"><article class="operation-card"><h3>Operational summary</h3><button class="button secondary small" type="button" data-refresh-support>Refresh summary</button><dl class="facts compact-facts" data-support-summary></dl></article></div>
         <details class="operation-card"><summary>Notification operations</summary><form class="section-tools" data-notification-filter-form><label>Status<select name="status"><option value="">All statuses</option><option value="WAITING_FOR_SYNC">Waiting for sync</option><option value="PENDING">Pending</option><option value="QUEUED">Queued</option><option value="SENDING">Sending</option><option value="SENT">Sent</option><option value="RETRY_PENDING">Retry pending</option><option value="DELIVERED">Delivered</option><option value="FAILED">Failed</option><option value="BOUNCED">Bounced</option><option value="COMPLAINED">Complained</option><option value="SUPPRESSED">Suppressed</option><option value="CANCELLED">Cancelled</option></select></label><button class="button secondary small" type="submit">Load notifications</button></form><div class="console-grid wide"><div class="data-list" data-notification-list></div><div class="data-list" data-notification-attempts></div></div></details>
         <details class="operation-card"><summary>Redacted audit timeline</summary><button class="button secondary small" type="button" data-refresh-audit>Load audit</button><div class="data-list" data-audit-list></div></details>
@@ -1127,6 +1230,76 @@ export const renderStaffHome = (
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/app-date-picker.js" defer></script>
       ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
+      ${staffFooter(displayName)}
+    </section>`,
+  });
+};
+
+// The registration desk. It is the page a registration staffer lands on, so it
+// leads with how to register somebody in race-day language and then carries the
+// same participants surface the Admin console's Participants view renders.
+//
+// It runs the console client (`staff-home.js`), which is why the working-event
+// picker is here: participants belong to an event, so the client has to resolve
+// one before it can list anybody. Every section of that client initialises
+// defensively, so the heats, support, and event-detail code it also contains
+// simply finds nothing to bind to here.
+export const renderStaffRegistration = (
+  displayName: string,
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
+): string => {
+  const canRegistration = isSystemAdmin
+    || roles.includes("REGISTRATION") || roles.includes("RACE_DIRECTOR");
+  return page({
+    title: "Registration",
+    description: "Protected QuickDucks registration desk.",
+    robots: "noindex,nofollow",
+    phase,
+    content: `
+    <section class="page-panel operations-panel staff-panel" data-staff-registration data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+      ${staffNav(isSystemAdmin, roles, "/staff/registration")}
+      <p class="eyebrow">Registration desk</p>
+      <h1 class="page-title operations-title">Get people into the race.</h1>
+      <p class="lede">There are two jobs here. Register someone who walks up without a registration, and hand a registered participant the duck they picked.</p>
+      <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
+      <div class="console-grid">
+        <article class="operation-card">
+          <h2>Someone walked up</h2>
+          <p class="muted">They have not registered on their phone. Register them here, then pair them with a duck.</p>
+          <ol class="staff-steps">
+            <li>Open <strong>Add walk-up participant</strong> below.</li>
+            <li>Type their first and last name. Email and phone are optional.</li>
+            <li>Press <strong>Create walk-up</strong>.</li>
+            <li>Read them the short lookup code QuickDucks shows, or hand them the private status link.</li>
+            <li>Now pair them with a duck, exactly as below.</li>
+          </ol>
+        </article>
+        <article class="operation-card">
+          <h2>Give them their duck</h2>
+          <p class="muted">Never pick the duck for them, and never pair before the duck is in their hands.</p>
+          <ol class="staff-steps">
+            <li>Let the participant choose the physical duck they want.</li>
+            <li>Scan that duck’s NFC tag or QR tag with this device.</li>
+            <li>QuickDucks opens the duck. Find the participant by their short lookup code or their name.</li>
+            <li>Check the participant and the duck number together on screen.</li>
+            <li>Press <strong>Confirm duck pairing</strong>. The duck now goes in the heat bag.</li>
+          </ol>
+        </article>
+      </div>
+      <div class="section-tools">
+        <label>Working event<select data-event-select aria-label="Working event"><option value="">Loading events…</option></select></label>
+        <button class="button secondary small" type="button" data-refresh-event>Refresh event</button>
+      </div>
+      <p class="message-line muted" data-console-message aria-live="polite">Loading participants…</p>
+      <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>An administrator creates the race event from the Admin console. Registrations belong to an event, so nothing can be registered until one exists.</span></div>
+
+      <section class="console-section" id="participants" aria-labelledby="registration-participants-title" data-event-scoped data-role-allowed="${canRegistration ? "true" : "false"}" hidden>
+        <p class="eyebrow">Everyone in this race</p><h2 id="registration-participants-title">Participants</h2>${participantsSurface()}
+      </section>
+      <script src="/assets/app-select.js" defer></script>
+      <script src="/assets/staff-home.js" defer></script>
       ${staffFooter(displayName)}
     </section>`,
   });
@@ -1150,6 +1323,7 @@ export const renderStaffAccess = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-access data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff/access")}
+      ${isSystemAdmin ? adminMenu(isSystemAdmin, roles, "/staff/access") : ""}
       ${duck()}
       <p class="eyebrow">Administrator</p>
       <h1 class="page-title operations-title">Staff access</h1>
@@ -1285,6 +1459,7 @@ export const renderStaffInventory = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-inventory data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
       ${staffNav(isSystemAdmin, roles, "/staff/inventory")}
+      ${isSystemAdmin ? adminMenu(isSystemAdmin, roles, "/staff/inventory") : ""}
       <p class="eyebrow">Physical ducks</p>
       <h1 class="page-title operations-title">Inventory</h1>
       <p class="lede">Every duck QuickDucks knows about. Scan a blank sticker to add one; scan a duck already in inventory and it opens here.</p>

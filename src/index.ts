@@ -46,6 +46,7 @@ import {
   renderStaffInventory,
   renderStaffLogin,
   renderStaffPairing,
+  renderStaffRegistration,
   renderStartLine,
   renderStatus,
   searchScript,
@@ -135,6 +136,11 @@ interface StationPage {
 }
 
 const stationPages = new Map<string, StationPage>([
+  ["/staff/registration", {
+    roles: ["REGISTRATION", "RACE_DIRECTOR"],
+    name: "registration",
+    render: (displayName, isSystemAdmin, roles, phase) => renderStaffRegistration(displayName, isSystemAdmin, roles, phase),
+  }],
   ["/staff/start-line", {
     roles: ["HEAT_RUNNER", "RACE_DIRECTOR"],
     name: "start-line",
@@ -151,6 +157,20 @@ const stationPages = new Map<string, StationPage>([
     render: (displayName, isSystemAdmin, roles, phase) => renderFinishLine(displayName, true, isSystemAdmin, roles, phase),
   }],
 ]);
+
+const inventoryRoles: readonly OperationalRole[] = ["DUCK_MANAGER", "RACE_DIRECTOR"];
+
+// Where `/staff` sends a signed-in non-administrator, in race-day priority
+// order. Each entry repeats the role set of the page it points at, and each of
+// those pages performs its own authoritative check on arrival; this list only
+// decides which one is offered first.
+const staffLandingPages: readonly (readonly [string, readonly OperationalRole[]])[] = [
+  ["/staff/registration", ["REGISTRATION", "RACE_DIRECTOR"]],
+  ["/staff/start-line", ["HEAT_RUNNER", "RACE_DIRECTOR"]],
+  ["/staff/finish-line", ["RESULT_TAKER", "RACE_DIRECTOR"]],
+  ["/staff/announcer", ["ANNOUNCER", "RACE_DIRECTOR"]],
+  ["/staff/inventory", inventoryRoles],
+];
 
 export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
@@ -385,12 +405,36 @@ export const createWorker = (
       return withSecurityHeaders(await staffLogoutResponse(request, env, tokenFetch));
     }
 
+    // `/staff` is both the sign-in page and, for an administrator, the Admin
+    // console. It is also the return target sign-in falls back to, so it can
+    // never simply 403 a regular staff member: a signed-in non-administrator is
+    // sent to the first page their own roles actually open. Every target is a
+    // distinct path with its own role check and none of them redirects back
+    // here while authenticated, so this cannot loop. A staff member with no
+    // operational role at all matches nothing and keeps the existing
+    // "No operational roles assigned" console page rather than bouncing.
     if (url.pathname === "/staff" && request.method === "GET") {
       const actor = await authenticateRequest(request, env);
       const phase = await publicPhase();
-      return withSessionCookies(actor === null
-        ? staffHtml(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo")), phase))
-        : staffHtml(renderStaffHome(actor.displayName ?? actor.email, actor.isSystemAdmin, actor.roles, phase)));
+      if (actor === null) {
+        return withSessionCookies(staffHtml(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo")), phase)));
+      }
+      if (!actor.isSystemAdmin) {
+        const landing = staffLandingPages
+          .find(([, roles]) => roles.some((role) => actor.roles.includes(role)))?.[0];
+        if (landing !== undefined) {
+          return withSessionCookies(new Response(null, {
+            status: 303,
+            headers: { ...securityHeaders, location: landing },
+          }));
+        }
+      }
+      return withSessionCookies(staffHtml(renderStaffHome(
+        actor.displayName ?? actor.email,
+        actor.isSystemAdmin,
+        actor.roles,
+        phase,
+      )));
     }
 
     // Staff account and role management is event-independent administrator work,
@@ -425,7 +469,7 @@ export const createWorker = (
         login.searchParams.set("returnTo", url.pathname);
         return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
       }
-      if (!hasAnyRole(actor, ["DUCK_MANAGER", "RACE_DIRECTOR"])) {
+      if (!hasAnyRole(actor, inventoryRoles)) {
         return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use duck inventory.", actor), 403, true));
       }
       return withSessionCookies(staffHtml(renderStaffInventory(

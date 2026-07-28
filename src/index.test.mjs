@@ -410,6 +410,178 @@ test("gates focused station pages by operational role", async () => {
   }
 });
 
+test("the registration desk is gated to the registration and race-director roles", async () => {
+  const actor = (roles, isSystemAdmin = false) => ({
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Desk Staff",
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  const page = (currentActor) => createWorker(async () => currentActor).fetch(
+    new Request("https://quickducks.com/staff/registration"), env,
+  );
+
+  // Anonymous: the same 303 to sign-in with a safe same-origin return target
+  // every other protected staff page uses.
+  const anonymous = await page(null);
+  assert.equal(anonymous.status, 303);
+  assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Fregistration");
+
+  for (const currentActor of [actor(["REGISTRATION"]), actor(["RACE_DIRECTOR"]), actor([], true)]) {
+    const label = currentActor.isSystemAdmin ? "admin" : currentActor.roles.join(",");
+    const allowed = await page(currentActor);
+    const body = await allowed.text();
+    assert.equal(allowed.status, 200, label);
+    assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow", label);
+    assert.equal(allowed.headers.get("cache-control"), "no-store", label);
+    assert.equal(allowed.headers.get("referrer-policy"), "same-origin", label);
+    assert.match(body, /<meta name="robots" content="noindex,nofollow">/, label);
+    // How to register somebody, in race-day language.
+    assert.match(body, /<h1 class="page-title operations-title">Get people into the race\.<\/h1>/, label);
+    assert.match(body, /<strong>Pairing order matters\.<\/strong>/, label);
+    assert.match(body, /Let the participant choose a physical duck, scan that duck/, label);
+    assert.match(body, /Someone walked up/, label);
+    assert.match(body, /Give them their duck/, label);
+    assert.match(body, /short lookup code/, label);
+    // The same participants surface the Admin console renders.
+    for (const hook of [
+      "data-participant-filter-form",
+      "data-walkup-form",
+      "data-participant-list",
+      "data-participant-detail",
+      "data-participant-edit-form",
+      "data-participant-duck-name-form",
+      "data-participant-actions",
+    ]) {
+      assert.ok(body.includes(hook), `${label}: missing participants hook ${hook}`);
+    }
+    // It runs the console client and resolves its own working event.
+    assert.match(body, /src="\/assets\/staff-home\.js"/, label);
+    assert.match(body, /data-operations-root/, label);
+    assert.match(body, /data-event-select/, label);
+    // It is only the registration desk: no event lifecycle, heats, or support.
+    assert.doesNotMatch(body, /data-event-create-card|data-force-delete-form|data-heat-list|data-support-summary/, label);
+    assert.match(body, /<a href="\/staff\/registration" aria-current="page">Registration<\/a>/, label);
+  }
+
+  for (const roles of [[], ["DUCK_MANAGER"], ["ANNOUNCER"], ["HEAT_RUNNER"], ["RESULT_TAKER"]]) {
+    const denied = await page(actor(roles));
+    assert.equal(denied.status, 403, roles.join(",") || "no roles");
+    assert.equal(denied.headers.get("x-robots-tag"), "noindex, nofollow");
+    assert.match(await denied.text(), /permission to use the registration station/);
+  }
+
+  // Only GET renders the page; other methods fall through to not-found.
+  for (const method of ["POST", "PUT", "DELETE"]) {
+    const response = await createWorker(async () => actor(["REGISTRATION"])).fetch(
+      new Request("https://quickducks.com/staff/registration", { method }), env,
+    );
+    assert.equal(response.status, 404, method);
+  }
+});
+
+// `/staff` is where staff sign-in returns to, so it may never dead-end a
+// regular staff member. An administrator gets the Admin console; everyone else
+// is sent to the first page their own roles open.
+test("/staff renders the Admin console for an administrator and redirects everyone else", async () => {
+  const actor = (roles, isSystemAdmin = false) => ({
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Landing Staff",
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  const staffHome = (currentActor) => createWorker(async () => currentActor).fetch(
+    new Request("https://quickducks.com/staff"), env,
+  );
+
+  const admin = await staffHome(actor([], true));
+  const adminBody = await admin.text();
+  assert.equal(admin.status, 200);
+  assert.match(adminBody, /<nav class="console-nav" aria-label="Admin views">/);
+  assert.match(adminBody, /id="event"/);
+  assert.match(adminBody, /src="\/assets\/staff-home\.js"/);
+
+  // Every operational role lands on the page it can actually work on, in
+  // race-day priority order.
+  for (const [roles, destination] of [
+    [["REGISTRATION"], "/staff/registration"],
+    [["RACE_DIRECTOR"], "/staff/registration"],
+    [["HEAT_RUNNER"], "/staff/start-line"],
+    [["RESULT_TAKER"], "/staff/finish-line"],
+    [["ANNOUNCER"], "/staff/announcer"],
+    [["DUCK_MANAGER"], "/staff/inventory"],
+    [["RESULT_TAKER", "HEAT_RUNNER"], "/staff/start-line"],
+    [["DUCK_MANAGER", "ANNOUNCER"], "/staff/announcer"],
+  ]) {
+    const response = await staffHome(actor(roles));
+    const label = roles.join(",");
+    assert.equal(response.status, 303, label);
+    assert.equal(response.headers.get("location"), destination, label);
+  }
+
+  // The destination always opens for the actor it was chosen for, so the
+  // redirect cannot bounce back here or loop.
+  for (const [roles, destination] of [
+    [["REGISTRATION"], "/staff/registration"],
+    [["HEAT_RUNNER"], "/staff/start-line"],
+    [["RESULT_TAKER"], "/staff/finish-line"],
+    [["ANNOUNCER"], "/staff/announcer"],
+    [["DUCK_MANAGER"], "/staff/inventory"],
+  ]) {
+    const landed = await createWorker(async () => actor(roles)).fetch(
+      new Request(`https://quickducks.com${destination}`), env,
+    );
+    assert.equal(landed.status, 200, destination);
+  }
+
+  // No operational role at all keeps the existing console page and its
+  // explanation rather than redirecting into a loop.
+  const roleless = await staffHome(actor([]));
+  const rolelessBody = await roleless.text();
+  assert.equal(roleless.status, 200);
+  assert.match(rolelessBody, /No operational roles assigned/);
+  assert.doesNotMatch(rolelessBody, /src="\/assets\/staff-home\.js"/);
+
+  // Signed out, `/staff` is still the sign-in page and never redirects.
+  const anonymous = await createWorker(async () => null).fetch(
+    new Request("https://quickducks.com/staff?returnTo=%2Fstaff%2Fregistration"), env,
+  );
+  assert.equal(anonymous.status, 200);
+  assert.match(await anonymous.text(), /Staff sign in/);
+});
+
+test("the persistent staff nav renders exactly the pages each actor may open", async () => {
+  const actor = (roles, isSystemAdmin = false) => ({
+    id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Nav Staff",
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  // Read from a real response so route gating and rendered navigation are
+  // proven together rather than from the renderer alone.
+  const navFor = async (currentActor, path) => {
+    const response = await createWorker(async () => currentActor).fetch(
+      new Request(`https://quickducks.com${path}`), env,
+    );
+    assert.equal(response.status, 200, `${path} for ${currentActor.roles.join(",") || "admin"}`);
+    const nav = (await response.text()).match(/<nav class="staff-nav"[\s\S]*?<\/nav>/)?.[0];
+    assert.ok(nav, path);
+    return [...nav.matchAll(/<a href="([^"]+)"/g)].map((match) => match[1]);
+  };
+
+  // An administrator reaches Inventory and Access from the Admin menu bar, so
+  // the top-level nav does not repeat them.
+  assert.deepEqual(await navFor(actor([], true), "/staff"), [
+    "/staff", "/staff/registration", "/staff/announcer", "/staff/start-line", "/staff/finish-line",
+  ]);
+  assert.deepEqual(await navFor(actor(["REGISTRATION"]), "/staff/registration"), ["/staff/registration"]);
+  assert.deepEqual(await navFor(actor(["ANNOUNCER"]), "/staff/announcer"), ["/staff/announcer"]);
+  assert.deepEqual(await navFor(actor(["HEAT_RUNNER"]), "/staff/start-line"), ["/staff/start-line"]);
+  assert.deepEqual(await navFor(actor(["RESULT_TAKER"]), "/staff/finish-line"), ["/staff/finish-line"]);
+  // The one non-role case: a non-administrator duck manager keeps a top-level
+  // Inventory link because they have no Admin menu bar to reach it from.
+  assert.deepEqual(await navFor(actor(["DUCK_MANAGER"]), "/staff/inventory"), ["/staff/inventory"]);
+  assert.deepEqual(await navFor(actor(["RACE_DIRECTOR"]), "/staff/registration"), [
+    "/staff/registration", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory",
+  ]);
+  // No roles: the console page renders, and offers no link anywhere.
+  assert.deepEqual(await navFor(actor([]), "/staff"), []);
+});
+
 // The staff duck page immediately fetches GET /api/v1/staff/ducks/:token, so a
 // page allow-list wider than the API's only renders a console that instantly
 // 403s. The API is the authority; this pins the two to the same role set.
@@ -489,6 +661,7 @@ const staffHtmlPaths = [
   "/staff",
   "/staff/access",
   "/staff/inventory",
+  "/staff/registration",
   "/staff/start-line",
   "/staff/announcer",
   "/staff/finish-line",
@@ -1140,7 +1313,7 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   // account-management markup.
   assert.doesNotMatch(staffHomeBody, /data-staff-access-form|data-create-role-set|id="access"/);
   assert.match(staffHomeBody, /<a href="\/staff\/access">Access<\/a>/);
-  assert.match(staffHomeBody, /id="events"/);
+  assert.match(staffHomeBody, /id="event"/);
   assert.match(staffHomeBody, /id="participants"/);
   // Inventory left the console for its own page; the console links out to it.
   assert.doesNotMatch(staffHomeBody, /id="inventory"/);
@@ -1193,7 +1366,7 @@ test("renders protected staff pairing preview with code and contact lookup", asy
   assert.doesNotMatch(rolelessHome, /data-return-review|data-numbered-disposition-form/);
 
   const announcerHome = renderStaffHome("Announcer", false, ["ANNOUNCER"]);
-  assert.match(announcerHome, /<a href="#heats" data-event-scoped hidden>Heats<\/a>/);
+  assert.match(announcerHome, /<a href="#heats" data-console-view-link="heats" data-event-scoped hidden>Heats<\/a>/);
   assert.doesNotMatch(announcerHome, /\/staff\/inventory/);
   assert.match(announcerHome, /data-roles="ANNOUNCER"/);
   assert.match(announcerHome, /href="\/staff\/announcer"/);

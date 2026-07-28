@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  baseUrl,
   bootstrap,
   expectNoDocumentOverflow,
   intakeDuck,
@@ -19,6 +20,7 @@ test.describe("sitewide UI consistency", () => {
 
     const paths = [
       "/staff",
+      "/staff/registration",
       "/staff/announcer",
       "/staff/start-line",
       "/staff/finish-line",
@@ -31,8 +33,10 @@ test.describe("sitewide UI consistency", () => {
       const panel = page.locator(".staff-panel");
       await expect(panel).toBeVisible();
       if (path === "/staff") {
-        await expect(page.locator('.staff-nav a[href="/staff/inventory"]')).toBeVisible();
-        await expect(page.locator('.console-nav a[href="/staff/inventory"]')).toHaveCount(0);
+        // An administrator reaches Inventory through the Admin menu bar, so the
+        // persistent staff nav does not repeat it.
+        await expect(page.locator('.console-nav a[href="/staff/inventory"]')).toBeVisible();
+        await expect(page.locator('.staff-nav a[href="/staff/inventory"]')).toHaveCount(0);
       }
       await expect(panel).toHaveCSS("max-width", "1120px");
       await expect(panel).toHaveCSS("background-color", "rgb(255, 253, 243)");
@@ -418,7 +422,12 @@ test.describe("sitewide UI consistency", () => {
 
     const directorContext = await browser.newContext();
     const directorPage = await directorContext.newPage();
-    await signIn(directorPage, director.email);
+    // The Admin console is administrator-only now, so a race director never
+    // reaches it: `/staff` sends them to their own landing page, and the delete
+    // controls exist on no page they can open.
+    await signIn(directorPage, director.email, "/staff/registration");
+    await directorPage.goto("/staff");
+    await expect(directorPage).toHaveURL(`${baseUrl}/staff/registration`);
     await expect(directorPage.locator("[data-open-force-delete], [data-force-delete-dialog]")).toHaveCount(0);
     await directorContext.close();
   });

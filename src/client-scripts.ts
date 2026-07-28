@@ -4311,6 +4311,10 @@ const canDirectRace = hasRole("RACE_DIRECTOR");
 const canRunHeat = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
 const canTakeResults = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
 const consoleMessage = document.querySelector("[data-console-message]");
+// This client runs on the Admin console and on the registration desk. Only the
+// operations root and the working-event picker are required on both — every
+// other surface below checks for its own markup before touching it, because one
+// throw here silently kills every section after it.
 const eventSelect = document.querySelector("[data-event-select]");
 let currentEvent = null;
 let currentEventDetail = null;
@@ -4423,12 +4427,58 @@ const noRaceState = document.querySelector("[data-no-race]");
 // Role gating stays authoritative on top: a section the actor may not use
 // stays hidden even once an event exists.
 const eventScopedElements = document.querySelectorAll("[data-event-scoped]");
+let consoleEventExists = false;
 const showEventScopedSections = (eventExists) => {
+  consoleEventExists = eventExists;
   for (const element of eventScopedElements) {
     element.hidden = !eventExists || element.dataset.roleAllowed === "false";
   }
   if (noRaceState) noRaceState.hidden = eventExists;
+  // The console sections are also the Admin views, so exactly one of the
+  // sections this pass just made available may actually be displayed. The
+  // switcher has the final say on their hidden state.
+  applyConsoleView(requestedConsoleView());
 };
+
+// --- Admin view switcher -----------------------------------------------------
+// The Admin console is a menu bar over separate views, not one long page. The
+// URL hash names the view, so a view is linkable, survives reload, and moves
+// with browser back and forward. A view may only ever be shown when its own
+// gating already allows it: role gating is fixed at render time and event
+// scoping follows the loaded event, so the switcher can never reveal a section
+// the actor is not allowed to see. When the requested view is unavailable it
+// falls back to the first permitted, currently-available one.
+//
+// Pages that are not the console (the registration desk) render none of this
+// markup, so every list here is simply empty and the switcher does nothing.
+const consoleViewSections = [...document.querySelectorAll("[data-console-view]")];
+const consoleViewLinks = [...document.querySelectorAll("[data-console-view-link]")];
+
+const consoleViewAvailable = (section) => section.dataset.roleAllowed !== "false"
+  && (!section.hasAttribute("data-event-scoped") || consoleEventExists);
+
+const requestedConsoleView = () => {
+  const hash = location.hash.replace(/^#/, "");
+  return hash === "" ? null : hash;
+};
+
+const applyConsoleView = (requested) => {
+  if (consoleViewSections.length === 0) return null;
+  const available = consoleViewSections.filter(consoleViewAvailable);
+  const target = available.find((section) => section.dataset.consoleView === requested)
+    || available[0]
+    || null;
+  const activeView = target === null ? null : target.dataset.consoleView;
+  for (const section of consoleViewSections) section.hidden = section !== target;
+  for (const link of consoleViewLinks) {
+    if (link.dataset.consoleViewLink === activeView) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  return activeView;
+};
+
+globalThis.addEventListener("hashchange", () => applyConsoleView(requestedConsoleView()));
+applyConsoleView(requestedConsoleView());
 const eventSummary = document.querySelector("[data-event-summary]");
 const readinessList = document.querySelector("[data-event-readiness]");
 const eventConfigCard = document.querySelector("[data-event-config-card]");
@@ -4491,6 +4541,10 @@ const lifecycleLabels = {
 
 const renderReadiness = (readiness) => {
   const event = currentEvent;
+  // The registration desk loads this same client without the Event Details
+  // view, so every surface checks that its own markup is on the page first. A
+  // throw here would silently kill everything after it.
+  if (!readinessList) return;
   readinessList.replaceChildren();
   for (const [action, state] of Object.entries(readiness)) {
     const presentation = lifecycleReadinessPresentation(state, event.status);
@@ -4569,7 +4623,7 @@ const renderEvent = (detail, readiness) => {
   if (!lifecycleShouldRenderEvent(eventSelect.value, currentEvent, detail.event)) return false;
   currentEvent = detail.event;
   currentEventDetail = detail;
-  showFacts(eventSummary, [
+  if (eventSummary) showFacts(eventSummary, [
     ["Name", currentEvent.name],
     ["Status", humanize(currentEvent.status)],
     ["Date", currentEvent.eventDate || "Not set"],
@@ -4598,6 +4652,13 @@ const renderEvent = (detail, readiness) => {
     forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;
     forceDeleteEventName.textContent = currentEvent.name;
   }
+  // QuickDucks holds one event dataset at a time, so a second create would be
+  // refused anyway. The card is removed from the page rather than dimmed, and
+  // the submit handler refuses too, so it can never be hidden but submittable.
+  if (eventCreateCard) {
+    eventCreateCard.open = false;
+    eventCreateCard.hidden = true;
+  }
   if (eventEmptyState) eventEmptyState.hidden = true;
   if (eventDetailRegion) eventDetailRegion.hidden = false;
   showEventScopedSections(true);
@@ -4620,8 +4681,8 @@ const loadEvents = async (preferredId) => {
     currentEventDetail = null;
     selectedRegistration = null;
     selectedHeat = null;
-    eventSummary.replaceChildren(empty("Create a draft event to begin."));
-    readinessList.replaceChildren(empty("No lifecycle is available."));
+    if (eventSummary) eventSummary.replaceChildren(empty("Create a draft event to begin."));
+    if (readinessList) readinessList.replaceChildren(empty("No lifecycle is available."));
     for (const selector of [
       "[data-participant-list]", "[data-heat-list]",
       "[data-finalist-list]", "[data-support-summary]",
@@ -4635,7 +4696,7 @@ const loadEvents = async (preferredId) => {
       const element = document.querySelector(selector);
       if (element) element.hidden = true;
     }
-    participantEditForm.reset();
+    if (participantEditForm) participantEditForm.reset();
     if (eventConfigForm) {
       eventConfigForm.reset();
       eventConfigCard.hidden = true;
@@ -4647,7 +4708,13 @@ const loadEvents = async (preferredId) => {
     }
     if (eventDetailRegion) eventDetailRegion.hidden = true;
     if (eventEmptyState) eventEmptyState.hidden = false;
-    if (eventCreateCard) eventCreateCard.open = true;
+    // No event: creating one is the only thing to do, so the card comes back
+    // and opens itself. Deleting an event reaches this branch too, so the card
+    // reappears without a manual reload.
+    if (eventCreateCard) {
+      eventCreateCard.hidden = false;
+      eventCreateCard.open = true;
+    }
     showEventScopedSections(false);
     setMessage("No event dataset exists. An administrator can create one.");
     return;
@@ -4687,7 +4754,7 @@ eventSelect.addEventListener("change", () => {
     .then(() => globalThis.quickDucksLive.markClean(eventSelect))
     .catch((error) => setMessage(error.message, true));
 });
-document.querySelector("[data-refresh-event]").addEventListener("click", () => {
+document.querySelector("[data-refresh-event]")?.addEventListener("click", () => {
   if (eventSelect.value) loadEvent(eventSelect.value).catch((error) => setMessage(error.message, true));
 });
 
@@ -4708,6 +4775,12 @@ if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) =>
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const values = new FormData(form);
+  // The card is removed from the page the moment an event exists; refusing here
+  // as well means a stale or scripted submission cannot send a doomed command.
+  if (currentEvent) {
+    setMessage("An event already exists. Delete it before creating another.", true);
+    return;
+  }
   await perform(button, "Creating draft event…", async () => {
     const result = await api("/api/v1/staff/events", commandOptions("POST", {
       commandId: crypto.randomUUID(),
@@ -4718,7 +4791,10 @@ if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) =>
     }));
     form.reset();
     updateEventSlugPreview(form, eventCreateSlugPreview);
-    if (eventCreateCard) eventCreateCard.open = false;
+    if (eventCreateCard) {
+      eventCreateCard.open = false;
+      eventCreateCard.hidden = true;
+    }
     await loadEvents(result.event.id);
   });
 });
@@ -4832,6 +4908,9 @@ const participantDetail = document.querySelector("[data-participant-detail]");
 const participantFacts = document.querySelector("[data-participant-facts]");
 const participantEditForm = document.querySelector("[data-participant-edit-form]");
 const participantActions = document.querySelector("[data-participant-actions]");
+// The participants surface is rendered by both the Admin console's Participants
+// view and the registration desk, so it is always all-or-nothing on a page.
+const participantsPresent = Boolean(participantFilterForm && participantList && participantDetail);
 
 const participantQuery = () => {
   const values = new FormData(participantFilterForm);
@@ -4847,6 +4926,7 @@ const participantQuery = () => {
 // card belongs to, and so the row they press again is obviously the one they
 // are putting down.
 const markParticipantSelection = () => {
+  if (!participantsPresent) return;
   const openId = selectedRegistration === null ? null : selectedRegistration.registrationId;
   for (const button of participantList.querySelectorAll("[data-registration-id]")) {
     const isOpen = button.dataset.registrationId === openId;
@@ -4874,7 +4954,7 @@ const toggleParticipantDetail = (registrationId) => {
 // the list the operator just asked for, the detail card is stale, so it clears
 // and hides instead of describing someone the list no longer shows.
 const loadParticipants = async (pruneSelection = false) => {
-  if (!currentEvent) return;
+  if (!currentEvent || !participantsPresent) return;
   const body = await api(
     "/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/registrations?" + participantQuery(),
   );
@@ -4923,9 +5003,19 @@ const changeParticipantStatus = async (operation, label, dangerous, button) => {
   });
 };
 
-// Deletion is offered unconditionally because the server owns the race-integrity
-// rule: it refuses while a duck is assigned or a heat place exists and returns
-// the unassign-first instruction, which is more useful than a hidden button.
+// Pairing is the line between the two destructive paths. Until a participant
+// has a duck there is nothing physical in the race, so removing the whole
+// registration is the only sensible action — and the server refuses a delete
+// while an assignment exists, which is this same rule from the other side. Once
+// a duck is paired it is sealed into a heat bag and stays in the water, so all
+// staff can do is make the participant ineligible to win.
+//
+// This reads the server's own current-assignment field. Status does not answer
+// the question: pairing is what makes a participant ACTIVE, but a reactivated
+// participant can be SUBMITTED while still holding their duck.
+const participantIsPaired = (registration) =>
+  registration.assignment !== null && registration.assignment !== undefined;
+
 const clearParticipantDetail = () => {
   selectedRegistration = null;
   participantDetail.hidden = true;
@@ -5039,9 +5129,20 @@ const renderParticipantDetail = (registration) => {
       location.assign("/staff/inventory?raceEntry=" + encodeURIComponent(registration.raceEntryId));
     });
   }
-  if (["SUBMITTED", "ACTIVE"].includes(registration.status)) {
-    addParticipantAction("Withdraw", "button danger small", (event) => changeParticipantStatus("withdraw", "Withdraw participant", true, event.currentTarget));
-    if (canDirectRace) addParticipantAction("Disqualify", "button danger small", (event) => changeParticipantStatus("disqualify", "Disqualify participant", true, event.currentTarget));
+  // Paired: no Delete at all, and one plain sentence saying why.
+  if (participantIsPaired(registration)) {
+    const note = text(
+      "p",
+      "Duck #" + registration.assignment.duck.visibleNumber
+        + " is already sealed in a heat bag, so it stays in the race. Withdraw or disqualify only makes this participant ineligible to be counted as a winner; the registration cannot be deleted.",
+      "muted participant-action-note",
+    );
+    note.dataset.participantActionNote = "";
+    participantActions.append(note);
+    if (["SUBMITTED", "ACTIVE"].includes(registration.status)) {
+      addParticipantAction("Withdraw", "button danger small", (event) => changeParticipantStatus("withdraw", "Withdraw participant", true, event.currentTarget));
+      if (canDirectRace) addParticipantAction("Disqualify", "button danger small", (event) => changeParticipantStatus("disqualify", "Disqualify participant", true, event.currentTarget));
+    }
   }
   if (canDirectRace && ["WITHDRAWN", "DISQUALIFIED"].includes(registration.status)) {
     addParticipantAction("Reactivate", "button small", async (event) => {
@@ -5058,7 +5159,10 @@ const renderParticipantDetail = (registration) => {
       });
     });
   }
-  addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));
+  // Unpaired: deleting the registration outright is the only destructive action.
+  if (!participantIsPaired(registration)) {
+    addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));
+  }
 };
 
 const loadParticipantDetail = async (registrationId) => {
@@ -5066,14 +5170,14 @@ const loadParticipantDetail = async (registrationId) => {
   renderParticipantDetail(body.registration);
 };
 
-participantFilterForm.addEventListener("submit", (event) => {
+participantFilterForm?.addEventListener("submit", (event) => {
   event.preventDefault();
   loadParticipants(true)
     .then(() => globalThis.quickDucksLive.markClean(participantFilterForm))
     .catch((error) => setMessage(error.message, true));
 });
 
-document.querySelector("[data-walkup-form]").addEventListener("submit", async (event) => {
+document.querySelector("[data-walkup-form]")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector("button");
@@ -5106,7 +5210,7 @@ document.querySelector("[data-walkup-form]").addEventListener("submit", async (e
   });
 });
 
-participantEditForm.addEventListener("submit", async (event) => {
+participantEditForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector("button");
@@ -5149,17 +5253,21 @@ const historyCard = (title, detail) => {
   return card;
 };
 
-// The console is one page of anchored sections, so a participant deep link is
-// an in-page navigation: bring the target section into view, then run the same
-// selection code path the section's own list buttons run.
-const revealConsoleSection = (selector) => {
-  const section = document.querySelector(selector);
+// A participant deep link from the heat roster switches the Admin view, so it
+// goes through the hash exactly like the menu bar does. That keeps one code
+// path for switching and leaves the jump in browser history.
+const revealConsoleSection = (view) => {
+  const section = document.getElementById(view);
+  if (consoleViewSections.some((candidate) => candidate.dataset.consoleView === view)) {
+    if (location.hash === "#" + view) applyConsoleView(view);
+    else location.hash = view;
+  }
   if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
   return section;
 };
 
 const openRosterParticipant = async (registrationId) => {
-  revealConsoleSection("#participants");
+  revealConsoleSection("participants");
   await loadParticipantDetail(registrationId);
   participantDetail.focus();
 };
@@ -5180,7 +5288,7 @@ const finalistList = document.querySelector("[data-finalist-list]");
 const finalistCard = document.querySelector("[data-finalist-card]");
 
 const loadHeats = async () => {
-  if (!currentEvent) return;
+  if (!currentEvent || !heatList) return;
   const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/heats");
   heatList.replaceChildren();
   if (body.heats.length === 0) {
@@ -5410,12 +5518,12 @@ const loadHeatDetail = async (heatId) => {
   renderHeatControls(body);
 };
 
-document.querySelector("[data-refresh-heats]").addEventListener("click", () => loadHeats().catch((error) => setMessage(error.message, true)));
+document.querySelector("[data-refresh-heats]")?.addEventListener("click", () => loadHeats().catch((error) => setMessage(error.message, true)));
 
 const finalistsExist = () => ["ROUND_ONE", "FINAL", "COMPLETED"].includes(currentEvent?.status);
 
 const loadFinalists = async () => {
-  if (!currentEvent) return;
+  if (!currentEvent || !finalistCard || !finalistList) return;
   finalistCard.hidden = !finalistsExist();
   if (finalistCard.hidden) {
     finalistList.replaceChildren();
@@ -5433,7 +5541,7 @@ const notificationAttempts = document.querySelector("[data-notification-attempts
 const auditList = document.querySelector("[data-audit-list]");
 
 const loadSupportSummary = async () => {
-  if (!isSystemAdmin || !currentEvent) return;
+  if (!isSystemAdmin || !currentEvent || !supportSummary) return;
   const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEvent.id) + "/summary");
   showFacts(supportSummary, [
     ["Total blockers", body.blockerCount], ["Registration", body.areas.registration.blockerCount],
@@ -5464,8 +5572,8 @@ const loadNotificationAttempts = async (notificationId) => {
 };
 
 const loadNotifications = async () => {
-  if (!isSystemAdmin || !currentEvent) return;
   const form = document.querySelector("[data-notification-filter-form]");
+  if (!isSystemAdmin || !currentEvent || !form || !notificationList) return;
   const status = String(new FormData(form).get("status") || "");
   const parameters = new URLSearchParams({ limit: "100" });
   if (status) parameters.set("status", status);
@@ -5503,7 +5611,7 @@ const loadNotifications = async () => {
 };
 
 const loadAudit = async () => {
-  if (!isSystemAdmin || !currentEvent) return;
+  if (!isSystemAdmin || !currentEvent || !auditList) return;
   const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEvent.id) + "/audit?limit=200");
   auditList.replaceChildren();
   for (const item of body.events) auditList.append(historyCard(humanize(item.action), item.occurredAt + " · " + (item.actorDisplayName || humanize(item.actorType)) + (item.code ? " · " + item.code : "")));
@@ -5511,14 +5619,14 @@ const loadAudit = async () => {
 };
 
 if (isSystemAdmin) {
-  document.querySelector("[data-refresh-support]").addEventListener("click", () => loadSupportSummary().catch((error) => setMessage(error.message, true)));
-  document.querySelector("[data-notification-filter-form]").addEventListener("submit", (event) => {
+  document.querySelector("[data-refresh-support]")?.addEventListener("click", () => loadSupportSummary().catch((error) => setMessage(error.message, true)));
+  document.querySelector("[data-notification-filter-form]")?.addEventListener("submit", (event) => {
     event.preventDefault();
     loadNotifications()
       .then(() => globalThis.quickDucksLive.markClean(event.currentTarget))
       .catch((error) => setMessage(error.message, true));
   });
-  document.querySelector("[data-refresh-audit]").addEventListener("click", () => loadAudit().catch((error) => setMessage(error.message, true)));
+  document.querySelector("[data-refresh-audit]")?.addEventListener("click", () => loadAudit().catch((error) => setMessage(error.message, true)));
 }
 
 staffLiveSubscription = globalThis.quickDucksLive.subscribe({

@@ -12,6 +12,7 @@ import {
   renderStaffInventory,
   renderStaffDuck,
   renderStaffHome,
+  renderStaffRegistration,
   renderStartLine,
 } from "./site.ts";
 
@@ -215,8 +216,8 @@ test("inventory cards and detail panel have isolated responsive layout semantics
 });
 
 const eventSection = (markup) => {
-  const match = markup.match(/<section class="console-section" id="events"[^]*?<\/section>/);
-  assert.ok(match, "the staff console renders an event section");
+  const match = markup.match(/<section class="console-section" id="event"[^]*?<\/section>/);
+  assert.ok(match, "the staff console renders an Event Details view");
   return match[0];
 };
 
@@ -232,7 +233,7 @@ test("the event section leads with create event, then the picker, then the selec
 
   // 1. heading, 2. create event, 3. working-event picker, 4. selected-event detail region.
   const [heading, createCard, picker, refresh, emptyState, detailRegion] = orderedIndexes(adminSection, [
-    '<h2 id="events-title">Event</h2>',
+    '<h2 id="event-title">Event Details</h2>',
     "data-event-create-card",
     "data-event-select",
     "data-refresh-event",
@@ -244,10 +245,12 @@ test("the event section leads with create event, then the picker, then the selec
   assert.ok(picker < refresh && refresh < emptyState, "the picker and its refresh button follow the create card");
   assert.ok(emptyState < detailRegion, "the no-event guidance precedes the selected-event region");
 
-  // The create card stays a collapsed administrator-only <details> outside the selected-event region.
+  // The create card stays a collapsed administrator-only <details> outside the
+  // selected-event region, and it ships hidden: one event dataset exists at a
+  // time, so it is revealed only while there is no event at all.
   assert.match(
     adminSection,
-    /<details class="operation-card event-create-card" data-event-create-card><summary>Create event<\/summary>/,
+    /<details class="operation-card event-create-card" data-event-create-card hidden><summary>Create event<\/summary>/,
   );
   assert.doesNotMatch(adminSection, /data-event-create-card[^>]*\bopen\b/);
   assert.doesNotMatch(directorSection, /data-event-create-card|data-event-create-form/);
@@ -306,7 +309,7 @@ test("the console script reveals the selected-event region and restores the no-e
   const noEventsMessage = staffHomeScript.indexOf('setMessage("No event dataset exists. An administrator can create one.");');
   const hideRegion = staffHomeScript.indexOf("if (eventDetailRegion) eventDetailRegion.hidden = true;");
   const showEmptyState = staffHomeScript.indexOf("if (eventEmptyState) eventEmptyState.hidden = false;");
-  const openCreateCard = staffHomeScript.indexOf("if (eventCreateCard) eventCreateCard.open = true;");
+  const openCreateCard = staffHomeScript.indexOf("      eventCreateCard.open = true;");
   assert.ok(noEventsBranch > 0 && noEventsMessage > noEventsBranch);
   for (const index of [hideRegion, showEmptyState, openCreateCard]) {
     assert.ok(index > noEventsBranch && index < noEventsMessage, "no-event cleanup stays in the no-events branch");
@@ -316,8 +319,53 @@ test("the console script reveals the selected-event region and restores the no-e
   assert.ok(staffHomeScript.includes('readinessList.replaceChildren(empty("No lifecycle is available."));'));
   assert.ok(staffHomeScript.includes("forceDeleteCard.hidden = true;"));
   assert.ok(staffHomeScript.includes('eventConfigCard.hidden = currentEvent.status !== "DRAFT";'));
-  // Creating an event collapses the primary action again.
-  assert.ok(staffHomeScript.includes("if (eventCreateCard) eventCreateCard.open = false;"));
+  // Creating an event collapses and removes the primary action again, and the
+  // handler refuses a submission once an event exists so the card can never be
+  // hidden but still submittable.
+  assert.ok(staffHomeScript.includes("      eventCreateCard.open = false;\n      eventCreateCard.hidden = true;"));
+  assert.ok(staffHomeScript.includes('    setMessage("An event already exists. Delete it before creating another.", true);'));
+});
+
+// One event dataset exists at a time, so a second create is refused anyway. The
+// card is therefore absent from the page whenever an event exists, and comes
+// back — without a reload — the moment the event is deleted.
+test("the create-event card is revealed only while no event exists", () => {
+  const markup = renderStaffHome("Administrator", true, []);
+  assert.match(markup, /data-event-create-card hidden>/);
+
+  const sliceBetween = (start, end) => {
+    const from = staffHomeScript.indexOf(start);
+    const to = staffHomeScript.indexOf(end, from);
+    assert.ok(from >= 0 && to > from, `cannot slice generated script between ${start} and ${end}`);
+    return staffHomeScript.slice(from, to);
+  };
+
+  // renderEvent removes it, exactly like the no-race and empty-state markers.
+  const shown = { hidden: false, open: true };
+  new Function(
+    "eventCreateCard",
+    "eventDetailRegion",
+    "eventEmptyState",
+    "showEventScopedSections",
+    sliceBetween("  if (eventCreateCard) {", "return true;"),
+  )(shown, { hidden: true }, { hidden: false }, () => undefined);
+  assert.equal(shown.hidden, true, "an existing event removes the create card");
+  assert.equal(shown.open, false, "and closes it so nothing inside stays reachable");
+
+  // The no-events branch — which delete-event also reaches — brings it back.
+  const removed = { hidden: true, open: false };
+  new Function(
+    "eventCreateCard",
+    "eventDetailRegion",
+    "eventEmptyState",
+    "showEventScopedSections",
+    sliceBetween(
+      "if (eventDetailRegion) eventDetailRegion.hidden = true;",
+      'setMessage("No event dataset exists. An administrator can create one.");',
+    ),
+  )(removed, { hidden: false }, { hidden: true }, () => undefined);
+  assert.equal(removed.hidden, false, "deleting the event brings the create card back");
+  assert.equal(removed.open, true);
 });
 
 test("the selected-event region ships hidden and the generated script toggles it both ways", () => {
@@ -336,7 +384,7 @@ test("the selected-event region ships hidden and the generated script toggles it
   };
   const region = { hidden: true };
   const emptyState = { hidden: true };
-  const createCard = { open: false };
+  const createCard = { open: false, hidden: false };
   const scoped = [];
   const showEventScopedSections = (exists) => scoped.push(exists);
 
@@ -345,7 +393,7 @@ test("the selected-event region ships hidden and the generated script toggles it
     "eventDetailRegion",
     "eventEmptyState",
     "showEventScopedSections",
-    sliceBetween("if (eventEmptyState) eventEmptyState.hidden = true;", "return true;"),
+    sliceBetween("  if (eventEmptyState) eventEmptyState.hidden = true;", "return true;"),
   )(region, emptyState, showEventScopedSections);
   assert.equal(region.hidden, false);
   assert.equal(emptyState.hidden, true);
@@ -423,6 +471,98 @@ test("event rendering only reads config fields that exist so the delete card sti
   const revealIndex = staffHomeScript.indexOf("forceDeleteCard.hidden = false");
   assert.ok(populateIndex > 0 && revealIndex > populateIndex,
     "the delete-event card is revealed after the config form is populated");
+});
+
+// A stale `form.elements.X` write throws, and a throw silently kills every
+// section after it. The console client now runs on two pages, so every named
+// control it addresses has to exist on each page that actually renders that
+// form — and each form the client only conditionally binds must be genuinely
+// optional, so its absence cannot reach an `.elements` read at all.
+test("every form field the console client writes exists on every page that loads it", () => {
+  const pages = {
+    "/staff": renderStaffHome("Administrator", true, []),
+    "/staff/registration": renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]),
+  };
+  // Each console variable, the markup hook its form is found by, and whether
+  // the client guards the form's absence before reading `.elements` from it.
+  const forms = [
+    ["eventConfigForm", "data-event-config-form", true],
+    ["eventCreateForm", "data-event-create-form", true],
+    ["forceDeleteForm", "data-force-delete-form", true],
+    ["participantEditForm", "data-participant-edit-form", false],
+    ["participantDuckNameForm", "data-participant-duck-name-form", true],
+  ];
+
+  for (const [variable, hook, optional] of forms) {
+    const referenced = [...staffHomeScript.matchAll(new RegExp(`${variable}\\.elements\\.([A-Za-z_$][\\w$]*)`, "g"))]
+      .map((match) => match[1]);
+    assert.ok(referenced.length > 0, `${variable} is never read, so this list is stale`);
+    assert.ok(
+      staffHomeScript.includes(`const ${variable} = document.querySelector("[${hook}]");`),
+      `${variable} must be resolved from [${hook}]`,
+    );
+    if (optional) {
+      assert.ok(
+        staffHomeScript.includes(`if (${variable}) `) || staffHomeScript.includes(`if (!${variable})`),
+        `${variable} is not on every page, so the client must guard its absence`,
+      );
+    }
+
+    for (const [path, markup] of Object.entries(pages)) {
+      const form = markup.match(new RegExp(`<form ${hook}[^>]*>[^]*?</form>`))?.[0];
+      if (form === undefined) {
+        assert.ok(optional, `${path} must render ${hook}, which the client reads unguarded`);
+        continue;
+      }
+      const namedControls = new Set([...form.matchAll(/name="([^"]+)"/g)].map((match) => match[1]));
+      for (const name of referenced) {
+        assert.ok(
+          namedControls.has(name),
+          `${path}: ${variable}.elements.${name} has no matching named control and would throw`,
+        );
+      }
+    }
+  }
+
+  // The two pages both carry the whole participants surface, so its hooks are
+  // never partially present.
+  for (const [path, markup] of Object.entries(pages)) {
+    for (const hook of [
+      "data-operations-root",
+      "data-event-select",
+      "data-console-message",
+      "data-participant-filter-form",
+      "data-walkup-form",
+      "data-walkup-result",
+      "data-participant-list",
+      "data-participant-detail",
+      "data-participant-name",
+      "data-participant-facts",
+      "data-participant-actions",
+      "data-no-race",
+    ]) {
+      assert.ok(markup.includes(hook), `${path} must render ${hook}`);
+    }
+  }
+
+  // Every element query the client makes without an optional-chain guard has to
+  // be a heading it writes into inside a surface it has already proved is
+  // present — an optional chain cannot carry an assignment, so these two are
+  // reached only from code paths that checked their own surface first.
+  const unguarded = [...new Set(
+    [...staffHomeScript.matchAll(/document\.querySelector\("\[(data-[a-z-]+)\]"\)\.(?!\s)/g)]
+      .map((match) => match[1]),
+  )].sort();
+  assert.deepEqual(
+    unguarded,
+    ["data-heat-name", "data-participant-name"],
+    "every other direct query must be optional-chained",
+  );
+  for (const [surface, heading] of [["participantsPresent", "data-participant-name"], ["heatList", "data-heat-name"]]) {
+    const write = staffHomeScript.indexOf(`document.querySelector("[${heading}]").textContent`);
+    assert.ok(write > 0, heading);
+    assert.ok(staffHomeScript.includes(`!${surface}`) || staffHomeScript.includes(`|| !${surface}`), surface);
+  }
 });
 
 test("event creation requires a hinted ducks-per-heat field wired into the create command", () => {
