@@ -1595,6 +1595,20 @@ const correctResults = async (
       eventId, promotion.final_heat_id, oldResults[0].raceEntryId,
       commandId, heatId,
     ));
+    // The final roster changed even though the final's lifecycle state did not.
+    // Bump its revision so station caches repaint the corrected finalist and a
+    // stale ready command cannot proceed against the old roster.
+    statements.push(env.DB.prepare(
+      `UPDATE heats SET revision = revision + 1, source_command_id = ?, updated_at = ?
+        WHERE id = ? AND event_id = ? AND round = 'FINAL'
+          AND status IN ('PLANNED', 'LOADING')
+          AND EXISTS (
+            SELECT 1 FROM race_commands correction
+             WHERE correction.id = ? AND correction.event_id = heats.event_id
+               AND correction.command_type = 'CORRECT_HEAT_RESULT'
+               AND correction.result_id = ?
+          )`,
+    ).bind(commandId, now, promotion.final_heat_id, eventId, commandId, heatId));
   }
   statements.push(
     env.DB.prepare(

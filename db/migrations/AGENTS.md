@@ -32,7 +32,9 @@
 `0016` replaces `heat_entries_update_unlocked` but preserves its default locked-
 roster refusal. Its only exception requires the exact superseded round-one
 winner, replacement finalized winner, correction command, promoted final slot,
-and a final heat still in `LOADING`; `READY` and later remain immutable.
+and a final heat still in `LOADING`. The entry ID, event, heat, round, slot,
+assignment source, and creation timestamp remain immutable; `READY` and later
+remain locked.
 
 `0014` is the destructive cleanup for the retired returns model. It wipes every
 event-scoped race row (approved "start from scratch"), drops

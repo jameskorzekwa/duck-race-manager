@@ -379,9 +379,8 @@ interface PageOptions {
 
 // Register and Race Status strictly swap, so the nav renders exactly one of
 // them. My Ducks is always in the document but starts hidden outside the
-// Registration-or-later phases: the saved-registration presence probe in
-// `participant.js` may still reveal it, and the phase half of that rule is
-// carried by `data-phase-visible` so neither client can fight the other.
+// Registration-or-later phases, matching the route that redirects home during
+// Preparing. Saved-registration presence controls only the page's own layout.
 // Staff stays in every phase.
 //
 // `data-live-nav` is the admission marker for the live navigation subscriber in
@@ -550,7 +549,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
       <div class="my-ducks-saved">
       <p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet. Register a participant, or follow someone from the race status search on this page.</p>
 
-      <section class="participant-section" data-participant-section="awaiting" aria-labelledby="awaiting-participants-title" hidden>
+      <section class="participant-section" data-participant-section="awaiting"${phaseAllowsRegistration(phase) ? ' data-keep-empty="true"' : ""} aria-labelledby="awaiting-participants-title" hidden>
         <div class="participant-section-head">
           <h2 id="awaiting-participants-title">Awaiting Participants</h2>
           <div class="participant-section-head-actions">
@@ -1435,8 +1434,8 @@ const addToMyDucks = async (followId, actions, button, feedback) => {
     });
     if (!response.ok) throw new Error("follow failed");
     actions.replaceChildren(addedTag());
-    // The device now has a saved registration, so record the presence half of
-    // the My Ducks nav rule and reveal the link immediately.
+    // Record that the device now has saved data. This page is phase-accessible,
+    // so My Ducks is already visible in its navigation.
     if (myDucksNav) {
       myDucksNav.dataset.hasRegistrations = "true";
       myDucksNav.hidden = false;

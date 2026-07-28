@@ -207,12 +207,11 @@ stays reachable for all five post-`DRAFT` statuses, including while registration
 is open, even though the navigation does not advertise it then. Staff stays in
 the top navigation in every phase.
 
-My Ducks appears whenever the phase is Registration or later, or when the saved
-registration presence probe reports that this device has saved registrations.
-The phase half of that rule is server-rendered; the presence half is applied by
-`participant.js`, and neither can hide a link the other grants. Before
-registration opens, a direct `GET /my-ducks` returns `303` to `/`; saved data
-cannot open that page while the public event is still being prepared.
+My Ducks appears whenever the phase is Registration or later. Before
+registration opens, both the navigation and a direct `GET /my-ducks` keep the
+page unavailable; the direct request returns `303` to `/`. The saved-registration
+presence probe controls the page's empty-versus-saved layout after it opens, not
+whether the route or navigation is available.
 
 Navigation is correct on first paint and does not need a refresh to stay
 correct: `live-ui.js` subscribes to the `event` domain of the live hub and
@@ -350,12 +349,13 @@ host-only, and has a one-year sliding lifetime. Only a hash of its token is
 stored in D1. The collection can link many registrations created in the same
 browser.
 
-The primary navigation reveals **My Ducks** only after a lightweight collection
-probe returns `{ hasRegistrations: true }`. Non-My-Ducks pages use this probe;
-it applies the same cookie validation, invalid-cookie clearing, and sliding
-expiry refresh as the full collection endpoint, but queries only whether one
-collection link exists. It never selects or returns names, lookup codes, race
-entries, status details, contact fields, or private paths.
+Non-My-Ducks pages run a lightweight collection presence probe. It applies the
+same cookie validation, invalid-cookie clearing, and sliding expiry refresh as
+the full collection endpoint, but queries only whether one collection link
+exists. It never selects or returns names, lookup codes, race entries, status
+details, contact fields, or private paths. The result controls the saved-list
+layout when My Ducks is phase-accessible; it cannot reveal the link during
+Preparing, when the route redirects home.
 
 A collection link records how it was created. A link created by registering in
 that browser is `REGISTRATION`; a link added from the public name search, a duck
@@ -388,12 +388,14 @@ every `FOLLOWED` entry whether or not that participant has a duck yet. The page
 states the difference in place: entries registered here keep their full details
 and staff lookup code, and followed entries show the public projection only. A
 live or polling refresh immediately regroups a registered card when staff pair
-or unpair its participant. A group with no participants hides its entire
-section, including its heading and controls, rather than rendering an empty
-state; when all groups are empty the page keeps one guidance message so it is
-never blank. Sections stay hidden until the first successful full collection
-response, so a failed initial request shows only the error-only line and keeps
-checking rather than claiming an empty collection.
+or unpair its participant. A group with no participants normally hides its
+entire section, including its heading and controls, rather than rendering an
+empty state. During open registration, the empty Awaiting Participants section
+keeps its heading and **Register another participant** action while its track and
+carousel controls stay hidden. When all groups are empty the page keeps one
+guidance message so it is never blank. Sections stay hidden until the first
+successful full collection response, so a failed initial request shows only the
+error-only line and keeps checking rather than claiming an empty collection.
 
 While registration is open, **Register another participant** sits in the
 Awaiting Participants heading row instead of below the complete page. The row

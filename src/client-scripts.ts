@@ -406,13 +406,13 @@ const participantShowError = (message) => {
   participantError.hidden = message === null;
 };
 
-// The My Ducks nav link is shown when the public phase allows it OR when this
-// device has saved registrations. This client owns only the presence half, so it
-// records it on the element and never hides a link the phase already grants.
+// Saved-registration presence still controls the page's empty/saved layout, but
+// the navigation follows the public phase. Before registration opens the route
+// redirects home, so revealing a saved-data link there would be a dead end.
 const participantSetNavPresence = (hasRegistrations) => {
   if (!participantNav) return;
   participantNav.dataset.hasRegistrations = hasRegistrations ? "true" : "false";
-  participantNav.hidden = !hasRegistrations && participantNav.dataset.phaseVisible !== "true";
+  participantNav.hidden = participantNav.dataset.phaseVisible !== "true";
 };
 
 // The name search leads the page while nothing is saved on this device, and
@@ -930,8 +930,10 @@ window.addEventListener("resize", () => {
   for (const section of participantSections) participantUpdateControls(section);
 });
 
-// An empty group hides its whole section (heading, description, and controls)
-// rather than showing an empty state. Both sections stay hidden until the first
+// Empty groups normally hide their whole section rather than showing an empty
+// card. During open registration the awaiting heading stays visible because it
+// owns the Register another participant action; its empty track and carousel
+// controls remain hidden. Every section still starts hidden until the first
 // successful full collection response, so nothing flashes before data loads.
 const participantRenderSection = (kind, registrations) => {
   const section = participantSections.find((item) => item.dataset.participantSection === kind);
@@ -940,7 +942,7 @@ const participantRenderSection = (kind, registrations) => {
   const controls = section.querySelector("[data-carousel-controls]");
   track.replaceChildren(...registrations.map(participantCard));
   const hasRegistrations = registrations.length > 0;
-  section.hidden = !hasRegistrations;
+  section.hidden = !hasRegistrations && section.dataset.keepEmpty !== "true";
   track.hidden = !hasRegistrations;
   controls.hidden = !hasRegistrations;
   if (hasRegistrations) requestAnimationFrame(() => participantUpdateControls(section));
@@ -1537,14 +1539,12 @@ const navSwapLink = (phase) => {
   if (phase === "PREPARING") return null;
   return navRoot.querySelector("[data-nav-race]") || navBuildLink("/race", "Race Status", "navRace");
 };
-// My Ducks is shown when the phase allows it OR when this device has saved
-// registrations. The presence half lives in participant.js and is carried on the
-// same element, so neither client can overwrite the other's condition.
+// My Ducks follows the phase because the route redirects home during Preparing.
+// Saved-registration presence still controls the page layout after it opens.
 const navApplyMyDucks = (phase) => {
   if (!navMyDucks) return;
   navMyDucks.dataset.phaseVisible = phase === "PREPARING" ? "false" : "true";
-  navMyDucks.hidden = navMyDucks.dataset.phaseVisible !== "true"
-    && navMyDucks.dataset.hasRegistrations !== "true";
+  navMyDucks.hidden = navMyDucks.dataset.phaseVisible !== "true";
 };
 const navRender = (phase) => {
   if (!navRoot) return;
@@ -4656,7 +4656,7 @@ const loadEvent = async (eventId) => {
     : { readiness: {} };
   if (!renderEvent(detail, readiness)) return;
   const loads = [];
-  if (canRegistration) loads.push(loadParticipants());
+  if (canRegistration) loads.push(loadParticipants(true));
   if (canRaceRead) loads.push(loadHeats(), loadFinalists());
   if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit());
   const results = await Promise.allSettled(loads);
@@ -5820,10 +5820,12 @@ const addFact = (label, value) => {
 const renderWinnerAction = (data) => {
   winnerAction.replaceChildren();
   if (winnerSuccess !== null) {
+    const success = winnerSuccess;
+    winnerSuccess = null;
     winnerAction.hidden = false;
     winnerAction.append(
       text("strong", "Official winner saved"),
-      text("p", "Duck #" + winnerSuccess.duckNumber + " is the official Heat " + winnerSuccess.heatNumber + " winner."),
+      text("p", "Duck #" + success.duckNumber + " is the official Heat " + success.heatNumber + " winner."),
     );
     return;
   }

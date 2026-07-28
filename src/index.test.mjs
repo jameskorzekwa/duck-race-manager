@@ -210,10 +210,10 @@ test("renders the private My Ducks page with two accessible horizontal sections"
   assert.match(body, /scroll-snap-type:x mandatory/);
   assert.doesNotMatch(body, /data-my-ducks-freshness|Loading saved registrations|Updated just now/);
   assert.match(body, /<p class="message-line muted" data-my-ducks-error role="alert" hidden><\/p>/);
-  // Neither group ships a per-section empty state; an empty group hides its
-  // whole section and the page keeps one guidance message instead.
+  // Neither group ships a per-section empty state. Registration marks the
+  // awaiting section so hydration reveals its heading and action when empty.
   assert.doesNotMatch(body, /data-carousel-empty/);
-  assert.match(body, /data-participant-section="awaiting" aria-labelledby="awaiting-participants-title" hidden>/);
+  assert.match(body, /data-participant-section="awaiting" data-keep-empty="true" aria-labelledby="awaiting-participants-title" hidden>/);
   assert.match(body, /data-participant-section="paired" aria-labelledby="paired-participants-title" hidden>/);
   assert.match(body, /<p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet\./);
   assert.match(body, /Register another participant/);

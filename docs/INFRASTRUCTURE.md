@@ -483,8 +483,9 @@ update trigger with an otherwise identical trigger that permits one narrow
 exception: a `CORRECT_HEAT_RESULT` command may replace its exact promoted final
 entry while the final heat is `LOADING`. It remains backward compatible with the
 previous Worker, which never attempts that update in `LOADING`; generic roster
-updates and every correction at `READY` or later still abort. The migration must
-remain ahead of the Worker release that exposes the extended correction window.
+updates, changes to the entry identity or creation timestamp, and every
+correction at `READY` or later still abort. The migration must remain ahead of
+the Worker release that exposes the extended correction window.
 
 The current Worker sends notification IDs to `quickducks-email` through the
 `EMAIL_QUEUE` producer binding. A queue consumer is not currently declared in

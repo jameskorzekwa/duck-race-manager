@@ -1918,7 +1918,8 @@ const myDucksHarness = (route, search = "", confirmResult = true) => {
   const document = new QuickDocument("#document");
   const navigation = document.createElement("a");
   navigation.dataset.myDucksNav = "";
-  navigation.hidden = true;
+  navigation.dataset.phaseVisible = "true";
+  navigation.hidden = false;
   const page = document.createElement("section");
   page.dataset.myDucksPage = "";
   const error = document.createElement("p");
@@ -2061,7 +2062,7 @@ const renderMyDucks = async (registrations) => {
 const deleteButton = (card) => card.descendants()
   .find((node) => node.tagName === "BUTTON" && node.dataset.deleteRegistration !== undefined) ?? null;
 
-test("an empty participant group hides its whole section instead of an empty state", async () => {
+test("an empty participant group normally hides its whole section instead of an empty state", async () => {
   const awaitingOnly = await renderMyDucks([collected("11111111-1111-4111-8111-111111111111", false)]);
   assert.equal(awaitingOnly.awaiting.section.hidden, false);
   assert.equal(awaitingOnly.awaiting.controls.hidden, false);
@@ -2090,7 +2091,17 @@ test("an entirely empty collection keeps one guidance message instead of a blank
   assert.equal(harness.awaiting.section.hidden, true);
   assert.equal(harness.paired.section.hidden, true);
   assert.equal(harness.empty.hidden, false, "the page must never render nothing at all");
-  assert.equal(harness.navigation.hidden, true);
+  assert.equal(harness.navigation.hidden, false);
+});
+
+test("open registration keeps the empty awaiting heading and registration action area", async () => {
+  const harness = myDucksHarness(() => Response.json({ registrations: [] }));
+  harness.awaiting.section.dataset.keepEmpty = "true";
+  await harness.subscriptions[0].refresh();
+
+  assert.equal(harness.awaiting.section.hidden, false);
+  assert.equal(harness.awaiting.track.hidden, true);
+  assert.equal(harness.awaiting.controls.hidden, true);
 });
 
 test("My Ducks sections stay hidden until the first successful collection response", async () => {
@@ -2639,7 +2650,8 @@ const duckPageHarness = (route, pathname, inMyDucks = false) => {
   const document = new QuickDocument("#document");
   const navigation = document.createElement("a");
   navigation.dataset.myDucksNav = "";
-  navigation.hidden = true;
+  navigation.dataset.phaseVisible = "true";
+  navigation.hidden = false;
   const follow = document.createElement("div");
   follow.dataset.duckFollow = "";
   follow.dataset.followId = "11111111-1111-4111-8111-111111111111";
@@ -2699,12 +2711,12 @@ const followResponse = (overrides = {}) => Response.json({
   },
 });
 
-test("a tag scan offers one follow action that adds the duck and reveals the nav", async () => {
+test("a tag scan offers one follow action and records saved-list presence", async () => {
   const harness = duckPageHarness((url) => url.startsWith("/api/v1/registrations/mine/follow")
     ? Response.json({ followed: true, alreadyInCollection: false })
     : url.startsWith("/api/v1/ducks/") ? followResponse() : Response.json({ hasRegistrations: false }), "/t/tag-token-value");
 
-  assert.equal(harness.navigation.hidden, true);
+  assert.equal(harness.navigation.hidden, false);
   await harness.button.dispatch("click");
 
   const request = harness.requests.find((item) => item.url.endsWith("/mine/follow"));
@@ -3326,6 +3338,7 @@ test("round-one tag scans stay on inspection while the final keeps multi-place e
   assert.match(staffDuckScript, /"Mark Duck as Heat " \+ candidate\.heatNumber \+ " Winner"/);
   assert.match(staffDuckScript, /\/heat-winner/);
   assert.match(staffDuckScript, /winnerSuccess = \{ duckNumber: data\.duck\.visibleNumber, heatNumber: candidate\.heatNumber \}/);
+  assert.match(staffDuckScript, /const success = winnerSuccess;\s*winnerSuccess = null;/);
   assert.match(finishLineScript, /Scan the winning duck's permanent NFC or QR tag/);
   assert.match(finishLineScript, /finishHeat\.round === "FINAL"/);
   assert.match(finishLineScript, /Submit official podium/);

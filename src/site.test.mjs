@@ -275,15 +275,20 @@ test("the how-it-works cards describe the race without linking anywhere", () => 
   assert.match(participantScript, /participantText\("a", "Open private status", "card-link"\)/);
 });
 
-test("My Ducks ships no per-section empty state and stays gated until data loads", () => {
+test("My Ducks keeps the registration action while sections stay gated until data loads", () => {
   const myDucks = renderMyDucks("REGISTRATION");
 
-  for (const kind of ["awaiting", "paired", "followed"]) {
+  assert.match(
+    myDucks,
+    /<section class="participant-section" data-participant-section="awaiting" data-keep-empty="true" aria-labelledby="awaiting-participants-title" hidden>/,
+  );
+  for (const kind of ["paired", "followed"]) {
     assert.match(
       myDucks,
       new RegExp(`<section class="participant-section" data-participant-section="${kind}" aria-labelledby="[a-z-]+" hidden>`),
     );
   }
+  assert.doesNotMatch(renderMyDucks("RACING"), /data-participant-section="awaiting" data-keep-empty/);
   assert.doesNotMatch(myDucks, /data-carousel-empty/);
   assert.doesNotMatch(myDucks, /No participants are waiting for a duck|No paired ducks are saved on this device yet/);
   assert.match(myDucks, /<p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet\./);

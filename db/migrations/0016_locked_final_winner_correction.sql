@@ -37,13 +37,15 @@ AND NOT EXISTS (
      AND new_winner.source_command_id = correction.id
    WHERE final_heat.id = OLD.heat_id
      AND final_heat.event_id = OLD.event_id
-     AND final_heat.round = 'FINAL'
-     AND final_heat.status = 'LOADING'
-     AND NEW.event_id = OLD.event_id
-     AND NEW.heat_id = OLD.heat_id
-     AND NEW.round = OLD.round
-     AND NEW.slot_number = OLD.slot_number
-     AND NEW.assignment_source = OLD.assignment_source
+      AND final_heat.round = 'FINAL'
+      AND final_heat.status = 'LOADING'
+      AND NEW.id = OLD.id
+      AND NEW.event_id = OLD.event_id
+      AND NEW.heat_id = OLD.heat_id
+      AND NEW.round = OLD.round
+      AND NEW.slot_number = OLD.slot_number
+      AND NEW.assignment_source = OLD.assignment_source
+      AND NEW.created_at = OLD.created_at
 )
 BEGIN
   SELECT RAISE(ABORT, 'heat roster is locked');

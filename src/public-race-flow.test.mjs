@@ -435,11 +435,11 @@ test("the nav is identical on every public content page in the same phase", asyn
   assert.deepEqual(visibleNav(missing.body), ["Home", "Staff"]);
 });
 
-test("My Ducks stays in the document while Preparing so the presence probe can reveal it", async () => {
+test("My Ducks stays in the document while Preparing for later phase repaint", async () => {
   const { body } = await page("/", undefined);
   const myDucks = navEntries(body).find((entry) => entry.href === "/my-ducks");
 
-  assert.ok(myDucks, "the My Ducks anchor must exist so presence can un-hide it");
+  assert.ok(myDucks, "the My Ducks anchor must exist so a later public phase can reveal it");
   assert.equal(myDucks.hidden, true);
   assert.match(navMarkup(body), /data-my-ducks-nav data-phase-visible="false" hidden/);
 
@@ -915,12 +915,12 @@ test("a race that disappears returns the nav to the Preparing set", async () => 
   assert.ok(harness.nav.children.some((child) => child.href === "/staff"));
 });
 
-test("My Ducks survives a Preparing phase when this device has saved registrations", async () => {
+test("My Ducks stays hidden during Preparing even when this device has saved registrations", async () => {
   const saved = navHarness("RACING", { eventStatus: undefined, hasRegistrations: true });
   await saved.subscriptions[0].refresh();
 
-  assert.equal(saved.myDucks.hidden, false, "saved registrations keep the link visible");
-  assert.deepEqual(navLabels(saved), ["Home", "My Ducks", "Staff"]);
+  assert.equal(saved.myDucks.hidden, true, "the unavailable route must not be advertised");
+  assert.deepEqual(navLabels(saved), ["Home", "Staff"]);
 
   const empty = navHarness("RACING", { eventStatus: undefined, hasRegistrations: false });
   await empty.subscriptions[0].refresh();
@@ -1272,7 +1272,7 @@ test("a non-empty collection drops the search below the saved ducks", async () =
   assert.equal(harness.empty.hidden, true);
 });
 
-test("the presence probe never hides a My Ducks link the phase already grants", async () => {
+test("the phase controls My Ducks visibility while presence controls saved layout", async () => {
   const granted = myDucksHarness([], { phaseVisible: true });
   await granted.subscriptions[0].refresh();
   assert.equal(granted.navigation.hidden, false, "the phase half of the rule must win");
@@ -1287,7 +1287,7 @@ test("the presence probe never hides a My Ducks link the phase already grants", 
     { phaseVisible: false },
   );
   await savedWhilePreparing.subscriptions[0].refresh();
-  assert.equal(savedWhilePreparing.navigation.hidden, false, "saved registrations reveal the link");
+  assert.equal(savedWhilePreparing.navigation.hidden, true, "saved registrations cannot reveal an unavailable route");
   assert.equal(savedWhilePreparing.navigation.dataset.hasRegistrations, "true");
 });
 

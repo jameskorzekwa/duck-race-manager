@@ -372,6 +372,9 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
   assert.equal(finalHeat.status, "LOADING");
   assert.notEqual(finalHeat.roster_locked_at, null);
   let finalRevision = finalHeat.revision;
+  const promotedEntryBefore = database.prepare(
+    "SELECT id, created_at FROM heat_entries WHERE heat_id = ? AND slot_number = 1",
+  ).get(finalHeat.id);
 
   const loadingCorrectionDetail = await handle(new Request(
     `https://quickducks.com/api/v1/staff/events/event/heats/${firstHeatId}`,
@@ -397,6 +400,13 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
     `https://quickducks.com/api/v1/staff/events/event/heats/${finalHeat.id}`,
   ))).json();
   assert.equal(refreshedFinal.roster[0].raceEntryId, rosters[0][2]);
+  assert.equal(refreshedFinal.heat.revision, finalRevision + 1);
+  assert.deepEqual(
+    database.prepare("SELECT id, created_at FROM heat_entries WHERE heat_id = ? AND slot_number = 1")
+      .get(finalHeat.id),
+    promotedEntryBefore,
+  );
+  finalRevision = refreshedFinal.heat.revision;
 
   const dependentReopen = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${firstHeatId}/results/reopen`,

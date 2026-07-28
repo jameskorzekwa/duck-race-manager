@@ -1136,10 +1136,14 @@ test("a reload that still contains the open participant keeps the card and the h
   assert.equal(harness.participantDetail.hidden, false);
   assert.equal(harness.row("registration-1").getAttribute("aria-pressed"), "true");
 
-  // A background reload after a mutation never prunes: the card it just
-  // rendered must survive a list the filter no longer matches.
+  // A mutation's direct reload does not prune: the card it just rendered must
+  // survive a list the filter no longer matches.
   harness.setList([participantSummary("registration-2")]);
   await harness.loadParticipants();
   assert.equal(harness.openParticipantId(), "registration-1");
   assert.equal(harness.participantDetail.hidden, false);
+});
+
+test("event and live refreshes prune participant detail that left the filtered list", () => {
+  assert.match(staffHomeScript, /if \(canRegistration\) loads\.push\(loadParticipants\(true\)\)/);
 });

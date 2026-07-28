@@ -19,6 +19,7 @@ const migrationNames = [
   "0013_followed_collection_entries.sql",
   "0014_simplified_lifecycle_schema.sql",
   "0015_participant_duck_names.sql",
+  "0016_locked_final_winner_correction.sql",
 ];
 
 const lifecycleStatuses = [
@@ -376,6 +377,11 @@ test("0014 from an empty database leaves the simplified schema", () => {
   ).get().sql;
   assert.doesNotMatch(deleteTrigger, /ARCHIVED/);
   assert.match(deleteTrigger, /FORCE_DELETE_EVENT/);
+  const updateTrigger = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'heat_entries_update_unlocked'",
+  ).get().sql;
+  assert.match(updateTrigger, /NEW\.id = OLD\.id/);
+  assert.match(updateTrigger, /NEW\.created_at = OLD\.created_at/);
 
   const indexes = objectNames(database, "index");
   assert.ok(indexes.includes("events_status_date_idx"));
@@ -768,11 +774,28 @@ test("0014 heat_entries_delete_unlocked protects locked rosters except under the
 
   // A locked roster is still protected.
   seedRoster("locked", true);
+  const lockedEntry = {
+    ...database.prepare("SELECT id, created_at FROM heat_entries WHERE id = 'heat-entry-locked'").get(),
+  };
   assert.throws(
     () => database.exec("DELETE FROM heat_entries WHERE id = 'heat-entry-locked'"),
     /heat roster is locked/,
   );
   assert.equal(count(database, "heat_entries"), 1);
+  assert.throws(
+    () => database.exec("UPDATE heat_entries SET id = 'renamed-entry' WHERE id = 'heat-entry-locked'"),
+    /heat roster is locked/,
+  );
+  assert.throws(
+    () => database.exec(
+      "UPDATE heat_entries SET created_at = '2026-07-27T00:00:00Z' WHERE id = 'heat-entry-locked'",
+    ),
+    /heat roster is locked/,
+  );
+  assert.deepEqual(
+    { ...database.prepare("SELECT id, created_at FROM heat_entries WHERE id = 'heat-entry-locked'").get() },
+    lockedEntry,
+  );
 
   // A sentinel for a different command type does not open the escape.
   database.exec(`
