@@ -610,6 +610,12 @@ type StatusOperation = "withdraw" | "reactivate" | "disqualify";
 // The duck therefore still floats down the water; it simply stops existing on
 // every public surface (board, leaderboard, podium, name search, duck pages)
 // and can never be recorded as a winner.
+//
+// Because the write disturbs nothing physical, it is available at every point in
+// the event lifecycle the event-status gate admits: a heat that is PLANNED,
+// LOADING, locked, READY, CALLING, RUNNING, AWAITING_RESULT, or FINALIZED is
+// left byte for byte as it was. A non-`ACTIVE` roster entry is a normal,
+// expected state — that duck rides in the bag and simply cannot win.
 const statusConfiguration = {
   withdraw: {
     commandType: "WITHDRAW_REGISTRATION",
@@ -673,24 +679,31 @@ const changeRegistrationStatus = async (
   if (!(configuration.allowedStatuses as readonly string[]).includes(current.status)) {
     return json({ error: "This registration cannot make that status transition." }, 409);
   }
-  const eligibilityChange = operation === "withdraw" || operation === "disqualify";
-  if (eligibilityChange) {
-    const protectedHeat = await env.DB.prepare(
-      `SELECT 1 AS protected
-         FROM heat_entries he
-         JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
-        WHERE he.race_entry_id = ?
-          AND (h.roster_locked_at IS NOT NULL
-            OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
-        LIMIT 1`,
-    ).bind(current.race_entry_id).first<{ protected: number }>();
-    if (protectedHeat !== null) {
-      return json({
-        error: "This participant is already on a locked or completed heat. Keep them ACTIVE and resolve the heat or result with the race director.",
-      }, 409);
-    }
-  }
-
+  // There is deliberately no heat guard here, and removing one from a guarded
+  // batch is not something to do casually, so this records why the heat stopped
+  // being protective.
+  //
+  // The old model refused withdrawal once the participant's heat was locked,
+  // running, awaiting its result, or finalized, because a withdrawn racer had to
+  // come off the roster and a locked roster is immovable. That model is gone.
+  // The duck is sealed into a numbered heat bag at pairing, nobody unpacks a bag
+  // on the bank, and heat entries may never be reordered because the only way to
+  // identify a duck is to physically scan it. So the racer stays on the roster
+  // forever and is merely ineligible to win.
+  //
+  // With nothing to remove, the heat's state protects nothing: this operation
+  // writes only the command row, the registration status, and the audit event,
+  // and a locked, running, or finalized heat is no more disturbed by it than a
+  // planned one. Refusing here instead made the whole feature unreachable — a
+  // racer paired into a locked heat could never leave, and one who left before
+  // the lock stopped the race from starting at all.
+  //
+  // Every other guard stays exactly where it was: the event-status gate above,
+  // the revision check, the allowed-transition check, command idempotency, and
+  // the audit write. Eligibility to *win* is guarded separately and untouched,
+  // in `winnerByTagCandidate`, `validateResultSet`, the selected-result SQL, and
+  // the finish-line scan.
+  //
   // Reactivation restores the status the participant would have had if they had
   // never left: `ACTIVE` while a current duck assignment still exists, otherwise
   // `SUBMITTED`. It reads the open assignment, never the ended one and never the
@@ -711,15 +724,7 @@ const changeRegistrationStatus = async (
            FROM registrations r
            JOIN events e ON e.id = r.event_id
            WHERE r.id = ? AND r.revision = ? AND r.status = ?
-             AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
-             AND (? = 0 OR NOT EXISTS (
-               SELECT 1 FROM race_entries re
-               JOIN heat_entries he ON he.race_entry_id = re.id
-               JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
-                WHERE re.registration_id = r.id
-                  AND (h.roster_locked_at IS NOT NULL
-                    OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
-             ))`,
+             AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
       ).bind(
         commandId,
         configuration.commandType,
@@ -728,7 +733,6 @@ const changeRegistrationStatus = async (
         registrationId,
         expectedRevision,
         current.status,
-        eligibilityChange ? 1 : 0,
       ),
       env.DB.prepare(
         `UPDATE registrations
@@ -737,18 +741,9 @@ const changeRegistrationStatus = async (
              AND event_id IN (
                SELECT id FROM events
                 WHERE status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
-             )
-             AND (? = 0 OR NOT EXISTS (
-               SELECT 1 FROM race_entries re
-               JOIN heat_entries he ON he.race_entry_id = re.id
-               JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
-                WHERE re.registration_id = registrations.id
-                  AND (h.roster_locked_at IS NOT NULL
-                    OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
-             ))`,
+             )`,
       ).bind(
         targetStatus, now, now, registrationId, expectedRevision, current.status,
-        eligibilityChange ? 1 : 0,
       ),
       env.DB.prepare(
         `INSERT INTO audit_events

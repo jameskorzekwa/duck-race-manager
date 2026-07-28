@@ -1,5 +1,6 @@
 import type { StaffActor } from "./auth.ts";
 import { operationalRoles, requireAnyRole } from "./authorization.ts";
+import { eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -227,20 +228,50 @@ const canonicalFingerprint = (value: Record<string, unknown>): string => JSON.st
 // Worker still running when it lands.
 const MINIMUM_HEAT_SIZE = 3;
 
-// A roster is only a racing roster while every registration on it is ACTIVE.
-// Withdrawal and disqualification leave the `heat_entries` row in place and are
-// permitted while a heat is still an unlocked plan, so this predicate is what
-// keeps a withdrawn participant from being locked onto a racing roster and read
-// out by the announcer. The identical predicate appears in the readiness
-// blocker, in the guarded start command, and in the automatic roster lock, so
-// the preflight, the transition, and the lock can never disagree. The only
-// interpolation is a fixed internal column name; every value stays bound.
-const inactiveRosterEntryExists = (heatColumn: string): string => `EXISTS (
-    SELECT 1 FROM heat_entries he
-      JOIN race_entries re ON re.id = he.race_entry_id
-      JOIN registrations r ON r.id = re.registration_id
-     WHERE he.heat_id = ${heatColumn} AND r.status != 'ACTIVE'
-  )`;
+// A heat that holds no `ACTIVE` racer at all.
+//
+// This replaces the retired "every registration on this roster must be ACTIVE"
+// predicate, whose intent no longer holds. Withdrawal and disqualification leave
+// the `heat_entries` row, its slot number, and its duck assignment exactly where
+// they are, because the duck was sealed into a numbered heat bag at pairing and
+// the bags are never re-sorted — the only way to identify a duck is to scan it.
+// So a non-`ACTIVE` roster entry is a normal, expected state: that duck rides
+// along and simply cannot be recorded as a winner. Blocking on it made the whole
+// rule unreachable, because a racer who left before the lock stopped the race
+// from starting at all.
+//
+// What genuinely still blocks is a heat where *nobody* can win. Round one needs
+// one first place and the final needs a podium, both guarded on `ACTIVE`, so
+// such a heat would run and then be impossible to publish, stranding the round.
+// The remedy — reactivation — stays available to a race director at any point.
+//
+// It is the negation of `eligibleRacerExists`, imported from `heat-operations.ts`
+// rather than restated, so the readiness blocker, the guarded round-one/final
+// start command, the automatic roster lock, and the heat station's own lock and
+// start guards are all literally the same SQL and cannot drift apart.
+const heatWithoutEligibleRacerExists = (heatColumn: string): string =>
+  `NOT ${eligibleRacerExists(heatColumn)}`;
+
+// Roster entries whose racer left. Reported so an operator can see who is riding
+// in the bag without being able to win; never a blocker.
+const inactiveRosterEntryCount = (round: string): string => `(SELECT COUNT(*)
+          FROM heat_entries he
+          JOIN heats h ON h.id = he.heat_id
+          JOIN race_entries re ON re.id = he.race_entry_id
+          JOIN registrations r ON r.id = re.registration_id
+         WHERE he.event_id = e.id AND h.round = '${round}' AND r.status != 'ACTIVE')`;
+
+// A heat's podium is only as deep as the racers who can take a place, so the
+// completion check counts eligible entries exactly as `validateResultSet` does.
+// Counting every entry would demand a place a withdrawn finalist is forbidden to
+// hold and leave the event permanently incompletable.
+const eligibleEntryCountSql = (eventColumn: string, heatColumn: string): string => `(
+              SELECT COUNT(*) FROM heat_entries he
+                JOIN race_entries re ON re.id = he.race_entry_id
+                JOIN registrations r ON r.id = re.registration_id
+               WHERE he.event_id = ${eventColumn} AND he.heat_id = ${heatColumn}
+                 AND r.status = 'ACTIVE'
+            )`;
 
 const normalizedHeatCapacity = (value: unknown, minimum: number): number | null =>
   Number.isInteger(value) && (value as number) >= minimum && (value as number) <= 10_000
@@ -657,8 +688,10 @@ interface ReadinessStats {
   pending_provisioning_count: number;
   round_one_heat_count: number;
   round_one_undersized_heat_count: number;
-  round_one_inactive_roster_heat_count: number;
-  final_inactive_roster_heat_count: number;
+  round_one_ineligible_heat_count: number;
+  final_ineligible_heat_count: number;
+  round_one_inactive_roster_entry_count: number;
+  final_inactive_roster_entry_count: number;
   locked_heat_count: number;
   round_one_unready_heat_count: number;
   round_one_unfinished_heat_count: number;
@@ -714,10 +747,12 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
                   WHERE he.heat_id = h.id) < ${MINIMUM_HEAT_SIZE}) AS round_one_undersized_heat_count,
         (SELECT COUNT(*) FROM heats h
           WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
-            AND ${inactiveRosterEntryExists("h.id")}) AS round_one_inactive_roster_heat_count,
+            AND ${heatWithoutEligibleRacerExists("h.id")}) AS round_one_ineligible_heat_count,
         (SELECT COUNT(*) FROM heats h
           WHERE h.event_id = e.id AND h.round = 'FINAL'
-            AND ${inactiveRosterEntryExists("h.id")}) AS final_inactive_roster_heat_count,
+            AND ${heatWithoutEligibleRacerExists("h.id")}) AS final_ineligible_heat_count,
+        ${inactiveRosterEntryCount("ROUND_ONE")} AS round_one_inactive_roster_entry_count,
+        ${inactiveRosterEntryCount("FINAL")} AS final_inactive_roster_entry_count,
         (SELECT COUNT(*) FROM heats h
           WHERE h.event_id = e.id
             AND (h.status != 'PLANNED' OR h.roster_locked_at IS NOT NULL)) AS locked_heat_count,
@@ -755,10 +790,7 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
             AND (
               SELECT COUNT(*) FROM heat_results hr
                WHERE hr.event_id = e.id AND hr.heat_id = h.id AND hr.status = 'FINALIZED'
-            ) != MIN(3, (
-              SELECT COUNT(*) FROM heat_entries he
-               WHERE he.event_id = e.id AND he.heat_id = h.id
-            ))) AS final_missing_result_count
+            ) != MIN(3, ${eligibleEntryCountSql("e.id", "h.id")})) AS final_missing_result_count
      FROM events e
      WHERE e.id = ?`,
   ).bind(eventId).first<ReadinessStats>();
@@ -901,7 +933,7 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
         AND NOT EXISTS (
           SELECT 1 FROM heats h
            WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
-             AND ${inactiveRosterEntryExists("h.id")}
+             AND ${heatWithoutEligibleRacerExists("h.id")}
         )`,
     updateSql: `UPDATE events SET status = 'ROUND_ONE', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'REGISTRATION_CLOSED'
@@ -941,7 +973,7 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
         AND NOT EXISTS (
           SELECT 1 FROM heats h
            WHERE h.event_id = e.id AND h.round = 'FINAL'
-             AND ${inactiveRosterEntryExists("h.id")}
+             AND ${heatWithoutEligibleRacerExists("h.id")}
         )`,
     updateSql: `UPDATE events SET status = 'FINAL', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'ROUND_ONE'
@@ -970,10 +1002,7 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
              AND (
                SELECT COUNT(*) FROM heat_results hr
                 WHERE hr.event_id = e.id AND hr.heat_id = h.id AND hr.status = 'FINALIZED'
-             ) != MIN(3, (
-               SELECT COUNT(*) FROM heat_entries he
-                WHERE he.event_id = e.id AND he.heat_id = h.id
-             ))
+             ) != MIN(3, ${eligibleEntryCountSql("e.id", "h.id")})
         )`,
     updateSql: `UPDATE events SET status = 'COMPLETED', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'FINAL'
@@ -1069,14 +1098,31 @@ const safelyResolveLifecycleRace = async (
   }
 };
 
-// Names the remedy an operator can actually reach: while the round has not
-// started, its heats are still unlocked plans and `PUT /heats/:id/roster`
-// accepts a replacement roster, so the fix is to rewrite the affected roster
-// without the withdrawn racer.
-const inactiveRosterBlocker = (heatCount: number, round: string): string =>
-  `${heatCount === 1 ? "A heat" : `${heatCount} heats`} in ${round} still `
-  + `${heatCount === 1 ? "has" : "have"} a withdrawn or disqualified racer on the roster. `
-  + "Replace that roster before starting, so no inactive racer is locked in or announced.";
+// Names the remedy an operator can actually reach. Replacing the roster is no
+// longer it: the withdrawn racer's duck is already sealed in this heat's bag and
+// stays there, and rewriting the roster would renumber slots the bags cannot
+// follow. Reactivation is the only thing that puts an eligible racer back into
+// an otherwise-empty heat, and it is available to a race director at any point.
+const noEligibleRacerBlocker = (heatCount: number, round: string): string =>
+  `${heatCount === 1 ? "A heat" : `${heatCount} heats`} in ${round} `
+  + `${heatCount === 1 ? "has" : "have"} no racer left who can win: every racer on `
+  + `${heatCount === 1 ? "that roster" : "those rosters"} is withdrawn or disqualified, `
+  + "so the heat could not produce a result. Reactivate a racer before starting. "
+  + "The roster, the slot numbers, and the ducks in the bag stay exactly as they are.";
+
+// Purely informational. A withdrawn or disqualified racer on a roster is a
+// normal race-day state: their duck is in the bag, it goes in the water, and it
+// cannot win. Readiness reports it so an operator is not surprised at the
+// finish line, and never blocks on it.
+const inactiveRosterNote = (
+  entryCount: number,
+  singularRoster: string,
+  pluralRoster: string,
+): string => (entryCount === 1
+  ? `1 racer on ${singularRoster} is withdrawn or disqualified. That duck stays in its heat bag `
+    + "and races as normal, but cannot be recorded as a winner."
+  : `${entryCount} racers on ${pluralRoster} are withdrawn or disqualified. Those ducks stay in `
+    + "their heat bags and race as normal, but cannot be recorded as winners.");
 
 const readinessFor = (
   event: EventRow,
@@ -1084,6 +1130,7 @@ const readinessFor = (
   definition: LifecycleDefinition,
 ): Record<string, unknown> => {
   const blockers: string[] = [];
+  const notes: string[] = [];
   if (event.status !== definition.from) blockers.push(`Event status must be ${definition.from}.`);
   switch (definition.action) {
     case "open-registration":
@@ -1120,8 +1167,15 @@ const readinessFor = (
       if (stats.round_one_heat_count > event.final_heat_capacity) {
         blockers.push("Round-one heat count cannot exceed final capacity.");
       }
-      if (stats.round_one_inactive_roster_heat_count > 0) {
-        blockers.push(inactiveRosterBlocker(stats.round_one_inactive_roster_heat_count, "round one"));
+      if (stats.round_one_ineligible_heat_count > 0) {
+        blockers.push(noEligibleRacerBlocker(stats.round_one_ineligible_heat_count, "round one"));
+      }
+      if (stats.round_one_inactive_roster_entry_count > 0) {
+        notes.push(inactiveRosterNote(
+          stats.round_one_inactive_roster_entry_count,
+          "a round-one roster",
+          "round-one rosters",
+        ));
       }
       if (stats.round_one_unready_heat_count > 0) blockers.push("Round-one heats must not have started.");
       break;
@@ -1130,8 +1184,15 @@ const readinessFor = (
       if (stats.round_one_unfinished_heat_count > 0) blockers.push("Every round-one heat must be finalized or cancelled.");
       if (stats.round_one_missing_result_count > 0) blockers.push("Every finalized round-one heat needs a winning result.");
       if (stats.final_heat_count === 0 || stats.final_entry_count === 0) blockers.push("Create the final and promote finalists first.");
-      if (stats.final_inactive_roster_heat_count > 0) {
-        blockers.push(inactiveRosterBlocker(stats.final_inactive_roster_heat_count, "the final"));
+      if (stats.final_ineligible_heat_count > 0) {
+        blockers.push(noEligibleRacerBlocker(stats.final_ineligible_heat_count, "the final"));
+      }
+      if (stats.final_inactive_roster_entry_count > 0) {
+        notes.push(inactiveRosterNote(
+          stats.final_inactive_roster_entry_count,
+          "the final roster",
+          "the final roster",
+        ));
       }
       if (stats.final_unready_heat_count > 0) blockers.push("Final heats must not have started.");
       break;
@@ -1150,6 +1211,11 @@ const readinessFor = (
     requiresAdmin: definition.requiresAdmin,
     allowed: blockers.length === 0,
     blockers,
+    // Facts an operator should see before committing, which deliberately do not
+    // affect `allowed`. Keeping them out of `blockers` is the whole point: a
+    // withdrawn racer on a roster is normal now, and reporting it as a blocker
+    // is exactly what made the race unstartable.
+    notes,
   };
 };
 
@@ -1562,10 +1628,12 @@ const splitStatements = (
 // Starting a round takes its rosters out of the operators' hands: every planned
 // heat is locked and advanced to LOADING in the same guarded batch as the event
 // transition, which is what replaces the retired manual lock-roster control.
-// The retired manual lock refused a roster holding a non-ACTIVE registration,
-// so this keeps that refusal: a heat with a withdrawn racer on it is never
-// locked, which makes the whole transition fail rather than silently locking a
-// stale roster, because the start command below carries the same predicate.
+// A roster holding withdrawn or disqualified racers locks normally: they stay on
+// it with their slots and their ducks untouched, and are simply ineligible to
+// win. The one roster that is never locked is one with no `ACTIVE` racer left at
+// all, because it could not produce a result afterwards. The start command above
+// carries the identical predicate, so such a heat fails the whole transition
+// rather than being silently left unlocked while the round starts around it.
 const lockRoundStatement = (
   round: "ROUND_ONE" | "FINAL",
   commandType: string,
@@ -1581,7 +1649,7 @@ const lockRoundStatement = (
     WHERE heats.event_id = ? AND heats.round = ? AND heats.status = 'PLANNED'
       AND heats.roster_locked_at IS NULL
       AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = heats.id)
-      AND NOT ${inactiveRosterEntryExists("heats.id")}
+      AND ${eligibleRacerExists("heats.id")}
       AND EXISTS (
         SELECT 1 FROM race_commands rc
          WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = ?

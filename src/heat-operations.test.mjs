@@ -800,36 +800,65 @@ test("heat reset repeats state, lock, roster, and result guards inside its atomi
   }
 });
 
-test("heat lock, finish scan, validation, and atomic finalization require ACTIVE registrations", async (context) => {
+test("a heat with no eligible racer left cannot lock, and results still require ACTIVE", async (context) => {
   const database = createDatabase();
   context.after(() => database.close());
   seedRace(database);
   database.exec(`
     UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
     INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
-    VALUES ('heat-active', 'event', 'ROUND_ONE', 1, 'PLANNED', 1);
+    VALUES ('heat-active', 'event', 'ROUND_ONE', 1, 'PLANNED', 2);
     INSERT INTO heat_entries
       (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
     VALUES ('heat-entry-active', 'event', 'heat-active', 'entry-1', 'ROUND_ONE', 1,
+            'BALANCED_DRAW', '2026-07-26T11:00:00Z'),
+           ('heat-entry-active-2', 'event', 'heat-active', 'entry-2', 'ROUND_ONE', 2,
             'BALANCED_DRAW', '2026-07-26T11:00:00Z');
   `);
   const DB = d1(database);
   const env = { APP_ORIGIN: "https://quickducks.com", DB };
   const handle = (request) => handleHeatOperations(request, env, actor);
+  const entriesBefore = database.prepare(
+    "SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id",
+  ).all().map((row) => ({ ...row }));
 
+  // One racer out of two leaving is normal: the heat still has someone who can
+  // win, so it locks with the withdrawn racer in place.
   database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1'");
+  const mixedLock = await handle(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-active/lock",
+    "POST",
+    { commandId: commandId(), revision: 0 },
+  ));
+  assert.equal(mixedLock.status, 201, JSON.stringify(await mixedLock.clone().json()));
+  assert.deepEqual(
+    database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id")
+      .all().map((row) => ({ ...row })),
+    entriesBefore,
+  );
+  database.exec(`
+    UPDATE heats SET status = 'PLANNED', roster_locked_at = NULL,
+           roster_locked_by_staff_profile_id = NULL, revision = 0,
+           source_command_id = NULL WHERE id = 'heat-active';
+    DELETE FROM audit_events WHERE action = 'HEAT_LOCKED';
+    DELETE FROM race_commands WHERE command_type = 'LOCK_HEAT';
+  `);
+
+  // Both racers gone is the one roster the lock still refuses: this heat could
+  // never produce a result.
+  database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-2'");
   const inactiveLock = await handle(jsonRequest(
     "/api/v1/staff/events/event/heats/heat-active/lock",
     "POST",
     { commandId: commandId(), revision: 0 },
   ));
   assert.equal(inactiveLock.status, 409);
-  assert.match((await inactiveLock.json()).error, /Update this planned, unlocked roster/i);
+  assert.match((await inactiveLock.json()).error, /cannot produce a winner.*Reactivate/is);
   assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-active'").get().status, "PLANNED");
 
-  database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-1'");
+  database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id IN ('registration-1', 'registration-2')");
   DB.beforeBatch = () => {
-    database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-1'");
+    database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id IN ('registration-1', 'registration-2')");
   };
   const atomicLock = await handle(jsonRequest(
     "/api/v1/staff/events/event/heats/heat-active/lock",
@@ -842,6 +871,7 @@ test("heat lock, finish scan, validation, and atomic finalization require ACTIVE
 
   database.exec(`
     UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1';
+    UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-2';
     UPDATE heats
        SET status = 'AWAITING_RESULT', roster_locked_at = '2026-07-26T11:05:00Z',
            finished_at = '2026-07-26T11:10:00Z', revision = 4
@@ -879,6 +909,14 @@ test("heat lock, finish scan, validation, and atomic finalization require ACTIVE
   assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-active'").get().status, "AWAITING_RESULT");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-active'").get().count, 0);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'").get().count, 0);
+
+  // Through all of it, no heat entry moved.
+  assert.deepEqual(
+    database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id")
+      .all().map((row) => ({ ...row })),
+    entriesBefore,
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 test("winner-by-tag candidates require one awaiting heat, its roster, and the current assignment", async (context) => {
@@ -1284,7 +1322,12 @@ test("the console offers the roster form for exactly the states the API accepts"
 // Starting the final locks its roster the same way starting round one does, so
 // it carries the same refusal: a finalist who withdrew is never locked in or
 // announced, and the reachable remedy is the final's own roster editor.
-test("a withdrawn finalist blocks the final until the final roster is replaced", async (context) => {
+// The old model refused to start the final while any finalist was not ACTIVE and
+// named "replace that roster" as the remedy. That is exactly backwards now: the
+// finalist's duck is already sealed into the final's bag, replacing the roster
+// would renumber slots the bags cannot follow, and refusing made the rule
+// unreachable. The final starts with them on it, marked and ineligible.
+test("a withdrawn finalist does not block the final and keeps their exact roster place", async (context) => {
   const database = createDatabase();
   context.after(() => database.close());
   seedRace(database);
@@ -1296,38 +1339,21 @@ test("a withdrawn finalist blocks the final until the final roster is replaced",
   `);
   const env = { DB: d1(database) };
   const handleEvent = (request) => handleEventOperations(request, env, actor);
+  const entriesBefore = database.prepare(
+    "SELECT id, heat_id, race_entry_id, slot_number, assignment_source FROM heat_entries ORDER BY id",
+  ).all().map((row) => ({ ...row }));
 
   const readiness = await handleEvent(new Request(
     "https://quickducks.com/api/v1/staff/events/event/readiness",
   ));
   const gate = (await readiness.json()).readiness["start-final"];
-  assert.equal(gate.allowed, false);
-  assert.deepEqual(gate.blockers, [
-    "A heat in the final still has a withdrawn or disqualified racer on the roster. "
-    + "Replace that roster before starting, so no inactive racer is locked in or announced.",
+  assert.equal(gate.allowed, true);
+  assert.deepEqual(gate.blockers, []);
+  // Reported, never blocking.
+  assert.deepEqual(gate.notes, [
+    "1 racer on the final roster is withdrawn or disqualified. That duck stays in its heat bag "
+    + "and races as normal, but cannot be recorded as a winner.",
   ]);
-
-  const blocked = await handleEvent(jsonRequest(
-    "/api/v1/staff/events/event/start-final",
-    "POST",
-    { commandId: commandId() },
-  ));
-  assert.equal(blocked.status, 409);
-  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "ROUND_ONE");
-  const finalHeat = database.prepare("SELECT status, roster_locked_at, revision FROM heats WHERE id = 'heat-final'").get();
-  assert.equal(finalHeat.status, "PLANNED");
-  assert.equal(finalHeat.roster_locked_at, null);
-
-  const replaced = await handleHeatOperations(
-    jsonRequest("/api/v1/staff/events/event/heats/heat-final/roster", "PUT", {
-      commandId: commandId(),
-      revision: finalHeat.revision,
-      raceEntryIds: ["entry-4"],
-    }),
-    env,
-    actor,
-  );
-  assert.equal(replaced.status, 200, JSON.stringify(await replaced.clone().json()));
 
   const started = await handleEvent(jsonRequest(
     "/api/v1/staff/events/event/start-final",
@@ -1338,11 +1364,298 @@ test("a withdrawn finalist blocks the final until the final roster is replaced",
   const locked = database.prepare("SELECT status, roster_locked_at FROM heats WHERE id = 'heat-final'").get();
   assert.equal(locked.status, "LOADING");
   assert.notEqual(locked.roster_locked_at, null);
+  // Byte for byte the roster it was before the final started.
   assert.deepEqual(
-    database.prepare("SELECT race_entry_id FROM heat_entries WHERE heat_id = 'heat-final'").all()
-      .map((row) => row.race_entry_id),
-    ["entry-4"],
+    database.prepare(
+      "SELECT id, heat_id, race_entry_id, slot_number, assignment_source FROM heat_entries ORDER BY id",
+    ).all().map((row) => ({ ...row })),
+    entriesBefore,
   );
+
+  // The staff finalist list keeps showing them, marked, because their duck is
+  // physically in the final's bag and staff have to reconcile the bag.
+  const finalists = await handleHeatOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event/finalists"),
+    env,
+    actor,
+  );
+  assert.equal(finalists.status, 200);
+  assert.deepEqual((await finalists.json()).finalists.map((row) => ({
+    raceEntryId: row.raceEntryId,
+    slotNumber: row.slotNumber,
+    eligible: row.eligible,
+    registrationStatus: row.participant.registrationStatus,
+  })), [
+    { raceEntryId: "entry-1", slotNumber: 1, eligible: false, registrationStatus: "WITHDRAWN" },
+    { raceEntryId: "entry-4", slotNumber: 2, eligible: true, registrationStatus: "ACTIVE" },
+  ]);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The one roster fact that still refuses: a final nobody can win.
+test("a final whose every finalist left is refused and writes nothing", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  seedFinalHeat(database);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1';
+    UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-4';
+  `);
+  const env = { DB: d1(database) };
+  const handleEvent = (request) => handleEventOperations(request, env, actor);
+
+  const readiness = await handleEvent(new Request(
+    "https://quickducks.com/api/v1/staff/events/event/readiness",
+  ));
+  const gate = (await readiness.json()).readiness["start-final"];
+  assert.equal(gate.allowed, false);
+  assert.deepEqual(gate.blockers, [
+    "A heat in the final has no racer left who can win: every racer on that roster is "
+    + "withdrawn or disqualified, so the heat could not produce a result. Reactivate a racer "
+    + "before starting. The roster, the slot numbers, and the ducks in the bag stay exactly as they are.",
+  ]);
+
+  const blocked = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/start-final",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(blocked.status, 409);
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "ROUND_ONE");
+  const finalHeat = database.prepare("SELECT status, roster_locked_at FROM heats WHERE id = 'heat-final'").get();
+  assert.equal(finalHeat.status, "PLANNED");
+  assert.equal(finalHeat.roster_locked_at, null);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_FINAL'",
+  ).get().count, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Promotion and result correction when a winner is no longer eligible
+// ---------------------------------------------------------------------------
+
+// Promotion into the final happens in the same guarded batch that publishes the
+// round-one winner, and that batch requires an `ACTIVE` racer. So a racer who
+// left can never become a winner and therefore can never be promoted — there is
+// no separate promotion path to guard.
+test("a round-one winner who left cannot be published and is never promoted", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    UPDATE heats SET status = 'AWAITING_RESULT', roster_locked_at = '2026-07-26T10:45:00Z',
+           finished_at = '2026-07-26T11:00:00Z' WHERE id = 'heat-1';
+    UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1';
+  `);
+  const env = { DB: d1(database) };
+
+  const refused = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/results/finalize",
+    "POST",
+    { commandId: commandId(), revision: 0, results: [{ raceEntryId: "entry-1", place: 1 }] },
+  ), env, actor);
+  assert.equal(refused.status, 422);
+  const body = await refused.json();
+  assert.equal(body.reason, FINISH_DUCK_INELIGIBLE_REASON);
+  assert.deepEqual(body.ineligibleRaceEntryIds, ["entry-1"]);
+
+  // No result, no final heat, no promotion — the entire batch was never run.
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heats WHERE round = 'FINAL'").get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_entries WHERE round = 'FINAL'",
+  ).get().count, 0);
+
+  // An eligible racer in the same heat still publishes and is promoted, which
+  // proves the refusal was about the racer and not about the heat.
+  const published = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/results/finalize",
+    "POST",
+    { commandId: commandId(), revision: 0, results: [{ raceEntryId: "entry-2", place: 1 }] },
+  ), env, actor);
+  assert.equal(published.status, 201, JSON.stringify(await published.clone().json()));
+  assert.deepEqual(
+    database.prepare(
+      "SELECT race_entry_id, slot_number FROM heat_entries WHERE round = 'FINAL' ORDER BY slot_number",
+    ).all().map((row) => ({ ...row })),
+    [{ race_entry_id: "entry-2", slot_number: 1 }],
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// A result stays published when its winner is later disqualified: the board
+// simply shows that heat with nobody in first place. The correction path is how
+// staff fix it, and it must still work with the original winner ineligible.
+test("a published round-one result is correctable after its winner is disqualified", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  seedFinalHeat(database);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-1';
+  `);
+  const env = { DB: d1(database) };
+
+  // The staff heat detail keeps naming the published winner and marks them, so
+  // the director can see both facts before deciding.
+  const detail = await handleHeatOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event/heats/heat-1"),
+    env,
+    actor,
+  );
+  assert.equal(detail.status, 200);
+  const detailBody = await detail.json();
+  assert.deepEqual(detailBody.results.map((row) => ({
+    raceEntryId: row.raceEntryId,
+    place: row.place,
+    eligible: row.eligible,
+    registrationStatus: row.participant.registrationStatus,
+  })), [{ raceEntryId: "entry-1", place: 1, eligible: false, registrationStatus: "DISQUALIFIED" }]);
+
+  const corrected = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/results/correct",
+    "POST",
+    {
+      commandId: commandId(),
+      revision: 0,
+      reason: "The published winner was disqualified after the heat.",
+      results: [{ raceEntryId: "entry-2", place: 1 }],
+    },
+  ), env, actor);
+  assert.equal(corrected.status, 201, JSON.stringify(await corrected.clone().json()));
+  assert.deepEqual(
+    database.prepare(
+      "SELECT race_entry_id, place FROM heat_results WHERE heat_id = 'heat-1' AND status = 'FINALIZED'",
+    ).all().map((row) => ({ ...row })),
+    [{ race_entry_id: "entry-2", place: 1 }],
+  );
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE race_entry_id = 'entry-1' AND status = 'SUPERSEDED'",
+  ).get().count, 1);
+  // The promoted final entry was replaced in place: same row, same slot.
+  assert.deepEqual(
+    database.prepare(
+      "SELECT id, race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-final' ORDER BY slot_number",
+    ).all().map((row) => ({ ...row })),
+    [
+      { id: "final-entry-1", race_entry_id: "entry-2", slot_number: 1 },
+      { id: "final-entry-2", race_entry_id: "entry-4", slot_number: 2 },
+    ],
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a published round-one result is reopenable and republishable after its winner withdraws", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  seedFinalHeat(database);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-4';
+  `);
+  const env = { DB: d1(database) };
+
+  const reopened = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-2/results/reopen",
+    "POST",
+    { commandId: commandId(), revision: 0, reason: "The published winner withdrew after the heat." },
+  ), env, actor);
+  assert.equal(reopened.status, 201, JSON.stringify(await reopened.clone().json()));
+  assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-2'").get().status, "AWAITING_RESULT");
+  // Their promotion is withdrawn with the result; the other finalist keeps their
+  // exact slot.
+  assert.deepEqual(
+    database.prepare(
+      "SELECT id, race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-final' ORDER BY slot_number",
+    ).all().map((row) => ({ ...row })),
+    [{ id: "final-entry-1", race_entry_id: "entry-1", slot_number: 1 }],
+  );
+
+  const revision = database.prepare("SELECT revision FROM heats WHERE id = 'heat-2'").get().revision;
+  const republished = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-2/results/finalize",
+    "POST",
+    { commandId: commandId(), revision, results: [{ raceEntryId: "entry-5", place: 1 }] },
+  ), env, actor);
+  assert.equal(republished.status, 201, JSON.stringify(await republished.clone().json()));
+  assert.deepEqual(
+    database.prepare(
+      "SELECT race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-final' ORDER BY slot_number",
+    ).all().map((row) => ({ ...row })),
+    [
+      { race_entry_id: "entry-1", slot_number: 1 },
+      { race_entry_id: "entry-5", slot_number: 2 },
+    ],
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The podium is only as deep as the racers who can take a place. A withdrawn
+// finalist keeps their slot and their duck in the bag, but demanding a place for
+// them would make the final impossible to publish and the event impossible to
+// complete.
+test("a final with a withdrawn finalist publishes a shorter podium and still completes", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  seedFinalHeat(database);
+  database.exec(`
+    UPDATE events SET status = 'FINAL' WHERE id = 'event';
+    UPDATE heats SET status = 'AWAITING_RESULT', roster_locked_at = '2026-07-26T12:00:00Z',
+           started_at = '2026-07-26T12:05:00Z', finished_at = '2026-07-26T12:10:00Z'
+     WHERE id = 'heat-final';
+    UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1';
+  `);
+  const env = { DB: d1(database) };
+
+  // Two on the roster, one eligible: a podium of exactly one place.
+  const tooDeep = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/finalize",
+    "POST",
+    {
+      commandId: commandId(),
+      revision: 0,
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(tooDeep.status, 422);
+  assert.match((await tooDeep.json()).error, /exactly places 1 through 1/);
+
+  const published = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/finalize",
+    "POST",
+    { commandId: commandId(), revision: 0, results: [{ raceEntryId: "entry-4", place: 1 }] },
+  ), env, actor);
+  assert.equal(published.status, 201, JSON.stringify(await published.clone().json()));
+  // The withdrawn finalist keeps their roster place; only the podium is shorter.
+  assert.deepEqual(
+    database.prepare(
+      "SELECT race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-final' ORDER BY slot_number",
+    ).all().map((row) => ({ ...row })),
+    [
+      { race_entry_id: "entry-1", slot_number: 1 },
+      { race_entry_id: "entry-4", slot_number: 2 },
+    ],
+  );
+
+  const completion = await handleEventOperations(jsonRequest(
+    "/api/v1/staff/events/event/complete",
+    "POST",
+    { commandId: commandId() },
+  ), env, actor);
+  assert.equal(completion.status, 201, JSON.stringify(await completion.clone().json()));
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "COMPLETED");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -1368,6 +1681,9 @@ test("the heat roster projection exposes exactly its documented identifier field
   assert.deepEqual(Object.keys(entry).sort(), [
     "assignmentSource",
     "duck",
+    // Staff rosters must show who left the race, because that duck is still in
+    // the bag and the announcer must not call the name.
+    "eligible",
     "heatEntryId",
     "participant",
     "raceEntryId",
@@ -1392,7 +1708,11 @@ test("the heat roster projection exposes exactly its documented identifier field
   assert.deepEqual(Object.keys(announcerBody.roster[0]).sort(), [
     "displayName",
     "duckNumber",
+    // Not narrower on this one point: the announcer is the person who must not
+    // read out a withdrawn racer's name, so the status ships with the roster.
+    "eligible",
     "raceEntryId",
+    "registrationStatus",
     "slotNumber",
   ]);
   // Deliberate: the participant-chosen duck name is public on the board and the
@@ -1413,6 +1733,125 @@ test("the heat roster projection exposes exactly its documented identifier field
 // participant keeps their place in the heat and holds nothing, so the heat must
 // not go off without them. This is the rule that makes deleting a duck mid-race
 // safe rather than quietly ruinous.
+// The rule the round-start and the lock share, exercised at the heat station:
+// withdrawn racers ride along, and only a heat nobody can win is refused.
+test("a heat holding a withdrawn racer runs normally, and one nobody can win is refused", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  const DB = d1(database);
+  const env = { DB };
+  const handle = (request) => handleHeatOperations(request, env, actor);
+  const handleEvent = (request) => handleEventOperations(request, env, actor);
+
+  // One racer in heat 1 and every racer in heat 2 leave before the round starts.
+  database.exec(`
+    UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-2';
+    UPDATE registrations SET status = 'WITHDRAWN' WHERE id IN ('registration-4', 'registration-5');
+    UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-6';
+  `);
+  const entriesBefore = database.prepare(
+    "SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id",
+  ).all().map((row) => ({ ...row }));
+
+  // Heat 2 has nobody who can win, so the whole round start is refused and
+  // neither heat is locked.
+  const blockedRound = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/start-round-one",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(blockedRound.status, 409);
+  assert.deepEqual(
+    database.prepare("SELECT roster_locked_at FROM heats ORDER BY heat_number").all()
+      .map((row) => row.roster_locked_at),
+    [null, null],
+  );
+
+  // Reactivating one racer in heat 2 is the remedy, and the round then starts
+  // with three withdrawn racers still on their rosters.
+  database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-4'");
+  const started = await handleEvent(jsonRequest(
+    "/api/v1/staff/events/event/start-round-one",
+    "POST",
+    { commandId: commandId() },
+  ));
+  assert.equal(started.status, 201, JSON.stringify(await started.clone().json()));
+  assert.deepEqual(
+    database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id")
+      .all().map((row) => ({ ...row })),
+    entriesBefore,
+  );
+
+  const move = async (heatId, operation, revision) => {
+    const response = await handle(jsonRequest(
+      `/api/v1/staff/events/event/heats/${heatId}/${operation}`,
+      "POST",
+      { commandId: commandId(), revision },
+    ));
+    return { status: response.status, body: await response.json() };
+  };
+  let revision = database.prepare("SELECT revision FROM heats WHERE id = 'heat-1'").get().revision;
+  for (const operation of ["ready", "call", "start"]) {
+    const step = await move("heat-1", operation, revision);
+    assert.equal(step.status, 201, `${operation}: ${JSON.stringify(step.body)}`);
+    revision = step.body.heat.revision;
+  }
+  assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-1'").get().status, "RUNNING");
+  assert.deepEqual(
+    database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id")
+      .all().map((row) => ({ ...row })),
+    entriesBefore,
+  );
+
+  // Heat 2's last eligible racer leaves while it is loading. It cannot start,
+  // and the refusal writes nothing.
+  database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-4'");
+  let secondRevision = database.prepare("SELECT revision FROM heats WHERE id = 'heat-2'").get().revision;
+  for (const operation of ["ready", "call"]) {
+    const step = await move("heat-2", operation, secondRevision);
+    assert.equal(step.status, 201, `heat-2 ${operation}: ${JSON.stringify(step.body)}`);
+    secondRevision = step.body.heat.revision;
+  }
+  const refusedStart = await move("heat-2", "start", secondRevision);
+  assert.equal(refusedStart.status, 409);
+  assert.match(refusedStart.body.error, /cannot produce a winner.*Reactivate/is);
+  assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-2'").get().status, "CALLING");
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_HEAT'",
+  ).get().count, 1, "only heat 1 ever recorded a start command");
+
+  // The guarded SQL, not just the preflight, holds the line: heat 2's last
+  // eligible racer leaves between the preflight and the batch.
+  database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-4'");
+  // Heat 1 stops being the one running heat, so the concurrency guard is not
+  // what refuses below.
+  database.exec(`
+    UPDATE heats
+       SET status = 'FINALIZED', finished_at = '2026-07-26T11:20:00Z',
+           finalized_at = '2026-07-26T11:25:00Z'
+     WHERE id = 'heat-1';
+  `);
+  DB.beforeBatch = () => {
+    database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-4'");
+  };
+  const racedStart = await move("heat-2", "start", secondRevision);
+  assert.equal(racedStart.status, 409);
+  assert.match(racedStart.body.error, /every racer left the race/i);
+  assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-2'").get().status, "CALLING");
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_HEAT'",
+  ).get().count, 1);
+
+  assert.deepEqual(
+    database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id")
+      .all().map((row) => ({ ...row })),
+    entriesBefore,
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("a heat refuses to start while any racer in it holds no duck", async () => {
   const database = createDatabase();
   seedRace(database);

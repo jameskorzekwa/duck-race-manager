@@ -740,54 +740,43 @@ test("repeated close and reopen cycles never strand an unrunnable layout", async
 });
 
 // ---------------------------------------------------------------------------
-// A withdrawn racer must never be locked onto a racing roster
+// A withdrawn racer rides along; only a heat nobody can win still blocks
 // ---------------------------------------------------------------------------
 
-test("a participant withdrawn while registration is closed blocks the round until the roster is replaced", async (context) => {
-  const { database, env, participants } = await setup(context, { ducksPerHeat: 4, participantCount: 8 });
+test("a participant withdrawn while registration is closed does not block the round or move a slot", async (context) => {
+  const { database, env } = await setup(context, { ducksPerHeat: 4, participantCount: 8 });
   assert.equal((await lifecycle(env, "close-registration")).status, 201);
   assert.deepEqual(heatLayout(database).map((heat) => heat.size), [4, 4]);
+  const rosterBefore = rosterOf(database, 2);
 
-  // Withdrawal is allowed while the heat is still an unlocked plan, and it
-  // leaves the heat_entries row exactly where it was.
+  // Withdrawal leaves the heat_entries row exactly where it was: the duck is
+  // already sealed in heat 2's bag and nobody unpacks a bag to fish it out.
   const withdrawn = await withdraw(env, "registration-5", 1);
   assert.equal(withdrawn.status, 201, await withdrawn.clone().text());
   assert.equal(
     database.prepare("SELECT status FROM registrations WHERE id = 'registration-5'").get().status,
     "WITHDRAWN",
   );
-  assert.equal(rosterOf(database, 2).length, 4);
+  assert.deepEqual(rosterOf(database, 2), rosterBefore);
 
+  // Readiness reports it and lets the race start.
   const gate = await readiness(env);
-  assert.equal(gate["start-round-one"].allowed, false);
-  assert.deepEqual(gate["start-round-one"].blockers, [
-    "A heat in round one still has a withdrawn or disqualified racer on the roster. "
-    + "Replace that roster before starting, so no inactive racer is locked in or announced.",
+  assert.equal(gate["start-round-one"].allowed, true);
+  assert.deepEqual(gate["start-round-one"].blockers, []);
+  assert.deepEqual(gate["start-round-one"].notes, [
+    "1 racer on a round-one roster is withdrawn or disqualified. That duck stays in its heat bag "
+    + "and races as normal, but cannot be recorded as a winner.",
   ]);
 
-  const blocked = await lifecycle(env, "start-round-one");
-  assert.equal(blocked.status, 409);
-  assert.match((await blocked.json()).readiness.blockers[0], /withdrawn or disqualified/);
-  assert.equal(eventStatus(database), "REGISTRATION_CLOSED");
-  assert.equal(
-    database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_ROUND_ONE'").get().count,
-    0,
-  );
-  // Nothing was locked, so the roster is still editable and the withdrawn racer
-  // never reached a racing roster or the announcer.
-  assert.deepEqual(heatLayout(database).map((heat) => heat.locked), [false, false]);
-
-  // The remedy the blocker names is reachable: replace the roster without them.
-  const heat = heatRow(database, 2);
-  const remaining = rosterOf(database, 2)
-    .map((entry) => entry.raceEntryId)
-    .filter((raceEntryId) => raceEntryId !== participants[4].raceEntryId);
-  assert.equal(remaining.length, 3);
-  const replaced = await replaceRoster(env, heat.id, heat.revision, remaining);
-  assert.equal(replaced.status, 200, await replaced.clone().text());
-  assert.deepEqual((await replaced.json()).roster.map((entry) => entry.raceEntryId), remaining);
-
   await assertRoundOneStarts(env, database);
+  // The lock ran over the withdrawn racer without touching their place.
+  assert.deepEqual(rosterOf(database, 2), rosterBefore);
+  assertStructurallySound(database);
+
+  // The announcer still sees them, marked, because their duck is in the bag the
+  // staff are physically holding. This is where the announcer learns not to
+  // call that name.
+  const heat = heatRow(database, 2);
   const announcer = await handleHeatOperations(
     new Request(`https://quickducks.com/api/v1/staff/events/event_test/heats/${heat.id}/announcer-roster`),
     env,
@@ -795,21 +784,30 @@ test("a participant withdrawn while registration is closed blocks the round unti
   );
   assert.equal(announcer.status, 200);
   const announced = (await announcer.json()).roster;
-  assert.equal(announced.length, 3);
-  assert.equal(announced.some((entry) => entry.displayName.includes("Number5")), false);
+  assert.equal(announced.length, 4);
+  const marked = announced.find((entry) => entry.displayName.includes("Number5"));
+  assert.ok(marked, "the withdrawn racer stays on the staff roster");
+  assert.equal(marked.eligible, false);
+  assert.equal(marked.registrationStatus, "WITHDRAWN");
+  assert.ok(announced.filter((entry) => entry.eligible).length, 3);
 });
 
-test("the guarded start refuses a roster that loses a racer between preflight and commit", async (context) => {
+test("the guarded start refuses a heat that loses its last eligible racer between preflight and commit", async (context) => {
   let withdrawn = false;
   const { database, env } = await setup(context, { ducksPerHeat: 3, participantCount: 6 }, () => {
     // Fires once, on the round-one start batch, after readiness already passed,
-    // so only the guarded SQL inside the batch can still catch it.
+    // so only the guarded SQL inside the batch can still catch it. Every racer
+    // in heat 2 leaves at once, which is the one roster state that cannot
+    // produce a result.
     if (withdrawn) return;
     if (eventStatus(database) !== "REGISTRATION_CLOSED") return;
     withdrawn = true;
-    database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-4'");
+    database.exec(
+      "UPDATE registrations SET status = 'WITHDRAWN' WHERE id IN ('registration-4', 'registration-5', 'registration-6')",
+    );
   });
   assert.equal((await lifecycle(env, "close-registration")).status, 201);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [3, 3]);
 
   const blocked = await lifecycle(env, "start-round-one");
   assert.equal(blocked.status, 409);
@@ -820,6 +818,33 @@ test("the guarded start refuses a roster that loses a racer between preflight an
   );
   assert.deepEqual(heatLayout(database).map((heat) => heat.locked), [false, false]);
   assert.deepEqual(heatLayout(database).map((heat) => heat.status), ["PLANNED", "PLANNED"]);
+  assertStructurallySound(database);
+
+  // Readiness now names the same refusal, and reactivation — not a roster
+  // replacement — is the remedy, because the bags cannot be re-sorted.
+  const gate = await readiness(env);
+  assert.equal(gate["start-round-one"].allowed, false);
+  assert.deepEqual(gate["start-round-one"].blockers, [
+    "A heat in round one has no racer left who can win: every racer on that roster is "
+    + "withdrawn or disqualified, so the heat could not produce a result. Reactivate a racer "
+    + "before starting. The roster, the slot numbers, and the ducks in the bag stay exactly as they are.",
+  ]);
+  const rosterBefore = rosterOf(database, 2);
+  const reactivated = await handleParticipantOperations(
+    new Request("https://quickducks.com/api/v1/staff/registrations/registration-4/reactivate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        expectedRevision: database.prepare("SELECT revision FROM registrations WHERE id = 'registration-4'").get().revision,
+      }),
+    }),
+    env,
+    director,
+  );
+  assert.equal(reactivated.status, 201, await reactivated.clone().text());
+  await assertRoundOneStarts(env, database);
+  assert.deepEqual(rosterOf(database, 2), rosterBefore);
   assertStructurallySound(database);
 });
 

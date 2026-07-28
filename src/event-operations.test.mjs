@@ -684,6 +684,71 @@ test("readiness reports actionable blockers without changing the event", async (
   assert.equal(db.batches.length, 0);
 });
 
+// The predicate this replaces treated any non-ACTIVE roster entry as a blocker,
+// which made the race unstartable the moment somebody left. Now the entries are
+// reported and the only refusal is a heat with nobody who could win.
+test("readiness reports withdrawn racers on rosters and blocks only a heat nobody can win", async () => {
+  const reported = async (stats, action, status) => {
+    const db = makeDb((sql) => sql.includes("submitted_registration_count")
+      ? { ...readyStats, ...stats }
+      : { ...draftEvent, status });
+    const response = await handleEventOperations(
+      new Request("https://quickducks.com/api/v1/staff/events/event_test/readiness"),
+      makeEnv(db),
+      staff,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(db.batches.length, 0);
+    return (await response.json()).readiness[action];
+  };
+
+  const roundOneWithLeavers = await reported(
+    { round_one_inactive_roster_entry_count: 2, round_one_ineligible_heat_count: 0 },
+    "start-round-one",
+    "REGISTRATION_CLOSED",
+  );
+  assert.equal(roundOneWithLeavers.allowed, true);
+  assert.deepEqual(roundOneWithLeavers.blockers, []);
+  assert.deepEqual(roundOneWithLeavers.notes, [
+    "2 racers on round-one rosters are withdrawn or disqualified. Those ducks stay in their "
+    + "heat bags and race as normal, but cannot be recorded as winners.",
+  ]);
+
+  const roundOneUnwinnable = await reported(
+    { round_one_inactive_roster_entry_count: 3, round_one_ineligible_heat_count: 1 },
+    "start-round-one",
+    "REGISTRATION_CLOSED",
+  );
+  assert.equal(roundOneUnwinnable.allowed, false);
+  assert.deepEqual(roundOneUnwinnable.blockers, [
+    "A heat in round one has no racer left who can win: every racer on that roster is "
+    + "withdrawn or disqualified, so the heat could not produce a result. Reactivate a racer "
+    + "before starting. The roster, the slot numbers, and the ducks in the bag stay exactly as they are.",
+  ]);
+  // Still reported alongside the blocker, so the operator sees the whole picture.
+  assert.equal(roundOneUnwinnable.notes.length, 1);
+
+  const finalWithLeaver = await reported(
+    { final_inactive_roster_entry_count: 1, final_ineligible_heat_count: 0 },
+    "start-final",
+    "ROUND_ONE",
+  );
+  assert.equal(finalWithLeaver.allowed, true);
+  assert.deepEqual(finalWithLeaver.blockers, []);
+  assert.deepEqual(finalWithLeaver.notes, [
+    "1 racer on the final roster is withdrawn or disqualified. That duck stays in its heat bag "
+    + "and races as normal, but cannot be recorded as a winner.",
+  ]);
+
+  const finalUnwinnable = await reported(
+    { final_inactive_roster_entry_count: 2, final_ineligible_heat_count: 1 },
+    "start-final",
+    "ROUND_ONE",
+  );
+  assert.equal(finalUnwinnable.allowed, false);
+  assert.match(finalUnwinnable.blockers.join(" "), /no racer left who can win/);
+});
+
 test("opening registration is blocked for a legacy event without a ducks-per-heat size", async () => {
   const legacyEvent = { ...draftEvent, round_one_heat_capacity: null };
   const db = makeDb((sql) => {

@@ -992,6 +992,187 @@ for (const [operation, expectedStatus] of [["withdraw", "WITHDRAWN"], ["disquali
   });
 }
 
+// The heat's own state used to be a refusal: once the roster was locked,
+// running, awaiting a result, or finalized, withdrawal was blocked in preflight
+// and in the atomic write. That belonged to the old model, where a withdrawn
+// racer had to come off the roster. It no longer does — the duck is sealed in a
+// numbered bag and the entries may never be reordered — so the racer stays put
+// and is simply ineligible. Which means the heat protects nothing, and the
+// operation must work at every point in the lifecycle.
+test("a paired racer can leave at any heat state, and the race data is byte-for-byte unchanged", async (context) => {
+  const { api, database, staff } = harness(context);
+  seedEvent(database);
+  const [leaving, second, third] = await seedFullHeat(api, database, context);
+  const director = staffActor(["RACE_DIRECTOR"]);
+  assert.ok(second && third);
+
+  const revisionOf = (registrationId) => registrationRow(database, registrationId).revision;
+  const race = () => ({
+    heats: snapshot(database, "heats", "id"),
+    entries: snapshot(database, "heat_entries", "id"),
+    assignments: snapshot(database, "duck_assignments", "id"),
+    results: snapshot(database, "heat_results", "id"),
+  });
+
+  // Every heat state a paired racer's entry can be sitting in. The locked ones
+  // are exactly the states the retired guard refused.
+  const heatStates = [
+    ["PLANNED", null],
+    ["LOADING", "2026-09-01T03:00:00Z"],
+    ["READY", "2026-09-01T03:00:00Z"],
+    ["CALLING", "2026-09-01T03:00:00Z"],
+    ["RUNNING", "2026-09-01T03:00:00Z"],
+    ["AWAITING_RESULT", "2026-09-01T03:00:00Z"],
+    ["FINALIZED", "2026-09-01T03:00:00Z"],
+  ];
+  for (const [status, lockedAt] of heatStates) {
+    database.prepare(
+      `UPDATE heats
+          SET status = ?, roster_locked_at = ?,
+              finalized_at = CASE WHEN ? = 'FINALIZED' THEN '2026-09-01T03:30:00Z' ELSE NULL END
+        WHERE id = 'shared-heat'`,
+    ).run(status, lockedAt, status);
+    if (status === "FINALIZED") {
+      // A published, official result for a different racer in the same heat.
+      // Leaving must not disturb it either.
+      database.exec(`
+        INSERT INTO race_commands (id, event_id, command_type, result_id, requested_at, completed_at)
+        VALUES ('publish-shared', 'event-delete', 'FINALIZE_HEAT_RESULT', 'shared-heat',
+                '2026-09-01T03:30:00Z', '2026-09-01T03:30:00Z');
+        INSERT INTO heat_results
+          (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status, revision,
+           finalized_at, recorded_by_staff_profile_id, source_command_id)
+        SELECT 'result-shared', 'event-delete', 'shared-heat', da.race_entry_id, da.id, 1,
+               'FINALIZED', 1, '2026-09-01T03:30:00Z', 'staff-registration', 'publish-shared'
+          FROM duck_assignments da
+         WHERE da.race_entry_id = '${second.entryId}';
+      `);
+    }
+    const before = race();
+
+    for (const [operation, expected] of [["withdraw", "WITHDRAWN"], ["disqualify", "DISQUALIFIED"]]) {
+      const response = await statusChange(staff, leaving.registrationId, operation, director, {
+        commandId: crypto.randomUUID(),
+        expectedRevision: revisionOf(leaving.registrationId),
+      });
+      const body = await jsonBody(response, 201, `${operation} while ${status}`);
+      assert.equal(body.registration.status, expected, `${operation} while ${status}`);
+      // The duck never left their hands; only eligibility changed.
+      assert.equal(body.registration.currentlyPaired, true);
+      assert.notEqual(body.registration.assignment, null);
+
+      const reactivated = await statusChange(staff, leaving.registrationId, "reactivate", director, {
+        commandId: crypto.randomUUID(),
+        expectedRevision: revisionOf(leaving.registrationId),
+      });
+      assert.equal(
+        (await jsonBody(reactivated, 201, `reactivate while ${status}`)).registration.status,
+        "ACTIVE",
+      );
+    }
+
+    assert.deepEqual(race(), before, `race data unchanged while ${status}`);
+  }
+
+  // Nothing renumbered anything, at any point.
+  assert.deepEqual(
+    database.prepare("SELECT id, race_entry_id, slot_number FROM heat_entries ORDER BY slot_number")
+      .all().map((row) => ({ ...row })),
+    [
+      { id: "shared-entry-1", race_entry_id: leaving.entryId, slot_number: 1 },
+      { id: "shared-entry-2", race_entry_id: second.entryId, slot_number: 2 },
+      { id: "shared-entry-3", race_entry_id: third.entryId, slot_number: 3 },
+    ],
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The guards that stayed still hold on a locked heat: the ones that were removed
+// were the heat-state ones and nothing else.
+test("withdrawal from a locked heat still enforces revision, idempotency, origin, and roles", async (context) => {
+  const { api, database, staff } = harness(context);
+  seedEvent(database);
+  const [leaving] = await seedFullHeat(api, database, context);
+  database.prepare(
+    "UPDATE heats SET status = 'RUNNING', roster_locked_at = ? WHERE id = 'shared-heat'",
+  ).run("2026-09-01T03:00:00Z");
+  const director = staffActor(["RACE_DIRECTOR"]);
+  const entriesBefore = snapshot(database, "heat_entries", "id");
+
+  // Revision check.
+  assert.equal(
+    (await statusChange(staff, leaving.registrationId, "withdraw", director, {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 9,
+    })).status,
+    409,
+  );
+  assert.equal(registrationRow(database, leaving.registrationId).status, "ACTIVE");
+
+  // Least privilege: disqualification stays race-director work even here.
+  assert.equal(
+    (await statusChange(staff, leaving.registrationId, "disqualify", staffActor(["REGISTRATION"]), {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 0,
+    })).status,
+    403,
+  );
+  assert.equal(
+    (await statusChange(staff, leaving.registrationId, "withdraw", staffActor(["DUCK_MANAGER"]), {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 0,
+    })).status,
+    403,
+  );
+
+  // Exact Origin for a cookie session.
+  const cookieActor = { ...staffActor(["RACE_DIRECTOR"]), authentication: "cookie" };
+  assert.equal(
+    (await staff(`/api/v1/staff/registrations/${leaving.registrationId}/withdraw`, cookieActor, {
+      method: "POST",
+      headers: { origin: "https://evil.example" },
+      body: { commandId: crypto.randomUUID(), expectedRevision: 0 },
+    })).status,
+    403,
+  );
+
+  // The real write, then the same command identifier replaying rather than
+  // writing twice.
+  const commandId = crypto.randomUUID();
+  assert.equal(
+    (await jsonBody(
+      await statusChange(staff, leaving.registrationId, "withdraw", director, { commandId, expectedRevision: 0 }),
+      201,
+      "withdraw from a running heat",
+    )).registration.status,
+    "WITHDRAWN",
+  );
+  const replay = await jsonBody(
+    await statusChange(staff, leaving.registrationId, "withdraw", director, { commandId, expectedRevision: 0 }),
+    200,
+    "replay",
+  );
+  assert.equal(replay.replayed, true);
+  assert.equal(registrationRow(database, leaving.registrationId).revision, 1);
+  assert.equal(
+    database.prepare(
+      "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'REGISTRATION_WITHDRAWN'",
+    ).get().count,
+    1,
+  );
+
+  // Reusing that identifier for a different operation is still a conflict.
+  assert.equal(
+    (await statusChange(staff, leaving.registrationId, "reactivate", director, {
+      commandId,
+      expectedRevision: 1,
+    })).status,
+    409,
+  );
+  assert.deepEqual(snapshot(database, "heat_entries", "id"), entriesBefore);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("withdrawal is revision-checked, replayed on retry, and refused for the wrong transition", async (context) => {
   const { api, database, staff } = harness(context);
   seedEvent(database);

@@ -603,18 +603,71 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       assert.equal(wrongInspection.winnerAction, null);
       assert.equal(wrongInspection.winnerIneligible, null);
 
-      // A racer whose duck is already in this heat's bag can leave the race.
-      // Nobody empties the bag to fish that duck out, so it is still in the
-      // water and can still reach the line first. The status is set directly
-      // here because the operator route that leaves an inactive racer on a
-      // locked roster is not part of this module; what matters is that the
-      // finish line answers the state honestly whenever it arises.
+      // A racer whose duck is already in this heat's bag leaves the race, right
+      // here, through the real staff endpoint, while their heat is locked and
+      // awaiting its official result. Nobody empties the bag to fish that duck
+      // out, so it is still in the water and can still reach the line first.
       const strandedEntryId = heat.roster[1].raceEntryId;
       const stranded = participants.find((item) => item.raceEntryId === strandedEntryId);
+      stranded.withdrawn = true;
       const entriesBeforeWithdrawal = database.prepare(
         "SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id",
       ).all().map((row) => ({ ...row }));
-      database.exec(`UPDATE registrations SET status = 'WITHDRAWN' WHERE id = '${stranded.registrationId}'`);
+      const assignmentsBeforeWithdrawal = database.prepare(
+        "SELECT id, race_entry_id, duck_id, valid_to FROM duck_assignments ORDER BY id",
+      ).all().map((row) => ({ ...row }));
+      const heatsBeforeWithdrawal = database.prepare(
+        "SELECT id, status, heat_number, roster_locked_at FROM heats ORDER BY id",
+      ).all().map((row) => ({ ...row }));
+      const strandedDetail = await jsonBody(await api(
+        `/api/v1/staff/registrations/${stranded.registrationId}`,
+        { token: staffToken },
+      ), 200, "load the racer who is leaving");
+      assert.equal(strandedDetail.registration.status, "ACTIVE");
+      const withdrawal = await jsonBody(await post(
+        `/api/v1/staff/registrations/${stranded.registrationId}/withdraw`,
+        { commandId: crypto.randomUUID(), expectedRevision: strandedDetail.registration.revision },
+      ), 201, "withdraw a racer whose heat is locked and awaiting its result");
+      assert.equal(withdrawal.registration.status, "WITHDRAWN");
+      // They still hold their duck: withdrawal is bookkeeping, not unpairing.
+      assert.equal(withdrawal.registration.currentlyPaired, true);
+      assert.equal(withdrawal.registration.deletable, false);
+      assert.deepEqual(
+        database.prepare("SELECT id, race_entry_id, duck_id, valid_to FROM duck_assignments ORDER BY id")
+          .all().map((row) => ({ ...row })),
+        assignmentsBeforeWithdrawal,
+      );
+      assert.deepEqual(
+        database.prepare("SELECT id, status, heat_number, roster_locked_at FROM heats ORDER BY id")
+          .all().map((row) => ({ ...row })),
+        heatsBeforeWithdrawal,
+      );
+
+      // Staff rosters keep showing them, marked, because their duck is in the
+      // bag the staff are physically holding. Public surfaces do not.
+      const strandedHeatDetail = await jsonBody(await api(
+        `/api/v1/staff/events/${eventId}/heats/${heat.id}`,
+        { token: staffToken },
+      ), 200, "staff roster after a withdrawal");
+      const strandedRow = strandedHeatDetail.roster.find((row) => row.raceEntryId === strandedEntryId);
+      assert.ok(strandedRow, "the withdrawn racer stays on the staff roster");
+      assert.equal(strandedRow.eligible, false);
+      assert.equal(strandedRow.participant.registrationStatus, "WITHDRAWN");
+      assert.equal(strandedHeatDetail.roster.length, 3);
+      const strandedAnnouncer = await jsonBody(await api(
+        `/api/v1/staff/events/${eventId}/heats/${heat.id}/announcer-roster`,
+        { token: staffToken },
+      ), 200, "announcer roster after a withdrawal");
+      const announcedStranded = strandedAnnouncer.roster.find((row) => row.raceEntryId === strandedEntryId);
+      assert.equal(announcedStranded.eligible, false);
+      assert.equal(announcedStranded.registrationStatus, "WITHDRAWN");
+      const withdrawnBoard = await jsonBody(await api("/api/v1/race-board"), 200, "board after a withdrawal");
+      assert.equal(
+        withdrawnBoard.event.roundOneHeats[heat.number - 1].roster
+          .some((entry) => entry.duckNumber === stranded.visibleNumber),
+        false,
+        "the public board stops showing them",
+      );
 
       for (const value of [`https://quickducks.com/t/${stranded.tagToken}`, String(stranded.visibleNumber)]) {
         const ineligibleScan = await api(
@@ -650,7 +703,8 @@ test("runs the complete race workflow through real API handlers and migrated SQL
         entriesBeforeWithdrawal,
       );
       assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
-      database.exec(`UPDATE registrations SET status = 'ACTIVE' WHERE id = '${stranded.registrationId}'`);
+      // They stay withdrawn for the rest of the race. The heat is published from
+      // an eligible duck below, the round finishes, and the final runs.
     }
     const taggedGet = await api(`/t/${winningParticipant.tagToken}`, { token: staffToken });
     assert.equal(taggedGet.status, 303);
@@ -700,7 +754,21 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     heat.status = finalized.heat.status;
     assert.equal(finalized.results.length, 1);
     if (heat === roundOneHeats[0]) {
-      const plannedWinner = heat.roster[1].raceEntryId;
+      // Slot 2 is the racer who withdrew above, so a correction to them is
+      // refused as ineligible and the published result is left alone. Slot 3 is
+      // the eligible correction target.
+      const ineligibleCorrection = await post(
+        `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/correct`,
+        {
+          commandId: crypto.randomUUID(), revision: heat.revision,
+          reason: "Attempt to award the heat to the racer who withdrew.",
+          results: [{ raceEntryId: heat.roster[1].raceEntryId, place: 1 }],
+        },
+      );
+      assert.equal(ineligibleCorrection.status, 422);
+      assert.equal((await ineligibleCorrection.json()).reason, "DUCK_NOT_ELIGIBLE");
+
+      const plannedWinner = heat.roster[2].raceEntryId;
       const plannedCorrection = await jsonBody(await post(
         `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/correct`,
         {
@@ -727,13 +795,28 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal("verification" in finalists, false);
   assert.equal(finalists.finalists.length, 3);
   let finalistIds = finalists.finalists.map((entry) => entry.raceEntryId);
+  // The racer who withdrew mid-race was never published as a winner, so they
+  // were never promoted, and every finalist is eligible.
+  const withdrawnParticipant = participants.find((participant) => participant.withdrawn === true);
+  assert.ok(withdrawnParticipant, "one racer withdrew mid-race");
+  assert.equal(finalistIds.includes(withdrawnParticipant.raceEntryId), false);
+  assert.ok(finalists.finalists.every((entry) => entry.eligible === true));
+
+  // Round one finished with a withdrawn racer still on a locked, raced,
+  // published roster, and the final is not blocked by them. Readiness reports
+  // them on the round-one rosters without blocking anything.
+  const finalReadiness = await jsonBody(await api(`/api/v1/staff/events/${eventId}/readiness`, {
+    token: staffToken,
+  }), 200, "final readiness with a withdrawn racer on a roster");
+  assert.equal(finalReadiness.readiness["start-final"].allowed, true);
+  assert.deepEqual(finalReadiness.readiness["start-final"].blockers, []);
 
   const finalStarted = await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-final`, {
     commandId: crypto.randomUUID(),
   }), 201, "start final");
   assert.equal(finalStarted.event.status, "FINAL");
   const firstHeat = roundOneHeats[0];
-  const loadingWinner = firstHeat.roster[2].raceEntryId;
+  const loadingWinner = firstHeat.roster[0].raceEntryId;
   const loadingCapability = await jsonBody(await api(
     `/api/v1/staff/events/${eventId}/heats/${firstHeat.id}`,
     { token: staffToken },
@@ -784,7 +867,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     {
       commandId: crypto.randomUUID(), revision: firstHeat.revision,
       reason: "This change is after final readiness.",
-      results: [{ raceEntryId: firstHeat.roster[0].raceEntryId, place: 1 }],
+      results: [{ raceEntryId: firstHeat.roster[2].raceEntryId, place: 1 }],
     },
   );
   assert.equal(lateCorrection.status, 409);
@@ -828,6 +911,25 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(/email|phone|lookupCode/i.test(JSON.stringify(publishedFinal)), false);
 
   for (const participant of participants) {
+    // The racer who withdrew mid-race is publicly absent everywhere, including
+    // their own duck's tag scan, while their private link still tells them the
+    // truth about themselves.
+    if (participant.withdrawn === true) {
+      assert.deepEqual(
+        await (await api(`/api/v1/ducks/${participant.tagToken}`)).json(),
+        { destination: "HOME" },
+        `withdrawn tag ${participant.firstName}`,
+      );
+      const withdrawnPrivate = await jsonBody(await api(
+        `/api/v1/registrations/${participant.privateToken}`,
+      ), 200, `private status ${participant.firstName}`);
+      assert.equal(withdrawnPrivate.status, "WITHDRAWN");
+      assert.equal(withdrawnPrivate.raceStatus.outcome, "WITHDRAWN");
+      // Their duck and heat place are still theirs; nothing was taken away.
+      assert.equal(withdrawnPrivate.raceStatus.duck.visibleNumber, participant.visibleNumber);
+      assert.equal(withdrawnPrivate.raceStatus.assignedHeat.roundOne.number, participant.bagHeatNumber);
+      continue;
+    }
     const publicStatus = await jsonBody(await api(`/api/v1/ducks/${participant.tagToken}`), 200, `public status ${participant.firstName}`);
     assert.equal(publicStatus.destination, "RACE_STATUS");
     const podiumIndex = finalistIds.indexOf(participant.raceEntryId);

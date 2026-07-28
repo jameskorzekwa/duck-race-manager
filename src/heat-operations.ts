@@ -228,17 +228,24 @@ interface PublishedResultRow {
   finalized_at: string;
   first_name: string;
   last_name: string;
+  registration_status: string;
   visible_number: number;
   source_command_id: string;
 }
 
+// A published result keeps naming the racer it named when it was published, even
+// if that racer has since been disqualified. Staff need to see both facts at
+// once to decide whether to reopen or correct the result, so the current
+// registration status ships beside the published place rather than the row being
+// filtered away. The public board projects results separately and omits them.
 const publishedResults = (
   env: Env,
   eventId: string,
   heatId: string,
 ): Promise<D1Result<PublishedResultRow>> => env.DB.prepare(
   `SELECT hr.id, hr.race_entry_id, hr.place, hr.revision, hr.finalized_at,
-          hr.source_command_id, r.first_name, r.last_name, d.visible_number
+          hr.source_command_id, r.first_name, r.last_name,
+          r.status AS registration_status, d.visible_number
      FROM heat_results hr
      JOIN race_entries re ON re.id = hr.race_entry_id
      JOIN registrations r ON r.id = re.registration_id
@@ -248,11 +255,17 @@ const publishedResults = (
     ORDER BY hr.place`,
 ).bind(eventId, heatId).all<PublishedResultRow>();
 
+// Staff rosters show every racer in the bag, including the ones who left, and
+// mark them. `eligible` is the single boolean a station renders from: it is
+// exactly "this racer can still be recorded as a winner", and it is the same
+// `ACTIVE` test the result paths guard on, stated once here rather than
+// re-derived from `registrationStatus` by each surface.
 const rosterResponse = (row: RosterRow): Record<string, unknown> => ({
   heatEntryId: row.heat_entry_id,
   raceEntryId: row.race_entry_id,
   slotNumber: row.slot_number,
   assignmentSource: row.assignment_source,
+  eligible: row.registration_status === "ACTIVE",
   participant: {
     registrationId: row.registration_id,
     firstName: row.first_name,
@@ -270,7 +283,12 @@ const resultResponseRow = (row: PublishedResultRow): Record<string, unknown> => 
   place: row.place,
   revision: row.revision,
   finalizedAt: row.finalized_at,
-  participant: { firstName: row.first_name, lastName: row.last_name },
+  eligible: row.registration_status === "ACTIVE",
+  participant: {
+    firstName: row.first_name,
+    lastName: row.last_name,
+    registrationStatus: row.registration_status,
+  },
   duck: { visibleNumber: row.visible_number },
 });
 
@@ -303,6 +321,13 @@ const getHeatDetail = async (env: Env, eventId: string, heatId: string): Promise
 // to line racers up against the duck in the water, and a chosen name is one more
 // ambiguous token to get wrong at volume. Nothing is lost by leaving it out —
 // the announcer can see it on the participant console if they ever need it.
+//
+// A withdrawn or disqualified racer is deliberately still listed, with the
+// status beside them. Their duck is sealed into this heat's bag and physically
+// goes into the water, so the roster has to match what the staff are holding;
+// hiding the row would leave a duck in the bag nobody could account for. The
+// status is exactly what tells the announcer not to call that name. Only public
+// surfaces omit them.
 const announcerRoster = async (env: Env, eventId: string, heatId: string): Promise<Response> => {
   const heat = await getHeatSummary(env, eventId, heatId);
   if (heat === null) return json({ error: "Heat not found." }, 404);
@@ -314,6 +339,8 @@ const announcerRoster = async (env: Env, eventId: string, heatId: string): Promi
       raceEntryId: row.race_entry_id,
       displayName: `${row.first_name} ${row.last_name}`,
       duckNumber: row.visible_number,
+      registrationStatus: row.registration_status,
+      eligible: row.registration_status === "ACTIVE",
     })),
   });
 };
@@ -799,6 +826,46 @@ const unpairedRosterSql = `SELECT 1 AS missing
       )
     LIMIT 1`;
 
+// The single SQL statement of "this heat still has somebody who could win it".
+//
+// It is exported because `event-operations.ts` needs literally this predicate in
+// three more places — the readiness blocker, the guarded round-one/final start
+// command, and the automatic roster lock — and the preflight, the transition,
+// and the lock must never be able to disagree about it. The only interpolation
+// is a fixed internal column name; every value stays bound.
+export const eligibleRacerExists = (heatColumn: string): string => `EXISTS (
+    SELECT 1 FROM heat_entries he
+      JOIN race_entries re ON re.id = he.race_entry_id
+      JOIN registrations r ON r.id = re.registration_id
+     WHERE he.heat_id = ${heatColumn} AND r.status = 'ACTIVE'
+  )`;
+
+// A heat that holds no `ACTIVE` racer at all. Every other roster shape is
+// normal: withdrawal and disqualification leave the heat entry, the slot number,
+// and the duck assignment exactly where they are, because the duck is sealed in
+// a numbered bag and the bags are never re-sorted. Those racers ride along and
+// simply cannot be recorded as the winner.
+//
+// What is not normal is a heat where *nobody* can win. Round one needs one
+// first place and the final needs a podium, and both are guarded on `ACTIVE`
+// registrations, so such a heat would run and then be impossible to publish,
+// stranding the round and every heat behind it. That is the one roster fact
+// worth refusing, and it replaces the retired "every roster participant must be
+// ACTIVE" rule at both gates that can still prevent it: the lock and the start.
+//
+// The remedy is reactivation, which stays available to a race director at any
+// point, so the refusal is never a dead end.
+const noEligibleRacerSql = `SELECT 1 AS ineligible
+     FROM heats h
+    WHERE h.event_id = ? AND h.id = ?
+      AND NOT ${eligibleRacerExists("h.id")}
+    LIMIT 1`;
+
+const NO_ELIGIBLE_RACER_ERROR = "Every racer in this heat is withdrawn or disqualified, so the heat cannot produce a winner."
+  + " Reactivate at least one of them, then try again. The roster, the slots, and the ducks in the bag stay exactly as they are.";
+
+const eligibleRacerGuard = (heatColumn: string): string => `AND ${eligibleRacerExists(heatColumn)}`;
+
 const transitionDefinitions = {
   lock: { command: "LOCK_HEAT", expected: "PLANNED", next: "LOADING", audit: "HEAT_LOCKED" },
   ready: { command: "READY_HEAT", expected: "LOADING", next: "READY", audit: "HEAT_READY" },
@@ -845,20 +912,14 @@ const transitionHeat = async (
   if (transition === "lock" && heat.roster_size === 0) {
     return json({ error: "A heat must have at least one roster entry before it is locked." }, 409);
   }
-  if (transition === "lock") {
-    const inactiveRoster = await env.DB.prepare(
-      `SELECT 1 AS inactive
-         FROM heat_entries he
-         JOIN race_entries re ON re.id = he.race_entry_id
-         JOIN registrations r ON r.id = re.registration_id
-        WHERE he.event_id = ? AND he.heat_id = ? AND r.status != 'ACTIVE'
-        LIMIT 1`,
-    ).bind(eventId, heatId).first<{ inactive: number }>();
-    if (inactiveRoster !== null) {
-      return json({
-        error: "Every roster participant must be ACTIVE. Update this planned, unlocked roster before locking it.",
-      }, 409);
-    }
+  // A withdrawn or disqualified racer on the roster is expected and blocks
+  // nothing; a heat with no eligible racer left at all cannot produce a result,
+  // so it is refused before it is locked and again before it is started. Both
+  // preflights are repeated as SQL inside the batch below.
+  if (transition === "lock" || transition === "start") {
+    const ineligibleHeat = await env.DB.prepare(noEligibleRacerSql)
+      .bind(eventId, heatId).first<{ ineligible: number }>();
+    if (ineligibleHeat !== null) return json({ error: NO_ELIGIBLE_RACER_ERROR }, 409);
   }
   if (transition === "start") {
     const blockingHeat = await env.DB.prepare(
@@ -890,22 +951,12 @@ const transitionHeat = async (
   const commandLockGuard = transition === "lock"
     ? `AND h.roster_locked_at IS NULL
        AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = h.id)
-       AND NOT EXISTS (
-         SELECT 1 FROM heat_entries he
-         JOIN race_entries re ON re.id = he.race_entry_id
-         JOIN registrations r ON r.id = re.registration_id
-          WHERE he.heat_id = h.id AND r.status != 'ACTIVE'
-       )`
+       ${eligibleRacerGuard("h.id")}`
     : "";
   const updateLockGuard = transition === "lock"
     ? `AND roster_locked_at IS NULL
        AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = heats.id)
-       AND NOT EXISTS (
-         SELECT 1 FROM heat_entries he
-         JOIN race_entries re ON re.id = he.race_entry_id
-         JOIN registrations r ON r.id = re.registration_id
-          WHERE he.heat_id = heats.id AND r.status != 'ACTIVE'
-       )`
+       ${eligibleRacerGuard("heats.id")}`
     : "";
   // The everyone-holds-a-duck rule is repeated here as SQL, so a duck deleted
   // between the preflight above and this batch aborts the start rather than
@@ -927,7 +978,8 @@ const transitionHeat = async (
           WHERE other.event_id = h.event_id AND other.id != h.id
             AND other.status IN ('RUNNING', 'AWAITING_RESULT')
        )
-       ${fullyPairedGuard("h.id")}`
+       ${fullyPairedGuard("h.id")}
+       ${eligibleRacerGuard("h.id")}`
     : "";
   const updateStartGuard = transition === "start"
     ? `AND NOT EXISTS (
@@ -935,7 +987,8 @@ const transitionHeat = async (
           WHERE other.event_id = heats.event_id AND other.id != heats.id
             AND other.status IN ('RUNNING', 'AWAITING_RESULT')
        )
-       ${fullyPairedGuard("heats.id")}`
+       ${fullyPairedGuard("heats.id")}
+       ${eligibleRacerGuard("heats.id")}`
     : "";
   let updateSql = `UPDATE heats SET status = ?, revision = revision + 1,
       source_command_id = ?, updated_at = ?`;
@@ -983,7 +1036,7 @@ const transitionHeat = async (
     ]);
   } catch {
     const message = transition === "start"
-      ? "Another heat is running or awaiting its official result, a racer lost their duck, or this heat changed. Refresh both stations before trying again."
+      ? "Another heat is running or awaiting its official result, a racer lost their duck, every racer left the race, or this heat changed. Refresh both stations before trying again."
       : "The heat transition conflicted with another update. Refresh and try again.";
     return json({ error: message }, 409);
   }
@@ -1184,7 +1237,23 @@ const validateResultSet = (
   results: ResultInput[],
   roster: ResultRosterRow[],
 ): Response | null => {
-  const finalPlaceCount = Math.min(3, roster.length);
+  // The podium is as deep as the racers who can actually take a place. A
+  // withdrawn or disqualified finalist keeps their slot and their duck in the
+  // bag but can never be recorded, so counting them would demand a place nobody
+  // is allowed to fill and make the final impossible to publish. This is the one
+  // place where a non-`ACTIVE` roster entry changes a number, and it changes only
+  // how many places exist — never who may hold one, which stays `ACTIVE`-only
+  // below and in the guarded SQL.
+  const eligibleRosterCount = roster.filter((entry) => entry.registration_status === "ACTIVE").length;
+  const finalPlaceCount = Math.min(3, eligibleRosterCount);
+  if (eligibleRosterCount === 0) {
+    return json({
+      error: "Every racer in this heat is withdrawn or disqualified, so no result can be recorded."
+        + " Reactivate the racer who should hold the place, then publish the result.",
+      reason: FINISH_DUCK_INELIGIBLE_REASON,
+      ineligibleRaceEntryIds: results.map((result) => result.raceEntryId),
+    }, 422);
+  }
   const validPlaces = round === "ROUND_ONE"
     ? results.length === 1 && results[0]?.place === 1
     : results.length === finalPlaceCount && results.every((result, index) => result.place === index + 1);
@@ -1799,18 +1868,25 @@ interface FinalistRow {
   slot_number: number;
   first_name: string;
   last_name: string;
+  registration_status: string;
   visible_number: number;
   qualifying_heat_id: string;
   qualifying_heat_number: number;
   podium_place: number | null;
 }
 
+// The staff finalist list, like every other staff roster, keeps a withdrawn or
+// disqualified finalist visible and marked. They won their round-one heat and
+// their duck is in the final's bag, so the bag and this list have to agree; what
+// changed is only that they can no longer take a podium place. The public
+// podium, which is projected separately by `race-board.ts`, still omits them.
 const finalistRows = (
   env: Env,
   eventId: string,
 ): Promise<D1Result<FinalistRow>> => env.DB.prepare(
   `SELECT final_entry.race_entry_id, final_entry.slot_number,
-          r.first_name, r.last_name, d.visible_number,
+          r.first_name, r.last_name, r.status AS registration_status,
+          d.visible_number,
           qualifier.id AS qualifying_heat_id, qualifier.heat_number AS qualifying_heat_number,
           podium.place AS podium_place
      FROM heats final_heat
@@ -1907,7 +1983,12 @@ const listFinalists = async (env: Env, eventId: string): Promise<Response> => {
     finalists: finalists.results.map((row) => ({
       raceEntryId: row.race_entry_id,
       slotNumber: row.slot_number,
-      participant: { firstName: row.first_name, lastName: row.last_name },
+      eligible: row.registration_status === "ACTIVE",
+      participant: {
+        firstName: row.first_name,
+        lastName: row.last_name,
+        registrationStatus: row.registration_status,
+      },
       duck: { visibleNumber: row.visible_number },
       qualifiedFrom: { heatId: row.qualifying_heat_id, heatNumber: row.qualifying_heat_number },
       podiumPlace: row.podium_place,

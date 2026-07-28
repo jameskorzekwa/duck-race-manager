@@ -323,6 +323,19 @@ test("withdrawn and disqualified racers vanish from every board surface without 
   assert.deepEqual(after.event.finalHeats[0].roster.map((entry) => entry.place), [1, 3]);
   assert.equal(after.event.roundOneHeats[0].roster[0].participantDisplayName, "Bravo");
 
+  // The round-one heat's published winner was the racer who withdrew. That heat
+  // is still `FINALIZED` and still publishes its surviving roster, simply with
+  // nobody holding first place — never a broken row with a place and no name.
+  // Correcting or reopening the result is the staff-side remedy; the board must
+  // not invent one.
+  assert.deepEqual(after.event.roundOneHeats[0].roster.map((entry) => entry.place), [null, null]);
+  assert.ok(after.event.roundOneHeats[0].roster.every((entry) => typeof entry.participantDisplayName === "string"));
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'round'").get().count,
+    1,
+    "the published result row itself is untouched",
+  );
+
   // Neither participant appears anywhere in the payload.
   assert.equal(/Alpha|Charlie/.test(JSON.stringify(after)), false);
 

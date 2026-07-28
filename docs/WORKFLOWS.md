@@ -127,6 +127,13 @@ would mean rescanning every duck. The participant simply disappears from every
 public surface and can never be published as a winner. See Public Visibility of
 Withdrawn and Disqualified Participants.
 
+Because the write disturbs nothing physical, it is available at **every** point
+in the event lifecycle: a participant may be withdrawn or disqualified while
+their heat is `PLANNED`, `LOADING`, locked, `READY`, `CALLING`, `RUNNING`,
+`AWAITING_RESULT`, or `FINALIZED`, and the heat is left byte for byte as it was.
+A non-`ACTIVE` roster entry is therefore a normal, expected race-day state: that
+duck rides in the bag, goes down the water, and simply cannot win.
+
 ### Heat
 
 ```text
@@ -1186,24 +1193,34 @@ checks pass:
 - Every round-one heat holds at least three entries. The blocker names reopening
   registration and signing up more participants as the remedy.
 - The round-one heat count does not exceed final capacity.
-- Every racer on a round-one roster is still `ACTIVE`. Withdrawal and
-  disqualification leave the heat entry in place and are allowed while the heat
-  is an unlocked plan, so this is what keeps a withdrawn participant from being
-  locked onto a racing roster and read out by the announcer. The blocker names
-  replacing that heat's roster as the remedy, which is reachable in exactly this
-  state.
+- Every round-one heat still holds at least one `ACTIVE` racer. Withdrawn and
+  disqualified racers on a roster never block: their entries, slots, and ducks
+  stay exactly where they are and readiness reports them as an informational
+  note. What is refused is a heat where *nobody* can win, because round one needs
+  one first place and that place is `ACTIVE`-only, so such a heat would run and
+  then be impossible to publish. The blocker names reactivating a racer as the
+  remedy — not replacing the roster, which would renumber slots the sealed heat
+  bags cannot follow.
 - Every round-one heat is still `PLANNED`, `LOADING`, or `READY`.
 
 Starting round one also locks every planned round-one roster, moving it to
 `LOADING` and stamping `roster_locked_at`, in the same guarded batch as the
-event transition. The roster lock carries the same all-`ACTIVE` predicate as the
-readiness blocker and the guarded `START_ROUND_ONE` command, so a stale roster
-fails the whole transition rather than being silently locked.
+event transition. A roster holding withdrawn or disqualified racers locks
+normally. The roster lock carries the same at-least-one-`ACTIVE` predicate as the
+readiness blocker and the guarded `START_ROUND_ONE` command, so a heat nobody
+could win fails the whole transition rather than being silently left unlocked
+while the round starts around it.
+
+Readiness also reports, without blocking, how many racers on round-one rosters
+are withdrawn or disqualified. Those appear in the `notes` array beside
+`blockers`; `allowed` ignores them.
 
 **Operator step:** resolve every unpaired submission by pairing, withdrawal, or
 administrative disqualification before starting. If a heat would race with fewer
-than three ducks, reopen registration rather than trying to start. If a racer
-withdrew after being paired, replace that heat's roster without them.
+than three ducks, reopen registration rather than trying to start. A racer who
+withdrew after being paired needs no action at all: leave the roster alone, their
+duck races and cannot win. Only if every racer in one heat has left must a race
+director reactivate one of them.
 
 Registration can close while a sticker is pending, and its owning operator can
 still confirm it during `REGISTRATION_CLOSED`. Round one remains blocked until
@@ -1219,15 +1236,25 @@ sticker first.
 
 A race director or system administrator can start the final when every round-one heat is
 `FINALIZED` or `CANCELLED`, at least one is finalized, each finalized round-one
-heat has one first-place result, one final heat with entries exists, every racer
-on the final roster is still `ACTIVE`, and that final has not started. Starting
-the final locks the final roster in the same guarded batch, exactly as starting
-round one does for round one, including the same refusal for a roster holding a
-withdrawn or disqualified finalist.
+heat has one first-place result, one final heat with entries exists, the final
+roster still holds at least one `ACTIVE` racer, and that final has not started.
+Starting the final locks the final roster in the same guarded batch, exactly as
+starting round one does for round one, including the same at-least-one-`ACTIVE`
+rule. A withdrawn or disqualified finalist keeps their slot and their duck in the
+bag, is reported as a readiness note, and blocks nothing.
+
+A round-one winner who is later withdrawn or disqualified is never promoted in
+the first place: promotion happens in the same guarded batch that publishes the
+winner, and that batch requires an `ACTIVE` racer. A finalist who leaves after
+being promoted stays on the final roster and simply cannot take a place.
 
 A race director or system administrator can complete the event when the final is finalized,
 all final heats are finalized or cancelled, and each finalized final contains
-exactly places 1 through `min(3, final roster size)`.
+exactly places 1 through `min(3, eligible final roster size)`. The podium is only
+as deep as the racers who can hold a place, counted the same way in
+`validateResultSet`, in the readiness stats, and in the guarded `COMPLETE_EVENT`
+command; counting a withdrawn finalist would demand a place nobody is allowed to
+fill and leave the event permanently incompletable.
 
 `COMPLETED` is the final lifecycle status. There is no transition past it; the
 event stays there, with results publicly visible, until an administrator runs
@@ -1265,11 +1292,14 @@ reactivated participant can be `SUBMITTED` while still holding their duck. This
 is console convenience only: the API accepts a withdrawal or disqualification
 for an unpaired registration as well.
 
-Withdrawal or disqualification is allowed while every heat containing that
-participant remains `PLANNED` and unlocked. Once any containing heat is locked,
-running, awaiting a result, or finalized, both operations are blocked in
-preflight and in the atomic write. Keep the participant `ACTIVE` and ask the
-race director to resolve the heat or official result instead.
+**Withdrawal or disqualification is allowed at any point in the event
+lifecycle.** The heat's state is not a precondition: `PLANNED`, `LOADING`,
+locked, `READY`, `CALLING`, `RUNNING`, `AWAITING_RESULT`, and `FINALIZED` all
+accept it, and none of them is changed by it. There is no longer a heat guard in
+the preflight or in the atomic write, because there is nothing to remove — the
+duck is sealed in a numbered bag, the entry never moves, and only eligibility
+changes. Every other guard is unchanged: the event-status gate, the revision
+check, the allowed-transition check, command idempotency, and the audit write.
 
 Withdrawal and disqualification are the exit for a participant who has been
 paired, and they are deliberately bookkeeping only. Each writes exactly three
@@ -1286,11 +1316,19 @@ operation to replace a roster with zero entries or cancel an empty heat, so
 operators must resolve these cases before locking and avoid creating a stranded
 empty heat.
 
-Because the heat entry survives, the round refuses to start while any roster
-still holds the withdrawn or disqualified racer. That is reported as a readiness
-blocker, enforced inside the guarded start command, and enforced again by the
-roster lock itself, so the race can never begin with an inactive racer on a
-locked roster or in the announcer's roster read.
+The heat entry survives and the round starts around it. The only roster fact
+that still refuses a lock or a start is a heat holding **no** `ACTIVE` racer at
+all, because that heat could never produce a result. That one refusal is reported
+as a readiness blocker, enforced inside the guarded start command and the heat
+lock/start transitions, and enforced again by the automatic roster lock, all with
+the same predicate so the preflight, the transition, and the lock can never
+disagree. Reactivation, which is available at any point, is its remedy.
+
+Staff rosters — heat detail, the announcer roster, the start-line roster, the
+staff finalist list, and published results — keep showing withdrawn and
+disqualified racers with `eligible: false` and their `registrationStatus`. Staff
+must reconcile what is physically in the bag, and the announcer must know not to
+call that name. Only public surfaces omit them.
 
 ### Delete Registration
 
@@ -1850,10 +1888,12 @@ is revision-checked and audited, and every statement in its batch is guarded on
 the command row the batch itself inserts, so a replacement that loses its race
 writes nothing rather than emptying the heat first.
 
-This is the remedy the readiness blockers name. A withdrawn racer left on a
-roster, or a heat that fell below the minimum, is repaired here before the round
-starts. The staff console offers the replacement form for exactly these statuses,
-so it never presents a control the API would refuse.
+This repairs a heat that fell below the minimum before the round starts. It is
+**not** the remedy for a withdrawn racer: their duck is already sealed in that
+heat's bag, rewriting the roster would renumber slots the bags cannot follow, and
+they block nothing anyway. Reactivation is the only remedy the eligibility
+blocker names. The staff console offers the replacement form for exactly these
+statuses, so it never presents a control the API would refuse.
 
 ## Heat Readiness and Running
 
@@ -1866,6 +1906,12 @@ For each round-one and final heat, station staff perform:
 5. A result taker **Mark heat finished**: changes `RUNNING` to
    `AWAITING_RESULT`.
 6. A result taker enters and publishes the required result.
+
+A heat cannot lock or start while it holds no `ACTIVE` racer. `transitionHeat`
+checks it before the write and repeats it as a SQL guard inside the atomic batch
+of both transitions; the refusal is `409` and names reactivation as the remedy.
+A heat that merely *contains* withdrawn or disqualified racers locks and starts
+normally, with every entry, slot number, and duck assignment untouched.
 
 A heat cannot start while any racer on its roster holds no duck. `transitionHeat`
 checks it before the write and repeats it as a SQL guard inside the atomic batch,
@@ -1937,10 +1983,16 @@ It shows the heat that is up now, chosen by the same priority as the start-line
 station, with a plain sentence saying what to do (read the racers, call the
 race, or hold for the official result). Its roster comes from
 `GET /api/v1/staff/events/:eventId/heats/:heatId/announcer-roster`, which
-projects exactly slot number, full participant name, and visible duck number.
-Announcers say the whole name, so this projection is deliberately the full
-registered name rather than the public name policy used on the race board; it
-carries no contact data, lookup code, or inventory detail.
+projects exactly slot number, full participant name, visible duck number, and the
+racer's `registrationStatus` with an `eligible` boolean. Announcers say the whole
+name, so this projection is deliberately the full registered name rather than the
+public name policy used on the race board; it carries no contact data, lookup
+code, or inventory detail.
+
+A withdrawn or disqualified racer stays on this roster and is marked ineligible
+rather than hidden. Their duck is sealed into the heat bag the staff are
+physically holding, so the roster has to match the bag, and the status is
+precisely what tells the announcer not to call that name.
 
 It also deliberately carries no participant-chosen duck name, even though that
 name is public everywhere else. Reading a name aloud is the one place where one
