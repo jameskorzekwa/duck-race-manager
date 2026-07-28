@@ -150,3 +150,13 @@ node --test src/role-authorization.integration.test.mjs
   only one event dataset may exist, and reset race data through the application.
   Their server owns `.wrangler/e2e`; never point them at production or a manually
   seeded local database.
+- Every new feature or behavior change must add or extend integration coverage.
+  Use real handlers plus migrated SQLite for API/domain behavior and Playwright
+  for browser-visible behavior. Unit tests or SQL-recording mocks alone do not
+  complete a feature.
+- Integration coverage must exercise the relevant success path and failures,
+  including authorization, lifecycle, idempotency/revisions, Origin enforcement,
+  and privacy projections where the feature crosses those boundaries.
+- Do not require James to run a local server as the routine test gate. The
+  automated integration suites own release confidence; manual local/device
+  testing is optional unless he explicitly requests it or hardware is involved.

@@ -64,50 +64,54 @@ tests, dependency audit, or migrations. CI also runs
 Worker and use the dedicated `.wrangler/e2e` persistence directory; do not run a
 separate server on port 8787 at the same time.
 
-## REVIEW BEFORE MERGE
+## INTEGRATION TESTS BEFORE RELEASE
 
-Merging to `main` deploys to production unattended. There is no staging
-environment and no manual approval step in the pipeline, so the merge *is* the
-release. James tries every behavior change on his own machine before that
-happens.
+Merging to `main` deploys to production unattended. The release gate is thorough,
+automated integration coverage — not asking James to test every branch manually.
 
-**Never merge a pull request that changes behavior until James has tried it and
-said to merge it.** This overrides the general "open and merge the PR" rule in
-`jameskorzekwa/agent-config`, which assumes a repository where merging is not
-deploying.
+**Every new feature or behavior change must add or extend integration tests
+before it is released.** A feature without integration coverage is incomplete
+and must not merge. A regression fix must add coverage that fails without the
+fix. Unit tests and SQL-recording mocks remain useful, but are not enough on
+their own for a user-visible workflow.
 
-Before asking him to look:
+Choose the level that exercises the real boundary:
 
-1. Run the branch locally with `npm run dev:local`, from the working copy that
-   actually holds the change. Use `npm run dev:network` instead when the change
-   is worth trying on a phone — anything touching the race-day stations, NFC, or
-   small-screen layout.
-2. Seed each state the change affects with
-   `npm run seed:local -- --state=<state>`. `docs/LOCAL_DEVELOPMENT.md` lists
-   them.
-3. Verify it yourself first, in a real browser, including console errors and
-   horizontal overflow at 320/390/768/1280px. Hand over work you already believe
-   is right.
-4. Leave the dev server running and the temporary clone in place. He is about to
-   use both.
+1. API, authorization, lifecycle, and transactional changes use the real Worker
+   handlers against a fully migrated `node:sqlite` database.
+2. Browser, routing, rendering, live-update, and multi-page workflow changes
+   extend the Playwright suite under `e2e/`, which starts and seeds its own local
+   Worker.
+3. Cover the complete happy path and the failure modes relevant to the change:
+   least privilege, exact Origin, lifecycle/readiness conflicts, revisions and
+   idempotent retries, public privacy projections, and responsive/browser edge
+   cases as applicable.
+4. Keep broad workflow tests honest. New features that alter race operations
+   must remain covered through registration, duck intake and pairing, heats,
+   final results, and event deletion rather than only through an isolated route.
 
-Then, in the response, give him:
+Before release, run:
 
-- The local URL to open, and the exact seed command for each state worth seeing.
-- The path to the temporary clone, so he can restart the server himself if it is
-  no longer running when he gets to it.
-- What changed in terms of what he will see, and which pages or flows to try.
-- Anything you could not verify yourself, and why.
-- The pull request link, stated plainly as unmerged and waiting on him.
+```sh
+npm test
+npm run test:e2e
+npm run check
+npm audit --audit-level=high
+npm run db:migrate:local              # when migrations changed
+```
 
-Silence is not approval, and approval of one screen is not approval of the
-change. After he approves: merge, confirm the release pipeline succeeded, and
-only then stop the server and delete the temporary clone. If he asks for
-changes, push to the same branch and hand it back the same way.
+Both CI and the release workflow run the browser integration suite. Do not skip,
+disable, narrow, or mock away coverage to make a release pass.
 
-A change with no runnable surface — documentation, comments, or repository
-metadata that cannot alter what the site does — may be merged without the local
-pass, but say so in the response rather than merging quietly.
+Agents do **not** need to start `dev:local` or `dev:network`, leave a server or
+temporary clone running, or ask James to manually test every change. Use the
+local servers when the user explicitly asks, while diagnosing a browser/device
+problem, or for a useful hardware/UX spot check. Manual testing is supplementary
+and never substitutes for the required integration tests.
+
+Once the required suites and CI are green, follow the normal repository workflow
+for the pull request and merge unless James explicitly asks for review or a
+manual hold. After merging, confirm the release pipeline and production health.
 
 ## ARCHITECTURE
 
@@ -156,8 +160,8 @@ pass, but say so in the response rather than merging quietly.
   the release workflow validates again, deploys unattended, then creates the
   automatic patch tag and release. Intentional major/minor releases use a
   reviewed protected tag on a default-branch commit. Because that merge ships
-  straight to production, behavior changes wait for James's local sign-off first
-  — see REVIEW BEFORE MERGE.
+  straight to production, every feature and behavior change requires thorough
+  integration coverage first — see INTEGRATION TESTS BEFORE RELEASE.
 - Workflow edits must preserve empty top-level permissions, job-scoped
   credentials, FIFO production concurrency, and the documented CloudFormation
   -> D1 -> Worker -> smoke test -> automatic tag/GitHub release order.
