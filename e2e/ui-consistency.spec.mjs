@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  bootstrap,
   expectNoDocumentOverflow,
+  intakeDuck,
   seedState,
   signIn,
   watchBrowserErrors,
@@ -28,6 +30,10 @@ test.describe("sitewide UI consistency", () => {
       await page.goto(path);
       const panel = page.locator(".staff-panel");
       await expect(panel).toBeVisible();
+      if (path === "/staff") {
+        await expect(page.locator('.staff-nav a[href="/staff/inventory"]')).toBeVisible();
+        await expect(page.locator('.console-nav a[href="/staff/inventory"]')).toHaveCount(0);
+      }
       await expect(panel).toHaveCSS("max-width", "1120px");
       await expect(panel).toHaveCSS("background-color", "rgb(255, 253, 243)");
       await expect(panel).toHaveCSS("padding-top", "35.2px");
@@ -149,6 +155,186 @@ test.describe("sitewide UI consistency", () => {
     expect(errors).toEqual([]);
   });
 
+  test("mobile QR scanning survives the camera permission visibility transition", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    const seeded = await seedState("registration");
+    const { admin, client } = await bootstrap();
+    const duck = await intakeDuck(client, seeded.eventId, 999);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => {
+      const camera = {
+        hidden: false, requests: 0, stops: 0, resolve: null, holdPlay: false, resolvePlay: null,
+      };
+      globalThis.__qrCameraTest = camera;
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        get: () => camera.hidden,
+      });
+      Object.defineProperty(globalThis, "BarcodeDetector", {
+        configurable: true,
+        value: class BarcodeDetector {
+          static async getSupportedFormats() { return ["qr_code"]; }
+          async detect() { return []; }
+        },
+      });
+      Object.defineProperty(navigator, "mediaDevices", {
+        configurable: true,
+        value: {
+          getUserMedia() {
+            camera.requests += 1;
+            return new Promise((resolve) => {
+              camera.resolve = () => resolve({
+                getTracks: () => [{ stop: () => { camera.stops += 1; } }],
+              });
+            });
+          },
+        },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
+        configurable: true,
+        get() { return this.__qrStream || null; },
+        set(value) { this.__qrStream = value; },
+      });
+      Object.defineProperty(HTMLMediaElement.prototype, "play", {
+        configurable: true,
+        value() {
+          if (!camera.holdPlay) return Promise.resolve();
+          return new Promise((resolve) => { camera.resolvePlay = resolve; });
+        },
+      });
+      let liveHub;
+      Object.defineProperty(globalThis, "quickDucksLive", {
+        configurable: true,
+        get: () => liveHub,
+        set(hub) {
+          const subscribe = hub.subscribe.bind(hub);
+          hub.subscribe = (options) => {
+            const subscription = subscribe(options);
+            if (options.domains.includes("ducks") && options.domains.includes("participants")) {
+              camera.refresh = subscription.refresh;
+            }
+            return subscription;
+          };
+          liveHub = hub;
+        },
+      });
+    });
+
+    await signIn(page, admin.email, `/staff/ducks/${duck.tagToken}`);
+    await page.getByRole("button", { name: "Scan QR code" }).click();
+    const scanner = page.locator("[data-qr-scanner]");
+    await expect(scanner).toBeVisible();
+    await page.waitForFunction(() => globalThis.__qrCameraTest.requests === 1);
+
+    await page.evaluate(() => {
+      globalThis.__qrCameraTest.hidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(scanner).toBeVisible();
+    await expect(page.locator("[data-qr-message]")).toHaveText("Starting the camera…");
+    await page.waitForTimeout(2250);
+    await expect(scanner).toBeVisible();
+    expect(await page.evaluate(() => globalThis.__qrCameraTest.stops)).toBe(0);
+
+    await page.evaluate(() => { globalThis.__qrCameraTest.resolve(); });
+    await expect(page.locator("[data-qr-message]")).toHaveText("Point the camera at the participant's QR code.");
+    await page.waitForTimeout(500);
+    await expect(scanner).toBeVisible();
+    await page.evaluate(() => {
+      globalThis.__qrCameraTest.hidden = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.waitForTimeout(750);
+    await expect(scanner).toBeVisible();
+    expect(await page.evaluate(() => globalThis.__qrCameraTest.stops)).toBe(0);
+
+    await page.evaluate(() => {
+      globalThis.__qrCameraTest.hidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(scanner).toBeHidden({ timeout: 3500 });
+    expect(await page.evaluate(() => globalThis.__qrCameraTest.stops)).toBe(1);
+
+    // Once permission returns a stream, real backgrounding must still stop it
+    // even when iOS delays the video play promise.
+    await page.evaluate(() => {
+      globalThis.__qrCameraTest.hidden = false;
+      globalThis.__qrCameraTest.holdPlay = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.getByRole("button", { name: "Scan QR code" }).click();
+    await page.waitForFunction(() => globalThis.__qrCameraTest.requests === 2);
+    await page.evaluate(() => { globalThis.__qrCameraTest.resolve(); });
+    await page.waitForFunction(() => typeof globalThis.__qrCameraTest.resolvePlay === "function");
+    await page.evaluate(() => {
+      globalThis.__qrCameraTest.hidden = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await expect(scanner).toBeHidden({ timeout: 3500 });
+    expect(await page.evaluate(() => globalThis.__qrCameraTest.stops)).toBe(2);
+    await page.evaluate(() => { globalThis.__qrCameraTest.resolvePlay(); });
+
+    let releaseFailedLoad;
+    let markFailedLoadArrived;
+    let loadRequests = 0;
+    const failedLoadGate = new Promise((resolve) => { releaseFailedLoad = resolve; });
+    const failedLoadArrived = new Promise((resolve) => { markFailedLoadArrived = resolve; });
+    await page.route(`**/api/v1/staff/ducks/${duck.tagToken}`, async (route) => {
+      loadRequests += 1;
+      if (loadRequests === 1) {
+        markFailedLoadArrived();
+        await failedLoadGate;
+        await route.fulfill({
+          status: 403,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Review test denied refresh." }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+    await page.evaluate(() => {
+      globalThis.__qrCameraTest.hidden = false;
+      globalThis.__qrCameraTest.holdPlay = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+      globalThis.__qrCameraTest.loadPromise = globalThis.__qrCameraTest.refresh();
+    });
+    await failedLoadArrived;
+    await page.getByRole("button", { name: "Scan QR code" }).click();
+    await page.waitForFunction(() => globalThis.__qrCameraTest.requests === 3);
+    await page.evaluate(() => { globalThis.__qrCameraTest.resolve(); });
+    await expect(page.locator("[data-qr-message]")).toHaveText("Point the camera at the participant's QR code.");
+    await page.evaluate(async () => {
+      await Promise.all([
+        globalThis.__qrCameraTest.refresh(),
+        globalThis.__qrCameraTest.refresh(),
+      ]);
+    });
+    releaseFailedLoad();
+    await page.evaluate(() => globalThis.__qrCameraTest.loadPromise);
+    await expect(scanner).toBeVisible();
+    expect(await page.evaluate(() => globalThis.__qrCameraTest.stops)).toBe(2);
+    await page.locator("[data-registration-search-status]").evaluate((status) => {
+      status.textContent = "Waiting for resumed search.";
+    });
+    const resumedResponsePromise = page.waitForResponse((response) => (
+      response.url().endsWith(`/api/v1/staff/ducks/${duck.tagToken}`) && response.status() === 200
+    ));
+    await page.locator("[data-qr-cancel]").click();
+    const resumedResponse = await resumedResponsePromise;
+    await resumedResponse.finished();
+    await expect(scanner).toBeHidden();
+    await expect(page.locator("[data-registration-search-status]")).not.toHaveText("Waiting for resumed search.");
+    await page.evaluate(() => new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    }));
+    expect(loadRequests).toBe(2);
+    await page.unroute(`**/api/v1/staff/ducks/${duck.tagToken}`);
+    expect(errors).toEqual([
+      "console: Failed to load resource: the server responded with a status of 403 (Forbidden)",
+    ]);
+  });
+
   test("Delete event is an administrator-only typed-confirmation dialog", async ({ browser }) => {
     const seeded = await seedState("draft");
     const admin = seeded.accounts.find((account) => account.isSystemAdmin);
@@ -159,6 +345,8 @@ test.describe("sitewide UI consistency", () => {
     await signIn(adminPage, admin.email);
     const open = adminPage.locator("[data-open-force-delete]");
     await expect(open).toBeVisible();
+    await expect(adminPage.getByText("Delete empty draft", { exact: true })).toHaveCount(0);
+    await expect(adminPage.locator("[data-delete-draft-card], [data-delete-draft-form]")).toHaveCount(0);
     await expect(adminPage.locator("details[data-force-delete-card]")).toHaveCount(0);
     await open.click();
     const dialog = adminPage.locator("[data-force-delete-dialog]");
@@ -240,5 +428,65 @@ test.describe("sitewide UI consistency", () => {
     await page.goto("/race");
     await expect(page.locator(".page-panel")).toHaveCSS("background-color", "rgb(255, 253, 243)");
     await expect(page.locator(".live-board")).toHaveCSS("background-color", "rgb(255, 253, 243)");
+  });
+
+  test("the home duck bobs through a water slit without covering mobile actions", async ({ page }) => {
+    await seedState("registration");
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await page.goto("/");
+    const actions = page.locator(".hero .actions");
+    const scene = page.locator(".hero-duck-scene");
+    const duck = page.locator(".hero-duck");
+    const slit = page.locator(".hero-duck-slit");
+    const water = page.locator(".hero-water");
+    const expectSlitComposition = async () => {
+      const [duckBox, slitBox, waterBox] = await Promise.all([
+        duck.boundingBox(),
+        slit.boundingBox(),
+        water.boundingBox(),
+      ]);
+      const visibleDuckBottom = duckBox.y + duckBox.height * (68.5 / 76);
+      expect(duckBox.y).toBeLessThan(waterBox.y);
+      expect(slitBox.y).toBeGreaterThan(waterBox.y + 16);
+      expect(slitBox.y).toBeLessThan(visibleDuckBottom);
+    };
+    await expect(duck).toHaveCSS("animation-name", "duck-bob");
+    await expect(duck).toHaveCSS("animation-duration", "2.8s");
+    await expect(water).toBeVisible();
+    await expect(scene).toHaveCSS("z-index", "2");
+    await expect(water).toHaveCSS("z-index", "1");
+    await expect(slit).toHaveCSS("z-index", "2");
+    await expect(slit).toHaveCSS("animation-name", "none");
+    await expect(actions.getByRole("link", { name: "Register", exact: true })).toBeVisible();
+    await expect(actions.getByRole("link", { name: "How it works", exact: true })).toBeVisible();
+    await expectSlitComposition();
+    const [heroBox, desktopSceneBox, desktopSlitBox, desktopWaterBox] = await Promise.all([
+      page.locator(".hero").boundingBox(),
+      scene.boundingBox(),
+      slit.boundingBox(),
+      water.boundingBox(),
+    ]);
+    // The 2.5rem offset is measured from the hero's inner border edge.
+    expect(heroBox.y + heroBox.height - desktopSceneBox.y - desktopSceneBox.height).toBeCloseTo(43, 0);
+    expect(desktopSlitBox.y).toBeGreaterThan(desktopWaterBox.y + 64);
+
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(duck).toHaveCSS("animation-name", "duck-bob");
+      await expectSlitComposition();
+      const [actionsBox, duckBox] = await Promise.all([
+        actions.boundingBox(),
+        duck.boundingBox(),
+      ]);
+      const visibleDuckTop = duckBox.y + duckBox.height * (8 / 76);
+      const visibleDuckBottom = duckBox.y + duckBox.height * (68.5 / 76);
+      const slitBox = await slit.boundingBox();
+      expect(visibleDuckTop).toBeGreaterThan(actionsBox.y + actionsBox.height + 16);
+      expect(visibleDuckBottom - slitBox.y).toBeGreaterThan(4);
+      expect(visibleDuckBottom - slitBox.y).toBeLessThan(24);
+    }
+
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await expect(duck).toHaveCSS("animation-name", "none");
   });
 });

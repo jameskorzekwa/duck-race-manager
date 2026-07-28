@@ -54,7 +54,7 @@ not authorized.
 | Open `/staff/announcer` (read-only) | `ANNOUNCER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/finish-line` and resolve a roster duck by tag URL/number | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
-| Create/configure/delete draft; reopen registration | None | Yes |
+| Create/configure draft; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
 | Open `/staff/access` | None | Yes |
 | Delete event: the whole dataset in any state | None | Yes |
@@ -999,9 +999,8 @@ and **Support**, and their console navigation anchors, are event-scoped: they ar
 hidden in the served markup and are revealed only when an event loads, so no
 section flashes and then vanishes. Role gating still applies on top of event
 existence, so an event-scoped section the actor may not use stays hidden even
-once an event exists. The **Inventory** navigation link is not an anchor:
-inventory is its own page, so the link is a plain navigation offered to duck
-managers, race directors, and administrators whether or not an event exists.
+once an event exists. Inventory is its own page in the persistent staff
+navigation and is not repeated in the console's section navigation.
 
 While no event row exists the console hides all three event-scoped sections and
 their anchors and shows the Event section with a **No race yet** state and, for a
@@ -1014,10 +1013,9 @@ the collapsed **Create event** card directly under the section heading; other
 roles see no create card. The **Working event** picker and its refresh button
 follow. Everything about the chosen event then appears in one labelled
 "Selected event details" region below the picker, in this order: the summary
-facts, **Configure draft**, **Readiness and lifecycle**, **Delete empty draft**,
-and **Delete event**. Administrator-only cards remain administrator-only, and
-the configure and delete-draft cards still appear only while the event is a
-draft.
+facts, **Configure draft**, **Readiness and lifecycle**, and **Delete event**.
+Administrator-only cards remain administrator-only, and the configure card
+appears only while the event is a draft.
 
 That region is hidden in the served markup and is revealed once an event is
 selected or defaulted. While no event row exists the console hides the region,
@@ -1079,11 +1077,10 @@ After registration opens, there is no supported configuration edit route.
 Changing a draft's name regenerates its slug on the server. Saving other draft
 settings leaves an existing persisted slug unchanged for compatibility.
 
-An administrator may delete a mistaken draft only when its revision matches,
-the typed text is exactly `DELETE <event name>`, it contains no race data, and
-it has no operational command/audit history other than creation and
-configuration. A detached deletion audit remains, while organization defaults
-remain available.
+An administrator may run **Delete event** from a draft or any later state by
+typing the exact event name in the danger dialog. This universal deletion is the
+only cleanup path and removes the complete event dataset; there is no separate
+empty-draft deletion action.
 
 ### Open and Close Registration
 
@@ -1540,10 +1537,12 @@ The staff pairing page shows a **Scan QR code** button whenever the browser has
 a camera in a secure context. The scanner ignores any QR code that is not a
 `QD1:` participant payload and keeps looking, so unrelated codes never reach the
 pairing command. A failed pairing invites another scan or a manual search. The
-camera is released on success, cancellation, a hidden page, and page unload.
+camera is released on success, cancellation, page unload, or when the page stays
+hidden past a short grace period. That grace period prevents mobile camera
+permission UI from immediately closing a stream that has just started.
 
 Decoding uses the browser's native `BarcodeDetector` where it exists, which is
-Chrome on Android. Browsers without it, including **iOS Safari** and Firefox,
+Chrome on Android. Browsers without it, including **iOS browsers** and Firefox,
 load a bundled decoder from same-origin `/assets/qr-decoder.js` on first scan and
 work identically. Browsers with native detection never download it. Scanning
 therefore works on iPhone and Android alike; only a device with no camera, or a

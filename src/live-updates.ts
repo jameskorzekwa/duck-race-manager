@@ -200,9 +200,6 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (["PATCH", "PUT"].includes(method) && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/configuration$/.test(pathname)) {
     return domains("event");
   }
-  if (method === "DELETE" && /^\/api\/v1\/staff\/events\/[^/]{1,128}$/.test(pathname)) {
-    return domains("event");
-  }
   if (method === "POST" && /^\/api\/v1\/staff\/events\/[^/]{1,128}\/force-delete$/.test(pathname)) {
     return domains("all");
   }
