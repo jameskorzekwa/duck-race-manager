@@ -107,12 +107,12 @@ recovered from GitHub state rather than treated as durable jobs.
 
 - `.github/workflows/agent-task.yml` accepts trusted `agent:inbox` issues,
   serializes work per issue, and runs the implementation orchestrator.
-- `.github/workflows/agent-review.yml` independently reviews OpenCode branches,
-  repairs findings, and admits one approved PR to the merge lane.
-- `.github/workflows/agent-reconcile.yml` repairs stale state, serializes grouped
-  requirements onto canonical PRs, settles releases, and advances the next PR.
-- `.opencode/agents/` contains explicit implementation, test, risk-review, and
-  reconciliation roles. The pinned Ensemble plugin coordinates bounded teams.
+- `.github/workflows/agent-review.yml` validates candidate code with read-only
+  authority, reviews it from a trusted checkout, and records an exact-SHA gate.
+- `.github/workflows/agent-reconcile.yml` deterministically repairs stale state,
+  releases grouped work, settles releases, and advances the next PR without a model.
+- `.opencode/agents/` contains explicit implementation, test, and risk-review
+  roles. The pinned Ensemble plugin coordinates bounded implementation teams.
 - `docs/AGENT_PIPELINE.md` is the operating and reusable installation guide.
 
 Only issues created by James with `agent:inbox`, explicit James `/agent` or
@@ -122,6 +122,12 @@ GitHub Models uses the job's short-lived token with `models: read`; repository
 writes use the OpenCode GitHub App's short-lived installation token so resulting
 branch and PR events still trigger CI. Agent jobs do not receive production
 credentials.
+
+Agent Review uses `pull_request_target` only as a trusted control plane. Candidate
+tests and model review run in separate jobs with read-only repository authority;
+the model loads agents and plugins from the trusted base checkout, candidate code
+is not executed in the model job, and the write-capable gate never checks out or
+executes candidate code. The gate rechecks the current PR head before mutation.
 
 The merge lane is deliberately narrower than implementation concurrency. One PR
 holds `agent:merge-slot` until its exact merge commit completes the Release

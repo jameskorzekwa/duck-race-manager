@@ -1,7 +1,12 @@
 {
   "dashboardPort": 0,
-  "defaultModel": "github-models/openai/gpt-5",
   "mergeOnCleanup": true,
+  "modelsByAgent": {
+    "pipeline-implementer": "github-models/openai/gpt-4.1",
+    "pipeline-risk-reviewer": "github-models/openai/gpt-4.1-mini",
+    "pipeline-scout": "github-models/openai/gpt-4.1-mini",
+    "pipeline-tester": "github-models/openai/gpt-4.1-mini"
+  },
   "promptForModels": false,
   "rateLimitCapacity": 4,
   "stallThresholdMs": 300000,

@@ -1,6 +1,6 @@
 ---
 name: github-agent-pipeline
-description: Use for QuickDucks GitHub agent-pipeline triage, implementation, review, reconciliation, merge admission, and deployment-state work.
+description: Use for QuickDucks GitHub agent-pipeline triage, implementation, review, merge admission, and deployment-state work.
 ---
 
 # GitHub Agent Pipeline
@@ -29,20 +29,20 @@ General labels such as `bug`, `enhancement`, `documentation`, and `duplicate` ma
 
 1. Only requests created or explicitly commanded by `jameskorzekwa` enter automation.
 2. New work is isolated by issue, runner, branch, and PR.
-3. Semantic grouping is conservative and recorded with `<!-- agent-pipeline canonical-issue=N canonical-pr=P -->`.
-4. Grouped updates never race an active canonical branch; the reconciler dispatches them after the branch is idle.
+3. Semantic grouping is conservative and recorded with `<!-- agent-pipeline canonical-issue=N -->`.
+4. Grouped updates never race canonical work; deterministic reconciliation dispatches them only after the canonical issue is deployed.
 5. Implementers never push to `main`.
 6. Every behavior change has appropriate real-handler or Playwright integration coverage.
-7. `Validate`, current-head agent review, and the merge slot must all pass before auto-merge.
+7. `CI / Validate`, candidate-head `Agent Review / Exact SHA`, current-head approval, and the merge slot must all pass before auto-merge.
 8. Only one `agent:merge-slot` exists. It remains until production succeeds or a failure is resolved.
 9. Production credentials remain solely in the `production` GitHub environment.
-10. Reconciliation is idempotent, bounded, and based on current GitHub state.
+10. Reconciliation is deterministic, idempotent, bounded, and based on current GitHub state; it never calls a model.
 
 ## GitHub Operations
 
 Use `gh` only for the current repository. Never print authentication state or token values. Before mutating a label or dispatching work, query current state and make the operation idempotent.
 
-Do not use `pull_request_target`, expose issue text to privileged third-party code, weaken required checks, bypass environment approval, or enable a merge while another merge slot or non-completed Release run exists.
+Never execute candidate code or load candidate OpenCode configuration in a job with write authority. The trusted `pull_request_target` workflow isolates candidate validation and model review in read-only-token jobs; only a later deterministic job can mutate labels or dispatch retries. Do not weaken required checks, bypass environment approval, or enable a merge while another merge slot or non-completed Release run exists.
 
 ## Verification
 
