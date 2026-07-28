@@ -200,8 +200,9 @@ test("every rendered form class remains covered by the shared form constraints",
   // seven forms (intake, edit, replace tag, retire tag, assign, unassign,
   // release) and gained the staff duck-name field, and the inventory page
   // renders six of its own (intake, duck name, assign, unpair, release,
-  // delete). The unsupported-device page, which had none, is gone.
-  assert.equal(openingForms, 28);
+  // delete). The unsupported-device page, which had none, is gone. Retiring
+  // the duplicate empty-draft deletion path removed one more console form.
+  assert.equal(openingForms, 27);
   assert.equal(closingForms, openingForms);
   // "danger-zone" left the form vocabulary with the two purge forms; it now
   // styles only the <details>/<article> wrappers around destructive actions.

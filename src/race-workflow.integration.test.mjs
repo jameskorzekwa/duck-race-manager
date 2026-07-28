@@ -215,6 +215,22 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(created.event.heatAssignmentMode, "IMMEDIATE_FIXED");
   assert.equal(created.event.roundOneHeatCapacity, 4);
 
+  // Delete event is the sole cleanup route, even while the event is an empty draft.
+  const retiredDraftDelete = await api(`/api/v1/staff/events/${eventId}`, {
+    method: "DELETE",
+    token: adminToken,
+    body: {
+      commandId: crypto.randomUUID(),
+      revision: created.event.revision,
+      confirmation: "DELETE Annual Duck Race",
+    },
+  });
+  assert.equal(retiredDraftDelete.status, 404);
+  const draftAfterRetiredDelete = await jsonBody(await api(`/api/v1/staff/events/${eventId}`, {
+    token: adminToken,
+  }), 200, "draft remains after retired delete route");
+  assert.equal(draftAfterRetiredDelete.event.status, "DRAFT");
+
   // The retired balanced mode is refused outright; assigning heats while
   // pairing is the only model.
   const retiredMode = await api(`/api/v1/staff/events/${eventId}/configuration`, {

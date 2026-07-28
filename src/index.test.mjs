@@ -74,8 +74,11 @@ test("renders the responsive landing page", async () => {
   assert.match(body, /<div class="hero-water" aria-hidden="true"><\/div>/);
   assert.match(body, /background-size:var\(--wave-length\) 3rem/);
   assert.match(body, /@keyframes water-flow \{ to \{ background-position:-10rem 0/);
-  assert.match(body, /transform-box:fill-box; transform-origin:center/);
-  assert.match(body, /@keyframes duck-rock[^@]+translateY\(-12px\) rotate\(3deg\)/);
+  assert.match(body, /\.hero-water \{[^}]*z-index:2/);
+  assert.match(body, /\.hero-duck \{[^}]*z-index:1;[^}]*bottom:5\.5rem/);
+  assert.match(body, /\.hero-duck \{ animation:duck-bob 2\.8s ease-in-out infinite/);
+  assert.match(body, /@keyframes duck-bob[^@]+translateY\(-7px\)/);
+  assert.doesNotMatch(body, /duck-(?:rock|bob)[^@]+rotate\(/);
   assert.match(body, /prefers-reduced-motion:reduce/);
   assert.doesNotMatch(body, /radial-gradient\(ellipse|M8 61c12 5|preserveAspectRatio="none"/);
   assert.match(response.headers.get("content-security-policy") ?? "", /connect-src 'self'/);

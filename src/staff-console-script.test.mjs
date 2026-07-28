@@ -264,16 +264,16 @@ test("the event section leads with create event, then the picker, then the selec
 
   // 5. every selected-event card lives inside that region, in the required order, after the select.
   const region = adminSection.slice(adminSection.indexOf('<div class="event-detail"'));
-  const [summary, config, readiness, deleteDraft, forceDelete] = orderedIndexes(region, [
+  const [summary, config, readiness, forceDelete] = orderedIndexes(region, [
     "data-event-summary",
     "data-event-config-card",
     "data-event-readiness",
-    "data-delete-draft-card",
     "data-force-delete-card",
   ]);
   assert.ok(summary < config, "the summary facts open the detail region");
   assert.ok(config < readiness, "configure draft precedes readiness and lifecycle");
-  assert.ok(readiness < deleteDraft && deleteDraft < forceDelete, "the danger cards close the detail region");
+  assert.ok(readiness < forceDelete, "the delete-event card closes the detail region");
+  assert.doesNotMatch(region, /data-delete-draft|Delete empty draft/);
   assert.ok(!region.includes("data-event-create-card"), "create event stays outside the selected-event region");
   assert.ok(!region.includes("data-event-select"), "the picker stays above the selected-event region");
   assert.ok(region.includes('<div class="console-grid">'), "the detail cards keep the console grid");
@@ -284,7 +284,6 @@ test("the event section leads with create event, then the picker, then the selec
   const registrationRegion = eventSection(renderStaffHome("Registration Staff", false, ["REGISTRATION"]));
   assert.match(registrationRegion, /Use your assigned station section for operational work\./);
   assert.ok(!directorRegion.includes("data-event-config-card"));
-  assert.ok(!directorRegion.includes("data-delete-draft-card"));
 });
 
 test("the console script reveals the selected-event region and restores the no-event guidance", () => {
@@ -316,9 +315,7 @@ test("the console script reveals the selected-event region and restores the no-e
   assert.ok(staffHomeScript.includes('eventSummary.replaceChildren(empty("Create a draft event to begin."));'));
   assert.ok(staffHomeScript.includes('readinessList.replaceChildren(empty("No lifecycle is available."));'));
   assert.ok(staffHomeScript.includes("forceDeleteCard.hidden = true;"));
-  assert.ok(staffHomeScript.includes("deleteDraftCard.hidden = true;"));
   assert.ok(staffHomeScript.includes('eventConfigCard.hidden = currentEvent.status !== "DRAFT";'));
-  assert.ok(staffHomeScript.includes('deleteDraftCard.hidden = currentEvent.status !== "DRAFT";'));
   // Creating an event collapses the primary action again.
   assert.ok(staffHomeScript.includes("if (eventCreateCard) eventCreateCard.open = false;"));
 });

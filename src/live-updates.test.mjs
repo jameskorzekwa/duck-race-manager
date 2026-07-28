@@ -173,7 +173,6 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
     ["POST", "/api/v1/staff/profiles/profile/reactivate", ["staff"]],
     ["POST", "/api/v1/staff/events", ["event"]],
     ["PATCH", "/api/v1/staff/events/event/configuration", ["event"]],
-    ["DELETE", "/api/v1/staff/events/event", ["event"]],
     ["POST", "/api/v1/staff/events/event/open-registration", ["event", "participants"]],
     ["POST", "/api/v1/staff/events/event/start-round-one", ["event", "participants", "ducks", "heats"]],
     ["POST", "/api/v1/staff/events/event/force-delete", ["all"]],
@@ -211,6 +210,7 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
     ["POST", "/api/v1/staff/events/event/heats/round-one/plan-preview"],
     ["POST", "/api/v1/staff/inventory/provisioning/classify"],
     ["POST", "/api/v1/unknown"],
+    ["DELETE", "/api/v1/staff/events/event"],
     // Retired return and purge routes classify to nothing at all.
     ["POST", "/api/v1/staff/events/event/start-return-processing"],
     ["POST", "/api/v1/staff/events/event/purge-ready"],

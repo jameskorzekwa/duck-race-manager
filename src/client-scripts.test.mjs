@@ -178,8 +178,16 @@ test("staff pairing pairs from a scan or an exact code and always keeps a manual
   // The camera must be released on every exit path, not just on success.
   assert.match(staffDuckScript, /for \(const track of qrStream\.getTracks\(\)\) track\.stop\(\)/);
   assert.match(staffDuckScript, /addEventListener\("pagehide", qrReleaseCamera\)/);
-  assert.match(staffDuckScript, /if \(document\.hidden\) qrStop\(\)/);
-  // A live refresh must not tear down an in-progress scan.
+  assert.match(staffDuckScript, /if \(!document\.hidden \|\| qrStarting\) return;[\s\S]*?qrVisibilityTimer = setTimeout\([\s\S]*?if \(document\.hidden\) qrStop\(\);[\s\S]*?2000\)/);
+  // Camera startup begins before decoder loading or the mobile permission
+  // prompt, so neither a live refresh nor transient permission visibility can
+  // tear it down.
+  assert.match(staffDuckScript, /qrStarting = true;[\s\S]*?qrScanning = true;[\s\S]*?await qrCreateDetector\(\)/);
+  assert.match(staffDuckScript, /if \(qrStarting \|\| qrScanning\) return;[\s\S]*?currentEvent = eventResponse\.event/);
+  assert.match(staffDuckScript, /const qrStop = \(resumeRefresh = true\)[\s\S]*?staffDuckSubscription\?\.resume\(\)/);
+  assert.match(staffDuckScript, /qrMessage\.textContent = qrCameraProblem\(error\);\s*staffDuckSubscription\?\.resume\(\)/);
+  assert.match(staffDuckScript, /qrVideo\.srcObject = qrStream;\s*\/\/ Permission has settled[\s\S]*?qrStarting = false;\s*qrScheduleHiddenStop\(\);\s*await qrVideo\.play\(\)/);
+  assert.match(staffDuckScript, /\} catch \(error\) \{\s*if \(qrStarting \|\| qrScanning\) return;\s*if \(error\.message !== "signed-out"\)/);
   assert.match(staffDuckScript, /isBlocked: \(\) => staffDuckBusy > 0 \|\| selectedRegistration !== null \|\| qrScanning/);
 
   // Scanning is a convenience over the code, never a new source of truth.
@@ -199,6 +207,12 @@ test("the pairing search lists the unpaired by default and puts the keyboard awa
   // An empty query is sent as an empty query rather than suppressed.
   assert.match(staffDuckScript, /new URLSearchParams\(\{ eventId: currentEvent\.id, q: query \}\)/);
   assert.equal(staffDuckScript.match(/registrations\/search\?/g).length, 1);
+  // Automatic list loads must not mark an already-clean form clean: markClean
+  // resumes live subscriptions and would recursively queue the duck load.
+  assert.match(
+    staffDuckScript,
+    /if \(globalThis\.quickDucksLive\.isDirty\(registrationSearchForm\)\) \{\s*globalThis\.quickDucksLive\.markClean\(registrationSearchForm\);/,
+  );
 
   // Typing narrows the same list, debounced, and never fires a pairing command.
   assert.match(staffDuckScript, /registrationSearchInput\.addEventListener\("input", queueRegistrationSearch\)/);
@@ -685,7 +699,6 @@ const confirmationCallsites = [
     { danger: true, confirmLabel: "Delete duck" },
   )) return;`],
   [staffHomeScript, 'if (!await appConfirm("Run “" + button.textContent + "” for " + event.name + "?")) return;'],
-  [staffHomeScript, 'if (!await appConfirm("Delete this empty draft? This cannot be undone.", { danger: true })) return;'],
   [staffHomeScript, 'if (dangerous && !await appConfirm(label + " for " + selectedRegistration.firstName + " " + selectedRegistration.lastName + "?", { danger: true })) return;'],
   [staffHomeScript, 'if (!await appConfirm("Reactivate this participant?")) return;'],
   [staffHomeScript, 'if (!await appConfirm(action + "? Read back: " + readback + ". This changes the public result immediately.", { danger: mode === "correct" })) return;'],
@@ -730,7 +743,7 @@ test("every confirmation callsite preserves its warning and returns before mutat
   assert.equal((staffInventoryScript.match(/\bappConfirm\(/g) ?? []).length, 6);
   // Delete event owns its typed-name modal, while the remaining console
   // mutations use the shared confirmation dialog.
-  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 11);
+  assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 10);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The staff duck scan confirms both name moderation and winner publication.
   assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 2);
