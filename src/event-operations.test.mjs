@@ -1233,65 +1233,8 @@ test("only an administrator can reopen registration", async () => {
   assert.equal(db.statements.length, 0);
 });
 
-test("an administrator can delete only a revision-matched, truly empty draft", async () => {
-  const commandId = crypto.randomUUID();
-  const safe = {
-    registration_count: 0,
-    race_entry_count: 0,
-    event_duck_count: 0,
-    duck_assignment_count: 0,
-    heat_count: 0,
-    heat_entry_count: 0,
-    heat_result_count: 0,
-    disposition_count: 0,
-    unsafe_command_count: 0,
-    unsafe_audit_count: 0,
-  };
-  const db = makeDb((sql) => {
-    if (sql.includes("AS race_entry_count")) return safe;
-    if (sql.includes("action = 'EMPTY_DRAFT_DELETED'")) return null;
-    if (sql.includes("FROM race_commands")) return null;
-    return draftEvent;
-  });
-  const response = await handleEventOperations(
-    jsonRequest("/api/v1/staff/events/event_test", "DELETE", {
-      commandId,
-      revision: 0,
-      confirmation: "DELETE Test Duck Race",
-    }),
-    makeEnv(db),
-    admin,
-  );
-
-  assert.equal(response.status, 204);
-  const sql = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.match(sql, /'DELETE_EMPTY_DRAFT'/);
-  assert.match(sql, /NOT EXISTS \(SELECT 1 FROM registrations/);
-  assert.match(sql, /DELETE FROM race_commands/);
-  assert.match(sql, /DELETE FROM events/);
-  assert.match(sql, /'EMPTY_DRAFT_DELETED'/);
-  assert.doesNotMatch(sql, /DELETE FROM organization_event_defaults/);
-});
-
-test("draft deletion is blocked when participant or operational data exists", async () => {
-  const db = makeDb((sql) => {
-    if (sql.includes("AS race_entry_count")) {
-      return {
-        registration_count: 1,
-        race_entry_count: 1,
-        event_duck_count: 0,
-        duck_assignment_count: 0,
-        heat_count: 0,
-        heat_entry_count: 0,
-        heat_result_count: 0,
-        disposition_count: 0,
-        unsafe_command_count: 0,
-        unsafe_audit_count: 0,
-      };
-    }
-    if (sql.includes("action = 'EMPTY_DRAFT_DELETED'") || sql.includes("FROM race_commands")) return null;
-    return draftEvent;
-  });
+test("the retired empty-draft deletion route is not handled", async () => {
+  const db = makeDb(() => draftEvent);
   const response = await handleEventOperations(
     jsonRequest("/api/v1/staff/events/event_test", "DELETE", {
       commandId: crypto.randomUUID(),
@@ -1302,8 +1245,8 @@ test("draft deletion is blocked when participant or operational data exists", as
     admin,
   );
 
-  assert.equal(response.status, 409);
-  assert.match((await response.json()).error, /race data/);
+  assert.equal(response, null);
+  assert.equal(db.statements.length, 0);
   assert.equal(db.batches.length, 0);
 });
 

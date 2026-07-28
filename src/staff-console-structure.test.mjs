@@ -140,10 +140,9 @@ test("role gating is recorded on each event-scoped section and survives event ex
 
 test("console-nav anchors are event-scoped, ship hidden, and stay role filtered", () => {
   const admin = consoleNav(renderStaffHome("Administrator", true, []));
-  // Inventory is a real link out to its own page; the rest are in-page anchors.
-  assert.deepEqual(navHrefs(admin), ["#events", "#participants", "/staff/inventory", "#heats", "#support"]);
-  // Access left the console nav for its own page.
-  assert.doesNotMatch(admin, /#access/);
+  assert.deepEqual(navHrefs(admin), ["#events", "#participants", "#heats", "#support"]);
+  // Inventory and Access are pages in the persistent staff nav, not repeated here.
+  assert.doesNotMatch(admin, /\/staff\/(?:inventory|access)|#access/);
   for (const anchor of admin.matchAll(/<a href="#([a-z]+)"([^>]*)>/g)) {
     if (anchor[1] === "events") {
       assert.equal(anchor[2], "", "the event anchor is always visible");
@@ -162,7 +161,7 @@ test("console-nav anchors are event-scoped, ship hidden, and stay role filtered"
   );
   assert.deepEqual(
     navHrefs(consoleNav(renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]))),
-    ["#events", "/staff/inventory"],
+    ["#events"],
   );
 });
 

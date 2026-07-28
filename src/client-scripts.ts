@@ -4434,8 +4434,6 @@ const readinessList = document.querySelector("[data-event-readiness]");
 const eventConfigCard = document.querySelector("[data-event-config-card]");
 const eventConfigForm = document.querySelector("[data-event-config-form]");
 const eventConfigSlugPreview = document.querySelector("[data-event-config-slug-preview]");
-const deleteDraftCard = document.querySelector("[data-delete-draft-card]");
-const deleteDraftForm = document.querySelector("[data-delete-draft-form]");
 const forceDeleteCard = document.querySelector("[data-force-delete-card]");
 const forceDeleteOpen = document.querySelector("[data-open-force-delete]");
 const forceDeleteDialog = document.querySelector("[data-force-delete-dialog]");
@@ -4595,10 +4593,6 @@ const renderEvent = (detail, readiness) => {
     eventConfigForm.elements.publicNamePolicy.value = currentEvent.publicNamePolicy;
     updateEventSlugPreview(eventConfigForm, eventConfigSlugPreview, currentEvent);
   }
-  if (deleteDraftCard) {
-    deleteDraftCard.hidden = currentEvent.status !== "DRAFT";
-    deleteDraftForm.elements.confirmation.placeholder = "DELETE " + currentEvent.name;
-  }
   if (forceDeleteCard) {
     forceDeleteCard.hidden = false;
     forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;
@@ -4645,10 +4639,6 @@ const loadEvents = async (preferredId) => {
     if (eventConfigForm) {
       eventConfigForm.reset();
       eventConfigCard.hidden = true;
-    }
-    if (deleteDraftForm) {
-      deleteDraftForm.reset();
-      deleteDraftCard.hidden = true;
     }
     if (forceDeleteForm) {
       resetForceDeleteDialog();
@@ -4756,22 +4746,6 @@ if (eventConfigForm) eventConfigForm.addEventListener("submit", async (event) =>
       }),
     );
     await loadEvents(currentEvent.id);
-  });
-});
-
-if (deleteDraftForm) deleteDraftForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const button = form.querySelector("button");
-  const confirmation = String(new FormData(form).get("confirmation"));
-  if (!await appConfirm("Delete this empty draft? This cannot be undone.", { danger: true })) return;
-  await perform(button, "Checking and deleting empty draft…", async () => {
-    await api(
-      "/api/v1/staff/events/" + encodeURIComponent(currentEventId()),
-      commandOptions("DELETE", { commandId: crypto.randomUUID(), revision: currentEvent.revision, confirmation }),
-    );
-    currentEvent = null;
-    await loadEvents();
   });
 });
 
@@ -6103,9 +6077,32 @@ let qrStream = null;
 let qrDetector = null;
 let qrTimer = null;
 let qrScanning = false;
+let qrStarting = false;
+let qrSession = 0;
+let qrVisibilityTimer = null;
+
+const qrScheduleHiddenStop = () => {
+  if (qrVisibilityTimer !== null) {
+    clearTimeout(qrVisibilityTimer);
+    qrVisibilityTimer = null;
+  }
+  // Do not time out a permission decision. Once startup settles, qrStart calls
+  // this again and a genuinely backgrounded page still releases the camera.
+  if (!document.hidden || qrStarting) return;
+  qrVisibilityTimer = setTimeout(() => {
+    qrVisibilityTimer = null;
+    if (document.hidden) qrStop();
+  }, 2000);
+};
 
 const qrReleaseCamera = () => {
+  qrSession += 1;
+  qrStarting = false;
   qrScanning = false;
+  if (qrVisibilityTimer !== null) {
+    clearTimeout(qrVisibilityTimer);
+    qrVisibilityTimer = null;
+  }
   if (qrTimer !== null) {
     clearTimeout(qrTimer);
     qrTimer = null;
@@ -6117,11 +6114,13 @@ const qrReleaseCamera = () => {
   if (qrVideo) qrVideo.srcObject = null;
 };
 
-const qrStop = () => {
+const qrStop = (resumeRefresh = true) => {
   qrReleaseCamera();
-  if (!qrPanel || !qrLaunch) return;
-  qrPanel.hidden = true;
-  qrLaunch.hidden = !qrSupported;
+  if (qrPanel && qrLaunch) {
+    qrPanel.hidden = true;
+    qrLaunch.hidden = !qrSupported;
+  }
+  if (resumeRefresh) staffDuckSubscription?.resume();
 };
 
 // Native detection where the browser has it, otherwise the bundled decoder
@@ -6149,7 +6148,7 @@ const qrTick = async () => {
         if (lookupCode !== null) {
           qrScanning = false;
           qrMessage.textContent = "Code scanned. Pairing…";
-          qrStop();
+          qrStop(false);
           const outcome = await pairWithLookupCode(lookupCode);
           if (!outcome.ok && !outcome.signedOut) {
             message.textContent = outcome.error + " Scan again, or search for the participant manually.";
@@ -6169,28 +6168,46 @@ const qrTick = async () => {
 };
 
 const qrStart = async () => {
-  if (!currentEvent) return;
+  if (!currentEvent || qrStarting || qrScanning) return;
+  const session = ++qrSession;
+  qrStarting = true;
+  // Block live refreshes from the first tap, including decoder loading and the
+  // mobile permission prompt, rather than only after video playback begins.
+  qrScanning = true;
   qrLaunch.hidden = true;
   qrPanel.hidden = false;
   qrMessage.textContent = "Starting the camera…";
+  let candidateStream = null;
   try {
-    qrDetector = await qrCreateDetector();
-    qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
-    // The page can be refreshed or cancelled while the permission prompt is
-    // open, so drop a stream that arrives after scanning was called off.
-    if (qrPanel.hidden) {
-      for (const track of qrStream.getTracks()) track.stop();
-      qrStream = null;
+    const detector = await qrCreateDetector();
+    if (session !== qrSession) return;
+    candidateStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+    // Cancellation invalidates this startup. Page visibility uses a grace
+    // period below because mobile permission UI can briefly hide the document.
+    if (session !== qrSession) {
+      for (const track of candidateStream.getTracks()) track.stop();
       return;
     }
+    qrDetector = detector;
+    qrStream = candidateStream;
+    candidateStream = null;
     qrVideo.srcObject = qrStream;
+    // Permission has settled and a real stream now exists. From this point a
+    // genuinely backgrounded page must release it even if play() is delayed.
+    qrStarting = false;
+    qrScheduleHiddenStop();
     await qrVideo.play();
+    if (session !== qrSession) return;
     qrMessage.textContent = "Point the camera at the participant's QR code.";
-    qrScanning = true;
     qrTick();
   } catch (error) {
+    if (candidateStream !== null) {
+      for (const track of candidateStream.getTracks()) track.stop();
+    }
+    if (session !== qrSession) return;
     qrReleaseCamera();
     qrMessage.textContent = qrCameraProblem(error);
+    staffDuckSubscription?.resume();
   }
 };
 
@@ -6203,7 +6220,7 @@ if (qrLaunch) {
 }
 addEventListener("pagehide", qrReleaseCamera);
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden) qrStop();
+  qrScheduleHiddenStop();
 });
 
 // Staff arrive here holding a duck that needs a person, so the list is the
@@ -6272,7 +6289,12 @@ const runRegistrationSearch = async (rawQuery, autoPair) => {
     const parameters = new URLSearchParams({ eventId: currentEvent.id, q: query });
     const body = await fetchJson("/api/v1/staff/registrations/search?" + parameters);
     if (sequence !== registrationSearchSequence) return;
-    globalThis.quickDucksLive.markClean(registrationSearchForm);
+    // markClean resumes queued live work, so only call it when this search
+    // actually clears user input dirtiness. Automatic list loads are already
+    // clean and must not queue the duck detail load again.
+    if (globalThis.quickDucksLive.isDirty(registrationSearchForm)) {
+      globalThis.quickDucksLive.markClean(registrationSearchForm);
+    }
     // An exactly typed lookup code identifies one participant with no
     // ambiguity, so pair straight away instead of showing a one-row list to
     // click. The server never reports a paired participant, so a code that
@@ -6370,14 +6392,18 @@ const load = async () => {
       fetchJson("/api/v1/events/current"),
       fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token)),
     ]);
+    // A refresh already in flight when scanning starts must not repaint the
+    // pairing area and release the newly acquired camera.
+    if (qrStarting || qrScanning) return;
     currentEvent = eventResponse.event;
     summary.replaceChildren();
-    qrStop();
+    qrStop(false);
     if (workArea) workArea.hidden = true;
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
     renderWinnerAction(duck);
   } catch (error) {
+    if (qrStarting || qrScanning) return;
     if (error.message !== "signed-out") {
       if (error.status === 403 || error.status === 404) {
         selectedRegistration = null;
