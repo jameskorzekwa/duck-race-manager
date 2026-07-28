@@ -479,7 +479,11 @@ test.describe("sitewide UI consistency", () => {
         duck.boundingBox(),
       ]);
       const visibleDuckTop = duckBox.y + duckBox.height * (8 / 76);
+      const visibleDuckBottom = duckBox.y + duckBox.height * (68.5 / 76);
+      const slitBox = await slit.boundingBox();
       expect(visibleDuckTop).toBeGreaterThan(actionsBox.y + actionsBox.height + 16);
+      expect(visibleDuckBottom - slitBox.y).toBeGreaterThan(4);
+      expect(visibleDuckBottom - slitBox.y).toBeLessThan(24);
     }
 
     await page.emulateMedia({ reducedMotion: "reduce" });
