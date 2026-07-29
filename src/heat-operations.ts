@@ -384,18 +384,22 @@ const resultResponseRow = (row: PublishedResultRow): Record<string, unknown> => 
 const getHeatDetail = async (env: Env, eventId: string, heatId: string): Promise<Response> => {
   const heat = await getHeatSummary(env, eventId, heatId);
   if (heat === null) return json({ error: "Heat not found." }, 404);
-  const [roster, results] = await Promise.all([
+  const [roster, results, podium] = await Promise.all([
     env.DB.prepare(rosterSql).bind(eventId, heatId).all<RosterRow>(),
     publishedResults(env, eventId, heatId),
+    // The final builds its podium one scan at a time, so the places taken so far
+    // are part of the heat a station is looking at, not a separate thing it has
+    // to go and ask about. Round one has no provisional state to report, and
+    // neither does a final that already published one.
+    heat.round === "FINAL" && heat.status === "AWAITING_RESULT"
+      ? finalPodiumState(env, eventId, heatId, null)
+      : Promise.resolve(null),
   ]);
   return json({
     heat: heatSummary(heat),
     roster: roster.results.map(rosterResponse),
     results: results.results.map(resultResponseRow),
-    // The final builds its podium one scan at a time, so the places taken so far
-    // are part of the heat a station is looking at, not a separate thing it has
-    // to go and ask about. Round one has no provisional state to report.
-    podium: heat.round === "FINAL" ? await finalPodiumState(env, eventId, heatId, null) : null,
+    podium,
   });
 };
 
@@ -1873,11 +1877,22 @@ const scannedPodiumGuardSql = `AND h.round = 'FINAL' AND e.status = 'FINAL'
          AND tag_selected.race_entry_id = ?
     )`;
 
-// The place is free and this duck is not already standing somewhere else on the
-// podium. "Free" means held by nobody who could still be published there: a row
-// whose racer has since left the race is not holding a place, because the batch
-// that would publish it refuses to write them. That is the same judgement
-// `finalPodiumState` shows the station, repeated where it is authoritative.
+// The place is free and this duck is not already standing somewhere on the
+// podium.
+//
+// Both halves mean exactly what `finalPodiumState` shows the station, because a
+// guard that disagrees with the buttons it guards produces a control that can
+// only ever fail. A row holds nothing if its racer has since left the race — the
+// batch that would publish it refuses to write them — and a row holds nothing if
+// its place is deeper than the podium still has, which is what a withdrawal
+// elsewhere in the roster does to a place that was already recorded.
+//
+// The second half is the one that bites. Reading it as a bare "this duck has a
+// row" left a still-`ACTIVE` finalist whose recorded place fell outside the
+// shrunken depth invisible to every projection and permanently blocked here and
+// by `UNIQUE (heat_id, race_entry_id)`: the page offered that duck the open
+// places, and every one of them was refused forever. The stale row itself is
+// deleted by the recording batch below.
 const scannedPodiumPlaceOpenSql = `AND NOT EXISTS (
       SELECT 1 FROM final_podium_selections held
         JOIN race_entries held_entry ON held_entry.id = held.race_entry_id
@@ -1888,6 +1903,7 @@ const scannedPodiumPlaceOpenSql = `AND NOT EXISTS (
     AND NOT EXISTS (
       SELECT 1 FROM final_podium_selections mine
        WHERE mine.heat_id = h.id AND mine.race_entry_id = ?
+         AND mine.place <= ${requiredPodiumPlacesSql("h.event_id", "h.id")}
     )`;
 
 const commandExistsSql = `EXISTS (
@@ -2113,14 +2129,16 @@ const recordFinalPodiumPlace = async (
     );
   } else {
     statements.push(
-      // Only a place nobody can still be published into can be standing here,
-      // and only because the guarded command row above accepted this scan for
-      // it. Clearing it is what lets the duck that actually finished there be
-      // scanned in after a finalist leaves mid-result.
+      // Sweep the two rows this scan is allowed to replace, and only because the
+      // guarded command row above accepted it: whatever was standing in the
+      // place being taken, and whatever this duck was standing in itself. The
+      // guard proved neither of them still holds anything — the racer left, or
+      // the place is deeper than the podium still has — so this is what stops a
+      // row nobody can see from occupying a place or a duck forever.
       env.DB.prepare(
         `DELETE FROM final_podium_selections
-          WHERE heat_id = ? AND place = ? AND ${commandExistsSql}`,
-      ).bind(heatId, place, commandId, eventId, heatId),
+          WHERE heat_id = ? AND (place = ? OR race_entry_id = ?) AND ${commandExistsSql}`,
+      ).bind(heatId, place, raceEntryId, commandId, eventId, heatId),
       env.DB.prepare(
         `INSERT INTO final_podium_selections
           (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
@@ -2157,7 +2175,24 @@ const recordFinalPodiumPlace = async (
   try {
     await env.DB.batch(statements);
   } catch {
-    return json({ error: "That podium place conflicted with another update. Retry with the same command identifier." }, 409);
+    // Deliberately swallowed. A D1 batch is one transaction, so whether this
+    // threw or merely wrote nothing, the command row below is the only honest
+    // account of what happened — and both outcomes need the same answer.
+  }
+  // Every statement is gated on the command row landing, so a guarded refusal
+  // makes the whole batch a silent no-op that raises nothing by itself. Reading
+  // the command back is what stops this endpoint reporting 201 and "2nd place
+  // saved" for a scan that wrote nothing.
+  //
+  // The advice is deliberately not "retry with the same command identifier".
+  // Nothing was written, so there is no command to replay; the podium moved
+  // under the page that painted the buttons, and the next scan has to be taken
+  // from a fresh one.
+  if (await findCommand(env, commandId) === null) {
+    return json({
+      error: "The podium changed while that duck was scanned."
+        + " Scan it again and choose from the places that are still open.",
+    }, 409);
   }
   return podiumScanResponse(env, eventId, heatId, false);
 };
@@ -2241,12 +2276,12 @@ const clearFinalPodiumPlace = async (
       ),
     ]);
   } catch {
-    return json({ error: "That podium place conflicted with another update. Refresh and try again." }, 409);
+    // Same reasoning as recording: the command row decides, not the exception.
   }
-  const command = await findCommand(env, commandId);
-  if (command === null) {
+  if (await findCommand(env, commandId) === null) {
     return json({
-      error: "That podium place is not recorded for a final that is waiting for its result.",
+      error: "That podium place is not recorded for a final that is waiting for its result."
+        + " Refresh and try again.",
     }, 409);
   }
   return podiumScanResponse(env, eventId, heatId, false);

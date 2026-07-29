@@ -2894,3 +2894,127 @@ test("the finish-line ineligible outcome is refused to roles that may not take r
   }
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
 });
+
+// ---------------------------------------------------------------------------
+// Scanned final podium places
+//
+// The command row that records a place concatenates five separate SQL fragments
+// and binds them as one positional list, and the podium it guards is re-read
+// inside the batch because the preflight cannot hold a lock. Both of those are
+// silent when they go wrong: a bind list one short binds NULL rather than
+// raising, and a guarded refusal makes every following statement a no-op.
+// ---------------------------------------------------------------------------
+
+const seedAwaitingFinal = (database) => {
+  seedRace(database);
+  seedRoundOneHeats(database);
+  seedFinalHeat(database);
+  database.exec(`
+    UPDATE events SET status = 'FINAL' WHERE id = 'event';
+    UPDATE heats
+       SET status = 'AWAITING_RESULT', roster_locked_at = '2026-07-26T12:00:00Z',
+           started_at = '2026-07-26T12:05:00Z', finished_at = '2026-07-26T12:10:00Z',
+           revision = 3
+     WHERE id = 'heat-final';
+  `);
+  const tag = database.prepare(
+    "INSERT INTO duck_tags (id, duck_id, token, status, activated_at) VALUES (?, ?, ?, 'ACTIVE', '2026-07-26T10:00:00Z')",
+  );
+  const tokens = {};
+  for (let index = 1; index <= 6; index += 1) {
+    tokens[`duck-${index}`] = String.fromCharCode(96 + index).repeat(32);
+    tag.run(`tag-${index}`, `duck-${index}`, tokens[`duck-${index}`]);
+  }
+  return tokens;
+};
+
+const podiumRequest = (token, body) => jsonRequest(
+  `/api/v1/staff/ducks/${token}/heat-winner`,
+  "POST",
+  { commandId: commandId(), eventId: "event", heatId: "heat-final", revision: 3, ...body },
+);
+
+test("the scanned podium command binds exactly the placeholders its fragments emit", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const tokens = seedAwaitingFinal(database);
+  const DB = d1(database);
+  // `node:sqlite` raises on too many bindings but silently binds NULL for too
+  // few, so counting is the only thing that catches an under-bind before it
+  // becomes a guard that quietly matches nothing.
+  const captured = [];
+  DB.beforeBatch = (statements) => {
+    for (const statement of statements) captured.push(statement);
+  };
+  const response = await handleHeatOperations(
+    podiumRequest(tokens["duck-1"], { raceEntryId: "entry-1", place: 2 }),
+    { DB },
+    actor,
+  );
+  assert.equal(response.status, 201);
+  assert.ok(captured.length > 0, "the recording batch ran");
+  for (const statement of captured) {
+    const placeholders = (statement.sql.match(/\?/g) ?? []).length;
+    assert.equal(
+      statement.args.length,
+      placeholders,
+      `bindings must match placeholders in: ${statement.sql}`,
+    );
+  }
+  // The command row is the one that concatenates the fragments, and every value
+  // in it is bound rather than interpolated.
+  const command = captured[0];
+  assert.match(command.sql, /INSERT INTO race_commands/);
+  assert.match(command.sql, /'RECORD_FINAL_PODIUM_PLACE'/);
+  assert.doesNotMatch(command.sql, /entry-1|heat-final|[a-z]{32}/);
+  assert.deepEqual(
+    database.prepare("SELECT race_entry_id, place FROM final_podium_selections").all()
+      .map((row) => ({ ...row })),
+    [{ race_entry_id: "entry-1", place: 2 }],
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a scanned podium place refused inside the batch writes nothing and says the podium moved", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const tokens = seedAwaitingFinal(database);
+  const DB = d1(database);
+
+  // Every preflight check passes, and then another station takes the same place
+  // in the trips before the batch. Only the guarded command row can see that,
+  // and taking the place moves no heat revision this request could have checked.
+  DB.beforeBatch = () => {
+    database.exec(`
+      INSERT INTO final_podium_selections
+        (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, recorded_at,
+         recorded_by_staff_profile_id, source_command_id)
+      VALUES ('raced-place', 'event', 'heat-final', 'entry-4', 'assignment-4', 1,
+              '2026-07-26T12:20:00Z', 'staff', 'result-command');
+    `);
+  };
+  const lost = await handleHeatOperations(
+    podiumRequest(tokens["duck-1"], { raceEntryId: "entry-1", place: 1 }),
+    { DB },
+    actor,
+  );
+  assert.equal(lost.status, 409);
+  assert.match((await lost.json()).error, /podium changed while that duck was scanned/i);
+
+  // The losing scan wrote nothing at all: no place, no command to be replayed
+  // from, and no heat revision that would strand the station on a stale page.
+  assert.deepEqual(
+    database.prepare("SELECT race_entry_id, place FROM final_podium_selections ORDER BY place").all()
+      .map((row) => ({ ...row })),
+    [{ race_entry_id: "entry-4", place: 1 }],
+  );
+  assert.equal(
+    database.prepare(
+      "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'RECORD_FINAL_PODIUM_PLACE'",
+    ).get().count,
+    0,
+  );
+  assert.equal(database.prepare("SELECT revision FROM heats WHERE id = 'heat-final'").get().revision, 3);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM audit_events").get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});

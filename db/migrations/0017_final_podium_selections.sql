@@ -11,10 +11,16 @@
 -- reader anywhere has to learn to filter a half-finished podium out of a result
 -- set, and no partially scanned podium can ever reach the public board.
 --
--- Every foreign key cascades. These rows are scratch state with no historical
--- value, so they must never be the reason a heat, a roster entry, an assignment,
--- or an event cannot be deleted. `duck_tags.supersedes_tag_id` is the standing
--- reminder of what a RESTRICT on a row nobody thinks about costs.
+-- Every event-scoped foreign key cascades. These rows are scratch state with no
+-- historical value, so they must never be the reason a heat, a roster entry, an
+-- assignment, a command, or an event cannot be deleted — delete event is the only
+-- cleanup path this product has, and `duck_tags.supersedes_tag_id` is the
+-- standing reminder of what a RESTRICT on a row nobody thinks about costs there.
+--
+-- `recorded_by_staff_profile_id` is the deliberate exception and stays RESTRICT,
+-- matching `heat_results` and every other row that names the staffer who wrote
+-- it. Staff profiles are deactivated, never deleted, and force delete does not
+-- touch that table, so this cannot reach the cleanup path.
 CREATE TABLE final_podium_selections (
   id TEXT PRIMARY KEY,
   event_id TEXT NOT NULL,

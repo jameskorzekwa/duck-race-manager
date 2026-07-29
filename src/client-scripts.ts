@@ -6936,22 +6936,34 @@ const submitPodiumPlace = async (data, candidate, place, button) => {
     // The response, not the count the button was painted from, decides what this
     // says: another station may have filled a place between the paint and the
     // press, so the scan that publishes is not always the one that looked like it
-    // would.
+    // would. A replayed command can also come back to a podium that has moved on
+    // since — the place may have been cleared — so the banner claims a saved
+    // place only while the response still shows this duck standing in it.
     const published = body.heat && body.heat.status === "FINALIZED";
+    const standing = published || podiumTakenPlacements(body.podium)
+      .some((placement) => placement.place === place && placement.raceEntryId === candidate.raceEntryId);
     winnerSuccess = published
       ? {
         title: "Official podium saved",
         detail: duckLabel + " took " + podiumPlaceLabel(place) + ". The final podium is now official.",
       }
-      : {
-        title: podiumPlaceLabel(place) + " saved",
-        detail: duckLabel + " is recorded as " + podiumPlaceLabel(place) + " in the final.",
-      };
+      : standing
+        ? {
+          title: podiumPlaceLabel(place) + " saved",
+          detail: duckLabel + " is recorded as " + podiumPlaceLabel(place) + " in the final.",
+        }
+        : {
+          title: podiumPlaceLabel(place) + " is not recorded",
+          detail: duckLabel + " is not standing in " + podiumPlaceLabel(place)
+            + " any more. Check the podium below and scan again if it should be.",
+        };
     await load();
-    pageTitle.textContent = duckLabel + " took " + podiumPlaceLabel(place);
+    if (standing) pageTitle.textContent = duckLabel + " took " + podiumPlaceLabel(place);
     message.textContent = published
       ? "Official podium saved. Live race screens have been notified."
-      : "Saved. Scan the next duck to pass the finish line.";
+      : standing
+        ? "Saved. Scan the next duck to pass the finish line."
+        : "That place is not recorded any more. Check the podium and scan again if it should be.";
   } catch (error) {
     if (error.message !== "signed-out") {
       button.disabled = false;
