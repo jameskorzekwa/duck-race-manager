@@ -30,34 +30,6 @@ function labelNames(item) {
   return new Set((item.labels ?? []).map((label) => typeof label === "string" ? label : label.name));
 }
 
-function sensitivePath(path) {
-  return path.startsWith(".github/")
-    || path.startsWith(".opencode/")
-    || path.startsWith("infra/")
-    || path.startsWith("db/migrations/")
-    || path.startsWith("scripts/")
-    || path.startsWith("wrangler")
-    || ["opencode.json", "package.json", "package-lock.json", "AGENTS.md"].includes(path);
-}
-
-async function sensitivePullRequest(github, owner, repo, pullNumber) {
-  const files = await github.paginate(github.rest.pulls.listFiles, {
-    owner, repo, pull_number: pullNumber, per_page: 100,
-  });
-  return files.some(({ filename }) => sensitivePath(filename));
-}
-
-async function currentHumanApproval(github, owner, repo, pullNumber, headSha) {
-  const reviews = await github.paginate(github.rest.pulls.listReviews, {
-    owner, repo, pull_number: pullNumber, per_page: 100,
-  });
-  const latest = reviews
-    .filter((review) => review.user?.id === 38769771 && review.commit_id === headSha)
-    .sort((left, right) => Date.parse(left.submitted_at) - Date.parse(right.submitted_at))
-    .at(-1);
-  return latest?.state === "APPROVED";
-}
-
 function pipelinePullProvenance(pr, defaultBranch) {
   const branch = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
   const marker = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
@@ -158,9 +130,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
       } else {
         const defaultRef = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
         const exactCheckValid = await validExactCheck(github, owner, repo, pr);
-        const humanApproved = !await sensitivePullRequest(github, owner, repo, pr.number)
-          || await currentHumanApproval(github, owner, repo, pr.number, pr.head.sha);
-        if (defaultRef.data.commit.sha !== pr.base.sha || !exactCheckValid || !humanApproved) {
+        if (defaultRef.data.commit.sha !== pr.base.sha || !exactCheckValid) {
           try {
             await github.graphql(`
               mutation($pullRequestId: ID!) {
@@ -483,9 +453,7 @@ export async function queueNextApproved({ github, context, core }) {
   const defaultRef = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
   const exactCheckValid = await validExactCheck(github, owner, repo, pr);
   const provenanceValid = pipelinePullProvenance(pr, defaultBranch);
-  const humanApproved = !await sensitivePullRequest(github, owner, repo, pr.number)
-    || await currentHumanApproval(github, owner, repo, pr.number, pr.head.sha);
-  if (!provenanceValid || defaultRef.data.commit.sha !== pr.base.sha || !exactCheckValid || !humanApproved) {
+  if (!provenanceValid || defaultRef.data.commit.sha !== pr.base.sha || !exactCheckValid) {
     try {
       await github.rest.issues.removeLabel({
         owner, repo, issue_number: pr.number, name: "agent:approved",

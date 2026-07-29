@@ -183,6 +183,30 @@ test("pipeline comments hyperlink workflow runs instead of pasting bare URLs", a
   assert.doesNotMatch(task, /Agent Task (?:run|failed): \$\{context\.serverUrl\}/);
 });
 
+test("the exact-head gate is autonomous and keeps deployment human-approved", async () => {
+  const review = await read(".github/workflows/agent-review.yml");
+  const gate = review.slice(review.indexOf("  gate:"), review.indexOf("  queue-merge:"));
+  const reconciliation = await read("scripts/agent-pipeline.mjs");
+
+  assert.doesNotMatch(gate, /humanApproved|SENSITIVE/);
+  assert.doesNotMatch(review, /outputs\.sensitive/);
+  assert.doesNotMatch(reconciliation, /sensitivePullRequest|currentHumanApproval/);
+
+  assert.match(gate, /decision\.sha === expectedHead/);
+  assert.match(gate, /decision\.verdict === "approved"/);
+  assert.match(gate, /VALIDATE_RESULT === "success"/);
+  assert.match(gate, /!revokedAfterStart/);
+
+  const release = await read(".github/workflows/release.yml");
+  assert.match(release, /environment:/);
+  assert.match(release, /production/);
+
+  const policy = await read("scripts/validate-agent-patch.mjs");
+  for (const control of ["\\.github", "\\.opencode", "opencode\\\\.json", "AGENTS\\\\.md"]) {
+    assert.match(policy, new RegExp(control));
+  }
+});
+
 test("model budgets let a full feature finish inside each job timeout", async () => {
   const task = await read(".github/workflows/agent-task.yml");
   const implement = task.slice(task.indexOf("  implement:"), task.indexOf("  verify:"));
