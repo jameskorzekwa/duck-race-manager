@@ -45,11 +45,29 @@ test("the summary cannot forge durable pipeline markers", () => {
   assert.match(summary, /&lt;!-- agent-pipeline task-retry=3 --&gt;/);
 });
 
-test("the summary keeps the most recent output within its character budget", () => {
-  const log = `\u2716 failing tests:\n${"x".repeat(50)}\nfinal assertion`;
+test("the summary keeps the failure identity within its character budget", () => {
+  const log = `\u2716 failing tests:\n\u2716 the search section promises a status-only projection\n${"x".repeat(9000)}`;
 
-  const summary = summarizeVerificationFailure(log, { maxCharacters: 20 });
+  const summary = summarizeVerificationFailure(log, { maxCharacters: 200 });
 
-  assert.match(summary, /^\[truncated to the last 20 characters\]\n/);
-  assert.ok(summary.endsWith("final assertion"));
+  assert.match(summary, /the search section promises a status-only projection/);
+  assert.match(summary, /\[truncated to the first 200 characters\]$/);
+});
+
+test("one enormous assertion value cannot crowd out the failing test name", () => {
+  const log = [
+    "\u2716 failing tests:",
+    "\u2716 the search section promises a status-only projection",
+    "  AssertionError: The input did not match /never email, phone, or staff data\\./",
+    `  actual: '${"<style>.card { padding: 1rem; }</style>".repeat(400)}'`,
+    "  expected: /never email, phone, or staff data\\./",
+  ].join("\n");
+
+  const summary = summarizeVerificationFailure(log);
+
+  assert.match(summary, /the search section promises a status-only projection/);
+  assert.match(summary, /did not match/);
+  assert.match(summary, /\[line truncated\]/);
+  assert.match(summary, /expected: \/never email, phone, or staff data/);
+  assert.ok(summary.length < 3000, `expected a compact summary, got ${summary.length} characters`);
 });
