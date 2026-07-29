@@ -27,6 +27,7 @@ test("implementation keeps models and candidate execution outside OIDC publicati
   assert.ok(implement.indexOf(".opencode/node_modules") < implement.indexOf("validate-agent-patch.mjs\" --source"));
   assert.ok(implement.indexOf("validate-agent-patch.mjs\" --source") < implement.indexOf("rsync -a"));
   assert.match(implement, /cleanup-model-workspace\.mjs/);
+  assert.doesNotMatch(implement, /rm -rf "\$RUNNER_TEMP\/agent-task"/);
   assert.match(implement, /scripts\/validate-agent-patch\.mjs/);
   assert.match(implement, /session list --dir "\$PIPELINE_MODEL_DIR" --with-status/);
   assert.doesNotMatch(verify, /id-token: write|models: read/);
@@ -53,6 +54,7 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   assert.match(review, /\.pipeline\/candidate\.patch/);
   assert.match(review, /git -C trusted archive/);
   assert.match(review, /session list --dir "\$PIPELINE_MODEL_DIR" --with-status/);
+  assert.doesNotMatch(review, /rm -rf "\$RUNNER_TEMP\/agent-review"/);
   assert.match(review, /timeout-minutes: 75/);
   assert.match(workflow, /github\.actor_id == '38769771'/);
   assert.match(validate, /scripts\/validate-agent-patch\.mjs/);
