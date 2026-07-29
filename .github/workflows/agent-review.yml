@@ -353,25 +353,13 @@ jobs:
             --model anthropic/claude-opus-4-8 \
             --agent pipeline-reviewer \
             --json \
-            > "$RUNNER_TEMP/agent-review/session-dispatch.json" || status=$?
-          if [[ "$status" -eq 0 ]]; then
-            DISPATCH_PATH="$RUNNER_TEMP/agent-review/session-dispatch.json" \
-              STATE_PATH="$HOME/.local/state/quickducks-agent-runner/active.json" node <<'NODE' || status=$?
-          const fs = require("node:fs");
-          const dispatch = JSON.parse(fs.readFileSync(process.env.DISPATCH_PATH, "utf8"));
-          if (!dispatch.sessionId || dispatch.promptDispatched !== true) throw new Error("OpenChamber did not confirm review dispatch.");
-          const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
-          state.sessionId = dispatch.sessionId;
-          fs.writeFileSync(process.env.STATE_PATH, JSON.stringify(state));
-          NODE
-          fi
-          if [[ "$status" -eq 0 ]]; then
-            node "$GITHUB_WORKSPACE/trusted/scripts/wait-for-openchamber-session.mjs" \
-              --dispatch "$RUNNER_TEMP/agent-review/session-dispatch.json" \
-              --result "$RUNNER_TEMP/agent-review/session-result.json" \
-              --timeout 3300 \
-              --marker-prefix PIPELINE_REVIEW_ || status=$?
-          fi
+            > "$RUNNER_TEMP/agent-review/session-dispatch.json" 2>&1 || true
+          node "$GITHUB_WORKSPACE/trusted/scripts/wait-for-openchamber-session.mjs" \
+            --dir "$PIPELINE_MODEL_DIR" \
+            --result "$RUNNER_TEMP/agent-review/session-result.json" \
+            --state "$HOME/.local/state/quickducks-agent-runner/active.json" \
+            --timeout 3300 \
+            --marker-prefix PIPELINE_REVIEW_ || status=$?
           printf '%s\n' "$status" > "$RUNNER_TEMP/agent-review/review-exit-status.txt"
 
       - name: Extract exact-head decision

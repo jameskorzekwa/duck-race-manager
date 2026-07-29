@@ -182,6 +182,14 @@ does not call a model. It:
 An interrupted model turn is restarted from issue, branch, PR, and check state;
 it is never resumed as if a provider call were exactly-once.
 
+When hosted verification rejects a patch, the unprivileged gate captures its own
+output, and the model-free publisher posts a bounded, credential-redacted
+excerpt under a `verification-failed` marker. The next attempt receives it as
+`untrustedVerificationEvidence`, so a retry repairs the named failure instead of
+reimplementing blind. The excerpt is data, never instructions: pipeline markers
+inside it are neutralized before it is posted, so candidate output cannot forge
+durable state.
+
 The runner records each active model directory outside the Actions workspace.
 Every later model job checks that record and fails closed while any prior
 OpenChamber parent or child session remains busy. Workspaces are unique per run
@@ -212,6 +220,7 @@ opencode.json
 .github/workflows/agent-reconcile.yml
 scripts/agent-pipeline.mjs
 scripts/cleanup-model-workspace.mjs
+scripts/summarize-verification-failure.mjs
 scripts/validate-agent-patch.mjs
 scripts/wait-for-openchamber-session.mjs
 ```
@@ -240,9 +249,16 @@ not copy `auth.json`, `OPENCODE_AUTH_CONTENT`, access tokens, or refresh tokens 
 GitHub. Verify the local OpenChamber model list before enabling intake. The
 self-hosted job should dispatch with `openchamber session create` and then poll
 authoritative directory-scoped session status with a bounded trusted helper.
-Require the exact parent, every child session to be idle, and a completed
-terminal marker before handling model output. Avoid one long `--wait` HTTP
-request because intermediaries can end it while the OpenCode session continues.
+Require every session in the unique per-run directory to be idle and the parent
+session to end on a completed terminal marker before handling model output.
+
+Treat the dispatch call's own exit status as advisory. A long `--wait` request
+can be ended by an intermediary while the session keeps running, and the CLI
+aborts non-blocking control calls after a fixed short HTTP timeout even though
+the server still creates the session and runs the model. Because the model
+directory is unique per run, the parent session inside it is the authoritative
+dispatch record; discover it by polling instead of trusting the response.
+
 The job must not load provider credentials into the Actions process.
 
 Grant `contents: write`, `pull-requests: write`, and `actions: write` only to a
