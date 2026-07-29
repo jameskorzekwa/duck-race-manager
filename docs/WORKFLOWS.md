@@ -306,9 +306,11 @@ live need must not spend one. The server marks public content pages — the home
 page, `/race`, `/my-ducks`, `/register`, `/duck/<number>`, `/r/<token>`, and
 `/t/<token>` — with `data-live-nav` on the navigation element, and only those
 pages register the navigation subscriber. The staff sign-in page, the not-found
-page, and staff error pages carry no marker and no other live surface, so they
-open no socket and schedule no polls, and they keep the navigation exactly as the
-server painted it. Staff HTML routes still resolve the same phase for their
+page, staff error pages, and the page a staff account with no operational role
+lands on carry no marker and no other live surface, so they open no socket and
+schedule no polls, and they keep the navigation exactly as the server painted it.
+The no-roles page also carries no `data-live-staff` marker, which is the hook the
+hub reads to decide a page has a staff surface to revalidate. Staff HTML routes still resolve the same phase for their
 server-rendered primary navigation, so their Home, Register or Race Status, My
 Ducks, and Staff links match the public site on first paint without taking a
 live-navigation connection.
@@ -1990,6 +1992,13 @@ entry per pass, in the order the staff must perform them:
 `duckNumbers` matters for a split: pouring a whole bag needs no search, but
 taking specific ducks back out of one does, so the instruction names them.
 
+The two counts are deliberately different facts, and the instruction never mixes
+them. `movedEntryCount` counts roster places; `duckNumbers` counts the ducks
+physically in the bag, and a place whose duck assignment has ended contributes no
+number. **The instruction always counts exactly the ducks it names**, so a
+staffer standing at the bags is never sent to find a duck that does not exist,
+and any roster place with no duck is reported as its own separate sentence.
+
 The Admin view turns each entry into one physical instruction, in the same loud
 visual language as the pairing page's own bag callout, at the very top of the
 page and outside every view so switching views cannot hide it:
@@ -1997,6 +2006,16 @@ page and outside every view so switching views cannot hide it:
 - A fold reads *Pour the Heat 5 bag into the Heat 4 bag*.
 - A split reads *Move 2 ducks: Duck #117, Duck #118 from the Heat 4 bag into a
   new Heat 5 bag*.
+- A move that also carries a racer with no current duck adds *1 racer in this
+  move has no duck assigned right now, so there is nothing to carry for them.*
+- A move with no duck to carry at all says so — *No ducks to carry*, and for a
+  split *No duck moves out of the Heat 4 bag* — rather than naming a count with
+  nothing behind it.
+
+The queue is read back out of browser storage, which anything on the origin can
+have written, so every field is revalidated on the way in and on the way out and
+a malformed entry is dropped rather than rendered. Each value is written with
+`textContent`.
 
 The instruction is queued in the browser rather than merely painted, so it
 survives a reload, a view switch, and a live refresh. Only pressing **Done — the
@@ -2206,6 +2225,36 @@ winner either, but they never withdrew, so they fall through to the generic
 refusal rather than being announced under a status word that is not theirs. If
 such a duck is scanned at the finish line it is still refused, with a sentence
 that makes no claim about a status.
+
+**A heat in which nobody at all can win is said plainly, on both round-one
+surfaces.** Withdrawal is allowed at every heat state and the eligible-racer
+guard protects only the lock and the start, so the last `ACTIVE` racer in a
+round-one heat can leave while that heat is already `RUNNING`. *Scan the next
+duck* is then the wrong instruction: every duck in that bag answers
+`DUCK_NOT_ELIGIBLE`, and no scan will ever produce a winner.
+
+Both stations therefore count the places a heat requires the same way — round one
+as `min(1, eligible roster size)` and the final as `min(3, eligible roster
+size)` — so a round-one heat is never reported as needing a winner that no duck
+may be. When that count is zero:
+
+- The finish-line station says *Nobody in this heat can win: every racer in it is
+  withdrawn or disqualified, so no result can be recorded. Every duck stays in
+  its bag. Ask the race director to reactivate a racer, then this station can
+  take the result.* Its **Required result** fact reads *No racer can win*. A heat
+  that is still `RUNNING` keeps its finish button, with that sentence appended,
+  because those ducks are physically on the water and the heat must still be
+  marked finished.
+- The staff duck inspection page, which is where round one actually publishes,
+  adds *Nobody in Heat N can win* to the statement about the scanned duck,
+  explains that every duck in that bag will be refused, and asks for reactivation
+  instead of the next scan. It answers that question by reading the same heat
+  roster projection the finish line reads, and only for a duck the server has
+  already refused; an unavailable read leaves the single-duck statement exactly
+  as it was rather than claiming anything about the heat.
+
+Reactivation is the remedy on both, it is available to a race director at any
+point, and it restores the winner action on the very next scan.
 
 The final keeps the complete-podium station flow. It requires distinct places 1
 through `min(3, eligible final roster size)` — the same count the server's result
@@ -2436,7 +2485,13 @@ or mutation payloads. Domain names only decide which open surfaces need an
 authoritative refetch; they are never data or proof that a command succeeded.
 
 A successful signal causes matching public, private, `My Ducks`, station,
-inventory, scan, and staff-console subscribers to refetch D1-backed APIs.
+inventory, scan, and staff-console subscribers to refetch D1-backed APIs. A page
+subscribes only to the domains it can actually repaint. The staff console client
+runs on both the Admin console and the registration desk, so it derives its
+domain list from the surfaces the page in front of it renders and the roles that
+may read them: the desk carries the participants surface only and therefore asks
+for `event`, `staff`, `participants`, and `ducks`, while the Admin console adds
+`heats` and, for an administrator, `support`.
 Reconnect uses bounded jitter and triggers an integrity refetch to close the
 missed-signal gap. While disconnected or when WebSocket is unavailable,
 subscribers poll approximately every five seconds; while connected they perform

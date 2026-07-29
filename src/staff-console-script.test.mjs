@@ -815,3 +815,91 @@ test("registration desk has no advance duck disposition controls", () => {
   assert.doesNotMatch(markup, /duckKeepPreference|Duck preference|Undecided/);
   assert.doesNotMatch(staffHomeScript, /duckKeepPreference|duck_keep_preference/);
 });
+
+// The live hub admits a bounded number of connections and fans every signal out
+// to every subscriber that names a matching domain, so a page that subscribes to
+// a domain it cannot repaint spends a refresh — and, per registration device, a
+// held Durable Object connection — on nothing. This one client runs on two very
+// different pages, so the domains have to be decided from what is on the page.
+test("the console subscribes only to the live domains the page it is on renders", () => {
+  const source = staffHomeScript.match(
+    /const staffLiveDomains = \["event", "staff"\];[\s\S]*?staffLiveDomains\.push\("support"\);\n/,
+  );
+  assert.ok(source, "the console script decides its live domains from the page");
+  const domainsFor = (context) => new Function(
+    ...Object.keys(context),
+    `${source[0]}\nreturn staffLiveDomains;`,
+  )(...Object.values(context));
+
+  // The Admin console renders every surface, so it keeps every domain.
+  assert.deepEqual(
+    domainsFor({
+      canRegistration: true,
+      participantList: {},
+      canRaceRead: true,
+      heatList: {},
+      finalistCard: {},
+      isSystemAdmin: true,
+      supportSummary: {},
+      notificationList: {},
+      auditList: {},
+    }),
+    ["event", "staff", "participants", "ducks", "heats", "support"],
+  );
+
+  // The registration desk renders participants and nothing else.
+  assert.deepEqual(
+    domainsFor({
+      canRegistration: true,
+      participantList: {},
+      canRaceRead: false,
+      heatList: null,
+      finalistCard: null,
+      isSystemAdmin: false,
+      supportSummary: null,
+      notificationList: null,
+      auditList: null,
+    }),
+    ["event", "staff", "participants", "ducks"],
+  );
+
+  // A race director's console has the heats but not the administrator support
+  // surfaces, and the subscription follows that exactly.
+  assert.deepEqual(
+    domainsFor({
+      canRegistration: true,
+      participantList: {},
+      canRaceRead: true,
+      heatList: {},
+      finalistCard: {},
+      isSystemAdmin: false,
+      supportSummary: null,
+      notificationList: null,
+      auditList: null,
+    }),
+    ["event", "staff", "participants", "ducks", "heats"],
+  );
+
+  // The gating is real, not theoretical: these are the hooks each page actually
+  // renders, so the registration desk genuinely has no heat or support surface a
+  // signal on those domains could repaint.
+  const desk = renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]);
+  const console_ = renderStaffHome("Administrator", true, []);
+  assert.ok(desk.includes("data-participant-list"));
+  for (const hook of [
+    "data-heat-list",
+    "data-finalist-card",
+    "data-support-summary",
+    "data-notification-list",
+    "data-audit-list",
+  ]) {
+    assert.ok(!desk.includes(hook), `the registration desk must not render ${hook}`);
+    assert.ok(console_.includes(hook), `the Admin console must render ${hook}`);
+  }
+
+  // And the subscription itself reads the computed list rather than a literal.
+  assert.match(
+    staffHomeScript,
+    /staffLiveSubscription = globalThis\.quickDucksLive\.subscribe\(\{\s*domains: staffLiveDomains,\s*root: operationsRoot,/,
+  );
+});

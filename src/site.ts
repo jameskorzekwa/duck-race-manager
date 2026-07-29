@@ -539,6 +539,12 @@ const preparingPanel = (marker: string, message: string): string => `
       <h1 class="page-title message-title">${escapeHtml(message)}</h1>
     </section>`;
 
+// The hero's "How it works" button was removed, so nothing on this page links to
+// `#how-it-works` any more. The id on the cards section stays: `/#how-it-works`
+// is a stable public deep link that can already have been shared or printed, an
+// id costs nothing to keep, and dropping it would break those links purely to
+// tidy markup no visitor sees. `public-race-flow.test.mjs` pins both halves — no
+// button, and the anchor still there — so this decision cannot drift silently.
 export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
   const cta = homePhaseCta[phase];
   return page({
@@ -1169,6 +1175,12 @@ const bagMoveCallout = (): string => `<section class="heat-bag bag-move" data-ba
 // what is missing, who grants it, and offers the two things that do work — the
 // public site and signing out. It carries no console client and no live
 // surface, so it holds no socket either.
+//
+// It therefore carries no `data-live-staff` marker. That marker is what the live
+// hub looks for to decide a page has a staff surface worth revalidating, and it
+// was here only because this panel was copied from the console shell. It changed
+// nothing while the page loads no script, but a marker that contradicts the
+// sentence above is a trap for the first person who adds one.
 export const renderStaffNoAccess = (
   displayName: string,
   phase: PublicPhase = "PREPARING",
@@ -1178,7 +1190,7 @@ export const renderStaffNoAccess = (
   robots: "noindex,nofollow",
   phase,
   content: `
-    <section class="page-panel operations-panel staff-panel" data-staff-no-access data-live-staff data-system-admin="false" data-roles="">
+    <section class="page-panel operations-panel staff-panel" data-staff-no-access data-system-admin="false" data-roles="">
       ${duck()}
       <p class="eyebrow">Staff account</p>
       <h1 class="page-title operations-title">No operational roles assigned.</h1>

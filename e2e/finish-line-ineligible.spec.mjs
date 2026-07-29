@@ -256,3 +256,129 @@ test.describe("a withdrawn duck at the finish line", () => {
     expect(errors).toEqual([]);
   });
 });
+
+// The dead end this closes. Withdrawal is allowed at any heat state, and the
+// eligible-racer guard protects only the lock and the start, so the last ACTIVE
+// racer in a round-one heat can leave while that heat is already RUNNING. Round
+// one publishes by scanning a tag rather than through the station form, so the
+// two surfaces a result taker actually stands in front of are the finish line
+// and the scanned duck's inspection page. Both used to send them to scan the
+// winning duck of a heat that has no winner in it: every duck in the bag answers
+// DUCK_NOT_ELIGIBLE, and nothing anywhere said why or how to get out.
+test.describe("a round-one heat nobody can win", () => {
+  test("tells the finish line and the scanned duck page plainly, and reactivation is the way out", async ({ page }) => {
+    test.setTimeout(120_000);
+    const errors = watchBrowserErrors(page);
+    // Round one, mid-race: heat 1 is published and heat 2 is on the water.
+    const seeded = await seedState("round-one");
+    const admin = seeded.accounts.find((account) => account.isSystemAdmin);
+    const resultTaker = accountWith(seeded.accounts, "RESULT_TAKER");
+
+    const listed = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats`, { token: admin.token });
+    const running = listed.body.heats.find((heat) => heat.status === "RUNNING");
+    expect(running, "the seeded race leaves one heat running").toBeTruthy();
+    const detail = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${running.id}`, {
+      token: admin.token,
+    });
+    const roster = detail.body.roster;
+    expect(roster.length).toBeGreaterThanOrEqual(2);
+
+    // Every racer in the running heat leaves. Their ducks were sealed into the
+    // heat 2 bag before any of it and are still on the water.
+    const racers = roster.map((entry) => {
+      const participant = seeded.participants.find((candidate) =>
+        candidate.visibleNumber === entry.duck.visibleNumber
+      );
+      expect(participant, `no seeded participant for duck ${entry.duck.visibleNumber}`).toBeTruthy();
+      return participant;
+    });
+    for (const racer of racers) {
+      await changeRegistrationStatus(admin.token, racer.registrationId, "withdraw");
+    }
+
+    // The heat is still RUNNING, so the finish button stays — those ducks have
+    // to be marked finished. What must not happen is the staffer learning only
+    // afterwards, one refused scan at a time, that there is no winner to find.
+    await signIn(page, resultTaker.email, "/staff/finish-line");
+    const stationMessage = page.locator("[data-station-message]");
+    const requiredResult = page.locator("[data-station-facts] .fact").filter({ hasText: "Required result" });
+    await expect(requiredResult).toContainText("No racer can win");
+    await expect(stationMessage).toContainText("When the race physically finishes, press the one finish button.");
+    await expect(stationMessage).toContainText("Nobody in this heat can win");
+    await expect(stationMessage).toContainText("Every duck stays in its bag.");
+    await expect(stationMessage).toContainText("Ask the race director to reactivate a racer");
+    // Every racer is still on the roster, marked, in their own slot.
+    await expect(page.locator("[data-station-roster] li")).toHaveCount(roster.length);
+    await expect(page.locator("[data-station-roster] .roster-flag").first())
+      .toHaveText("Cannot win · Withdrawn");
+
+    // The race physically finishes. The confirmation must not talk over the
+    // repaint with "scan the winning duck".
+    await page.getByRole("button", { name: "Mark heat finished" }).click();
+    await expect(stationMessage).toContainText("Nobody in this heat can win", { timeout: 20_000 });
+    await expect(stationMessage).not.toContainText("Scan the winning duck");
+    await expect(stationMessage).toContainText("Ask the race director to reactivate a racer");
+    await expect(requiredResult).toContainText("No racer can win");
+
+    // The other round-one result surface: the result taker scans a duck out of
+    // that bag and lands on its inspection page.
+    await page.goto(`/staff/ducks/${racers[0].tagToken}`);
+    const winnerAction = page.locator("[data-winner-action]");
+    await expect(winnerAction).toBeVisible();
+    await expect(winnerAction).toHaveClass(/ineligible/);
+    await expect(winnerAction).toContainText(`Duck #${racers[0].visibleNumber} is Withdrawn`);
+    await expect(winnerAction).toContainText(`Nobody in Heat ${running.number} can win`);
+    await expect(winnerAction).toContainText("every duck in that bag will be refused");
+    await expect(winnerAction).toContainText("Ask the race director to reactivate a racer");
+    // Not the instruction that produces the loop.
+    await expect(winnerAction).not.toContainText("Scan the next duck to pass the finish line.");
+    await expect(page.locator("[data-staff-message]"))
+      .toContainText(`Nobody in Heat ${running.number} can win.`);
+    await expect(page.getByRole("button", { name: /Mark Duck as Heat .* Winner/ })).toHaveCount(0);
+
+    // Nothing was written by any of it.
+    const untouched = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${running.id}`, {
+      token: admin.token,
+    });
+    expect(untouched.body.heat.status).toBe("AWAITING_RESULT");
+    expect(untouched.body.results).toEqual([]);
+    expect(untouched.body.roster.map((entry) => `${entry.slotNumber}|${entry.raceEntryId}`))
+      .toEqual(roster.map((entry) => `${entry.slotNumber}|${entry.raceEntryId}`));
+
+    // The remedy the message names is a real way out: a race director reactivates
+    // the racer who actually crossed the line first, and the same scan now offers
+    // the winner action.
+    const restored = await changeRegistrationStatus(admin.token, racers[0].registrationId, "reactivate");
+    expect(restored.status).toBe("ACTIVE");
+
+    await page.reload();
+    await expect(winnerAction).toContainText("Result waiting");
+    const markWinner = page.getByRole("button", { name: `Mark Duck as Heat ${running.number} Winner` });
+    await expect(markWinner).toBeVisible();
+    await markWinner.click();
+    await confirmAction(page, "Mark winner");
+    // The heat is settled, so the page no longer offers the action. (The
+    // "Official winner saved" line is deliberately not asserted: the publication
+    // signals a live refresh that repaints this page's message line straight
+    // away, which is existing behaviour of the round-one publish flow and not
+    // what this spec is about.)
+    await expect(markWinner).toHaveCount(0);
+    await expect(winnerAction).not.toContainText("Nobody in Heat");
+
+    const published = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${running.id}`, {
+      token: admin.token,
+    });
+    expect(published.body.heat.status).toBe("FINALIZED");
+    expect(published.body.results.map((result) => result.place)).toEqual([1]);
+    // Still nothing moved around the racers who stayed out.
+    expect(published.body.roster.map((entry) => `${entry.slotNumber}|${entry.raceEntryId}`))
+      .toEqual(roster.map((entry) => `${entry.slotNumber}|${entry.raceEntryId}`));
+
+    // And the finish line agrees: the heat it was stuck on is settled and the
+    // station has moved on rather than still demanding a winner.
+    await page.goto("/staff/finish-line");
+    await expect(page.locator("[data-station-message]")).not.toContainText("Nobody in this heat can win");
+
+    expect(errors).toEqual([]);
+  });
+});

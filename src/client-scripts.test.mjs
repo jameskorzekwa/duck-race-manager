@@ -4075,8 +4075,30 @@ test("the console reports a reopen split by naming the exact ducks to take back 
   assert.match(split.elements.bagMoveNote.textContent, /Take exactly those ducks out of the Heat 4 bag/);
   assert.match(split.elements.bagMoveNote.textContent, /leave every other duck exactly where it is/);
 
-  // A place whose duck assignment ended contributes no number, and the count
-  // still tells the staffer how many ducks are involved.
+  // The count and the list are the same fact, always. A place whose duck
+  // assignment has ended contributes no number, and counting it anyway used to
+  // read "Move 2 ducks: Duck #117" — one duck named, two demanded, and a
+  // staffer sent to the bank to find a duck that is not there.
+  const gap = bagMoveHarness();
+  gap.queueBagMoves([{
+    action: "SPLIT",
+    fromHeatNumber: 4,
+    intoHeatNumber: 5,
+    duckNumbers: [117],
+    movedEntryCount: 2,
+  }], "command-gap");
+  assert.equal(
+    gap.elements.bagMoveInstruction.textContent,
+    "Move 1 duck: Duck #117 from the Heat 4 bag into a new Heat 5 bag",
+  );
+  assert.equal(gap.elements.bagMoveDucks.textContent, "1 duck: Duck #117");
+  // The roster difference is still reported, as the separate fact it is.
+  assert.match(
+    gap.elements.bagMoveNote.textContent,
+    / 1 racer in this move has no duck assigned right now, so there is nothing to carry for them\.$/,
+  );
+
+  // The same rule for a merge, which pours a whole bag rather than searching it.
   const countOnly = bagMoveHarness();
   countOnly.queueBagMoves([{
     action: "MERGE",
@@ -4085,8 +4107,106 @@ test("the console reports a reopen split by naming the exact ducks to take back 
     duckNumbers: [],
     movedEntryCount: 1,
   }], "command-d");
-  assert.equal(countOnly.elements.bagMoveDucks.textContent, "1 duck");
+  assert.equal(countOnly.elements.bagMoveDucks.textContent, "No ducks to carry");
   assert.equal(countOnly.elements.bagMoveInstruction.textContent, "Pour the Heat 2 bag into the Heat 1 bag");
+  assert.match(
+    countOnly.elements.bagMoveNote.textContent,
+    / 1 racer in this move has no duck assigned right now, so there is nothing to carry for them\.$/,
+  );
+
+  const mergeGap = bagMoveHarness();
+  mergeGap.queueBagMoves([{
+    action: "MERGE",
+    fromHeatNumber: 5,
+    intoHeatNumber: 4,
+    duckNumbers: [117, 118],
+    movedEntryCount: 4,
+  }], "command-e");
+  assert.equal(mergeGap.elements.bagMoveDucks.textContent, "2 ducks: Duck #117, Duck #118");
+  assert.match(
+    mergeGap.elements.bagMoveNote.textContent,
+    / 2 racers in this move have no duck assigned right now, so there is nothing to carry for them\.$/,
+  );
+
+  // A split with nothing physical to move never reads as an instruction to move
+  // nothing named: it says plainly that no duck leaves the bag.
+  const emptySplit = bagMoveHarness();
+  emptySplit.queueBagMoves([{
+    action: "SPLIT",
+    fromHeatNumber: 4,
+    intoHeatNumber: 5,
+    duckNumbers: [],
+    movedEntryCount: 1,
+  }], "command-f");
+  assert.equal(emptySplit.elements.bagMoveInstruction.textContent, "No duck moves out of the Heat 4 bag");
+  assert.equal(emptySplit.elements.bagMoveDucks.textContent, "No ducks to carry");
+  assert.match(
+    emptySplit.elements.bagMoveNote.textContent,
+    /No duck in the Heat 4 bag moves, and every bag stays exactly as it is\./,
+  );
+
+  // Whatever the shape, a number the instruction states is a number of ducks it
+  // also names. This is the invariant the reviewer's case broke.
+  for (const move of [
+    { action: "MERGE", fromHeatNumber: 5, intoHeatNumber: 4, duckNumbers: [9], movedEntryCount: 3 },
+    { action: "SPLIT", fromHeatNumber: 4, intoHeatNumber: 5, duckNumbers: [9, 10], movedEntryCount: 5 },
+    { action: "SPLIT", fromHeatNumber: 4, intoHeatNumber: 5, duckNumbers: [9, 10], movedEntryCount: 2 },
+  ]) {
+    const consistent = bagMoveHarness();
+    consistent.queueBagMoves([move], `command-${move.action}-${move.movedEntryCount}`);
+    const named = (consistent.elements.bagMoveInstruction.textContent.match(/Duck #\d+/g) ?? []).length;
+    const claimed = consistent.elements.bagMoveInstruction.textContent.match(/(\d+) ducks?:/);
+    assert.equal(claimed === null ? named : Number(claimed[1]), named, JSON.stringify(move));
+    const listed = (consistent.elements.bagMoveDucks.textContent.match(/Duck #\d+/g) ?? []).length;
+    const listedClaim = consistent.elements.bagMoveDucks.textContent.match(/(\d+) ducks?:/);
+    assert.equal(listedClaim === null ? listed : Number(listedClaim[1]), listed, JSON.stringify(move));
+  }
+});
+
+test("the bag-move queue refuses an entry it could only render as nonsense", () => {
+  const harness = bagMoveHarness();
+  const valid = {
+    id: "command-a:0",
+    action: "MERGE",
+    fromHeatNumber: 5,
+    intoHeatNumber: 4,
+    duckNumbers: [117],
+    movedEntryCount: 1,
+  };
+
+  // Anything on this origin can write the queue, and every field of it is
+  // printed into an instruction a staffer walks away and acts on. It is written
+  // with textContent throughout, so this is tidiness rather than safety — but
+  // "Duck #[object Object]" is not an instruction anyone can follow.
+  const corrupt = [
+    { ...valid, duckNumbers: [{}] },
+    { ...valid, duckNumbers: ["117"] },
+    { ...valid, duckNumbers: [null] },
+    { ...valid, duckNumbers: [1.5] },
+    { ...valid, duckNumbers: [117, undefined] },
+    { ...valid, duckNumbers: "117" },
+    { ...valid, fromHeatNumber: "5" },
+    { ...valid, action: "POUR" },
+    { ...valid, id: 7 },
+  ];
+  harness.bagMoveWrite([...corrupt, valid]);
+  assert.deepEqual(harness.bagMoveRead(), [valid], "only the well-formed entry survives the read");
+
+  harness.renderBagMove();
+  assert.equal(harness.elements.bagMoveDucks.textContent, "1 duck: Duck #117");
+  assert.doesNotMatch(harness.elements.bagMoveDucks.textContent, /\[object Object\]|undefined|null|NaN/);
+  assert.doesNotMatch(harness.elements.bagMoveInstruction.textContent, /\[object Object\]|undefined|null|NaN/);
+
+  // A corrupt entry is refused on the way in as well, not only on the way out.
+  const queued = bagMoveHarness();
+  queued.queueBagMoves([{ ...valid, duckNumbers: [{}] }, { ...valid, duckNumbers: [118] }], "command-z");
+  assert.deepEqual(queued.bagMoveRead().map((move) => move.duckNumbers), [[118]]);
+
+  // A queue that is not a list at all, or unreadable entirely, is simply empty.
+  queued.store.set("quickducks.bag-moves", "{\"nope\":true}");
+  assert.deepEqual(queued.bagMoveRead(), []);
+  queued.store.set("quickducks.bag-moves", "not json");
+  assert.deepEqual(queued.bagMoveRead(), []);
 });
 
 test("the queued bag instruction survives everything except a person acknowledging it", () => {
@@ -4183,6 +4303,182 @@ test("the scanned-duck page presents an ineligible winner plainly, not as a fail
     staffDuckScript.match(/if \(!candidate && ineligible\) \{[\s\S]*?return;\s*\}/)[0],
     /heat-winner|addEventListener/,
   );
+});
+
+// ---------------------------------------------------------------------------
+// The other round-one result surface
+//
+// Round one is published by scanning a tag, so the staff duck page — not the
+// finish-line form — is where a result taker stands when a heat has no winner
+// left in it. "Scan the next duck" is the right answer for one refused duck and
+// the wrong answer for a bag in which every duck will be refused: it walks a
+// staffer through the whole heat, one DUCK_NOT_ELIGIBLE at a time, with nothing
+// naming the way out.
+// ---------------------------------------------------------------------------
+
+const staffDuckWinnerHarness = () => {
+  const document = new FakeDocument();
+  const elements = {
+    winnerAction: document.createElement("div"),
+    message: document.createElement("p"),
+  };
+  const runtime = buildRuntime(
+    [
+      liftFrom(staffDuckScript, "text", /const text = \(tag, value, className\) => \{[\s\S]*?\n\};/),
+      liftFrom(
+        staffDuckScript,
+        "ineligibleStatusLabel",
+        /const ineligibleStatusLabel = [\s\S]*?character\.toUpperCase\(\)\);/,
+      ),
+      liftFrom(
+        staffDuckScript,
+        "renderWinnerAction",
+        /const renderWinnerAction = \(data, heatHasNoEligibleRacer = false\) => \{[\s\S]*?\n\};/,
+      ),
+      "let winnerSuccess = null;",
+    ].join("\n").split("\n"),
+    { document, ...elements },
+    ["renderWinnerAction"],
+  );
+  return { ...elements, ...runtime };
+};
+
+const winnerBlockText = (block) => block.children.map((child) => child.textContent);
+
+const ineligibleDuck = {
+  duck: { visibleNumber: 202 },
+  winnerAction: null,
+  winnerIneligible: {
+    eventId: "event",
+    heatId: "heat-2",
+    heatNumber: 2,
+    raceEntryId: "entry-2",
+    registrationStatus: "WITHDRAWN",
+    visibleNumber: 202,
+    participantDisplayName: "Daisy D.",
+  },
+};
+
+test("the scanned-duck page sends the staffer on while somebody in the heat can still win", () => {
+  const harness = staffDuckWinnerHarness();
+  harness.renderWinnerAction(ineligibleDuck, false);
+
+  assert.equal(harness.winnerAction.hidden, false);
+  assert.deepEqual(winnerBlockText(harness.winnerAction), [
+    "Duck #202 is Withdrawn",
+    "Daisy D. cannot be recorded as the Heat 2 winner, and this duck stays in its heat.",
+    "Scan the next duck to pass the finish line.",
+  ]);
+  assert.equal(harness.message.textContent, "This duck cannot win. Scan the next duck to pass the finish line.");
+});
+
+test("the scanned-duck page says nobody in the heat can win rather than looping the staffer", () => {
+  const harness = staffDuckWinnerHarness();
+  harness.renderWinnerAction(ineligibleDuck, true);
+
+  assert.equal(harness.winnerAction.hidden, false);
+  assert.deepEqual(winnerBlockText(harness.winnerAction), [
+    "Duck #202 is Withdrawn",
+    "Daisy D. cannot be recorded as the Heat 2 winner, and this duck stays in its heat.",
+    "Nobody in Heat 2 can win",
+    "Every racer in Heat 2 is withdrawn or disqualified, so every duck in that bag will be refused"
+    + " and no result can be recorded. Every duck stays in its bag.",
+    "Ask the race director to reactivate a racer, then scan that duck's tag again.",
+  ]);
+  // The instruction that produces the loop is gone from this surface entirely.
+  assert.ok(!winnerBlockText(harness.winnerAction).includes("Scan the next duck to pass the finish line."));
+  assert.equal(
+    harness.message.textContent,
+    "Nobody in Heat 2 can win. Ask the race director to reactivate a racer, then scan that duck's tag again.",
+  );
+  // Still no winner command anywhere on the page.
+  assert.equal(harness.winnerAction.children.filter((child) => child.tagName === "BUTTON").length, 0);
+});
+
+test("the scanned-duck page asks the heat question only for a refused duck, and never guesses", async () => {
+  const requested = [];
+  const build = (responder) => buildRuntime(
+    [
+      rosterEligibilityHelpersScript,
+      liftFrom(
+        staffDuckScript,
+        "winnerHeatHasNoEligibleRacer",
+        /const winnerHeatHasNoEligibleRacer = async \(data\) => \{[\s\S]*?\n\};/,
+      ),
+    ].join("\n").split("\n"),
+    {
+      fetchJson: async (url) => {
+        requested.push(url);
+        return responder(url);
+      },
+    },
+    ["winnerHeatHasNoEligibleRacer"],
+  );
+
+  const strandedHeat = build(() => ({
+    roster: [
+      { raceEntryId: "entry-1", eligible: false },
+      { raceEntryId: "entry-2", eligible: false },
+    ],
+  }));
+  assert.equal(await strandedHeat.winnerHeatHasNoEligibleRacer(ineligibleDuck), true);
+  // It reads exactly the heat the server named, through the roster projection
+  // the finish line reads, and asks nothing else.
+  assert.deepEqual(requested, ["/api/v1/staff/events/event/heats/heat-2"]);
+
+  // One eligible racer left is not a stranded heat: the next scan can still win.
+  requested.length = 0;
+  const liveHeat = build(() => ({
+    roster: [
+      { raceEntryId: "entry-1", eligible: false },
+      { raceEntryId: "entry-2", eligible: true },
+    ],
+  }));
+  assert.equal(await liveHeat.winnerHeatHasNoEligibleRacer(ineligibleDuck), false);
+
+  // A roster projection from before the eligible field existed counts as
+  // eligible, exactly as every other surface treats it, rather than declaring a
+  // heat stranded on missing data.
+  const legacyHeat = build(() => ({ roster: [{ raceEntryId: "entry-1" }] }));
+  assert.equal(await legacyHeat.winnerHeatHasNoEligibleRacer(ineligibleDuck), false);
+
+  // Nothing is asked for a duck the server did not refuse, or for a duck it
+  // offered a winner action for: this costs a request, so it is spent only on
+  // the case that needs it.
+  requested.length = 0;
+  const quiet = build(() => ({ roster: [] }));
+  assert.equal(await quiet.winnerHeatHasNoEligibleRacer({ duck: { visibleNumber: 1 }, winnerIneligible: null }), false);
+  assert.equal(await quiet.winnerHeatHasNoEligibleRacer({
+    ...ineligibleDuck,
+    winnerAction: { heatNumber: 2 },
+  }), false);
+  assert.equal(await quiet.winnerHeatHasNoEligibleRacer(null), false);
+  assert.equal(await quiet.winnerHeatHasNoEligibleRacer({
+    ...ineligibleDuck,
+    winnerIneligible: { ...ineligibleDuck.winnerIneligible, heatId: null },
+  }), false);
+  assert.deepEqual(requested, []);
+
+  // A failed or refused read makes no claim about the heat at all: the page says
+  // exactly what it said before rather than inventing a dead end.
+  const broken = build(() => { throw new Error("Heat not found."); });
+  assert.equal(await broken.winnerHeatHasNoEligibleRacer(ineligibleDuck), false);
+  const malformed = build(() => ({ roster: "nope" }));
+  assert.equal(await malformed.winnerHeatHasNoEligibleRacer(ineligibleDuck), false);
+});
+
+test("the scanned-duck page resolves the heat before it paints, and stays DOM-safe", () => {
+  assert.doesNotThrow(() => new Function(staffDuckScript));
+  // The eligibility question is answered before anything is written, so the two
+  // statements land together rather than one appearing under the staffer later.
+  assert.match(
+    staffDuckScript,
+    /const heatHasNoEligibleRacer = await winnerHeatHasNoEligibleRacer\(duck\);\s*if \(qrStarting \|\| qrScanning\) return;/,
+  );
+  assert.match(staffDuckScript, /renderWinnerAction\(duck, heatHasNoEligibleRacer\)/);
+  // One shared definition of "can this racer still win", not a second copy.
+  assert.match(staffDuckScript, /const rosterEntryEligible = \(entry\) => !entry \|\| entry\.eligible !== false;/);
+  assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
 });
 
 test("the finish line reports an ineligible duck as an outcome and stays armed", () => {
@@ -4749,7 +5045,12 @@ const finishLineRenderHarness = () => {
       liftFrom(finishLineScript, "finishClearIneligible", /const finishClearIneligible = \(\) => \{[\s\S]*?\n\};/),
       liftFrom(finishLineScript, "finishAddFact", /const finishAddFact = \(label, value\) => \{[\s\S]*?\n\};/),
       liftFrom(finishLineScript, "finishEligibleEntries", /const finishEligibleEntries = \(\) => .*;\n/),
-      liftFrom(finishLineScript, "finishRequiredPlaces", /const finishRequiredPlaces = \(\) => .*;\n/),
+      liftFrom(finishLineScript, "finishRequiredPlaces", /const finishRequiredPlaces = \(\) => [\s\S]*?;\n/),
+      liftFrom(
+        finishLineScript,
+        "FINISH_NO_ELIGIBLE_MESSAGE",
+        /const FINISH_NO_ELIGIBLE_MESSAGE = [\s\S]*?;\n/,
+      ),
       liftFrom(finishLineScript, "finishSubmitBlocked", /const finishSubmitBlocked = \(busy\) => \{[\s\S]*?\n\};/),
       liftFrom(finishLineScript, "finishRenderSelections", /const finishRenderSelections = \(\) => \{[\s\S]*?\n\};/),
       liftFrom(finishLineScript, "finishRender", /const finishRender = \(event, detail\) => \{[\s\S]*?\n\};/),
@@ -4766,7 +5067,7 @@ const finishLineRenderHarness = () => {
       finishSubscription: null,
       globalThis: { quickDucksLive: { beginBusy: () => () => {} } },
     },
-    ["finishRender", "requiredPlaces", "selectFor", "selectedPlaces"],
+    ["finishRender", "requiredPlaces", "selectFor", "selectedPlaces", "FINISH_NO_ELIGIBLE_MESSAGE"],
   );
   return { ...elements, ...runtime };
 };
@@ -4786,6 +5087,15 @@ const withdrawn = (entry) => ({
   eligible: false,
   participant: { ...entry.participant, registrationStatus: "WITHDRAWN" },
 });
+
+// The exact sentence the station says when no racer in the heat can win. It is
+// written out here rather than read back out of the shipped script, so a silent
+// drift in the wording fails this file instead of quietly changing what a
+// staffer is told at the one moment they cannot work it out for themselves.
+const NO_ELIGIBLE_MESSAGE = "Nobody in this heat can win:"
+  + " every racer in it is withdrawn or disqualified, so no result can be recorded."
+  + " Every duck stays in its bag."
+  + " Ask the race director to reactivate a racer, then this station can take the result.";
 
 const finalEvent = { id: "event", name: "Annual Duck Race", status: "FINAL" };
 const finalHeat = { id: "final-heat", round: "FINAL", number: 1, status: "AWAITING_RESULT", revision: 7 };
@@ -4926,10 +5236,125 @@ test("a final whose racers have all left says so instead of arming an empty subm
   });
   assert.equal(harness.requiredPlaces(), 0);
   assert.equal(factValue(harness.finishFacts, "Required result"), "0 podium places");
-  assert.match(
-    harness.finishMessage.textContent,
-    /^Every racer in this heat is withdrawn or disqualified, so no result can be recorded\./,
-  );
+  assert.equal(harness.finishMessage.textContent, NO_ELIGIBLE_MESSAGE);
   // Zero selections must never read as "the selections match what is required".
   assert.equal(harness.finishSubmit.disabled, true);
+});
+
+// ---------------------------------------------------------------------------
+// Round one, where the same dead end was unreachable
+//
+// Round one was hard-coded to one required place, so the zero guard could never
+// fire for it however many racers had left. The station kept saying "scan the
+// winning duck", every duck in the bag answered DUCK_NOT_ELIGIBLE, and nothing
+// on screen said that this heat has no winner in it or that only a race director
+// can change that.
+// ---------------------------------------------------------------------------
+
+const roundOneEvent = { id: "event", name: "Annual Duck Race", status: "ROUND_ONE" };
+const roundOneHeat = { id: "heat-2", round: "ROUND_ONE", number: 2, status: "AWAITING_RESULT", revision: 4 };
+
+test("the finish line says the no-winner sentence once, from one constant", () => {
+  assert.equal(finishLineRenderHarness().FINISH_NO_ELIGIBLE_MESSAGE, NO_ELIGIBLE_MESSAGE);
+  // One declaration and four uses: the scan guard, the mark-finished
+  // confirmation, the running heat, and the awaiting-result heat. Two hand-typed
+  // copies is how the scan guard and the message line came to disagree before.
+  assert.equal((finishLineScript.match(/FINISH_NO_ELIGIBLE_MESSAGE/g) ?? []).length, 5);
+  assert.doesNotMatch(
+    finishLineScript,
+    /Ask the race director to reactivate the racer who should hold the place/,
+  );
+});
+
+test("round one requires one place while somebody can win and zero when nobody can", () => {
+  const harness = finishLineRenderHarness();
+  const roster = [
+    finalistEntry(1, "Active", 201),
+    finalistEntry(2, "Leaving", 202),
+    finalistEntry(3, "Also leaving", 203),
+  ];
+
+  // One winner, however many racers are on the roster: round one is one place
+  // deep, not three.
+  harness.finishRender(roundOneEvent, { heat: roundOneHeat, roster });
+  assert.equal(harness.requiredPlaces(), 1);
+  assert.equal(factValue(harness.finishFacts, "Required result"), "One winner");
+
+  // Two of three leave. There is still somebody who can win, so nothing changes.
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: [roster[0], withdrawn(roster[1]), withdrawn(roster[2])],
+  });
+  assert.equal(harness.requiredPlaces(), 1, "one eligible racer is still one winner");
+  assert.equal(factValue(harness.finishFacts, "Required result"), "One winner");
+
+  // The last one leaves. The count has to follow the racers, not the round.
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: roster.map(withdrawn),
+  });
+  assert.equal(harness.requiredPlaces(), 0, "a round-one heat nobody can win requires no place");
+  assert.equal(factValue(harness.finishFacts, "Required result"), "No racer can win");
+
+  // And the roster is untouched: every duck is still in the bag and still listed.
+  assert.equal(harness.finishRoster.children.length, 3);
+  assert.deepEqual(harness.finishRoster.children.map((row) => markerOf(row)?.flag ?? null), [
+    "Cannot win · Withdrawn",
+    "Cannot win · Withdrawn",
+    "Cannot win · Withdrawn",
+  ]);
+});
+
+test("a round-one heat nobody can win says so instead of sending the staffer to scan", () => {
+  const harness = finishLineRenderHarness();
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: [
+      withdrawn(finalistEntry(1, "Gone", 201)),
+      withdrawn(finalistEntry(2, "Also gone", 202)),
+    ],
+  });
+
+  // The branch that used to win. "Scan the winning duck's tag" is exactly the
+  // instruction that loops on DUCK_NOT_ELIGIBLE forever.
+  assert.equal(harness.finishMessage.textContent, NO_ELIGIBLE_MESSAGE);
+  assert.doesNotMatch(harness.finishMessage.textContent, /Scan the winning duck/);
+  // It names the fact, the ducks staying put, and the only remedy there is.
+  assert.match(harness.finishMessage.textContent, /^Nobody in this heat can win:/);
+  assert.match(harness.finishMessage.textContent, /Every duck stays in its bag\./);
+  assert.match(harness.finishMessage.textContent, /reactivate a racer/);
+
+  // One racer comes back and the station returns to the scan instruction, so the
+  // remedy it names is a real way out rather than a terminal state.
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: [
+      finalistEntry(1, "Back", 201),
+      withdrawn(finalistEntry(2, "Also gone", 202)),
+    ],
+  });
+  assert.equal(harness.requiredPlaces(), 1);
+  assert.match(harness.finishMessage.textContent, /^Scan the winning duck's permanent NFC or QR tag\./);
+});
+
+test("a running round-one heat nobody can win keeps its finish button and still says so", () => {
+  const harness = finishLineRenderHarness();
+  const running = { ...roundOneHeat, status: "RUNNING" };
+  harness.finishRender(roundOneEvent, {
+    heat: running,
+    roster: [
+      withdrawn(finalistEntry(1, "Gone", 201)),
+      withdrawn(finalistEntry(2, "Also gone", 202)),
+    ],
+  });
+
+  // Those ducks are physically on the water, so the heat still has to be marked
+  // finished. The staffer is simply told now rather than after they start
+  // scanning refused duck after refused duck.
+  assert.deepEqual(harness.finishAction.children.map((child) => child.textContent), ["Mark heat finished"]);
+  assert.match(
+    harness.finishMessage.textContent,
+    /^When the race physically finishes, press the one finish button\. /,
+  );
+  assert.ok(harness.finishMessage.textContent.endsWith(NO_ELIGIBLE_MESSAGE));
 });
