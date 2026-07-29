@@ -34,7 +34,8 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.match(implement, /--dir "\$PIPELINE_MODEL_DIR" \\\n\s+--result/);
   assert.doesNotMatch(implement, /rm -rf "\$RUNNER_TEMP\/agent-task"/);
   assert.match(implement, /scripts\/validate-agent-patch\.mjs/);
-  assert.match(implement, /session list --dir "\$PIPELINE_MODEL_DIR" --with-status/);
+  assert.match(implement, /--mode idle \\\n\s+--dir "\$PIPELINE_MODEL_DIR"/);
+  assert.match(implement, /--mode idle \\\n\s+--dir "\$previous_dir"/);
   assert.doesNotMatch(verify, /id-token: write|models: read/);
   assert.match(verify, /scripts\/validate-agent-patch\.mjs/);
   assert.doesNotMatch(publish, /id-token: write/);
@@ -69,7 +70,8 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   assert.doesNotMatch(review, /REVIEW_CANDIDATE_PATH|--dir "\$GITHUB_WORKSPACE\/trusted"/);
   assert.match(review, /\.pipeline\/candidate\.patch/);
   assert.match(review, /git -C trusted archive/);
-  assert.match(review, /session list --dir "\$PIPELINE_MODEL_DIR" --with-status/);
+  assert.match(review, /--mode idle \\\n\s+--dir "\$PIPELINE_MODEL_DIR"/);
+  assert.match(review, /--mode idle \\\n\s+--dir "\$previous_dir"/);
   assert.doesNotMatch(review, /rm -rf "\$RUNNER_TEMP\/agent-review"/);
   assert.match(review, /timeout-minutes: 75/);
   assert.match(workflow, /github\.actor_id == '38769771'/);

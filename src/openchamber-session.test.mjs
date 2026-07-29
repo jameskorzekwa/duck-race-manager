@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   resolveParentSession,
+  waitForIdleSessions,
   waitForOpenChamberSession,
 } from "../scripts/wait-for-openchamber-session.mjs";
 
@@ -130,6 +131,64 @@ test("polling remains bounded while sessions stay busy", async () => {
     ...clock,
     pollIntervalMs: 250,
   }), /did not complete within 1 seconds/);
+});
+
+test("cleanup waits for a straggler subagent instead of discarding the attempt", async () => {
+  const clock = fakeClock();
+  const responses = [
+    listing([
+      { id: "ses_parent", status: { type: "idle" } },
+      { id: "ses_child", parentID: "ses_parent", status: { type: "busy" } },
+    ]),
+    listing([
+      { id: "ses_parent", status: { type: "idle" } },
+      { id: "ses_child", parentID: "ses_parent", status: { type: "idle" } },
+    ]),
+  ];
+
+  const sessions = await waitForIdleSessions({
+    directory,
+    timeoutSeconds: 600,
+    requireSession: true,
+    run: () => responses.shift(),
+    ...clock,
+    pollIntervalMs: 10,
+  });
+
+  assert.equal(sessions.length, 2);
+});
+
+test("cleanup still fails closed on a session that never goes idle", async () => {
+  const clock = fakeClock();
+
+  await assert.rejects(waitForIdleSessions({
+    directory,
+    timeoutSeconds: 1,
+    run: () => listing([{ id: "ses_parent", status: { type: "busy" } }]),
+    ...clock,
+    pollIntervalMs: 250,
+  }), /Model sessions remain active after 1 seconds: ses_parent/);
+});
+
+test("cleanup fails closed when a dispatched session vanished", async () => {
+  const clock = fakeClock();
+
+  await assert.rejects(waitForIdleSessions({
+    directory,
+    timeoutSeconds: 60,
+    requireSession: true,
+    run: () => listing([]),
+    ...clock,
+    pollIntervalMs: 10,
+  }), /dispatched model session is missing/);
+
+  assert.deepEqual(await waitForIdleSessions({
+    directory,
+    timeoutSeconds: 60,
+    run: () => listing([]),
+    ...clock,
+    pollIntervalMs: 10,
+  }), []);
 });
 
 test("polling tolerates transient control-plane failures", async () => {

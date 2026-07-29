@@ -304,20 +304,13 @@ jobs:
           process.stdout.write(directory);
           NODE
             )"
-            openchamber session list --dir "$previous_dir" --with-status --all --limit 100 --json > "$state_root/prior-status.json"
-            STATUS_PATH="$state_root/prior-status.json" STATE_PATH="$state_path" node <<'NODE'
-          const fs = require("node:fs");
-          const body = JSON.parse(fs.readFileSync(process.env.STATUS_PATH, "utf8"));
-          const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
-          if (state.phase === "dispatching" && (body.sessions ?? []).length === 0) {
-            throw new Error("A prior dispatched model session is missing from OpenChamber status.");
-          }
-          const busy = (body.sessions ?? []).filter((session) => session.status?.type !== "idle");
-          if (busy.length > 0) throw new Error(`A prior local model session is still active: ${busy.map((session) => session.id).join(", ")}`);
-          NODE
+            node "$GITHUB_WORKSPACE/trusted/scripts/wait-for-openchamber-session.mjs" \
+              --mode idle \
+              --dir "$previous_dir" \
+              --state "$state_path" \
+              --timeout 600
             node "$GITHUB_WORKSPACE/trusted/scripts/cleanup-model-workspace.mjs" \
               "$state_path" "$state_root/workspaces" "$previous_dir"
-            rm -f "$state_root/prior-status.json"
           fi
           MODEL_DIR="$PIPELINE_MODEL_DIR" STATE_PATH="$state_path" node <<'NODE'
           const fs = require("node:fs");
@@ -397,17 +390,11 @@ jobs:
           set -euo pipefail
           state_root="$HOME/.local/state/quickducks-agent-runner"
           if [[ -n "${PIPELINE_MODEL_DIR:-}" ]] && command -v openchamber > /dev/null; then
-            openchamber session list --dir "$PIPELINE_MODEL_DIR" --with-status --all --limit 100 --json \
-              > "$RUNNER_TEMP/agent-review/cleanup-status.json"
-            STATUS_PATH="$RUNNER_TEMP/agent-review/cleanup-status.json" STATE_PATH="$state_root/active.json" MODEL_DIR="$PIPELINE_MODEL_DIR" node -e '
-              const fs = require("node:fs");
-              const body = JSON.parse(fs.readFileSync(process.env.STATUS_PATH, "utf8"));
-              const sessions = body.sessions ?? [];
-              const state = fs.existsSync(process.env.STATE_PATH)
-                ? JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8")) : {};
-              if (state.directory === process.env.MODEL_DIR && state.phase === "dispatching" && sessions.length === 0) process.exit(1);
-              process.exit(sessions.every((session) => session.status?.type === "idle") ? 0 : 1);
-            '
+            node "$GITHUB_WORKSPACE/trusted/scripts/wait-for-openchamber-session.mjs" \
+              --mode idle \
+              --dir "$PIPELINE_MODEL_DIR" \
+              --state "$state_root/active.json" \
+              --timeout 600
             node "$GITHUB_WORKSPACE/trusted/scripts/cleanup-model-workspace.mjs" \
               "$state_root/active.json" "$state_root/workspaces" "$PIPELINE_MODEL_DIR"
           fi
