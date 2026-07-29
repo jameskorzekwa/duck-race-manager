@@ -24,8 +24,13 @@ import {
   collectionStatements,
   followStatements,
   getBrowserCollection,
+  isParticipantOwnershipProof,
+  participantContactFingerprint,
+  participantOwnershipProof,
   prepareBrowserCollection,
   refreshBrowserCollection,
+  type BrowserCollection,
+  verifyParticipantOwnershipProof,
 } from "./browser-collection.ts";
 import {
   getPublicStatusByDuckNumber,
@@ -585,6 +590,269 @@ const visibleCollectionLinkSql = `(
         )
       )`;
 
+const contactProofHeader = "x-quickducks-ownership-proof";
+
+interface OwnedContactRow {
+  event_id: string;
+  email: string | null;
+  phone: string | null;
+  email_notifications_enabled: number;
+  sms_notifications_enabled: number;
+  email_required: number;
+  revision: number;
+}
+
+const contactJson = (row: OwnedContactRow): Record<string, unknown> => ({
+  email: row.email,
+  phone: row.phone,
+  emailNotificationsEnabled: row.email_notifications_enabled === 1,
+  smsNotificationsEnabled: row.sms_notifications_enabled === 1,
+  emailRequired: row.email_required === 1,
+  revision: row.revision,
+});
+
+const ownedContact = (env: Env, collectionId: string, registrationId: string): Promise<OwnedContactRow | null> =>
+  env.DB.prepare(
+    `SELECT r.event_id, r.email, r.phone, r.email_notifications_enabled,
+            r.sms_notifications_enabled, e.email_required, r.revision
+       FROM browser_collection_registrations bcr
+       JOIN registrations r ON r.id = bcr.registration_id
+       JOIN events e ON e.id = r.event_id
+      WHERE bcr.collection_id = ?
+        AND bcr.registration_id = ?
+        AND bcr.added_via = 'REGISTRATION'
+      LIMIT 1`,
+  ).bind(collectionId, registrationId).first<OwnedContactRow>();
+
+const authorizeOwnedContact = async (
+  request: Request,
+  env: Env,
+  registrationId: string,
+): Promise<{ collection: BrowserCollection; contact: OwnedContactRow } | null> => {
+  const proof = request.headers.get(contactProofHeader);
+  if (proof === null || !isParticipantOwnershipProof(proof)) return null;
+  const collection = await getBrowserCollection(request, env);
+  if (collection === null) return null;
+  // Verify before selecting PII. The first query proves only that this exact
+  // collection has an owner link for the requested participant.
+  const link = await env.DB.prepare(
+    `SELECT 1 AS owned
+       FROM browser_collection_registrations
+      WHERE collection_id = ? AND registration_id = ? AND added_via = 'REGISTRATION'
+      LIMIT 1`,
+  ).bind(collection.id, registrationId).first<{ owned: number }>();
+  if (
+    link === null
+    || !await verifyParticipantOwnershipProof(collection, registrationId, proof)
+  ) return null;
+  const contact = await ownedContact(env, collection.id, registrationId);
+  return contact === null ? null : { collection, contact };
+};
+
+const getMyRegistrationContact = async (
+  request: Request,
+  env: Env,
+  registrationId: string,
+): Promise<Response> => {
+  const authorized = await authorizeOwnedContact(request, env, registrationId);
+  return authorized === null
+    ? json({ error: "Private participant details are not available." }, 404)
+    : json({ contact: contactJson(authorized.contact) });
+};
+
+interface ContactInput {
+  email: string | null;
+  phone: string | null;
+  emailNotificationsEnabled: boolean;
+  smsNotificationsEnabled: boolean;
+}
+
+const contactEmailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const cleanContactValue = (value: string): string | null => value.trim() || null;
+
+const validateContactInput = (
+  payload: Record<string, unknown>,
+  emailRequired: boolean,
+): { value?: ContactInput; errors: Record<string, string> } => {
+  const errors: Record<string, string> = {};
+  for (const field of ["email", "phone"] as const) {
+    if (payload[field] !== null && typeof payload[field] !== "string") errors[field] = "Must be text or null.";
+  }
+  for (const field of ["emailNotificationsEnabled", "smsNotificationsEnabled"] as const) {
+    if (typeof payload[field] !== "boolean") errors[field] = "Must be true or false.";
+  }
+  if (Object.keys(errors).length > 0) return { errors };
+  const email = typeof payload.email === "string" ? cleanContactValue(payload.email)?.toLowerCase() ?? null : null;
+  const phone = typeof payload.phone === "string" ? cleanContactValue(payload.phone) : null;
+  const emailNotificationsEnabled = payload.emailNotificationsEnabled === true;
+  const smsNotificationsEnabled = payload.smsNotificationsEnabled === true;
+  if (emailRequired && email === null) errors.email = "Email is required for this race.";
+  if (email !== null && (email.length > 254 || !contactEmailPattern.test(email))) {
+    errors.email = "Enter a valid email address.";
+  }
+  if (phone !== null && phone.length > 32) errors.phone = "Use 32 characters or fewer.";
+  if (emailNotificationsEnabled && email === null) {
+    errors.emailNotificationsEnabled = "Add an email address before enabling email updates.";
+  }
+  if (smsNotificationsEnabled && phone === null) {
+    errors.smsNotificationsEnabled = "Add a phone number before enabling text message updates.";
+  }
+  return Object.keys(errors).length > 0
+    ? { errors }
+    : { value: { email, phone, emailNotificationsEnabled, smsNotificationsEnabled }, errors };
+};
+
+const updateMyRegistrationContact = async (
+  request: Request,
+  env: Env,
+  registrationId: string,
+): Promise<Response> => {
+  const parsed = await readPublicCommandBody(request, env);
+  if (parsed.error !== undefined) return parsed.error;
+  const allowedKeys = new Set([
+    "commandId", "expectedRevision", "email", "phone",
+    "emailNotificationsEnabled", "smsNotificationsEnabled",
+  ]);
+  if (Object.keys(parsed.payload).some((key) => !allowedKeys.has(key))) {
+    return json({ error: "Only contact details and notification preferences can be updated." }, 400);
+  }
+  const { commandId, expectedRevision } = parsed.payload;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || !Number.isInteger(expectedRevision) || (expectedRevision as number) < 0
+    || (expectedRevision as number) > Number.MAX_SAFE_INTEGER
+    || !isRegistrationId(registrationId)
+  ) return json({ error: "Invalid command, revision, or registration identifier." }, 400);
+
+  const rateLimit = await publicRateLimit(request, env, "contact-update");
+  if (!rateLimit.success) {
+    return json({ error: "Too many requests. Please wait and try again." }, 429);
+  }
+
+  const authorized = await authorizeOwnedContact(request, env, registrationId);
+  if (authorized === null) return json({ error: "Private participant details are not available." }, 404);
+  const validation = validateContactInput(parsed.payload, authorized.contact.email_required === 1);
+  if (validation.value === undefined) {
+    return json({ error: "Contact validation failed.", fields: validation.errors }, 422);
+  }
+  const value = validation.value;
+  const material = JSON.stringify({ expectedRevision, ...value });
+  const fingerprint = await participantContactFingerprint(authorized.collection, registrationId, material);
+  const previous = await env.DB.prepare(
+    "SELECT command_type, result_id, request_fingerprint FROM race_commands WHERE id = ?",
+  ).bind(commandId).first<{
+    command_type: string;
+    result_id: string | null;
+    request_fingerprint: string | null;
+  }>();
+  if (previous !== null) {
+    if (
+      previous.command_type !== "UPDATE_OWN_CONTACT"
+      || previous.result_id !== registrationId
+      || previous.request_fingerprint !== fingerprint
+    ) return json({ error: "Command identifier has already been used." }, 409);
+    const current = await ownedContact(env, authorized.collection.id, registrationId);
+    return current === null
+      ? json({ error: "Private participant details are not available." }, 404)
+      : json({ updated: true, replayed: true, contact: contactJson(current) });
+  }
+  if (authorized.contact.revision !== expectedRevision) {
+    return json({ error: "Contact details changed since they were loaded.", currentRevision: authorized.contact.revision }, 409);
+  }
+
+  const changedFields: string[] = [];
+  if (value.email !== authorized.contact.email) changedFields.push("email");
+  if (value.phone !== authorized.contact.phone) changedFields.push("phone");
+  if ((value.emailNotificationsEnabled ? 1 : 0) !== authorized.contact.email_notifications_enabled) {
+    changedFields.push("email_notifications_enabled");
+  }
+  if ((value.smsNotificationsEnabled ? 1 : 0) !== authorized.contact.sms_notifications_enabled) {
+    changedFields.push("sms_notifications_enabled");
+  }
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
+         SELECT ?, r.event_id, 'UPDATE_OWN_CONTACT', r.id, ?, ?, ?
+           FROM registrations r
+           JOIN browser_collection_registrations bcr
+             ON bcr.registration_id = r.id
+            AND bcr.collection_id = ?
+            AND bcr.added_via = 'REGISTRATION'
+          WHERE r.id = ? AND r.revision = ?`,
+      ).bind(commandId, now, now, fingerprint, authorized.collection.id, registrationId, expectedRevision),
+      env.DB.prepare(
+        `UPDATE registrations
+            SET email = ?, phone = ?, email_notifications_enabled = ?,
+                sms_notifications_enabled = ?, updated_at = ?, revision = revision + 1
+          WHERE id = ? AND revision = ?
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'UPDATE_OWN_CONTACT' AND rc.result_id = ?
+            )`,
+      ).bind(
+        value.email,
+        value.phone,
+        value.emailNotificationsEnabled ? 1 : 0,
+        value.smsNotificationsEnabled ? 1 : 0,
+        now,
+        registrationId,
+        expectedRevision,
+        commandId,
+        registrationId,
+      ),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         SELECT ?, rc.event_id, rc.id, 'REGISTRATION_CONTACT_UPDATED', 'REGISTRATION',
+                rc.result_id, 'PUBLIC', ?, ?
+           FROM race_commands rc
+          WHERE rc.id = ? AND rc.command_type = 'UPDATE_OWN_CONTACT' AND rc.result_id = ?`,
+      ).bind(
+        crypto.randomUUID(),
+        now,
+        JSON.stringify({
+          changed_fields: changedFields,
+          updated_via: "PRIVATE_BROWSER_COLLECTION",
+          previous_revision: expectedRevision,
+          revision: (expectedRevision as number) + 1,
+        }),
+        commandId,
+        registrationId,
+      ),
+    ]);
+  } catch {
+    // An identical concurrent request may have committed after the preflight.
+    // Resolve that race as the same replay the next retry would receive.
+    const replay = await env.DB.prepare(
+      "SELECT command_type, result_id, request_fingerprint FROM race_commands WHERE id = ?",
+    ).bind(commandId).first<{
+      command_type: string;
+      result_id: string | null;
+      request_fingerprint: string | null;
+    }>();
+    if (
+      replay?.command_type === "UPDATE_OWN_CONTACT"
+      && replay.result_id === registrationId
+      && replay.request_fingerprint === fingerprint
+    ) {
+      const current = await ownedContact(env, authorized.collection.id, registrationId);
+      if (current !== null) return json({ updated: true, replayed: true, contact: contactJson(current) });
+    }
+    return json({ error: "Contact details changed during the update. Refresh and try again." }, 409);
+  }
+  if (!await commandCommitted(env, commandId, "UPDATE_OWN_CONTACT", registrationId)) {
+    return json({ error: "Contact details changed during the update. Refresh and try again." }, 409);
+  }
+  const updated = await ownedContact(env, authorized.collection.id, registrationId);
+  return updated === null
+    ? json({ error: "The saved contact details could not be loaded." }, 500)
+    : json({ updated: true, replayed: false, contact: contactJson(updated) });
+};
+
 const getMyRegistrations = async (request: Request, env: Env): Promise<Response> => {
   const existingCollection = await getBrowserCollection(request, env);
   if (existingCollection === null) {
@@ -664,6 +932,9 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
       // wordlist now rejects disappears from the card and its rename form too.
       duckName: followed ? null : publicDuckName(row.duck_name),
       nameable: !followed && row.is_nameable === 1,
+      ...(followed ? {} : {
+        ownershipProof: await participantOwnershipProof(collection, row.registration_id),
+      }),
       raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),
     };
   }));
@@ -1348,6 +1619,16 @@ const handleApiRequest = async (
 
   if (url.pathname === "/api/v1/registrations/mine/delete" && request.method === "POST") {
     return deleteMyRegistration(request, env);
+  }
+
+  const contactMatch = url.pathname.match(
+    /^\/api\/v1\/registrations\/mine\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/contact$/i,
+  );
+  if (contactMatch !== null && request.method === "GET") {
+    return getMyRegistrationContact(request, env, contactMatch[1]);
+  }
+  if (contactMatch !== null && request.method === "POST") {
+    return updateMyRegistrationContact(request, env, contactMatch[1]);
   }
 
   if (url.pathname === "/api/v1/race-status/search" && request.method === "GET") {

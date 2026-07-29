@@ -848,6 +848,11 @@ If Worker deployment fails, the migrated database remains live with the old
 Worker. This is why migrations must be backward compatible. Correct the Worker
 or add a forward migration and release a new version.
 
+Migration `0018_registration_sms_preferences.sql` is additive and safe in that
+window: the old Worker names every registration insert column and therefore gets
+the new default-off SMS preference automatically. A compatible Worker rollback
+may ignore the retained column; it must not down-migrate or clear consent data.
+
 If smoke tests fail after Worker deployment, stop normal releases and assess the
 application before changing data. The first release that applies `RaceUpdates`
 Durable Object migration `v1` cannot roll back to a Worker from before that

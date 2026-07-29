@@ -11,6 +11,78 @@ export interface BrowserCollection {
   isNew: boolean;
 }
 
+const ownershipProofPattern = /^[A-Za-z0-9_-]{43}$/;
+const ownershipProofEncoder = new TextEncoder();
+
+const ownershipKey = (collection: BrowserCollection) => crypto.subtle.importKey(
+  "raw",
+  ownershipProofEncoder.encode(collection.cookieToken),
+  { name: "HMAC", hash: "SHA-256" },
+  false,
+  ["sign", "verify"],
+);
+
+const ownershipMessage = (
+  collection: BrowserCollection,
+  purpose: string,
+  registrationId: string,
+  material = "",
+): Uint8Array => ownershipProofEncoder.encode(
+  `quickducks-browser-ownership-v1\u0000${purpose}\u0000${collection.id}\u0000${registrationId}\u0000${material}`,
+);
+
+const base64Url = (value: ArrayBuffer): string => {
+  let binary = "";
+  for (const byte of new Uint8Array(value)) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+};
+
+// A proof is scoped to one collection and one participant. It is derived from
+// the HttpOnly collection token, so old collection links need no backfill and a
+// proof copied to another device is useless without the matching cookie.
+export const participantOwnershipProof = async (
+  collection: BrowserCollection,
+  registrationId: string,
+): Promise<string> => base64Url(await crypto.subtle.sign(
+  "HMAC",
+  await ownershipKey(collection),
+  ownershipMessage(collection, "participant-contact", registrationId),
+));
+
+export const isParticipantOwnershipProof = (value: string): boolean => ownershipProofPattern.test(value);
+
+export const verifyParticipantOwnershipProof = async (
+  collection: BrowserCollection,
+  registrationId: string,
+  proof: string,
+): Promise<boolean> => {
+  if (!isParticipantOwnershipProof(proof)) return false;
+  try {
+    const encoded = proof.replaceAll("-", "+").replaceAll("_", "/") + "=";
+    const signature = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
+    return await crypto.subtle.verify(
+      "HMAC",
+      await ownershipKey(collection),
+      signature,
+      ownershipMessage(collection, "participant-contact", registrationId),
+    );
+  } catch {
+    return false;
+  }
+};
+
+// The command log retains only this keyed digest. Contact values and consent
+// choices cannot be recovered or dictionary-tested without the device secret.
+export const participantContactFingerprint = async (
+  collection: BrowserCollection,
+  registrationId: string,
+  material: string,
+): Promise<string> => base64Url(await crypto.subtle.sign(
+  "HMAC",
+  await ownershipKey(collection),
+  ownershipMessage(collection, "participant-contact-command", registrationId, material),
+));
+
 const readCookie = (request: Request, name: string): string | null => {
   const header = request.headers.get("cookie");
   if (header === null) return null;

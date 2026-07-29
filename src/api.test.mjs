@@ -231,6 +231,9 @@ test("public name search returns race status without contact details", async () 
   assert.equal("phone" in body.results[0], false);
   assert.equal("lookupCode" in body.results[0], false);
   assert.equal("privateStatusPath" in body.results[0], false);
+  assert.equal("emailNotificationsEnabled" in body.results[0], false);
+  assert.equal("smsNotificationsEnabled" in body.results[0], false);
+  assert.equal("ownershipProof" in body.results[0], false);
   assert.doesNotMatch(db.statements[0].sql, /email|phone|lookup_code/i);
   assert.doesNotMatch(db.statements[0].sql, /LIKE/i);
   // An anonymous search binds an unmatchable collection id, so every result is
@@ -363,6 +366,8 @@ test("one browser collection returns multiple independent registrations", async 
   assert.equal("email" in body.registrations[0], false);
   assert.equal("phone" in body.registrations[0], false);
   assert.equal("privateStatusPath" in body.registrations[0], false);
+  assert.match(body.registrations[0].ownershipProof, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(body.registrations[0].ownershipProof, body.registrations[1].ownershipProof);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(db.statements[1].sql, /SET last_seen_at = \?, expires_at = \?/);
   assert.match(db.statements[2].sql, /FROM duck_assignments da/);
@@ -446,6 +451,8 @@ test("a followed collection entry is projected without a lookup code or unmasked
   assert.equal(followed.lookupCode, null);
   assert.equal(followed.firstName, null);
   assert.equal(followed.lastName, null);
+  assert.match(owned.ownershipProof, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal("ownershipProof" in followed, false);
   // A QR is an encoding of the lookup code, so withholding the code but
   // sending its QR would hand back exactly what the projection just refused.
   // Asserting the owned side too keeps this pair failing for the right reason:
@@ -742,6 +749,9 @@ test("private registration status still keeps email and phone staff-only", async
   assert.equal(body.raceStatus.outcome, "NOT_RACED");
   assert.equal("email" in body, false);
   assert.equal("phone" in body, false);
+  assert.equal("emailNotificationsEnabled" in body, false);
+  assert.equal("smsNotificationsEnabled" in body, false);
+  assert.equal("ownershipProof" in body, false);
   assert.ok(db.statements.every((statement) => !/email|phone/i.test(statement.sql)));
   assert.ok(db.statements.every((statement) => !statement.sql.includes("duck_keep_preference")));
 });
@@ -989,6 +999,9 @@ const duckNumberRow = {
   phone: "555-0100",
   lookup_code: "DUCK8234",
   private_token_hash: "hash-value",
+  email_notifications_enabled: 1,
+  sms_notifications_enabled: 1,
+  ownership_proof: "proof-value",
   tag_token: "tag-token-value",
   inventory_location: "Shed B",
   staff_notes: "Ask about the cracked bill.",
@@ -1062,6 +1075,7 @@ test("the public duck number projection exposes no contact, code, token, or staf
   for (const forbidden of [
     "email", "phone", "lookupCode", "lookup_code", "privateToken", "privateTokenHash",
     "private_token_hash", "token", "tagToken", "tag_token", "privateStatusPath",
+    "emailNotificationsEnabled", "smsNotificationsEnabled", "ownershipProof", "ownership_proof",
     "inventoryLocation", "inventory_location", "notes", "staffNotes", "staff_notes",
     "auditEvents", "firstName", "lastName", "registrationId", "duck_name",
   ]) {
@@ -1079,7 +1093,7 @@ test("the public duck number projection exposes no contact, code, token, or staf
     ["followId", "inMyDucks"],
   );
   for (const forbidden of [
-    "daisy@example.com", "555-0100", "DUCK8234", "hash-value",
+    "daisy@example.com", "555-0100", "DUCK8234", "hash-value", "proof-value",
     "tag-token-value", "Shed B", "Ask about the cracked bill.",
   ]) {
     assert.equal(values.includes(forbidden), false, `value ${forbidden} must not be projected`);

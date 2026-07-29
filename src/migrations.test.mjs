@@ -21,6 +21,7 @@ const migrationNames = [
   "0015_participant_duck_names.sql",
   "0016_locked_final_winner_correction.sql",
   "0017_final_podium_selections.sql",
+  "0018_registration_sms_preferences.sql",
 ];
 
 const lifecycleStatuses = [
@@ -268,6 +269,59 @@ test("0015 adds an optional bounded duck name that older writes keep working wit
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM race_entries WHERE duck_name = 'Bubbles'").get().count,
     2,
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0018 adds default-off SMS consent and requires a phone when enabled", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0018_registration_sms_preferences.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event', 'test-race', 'Test Race', 'America/Denver', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, phone, status, lookup_code,
+       private_token_hash, submitted_at, status_changed_at)
+    VALUES ('registration-1', 'event', 'Daisy', 'Duck', '+15550101', 'SUBMITTED',
+            'DAASY234', 'hash-1', '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z');
+  `);
+
+  applyMigrations(database, ["0018_registration_sms_preferences.sql"]);
+  assert.equal(
+    database.prepare("SELECT sms_notifications_enabled FROM registrations WHERE id = 'registration-1'").get()
+      .sms_notifications_enabled,
+    0,
+  );
+  // The old Worker names no SMS column, so its insert shape remains valid and
+  // receives the safe opted-out default.
+  database.exec(`
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code,
+       private_token_hash, submitted_at, status_changed_at)
+    VALUES ('registration-2', 'event', 'Donald', 'Mallard', 'SUBMITTED',
+            'DNNALD23', 'hash-2', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+  `);
+  assert.equal(
+    database.prepare("SELECT sms_notifications_enabled FROM registrations WHERE id = 'registration-2'").get()
+      .sms_notifications_enabled,
+    0,
+  );
+  database.exec("UPDATE registrations SET sms_notifications_enabled = 1 WHERE id = 'registration-1'");
+  for (const value of [-1, 2]) {
+    assert.throws(
+      () => database.prepare("UPDATE registrations SET sms_notifications_enabled = ? WHERE id = 'registration-1'").run(value),
+      /CHECK constraint failed/,
+    );
+  }
+  assert.throws(
+    () => database.exec("UPDATE registrations SET phone = NULL WHERE id = 'registration-1'"),
+    /CHECK constraint failed/,
+  );
+  assert.throws(
+    () => database.exec("UPDATE registrations SET sms_notifications_enabled = 1 WHERE id = 'registration-2'"),
+    /CHECK constraint failed/,
   );
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();

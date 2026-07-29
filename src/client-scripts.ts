@@ -213,7 +213,7 @@ const updatePublicNamePolicy = () => {
     : currentEvent.publicNamePolicy === "FIRST_NAME_ONLY"
       ? firstName
       : firstName + " " + lastName.slice(0, 1).toUpperCase() + ".";
-  publicNamePolicy.textContent = "Your name will appear publicly as " + example + " (" + format + "). Your email and phone stay private.";
+  publicNamePolicy.textContent = "Your name will appear publicly as " + example + " (" + format + "). Your email and phone stay private: authorized staff and this originating device can view them, but public race pages cannot.";
 };
 
 firstNameInput.addEventListener("input", updatePublicNamePolicy);
@@ -818,6 +818,192 @@ const participantNameControls = (registration) => {
   return [toggle, form];
 };
 
+// Contact details are never part of the collection summary. Each owned card
+// uses its participant-specific proof for a second private read, and followed
+// cards receive no proof at all.
+const participantOpenContactEditors = new Set();
+
+const participantSaveContact = async (registration, form, fields, save, feedback, commandState) => {
+  const value = {
+    email: fields.email.value.trim() || null,
+    phone: fields.phone.value.trim() || null,
+    emailNotificationsEnabled: fields.emailUpdates.checked,
+    smsNotificationsEnabled: fields.smsUpdates.checked,
+  };
+  if (value.emailNotificationsEnabled && value.email === null) {
+    feedback.textContent = "Add an email address before enabling email updates.";
+    feedback.hidden = false;
+    return;
+  }
+  if (value.smsNotificationsEnabled && value.phone === null) {
+    feedback.textContent = "Add a phone number before enabling text message updates.";
+    feedback.hidden = false;
+    return;
+  }
+  const material = JSON.stringify(value);
+  if (commandState.pending === null || commandState.pending.material !== material) {
+    commandState.pending = { commandId: crypto.randomUUID(), material };
+  }
+  save.disabled = true;
+  save.textContent = "Saving…";
+  feedback.hidden = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  try {
+    let response;
+    let body = null;
+    try {
+      response = await fetch(
+        "/api/v1/registrations/mine/" + encodeURIComponent(registration.registrationId) + "/contact",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+            "x-quickducks-ownership-proof": registration.ownershipProof,
+          },
+          body: JSON.stringify({
+            commandId: commandState.pending.commandId,
+            expectedRevision: registration.contact.revision,
+            ...value,
+          }),
+        },
+      );
+      body = await response.json();
+    } catch {}
+    if (!response || !response.ok || !body || !body.contact) {
+      save.disabled = false;
+      save.textContent = "Save changes";
+      // Keep the same command through network, rate-limit, conflict, and server
+      // failures: the write may have committed even when its response was lost.
+      // Only a definitive request/auth/validation rejection retires it.
+      if (response && [400, 403, 404, 413, 415, 422].includes(response.status)) {
+        commandState.pending = null;
+      }
+      feedback.textContent = response && response.status === 422
+        ? "Check the email, phone, and update choices, then try again."
+        : response && response.status === 409
+          ? "These details changed elsewhere. Refresh the page and try again."
+          : "Contact details could not be saved. Please try again.";
+      feedback.hidden = false;
+      return;
+    }
+    commandState.pending = null;
+    registration.contact = body.contact;
+    globalThis.quickDucksLive.markClean(form);
+    participantOpenContactEditors.delete(registration.registrationId);
+    participantVersion = null;
+    await participantRefreshWork();
+  } finally {
+    endBusy();
+  }
+};
+
+const participantContactControls = (registration) => {
+  const contact = registration.contact;
+  if (!contact || registration.followed === true || typeof registration.ownershipProof !== "string") {
+    return participantText("p", "Private contact details are temporarily unavailable. Refresh to try again.", "muted");
+  }
+  const registrationId = registration.registrationId;
+  const section = participantText("section", "", "participant-contact");
+  const heading = participantText("h4", "Private contact and updates");
+  const details = participantText("dl", "", "facts contact-facts");
+  participantAddFact(details, "Email", contact.email || "Not provided");
+  participantAddFact(details, "Phone", contact.phone || "Not provided");
+  participantAddFact(details, "Email opt-in", contact.emailNotificationsEnabled ? "Opted in" : "Not opted in");
+  participantAddFact(details, "SMS opt-in", contact.smsNotificationsEnabled ? "Opted in" : "Not opted in");
+
+  const toggle = participantText("button", "Edit contact details", "button secondary small");
+  toggle.type = "button";
+  toggle.dataset.contactEdit = registrationId;
+  toggle.setAttribute("aria-controls", "contact-form-" + registrationId);
+
+  const form = participantText("form", "", "contact-form");
+  form.id = "contact-form-" + registrationId;
+  form.dataset.contactForm = registrationId;
+  const emailLabel = participantText("label", contact.emailRequired ? "Email" : "Email (optional)");
+  const email = document.createElement("input");
+  email.name = "email";
+  email.type = "email";
+  email.autocomplete = "email";
+  email.maxLength = 254;
+  email.required = contact.emailRequired === true;
+  email.value = contact.email || "";
+  emailLabel.append(email);
+  const phoneLabel = participantText("label", "Phone (optional)");
+  const phone = document.createElement("input");
+  phone.name = "phone";
+  phone.type = "tel";
+  phone.autocomplete = "tel";
+  phone.maxLength = 32;
+  phone.value = contact.phone || "";
+  phoneLabel.append(phone);
+
+  const emailUpdatesLabel = participantText("label", "", "check");
+  const emailUpdates = document.createElement("input");
+  emailUpdates.type = "checkbox";
+  emailUpdates.name = "emailNotificationsEnabled";
+  emailUpdates.checked = contact.emailNotificationsEnabled === true;
+  emailUpdatesLabel.append(emailUpdates, participantText("span", "Receive operational race updates by email"));
+  const smsUpdatesLabel = participantText("label", "", "check");
+  const smsUpdates = document.createElement("input");
+  smsUpdates.type = "checkbox";
+  smsUpdates.name = "smsNotificationsEnabled";
+  smsUpdates.checked = contact.smsNotificationsEnabled === true;
+  smsUpdatesLabel.append(smsUpdates, participantText("span", "Receive operational race updates by text message"));
+  const feedback = participantText("p", "", "message-line muted");
+  feedback.setAttribute("role", "status");
+  feedback.hidden = true;
+  const save = participantText("button", "Save changes", "button small");
+  save.type = "submit";
+  const cancel = participantText("button", "Cancel", "button secondary small");
+  cancel.type = "button";
+  const actions = participantText("div", "", "actions");
+  actions.append(save, cancel);
+  form.append(emailLabel, phoneLabel, emailUpdatesLabel, smsUpdatesLabel, actions, feedback);
+  const commandState = { pending: null };
+
+  const reset = () => {
+    email.value = contact.email || "";
+    phone.value = contact.phone || "";
+    emailUpdates.checked = contact.emailNotificationsEnabled === true;
+    smsUpdates.checked = contact.smsNotificationsEnabled === true;
+    commandState.pending = null;
+    feedback.hidden = true;
+  };
+  const paint = (open) => {
+    details.hidden = open;
+    form.hidden = !open;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  };
+  const setOpen = (open) => {
+    if (open) participantOpenContactEditors.add(registrationId);
+    else participantOpenContactEditors.delete(registrationId);
+    if (!open) {
+      reset();
+      globalThis.quickDucksLive.markClean(form);
+      toggle.focus();
+    }
+    paint(open);
+    if (open) email.focus();
+  };
+  toggle.addEventListener("click", () => setOpen(form.hidden));
+  cancel.addEventListener("click", () => setOpen(false));
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    return participantSaveContact(
+      registration,
+      form,
+      { email, phone, emailUpdates, smsUpdates },
+      save,
+      feedback,
+      commandState,
+    );
+  });
+  paint(participantOpenContactEditors.has(registrationId));
+  section.append(heading, details, toggle, form);
+  return section;
+};
+
 const participantQrNamespace = "http://www.w3.org/2000/svg";
 
 // The server sends drawing geometry rather than markup, and this builds the
@@ -882,6 +1068,7 @@ const participantCard = (registration) => {
       : "Show this code to staff at the duck table. They can scan it or type the code above.", "muted"));
   }
   card.append(participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"));
+  if (!registration.followed) card.append(participantContactControls(registration));
   participantAddRaceFacts(card, registration.raceStatus, registration);
   if (participantCanDelete(registration)) card.append(...participantDeleteControls(registration));
   if (participantCanUnfollow(registration)) card.append(...participantUnfollowControls(registration));
@@ -1147,9 +1334,31 @@ const participantFetch = async () => {
     return;
   }
   if (!body || !Array.isArray(body.registrations)) throw new Error("invalid collection response");
-  participantSetNavPresence(body.registrations.length > 0);
-  participantSetSearchPlacement(body.registrations.length > 0);
-  if (!document.hidden) participantRender(body.registrations);
+  const registrations = await Promise.all(body.registrations.map(async (registration) => {
+    if (registration.followed === true || typeof registration.ownershipProof !== "string") return registration;
+    try {
+      const contactResponse = await fetch(
+        "/api/v1/registrations/mine/" + encodeURIComponent(registration.registrationId) + "/contact",
+        {
+          headers: {
+            accept: "application/json",
+            "x-quickducks-ownership-proof": registration.ownershipProof,
+          },
+          cache: "no-store",
+        },
+      );
+      if (!contactResponse.ok) return { ...registration, contact: null };
+      const contactBody = await contactResponse.json();
+      return contactBody && contactBody.contact
+        ? { ...registration, contact: contactBody.contact }
+        : { ...registration, contact: null };
+    } catch {
+      return { ...registration, contact: null };
+    }
+  }));
+  participantSetNavPresence(registrations.length > 0);
+  participantSetSearchPlacement(registrations.length > 0);
+  if (!document.hidden) participantRender(registrations);
 };
 
 const participantRefreshWork = async () => {

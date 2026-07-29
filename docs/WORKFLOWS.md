@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0016_locked_final_winner_correction.sql`, browser
+the Worker, D1 migrations through `0018_registration_sms_preferences.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -356,8 +356,10 @@ The participant enters:
 - Last name, required, normalized to single spaces, maximum 80 characters.
 - Email, optional or required by event configuration, maximum 254 characters.
 - Phone, optional, maximum 32 characters.
-- Email for staff contact when supplied. The routine UI does not offer an email
-  notification preference while outbound delivery remains non-operational.
+- Contact details for authorized staff and the proof-protected card on the
+  originating device when supplied. Notification preferences begin opted out;
+  the participant can change them later from that card even though outbound
+  delivery remains non-operational.
 - A successful Turnstile response.
 
 The safe current-event response includes the configured public-name policy. The
@@ -454,7 +456,7 @@ for each collected registration:
 - For a registered entry, the full participant name and the staff lookup code
   from the private browser collection.
 - For a followed entry, a **Following** tag, the event's policy-filtered public
-  display name, and no lookup code at all. The collection response returns
+  display name, and no lookup code or ownership proof at all. The collection response returns
   `lookupCode: null` and null name parts for these entries, because the public
   search that produced them exposes neither.
 - Registration status.
@@ -465,6 +467,10 @@ for each collected registration:
 - `duckName` and a `nameable` flag. The card's own editable name is sent only for
   an entry this browser registered; a followed card reads the duck's public name
   from its race status like any other visitor. See **Naming Your Own Duck**.
+- For each `REGISTRATION` link only, a participant-specific HMAC ownership proof.
+  The proof is derived from the HttpOnly collection token, collection ID, and
+  registration ID, so retained links gain it without re-registration or a data
+  backfill. It is never returned for `FOLLOWED` links.
 
 Cards are grouped into three horizontally swipeable sections with keyboard and
 previous/next controls: **Awaiting Participants** and paired **My Ducks** hold
@@ -514,6 +520,53 @@ does not withdraw or delete registrations.
 Public race status in a collection stays available through `COMPLETED`. It
 becomes `null` only when an administrator deletes the event, which also removes
 the collection's registration entries.
+
+### Viewing and Editing Private Contact Details
+
+**Implemented:** every My Ducks card created on this device makes a separate
+proof-protected private read and shows that participant's email, phone, email
+opt-in, and SMS opt-in. **Edit contact details** opens only those four fields in
+place. Cancel discards the draft; Save writes the normalized values and refetches
+the authoritative contact resource. A reload therefore shows the persisted
+values. Followed cards have neither the proof, private read, fields, nor Edit
+action and remain public-only.
+
+`GET /api/v1/registrations/mine/<registration-id>/contact` requires both the
+valid unexpired HttpOnly collection cookie and the participant-specific proof in
+`X-QuickDucks-Ownership-Proof`. The collection must still hold that exact link as
+`REGISTRATION`. A missing cookie or proof, an invalid or mismatched proof, an
+unrelated registration, and a `FOLLOWED` link all return the same `404`. A proof
+for one participant cannot authorize another participant, and copying a proof to
+another device is useless without its matching cookie. The read is `no-store`,
+does not refresh the collection, writes nothing, and sends no live signal.
+
+`POST /api/v1/registrations/mine/<registration-id>/contact` repeats that exact
+authorization and additionally requires JSON, a bounded body, and the exact
+application `Origin`. The body must contain an RFC 4122 v4 command ID, expected
+registration revision, and exactly email, phone, email opt-in, and SMS opt-in;
+unknown fields are rejected. Email is normalized to lowercase and validated,
+phone is trimmed and bounded, event-required email cannot be cleared, and an
+opt-in requires its corresponding contact value. Migration `0018` adds
+`sms_notifications_enabled` with a default-off boolean constraint and requires a
+phone whenever it is enabled; existing rows and old Worker insert shapes remain
+valid.
+
+The guarded command insert rechecks the exact `REGISTRATION` collection link and
+revision inside the D1 batch. The contact update increments the registration
+revision. Exact retries return `replayed: true`; reusing a command for different
+normalized contact material or a different revision returns `409`. Command
+history stores only a keyed HMAC fingerprint. The redacted audit event stores
+the registration ID, revisions, and changed field names, never contact values,
+proof, request body, lookup code, or private token. A contact-only edit queues no
+notification and publishes no WebSocket refresh, so no public timing or payload
+is broadcast.
+
+The collection summary itself remains contact-free. Public name search, race
+status, duck pages, race boards, and WebSockets return neither contact fields,
+notification preferences, nor ownership proof. The private `/r/<token>` status
+page also remains contact-free. All four fields are available on the originating
+device's proof-protected My Ducks card; email, phone, and email opt-in retain
+their existing logged-in authorized-staff visibility.
 
 ### Deleting Your Own Registration
 

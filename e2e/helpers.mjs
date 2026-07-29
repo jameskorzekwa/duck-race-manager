@@ -77,6 +77,7 @@ export const registerParticipant = async (client, eventId, index, overrides = {}
     email: `racer${index}@example.test`,
     phone: `+1555020${String(index).padStart(4, "0")}`,
     emailNotificationsEnabled: false,
+    smsNotificationsEnabled: false,
     turnstileToken: localPreviewTurnstileToken,
   }, { anonymous: true, label: `register synthetic racer ${index}` });
   return {
@@ -208,7 +209,8 @@ export const publicBoardShape = async () => {
 
 export const rejectSensitiveKeys = (value) => {
   const forbidden = new Set([
-    "email", "phone", "lookupCode", "privateToken", "privateStatusPath",
+    "email", "phone", "emailNotificationsEnabled", "smsNotificationsEnabled",
+    "ownershipProof", "lookupCode", "privateToken", "privateStatusPath",
     "notes", "location", "storageLocation", "audit", "tagToken",
   ]);
   const visit = (candidate) => {

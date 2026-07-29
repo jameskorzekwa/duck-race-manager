@@ -207,6 +207,8 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
   for (const [method, path] of [
     ["GET", "/api/v1/staff/events"],
     ["GET", "/api/v1/registrations/mine"],
+    // Contact-only edits are private and must not broadcast even their timing.
+    ["POST", "/api/v1/registrations/mine/11111111-1111-4111-8111-111111111111/contact"],
     ["POST", "/api/v1/staff/events/event/heats/round-one/plan-preview"],
     ["POST", "/api/v1/staff/inventory/provisioning/classify"],
     ["POST", "/api/v1/unknown"],

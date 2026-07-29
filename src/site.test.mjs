@@ -371,15 +371,17 @@ test("My Ducks separates participants registered here from ducks that are only f
   const myDucks = renderMyDucks("REGISTRATION");
 
   // The followed set is its own section with its own carousel, and it says
-  // plainly that those entries carry no staff code and no duck name.
+  // plainly that those entries carry no private contact, staff code, or duck name.
   assert.match(myDucks, /<h2 id="followed-participants-title">Ducks I’m Following<\/h2>/);
   assert.match(myDucks, /data-participant-track tabindex="0" aria-label="Followed participants" hidden/);
-  assert.match(myDucks, /someone else’s registration, so they show public race status only — no staff lookup code and no duck name/);
+  assert.match(myDucks, /someone else’s registration, so they show public race status only — no contact details, update choices, staff lookup code, or duck name/);
   // The owned sections say the opposite, so the distinction is on the page and
   // not only in the card contents.
   assert.match(myDucks, /Participants you registered on this device, waiting for staff to pair a physical duck\. Their staff lookup code stays on this device\./);
   assert.match(myDucks, /Participants you registered on this device, already paired with their race duck\. Use Rename on a duck to give it a name/);
-  assert.match(myDucks, /Participants you registered on this device keep their full details and staff lookup code\./);
+  assert.match(myDucks, /Participants you registered on this device keep their private contact details, update choices, and staff lookup code\./);
+  assert.match(myDucks, /participant-specific private ownership proof/);
+  assert.match(myDucks, /Email, phone, email opt-in, and SMS opt-in/);
   // The followed section still follows the shared hidden-until-data rule.
   const followed = myDucks.slice(myDucks.indexOf('data-participant-section="followed"'));
   assert.match(followed.slice(0, followed.indexOf("</section>")), /data-carousel-controls hidden/);

@@ -122,6 +122,10 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .participant-track:focus-visible { border-radius:.8rem; outline:4px solid #83d8ec; outline-offset:2px; }
 .participant-card { flex:0 0 min(30rem,calc(100% - 3rem)); min-width:0; scroll-snap-align:start; scroll-snap-stop:always; }
 .participant-card:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
+.participant-contact { margin:1rem 0; padding-top:1rem; border-top:2px solid #b8c6c9; }
+.participant-contact h4 { margin:0 0 .75rem; font-size:1.05rem; }
+.participant-contact .contact-facts { grid-template-columns:repeat(2,minmax(0,1fr)); margin:.75rem 0; }
+.participant-contact .contact-form { margin-top:.8rem; padding:.9rem; border:2px solid #b8c6c9; border-radius:.8rem; background:var(--paper); }
 .success-tag { display:inline-block; margin-bottom:.65rem; padding:.3rem .55rem; border:2px solid var(--ink); border-radius:999px; background:var(--yellow); font-size:.75rem; font-weight:950; letter-spacing:.06em; text-transform:uppercase; }
 .search-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.75rem; align-items:end; margin-top:1rem; }
 .search-form .button { min-height:3.2rem; }
@@ -624,8 +628,8 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
       ${duck()}
       <p class="eyebrow">Saved on this device</p>
       <h1 class="page-title">My Ducks</h1>
-      <p class="lede">Participants you registered on this device keep their full details and staff lookup code. Ducks you followed show public race status only.</p>
-      <div class="privacy"><strong>Private by design.</strong><span>Email and phone never appear here. Immediately after registration, this tab can show the one-time private status link so you can bookmark it; saved collection responses never include that link.</span></div>
+       <p class="lede">Participants you registered on this device keep their private contact details, update choices, and staff lookup code. Ducks you followed show public race status only.</p>
+       <div class="privacy"><strong>Private by design.</strong><span>Email, phone, email opt-in, and SMS opt-in are available here only on the originating device with participant-specific private ownership proof. Email, phone, and email opt-in are also visible to logged-in authorized race staff. These details never appear in public search or race status. Immediately after registration, this tab can also show the one-time private status link so you can bookmark it; saved collection responses never include that link.</span></div>
       <div class="notice" data-registration-success aria-live="polite" hidden></div>
       <p class="message-line muted" data-my-ducks-error role="alert" hidden></p>
       <div class="my-ducks-flow" data-my-ducks-flow>
@@ -666,7 +670,7 @@ ${phaseAllowsRegistration(phase) ? '            <a class="button small" href="/r
             <button class="button secondary small" type="button" data-carousel-next aria-controls="followed-participants">Next</button>
           </div>
         </div>
-        <p class="muted">Participants you followed from a duck tag, a duck page, or the search below. These are someone else’s registration, so they show public race status only — no staff lookup code and no duck name.</p>
+         <p class="muted">Participants you followed from a duck tag, a duck page, or the search below. These are someone else’s registration, so they show public race status only — no contact details, update choices, staff lookup code, or duck name.</p>
         <div class="participant-track" id="followed-participants" data-participant-track tabindex="0" aria-label="Followed participants" hidden></div>
       </section>
       </div>
@@ -718,7 +722,7 @@ export const renderRegistration = (
       <p class="eyebrow">Participant registration</p>
       <h1 class="page-title" data-event-name>Loading race details…</h1>
       <p class="lede" data-event-date>Registration takes about one minute.</p>
-      <div class="privacy"><strong>Private by design.</strong><span>Your email and phone number are visible only to logged-in authorized race staff. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
+       <div class="privacy"><strong>Private by design.</strong><span>Your email and phone number are visible only to logged-in authorized race staff and, with participant-specific private ownership proof, on the originating device’s My Ducks card. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
       <div class="notice"><strong>Registering more than one participant?</strong> Finish this form once for each person. You can use the same phone, email, or browser, and QuickDucks will keep their codes together on this device.</div>
       <form method="post" action="/api/v1/registrations" data-registration-form data-protection-ready="${turnstileSiteKey === undefined && !localPreviewWithoutProtection ? "false" : "true"}">
         <div class="field-grid">
@@ -791,7 +795,7 @@ export const renderStatus = (
         ${raceStatus === undefined ? "" : raceStatus === null
           ? '<p class="muted">Race status is not currently public.</p>'
           : publicStatusFacts(raceStatus, false)}</div>
-      <p class="muted">Duck, heat, and result facts match public race status. Email and phone stay staff-only, and the complete race dataset is deleted after return processing.</p>
+      <p class="muted">Duck, heat, and result facts match public race status. Email, phone, and update choices stay private; the originating device’s proof-protected My Ducks card can show them, and authorized staff can also see email, phone, and email opt-in. The complete race dataset is deleted after return processing.</p>
       <div class="actions">${phaseAllowsRegistration(phase) ? '<a class="button" href="/register">Register another participant</a>' : ""}<a class="button secondary" href="/">Back to home</a></div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
   });

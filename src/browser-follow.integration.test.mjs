@@ -169,7 +169,7 @@ test("a followed search result joins My Ducks without ever exposing a lookup cod
   assert.equal(search.results[0].participantDisplayName, "Daisy D.");
   assert.equal(search.results[0].inMyDucks, false);
   assert.match(search.results[0].followId, /^[0-9a-f-]{36}$/);
-  assert.equal(/email|phone|lookup|privateStatusPath|token/i.test(JSON.stringify(search)), false);
+  assert.equal(/email|phone|lookup|privateStatusPath|ownershipProof|token/i.test(JSON.stringify(search)), false);
   assert.equal(JSON.stringify(search).includes(owner.lookupCode), false);
 
   const followResponse = await api("/api/v1/registrations/mine/follow", {
@@ -200,7 +200,7 @@ test("a followed search result joins My Ducks without ever exposing a lookup cod
   assert.equal(followed.raceStatus.outcome, "AWAITING_DUCK_PAIRING");
   assert.equal(JSON.stringify(followerMine).includes(owner.lookupCode), false);
   assert.equal(JSON.stringify(followerMine).includes("Duck"), false, "the masked last name must not leak");
-  assert.equal(/email|phone|privateStatusPath/i.test(JSON.stringify(followerMine)), false);
+  assert.equal(/email|phone|emailNotificationsEnabled|smsNotificationsEnabled|ownershipProof|privateStatusPath/i.test(JSON.stringify(followerMine)), false);
 
   // The presence probe still reveals the nav for a purely followed collection.
   assert.deepEqual(
@@ -244,6 +244,7 @@ test("a followed search result joins My Ducks without ever exposing a lookup cod
   assert.equal(ownerMine.registrations[0].followed, false);
   assert.equal(ownerMine.registrations[0].lookupCode, owner.lookupCode);
   assert.equal(ownerMine.registrations[0].displayName, "Daisy Duck");
+  assert.match(ownerMine.registrations[0].ownershipProof, /^[A-Za-z0-9_-]{43}$/);
 
   assert.deepEqual(
     database.prepare(

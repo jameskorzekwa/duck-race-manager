@@ -359,6 +359,10 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.doesNotMatch(registrationScript, /\/my-ducks\?registered=.*privateStatusPath/);
   assert.match(participantScript, /\/api\/v1\/registrations\/mine/);
   assert.match(participantScript, /\/api\/v1\/registrations\/mine\/presence/);
+  assert.match(participantScript, /\/contact/);
+  assert.match(participantScript, /x-quickducks-ownership-proof/);
+  assert.match(participantScript, /Edit contact details/);
+  assert.match(participantScript, /smsNotificationsEnabled/);
   assert.match(participantScript, /Open private status/);
   assert.match(participantScript, /registration\.paired/);
   assert.match(participantScript, /history\.replaceState/);
@@ -371,6 +375,8 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   for (const script of [searchScript, registrationScript, participantScript]) {
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   }
+  assert.doesNotMatch(participantScript, /(?:localStorage|sessionStorage)\.setItem\([^\n]*(?:ownershipProof|contact|email|phone)/i);
+  assert.doesNotMatch(participantScript, /location\.(?:assign|replace)\([^\n]*(?:ownershipProof|contact|email|phone)/i);
   assert.match(staffDuckScript, /\/api\/v1\/staff\/ducks/);
   assert.match(staffDuckScript, /\/api\/v1\/staff\/registrations\/search/);
   assert.match(staffDuckScript, /registration\.email/);

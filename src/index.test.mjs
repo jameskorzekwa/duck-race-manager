@@ -1057,6 +1057,8 @@ test("renders working registration UI while protection remains fail-closed", asy
   assert.doesNotMatch(registrationBody, /email updates/i);
   assert.match(registrationBody, /data-public-name-policy/);
   assert.match(registrationBody, /visible only to logged-in authorized race staff/);
+  assert.match(registrationBody, /participant-specific private ownership proof/);
+  assert.match(registrationBody, /originating device/);
   assert.match(registrationBody, /permanently deletes the complete race/);
   assert.doesNotMatch(registrationBody, /duck_keep_preference|plan to keep|plan to return|not sure yet/i);
   assert.match(await confirmation.text(), /DUCK8234/);

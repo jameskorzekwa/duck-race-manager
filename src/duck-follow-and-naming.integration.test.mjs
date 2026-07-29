@@ -377,6 +377,7 @@ test("the public duck page offers the identical follow control and identifier", 
   assert.equal(mine.registrations[0].lookupCode, null);
   assert.equal(mine.registrations[0].duckName, null);
   assert.equal(mine.registrations[0].nameable, false);
+  assert.equal("ownershipProof" in mine.registrations[0], false);
   clean(database);
 });
 
