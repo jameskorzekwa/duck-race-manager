@@ -19,6 +19,13 @@ const stylesheetFrom = (markup) => {
   return match[1];
 };
 
+test("the shared rounded type uses open tracking instead of compressed letters", () => {
+  const css = stylesheetFrom(renderMyDucks());
+
+  assert.match(css, /:root \{[^}]*letter-spacing:\.01em;/);
+  assert.doesNotMatch(css, /letter-spacing:-/);
+});
+
 test("shared staff styles keep card and status rhythm without empty whitespace", () => {
   const css = stylesheetFrom(renderStaffHome("Spacing Test", true, []));
 

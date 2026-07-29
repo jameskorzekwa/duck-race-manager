@@ -554,8 +554,8 @@ test.describe("sitewide UI consistency", () => {
     expect(errors).toEqual([]);
   });
 
-  test("the home duck bobs through a water slit without covering mobile hero copy", async ({ page }) => {
-    await seedState("registration");
+  test("the home duck and water stay clear of readable, comfortably tracked hero copy", async ({ page }) => {
+    await seedState("empty");
     await page.emulateMedia({ reducedMotion: "no-preference" });
     await page.goto("/");
     // The hero carries copy and artwork only now, so the duck must clear the
@@ -565,6 +565,13 @@ test.describe("sitewide UI consistency", () => {
     const duck = page.locator(".hero-duck");
     const slit = page.locator(".hero-duck-slit");
     const water = page.locator(".hero-water");
+    const expectCopyClearance = async () => {
+      const [copyBox, waterBox] = await Promise.all([
+        heroCopy.boundingBox(),
+        water.boundingBox(),
+      ]);
+      expect(waterBox.y - copyBox.y - copyBox.height).toBeGreaterThanOrEqual(16);
+    };
     const expectSlitComposition = async () => {
       const [duckBox, slitBox, waterBox] = await Promise.all([
         duck.boundingBox(),
@@ -586,6 +593,11 @@ test.describe("sitewide UI consistency", () => {
     // The hero holds no action row at all; the phase CTA lives with the race.
     await expect(page.locator(".hero .actions")).toHaveCount(0);
     await expect(page.locator(".hero a")).toHaveCount(0);
+    expect(parseFloat(await page.locator("body").evaluate((element) => getComputedStyle(element).letterSpacing)))
+      .toBeGreaterThan(0);
+    expect(parseFloat(await page.locator("h1").evaluate((element) => getComputedStyle(element).letterSpacing)))
+      .toBeGreaterThan(0);
+    await expectCopyClearance();
     await expectSlitComposition();
     const [heroBox, desktopSceneBox, desktopSlitBox, desktopWaterBox] = await Promise.all([
       page.locator(".hero").boundingBox(),
@@ -600,6 +612,7 @@ test.describe("sitewide UI consistency", () => {
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 844 });
       await expect(duck).toHaveCSS("animation-name", "duck-bob");
+      await expectCopyClearance();
       await expectSlitComposition();
       const [copyBox, duckBox] = await Promise.all([
         heroCopy.boundingBox(),
