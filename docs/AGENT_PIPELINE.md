@@ -187,6 +187,8 @@ Every later model job checks that record and fails closed while any prior
 OpenChamber parent or child session remains busy. Workspaces are unique per run
 and are deleted only after all matching sessions report `idle`, so a timed-out
 turn cannot race a later checkout or contaminate another patch.
+A local session marked `dispatching` but missing from OpenChamber status
+intentionally leaves the runner fail-closed for manual inspection.
 
 ## Install In Another Repository
 
