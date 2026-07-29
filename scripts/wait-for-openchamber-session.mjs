@@ -129,6 +129,43 @@ export async function waitForOpenChamberSession({
   throw new Error(`Session ${sessionId ?? "dispatch"} did not complete within ${timeoutSeconds} seconds.`);
 }
 
+// Cleanup and recovery must fail closed on a busy session, but a straggler
+// subagent finishing moments after the parent is normal. Wait for idle within a
+// bounded window instead of discarding a completed attempt on one sample.
+export async function waitForIdleSessions({
+  directory,
+  timeoutSeconds,
+  requireSession = false,
+  run = runOpenChamber,
+  sleep = delay,
+  now = Date.now,
+  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+}) {
+  const modelDirectory = String(directory ?? "").trim();
+  if (!modelDirectory) throw new Error("A model directory is required.");
+  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1) {
+    throw new Error("Idle timeout must be a positive integer number of seconds.");
+  }
+
+  const deadline = now() + timeoutSeconds * 1_000;
+  let busy = [];
+  while (true) {
+    const sessions = listSessions(run, modelDirectory);
+    if (sessions.length === 0) {
+      if (requireSession) {
+        throw new Error(`A dispatched model session is missing from OpenChamber status for ${modelDirectory}.`);
+      }
+      return [];
+    }
+    busy = sessions.filter((session) => session?.status?.type !== "idle");
+    if (busy.length === 0) return sessions;
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(pollIntervalMs, remaining));
+  }
+  throw new Error(`Model sessions remain active after ${timeoutSeconds} seconds: ${busy.map((session) => session.id).join(", ")}`);
+}
+
 function parseArguments(args) {
   const values = {};
   for (let index = 0; index < args.length; index += 2) {
@@ -142,18 +179,35 @@ function parseArguments(args) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = parseArguments(process.argv.slice(2));
-  if (!args.dir || !args.result || !args.timeout || !args["marker-prefix"]) {
-    throw new Error("Usage: wait-for-openchamber-session.mjs --dir <path> --result <path> --timeout <seconds> --marker-prefix <prefix> [--state <path>]");
-  }
-  const result = await waitForOpenChamberSession({
-    directory: args.dir,
-    timeoutSeconds: Number(args.timeout),
-    markerPrefix: args["marker-prefix"],
-    onSessionResolved: (sessionId) => {
-      if (!args.state || !existsSync(args.state)) return;
+  if (args.mode === "idle") {
+    if (!args.dir || !args.timeout) {
+      throw new Error("Usage: wait-for-openchamber-session.mjs --mode idle --dir <path> --timeout <seconds> [--state <path>]");
+    }
+    let requireSession = false;
+    if (args.state && existsSync(args.state)) {
       const state = JSON.parse(readFileSync(args.state, "utf8"));
-      writeFileSync(args.state, JSON.stringify({ ...state, sessionId }));
-    },
-  });
-  writeFileSync(args.result, JSON.stringify(result, null, 2));
+      requireSession = path.resolve(String(state.directory ?? "")) === path.resolve(args.dir)
+        && state.phase === "dispatching";
+    }
+    await waitForIdleSessions({
+      directory: args.dir,
+      timeoutSeconds: Number(args.timeout),
+      requireSession,
+    });
+  } else {
+    if (!args.dir || !args.result || !args.timeout || !args["marker-prefix"]) {
+      throw new Error("Usage: wait-for-openchamber-session.mjs --dir <path> --result <path> --timeout <seconds> --marker-prefix <prefix> [--state <path>]");
+    }
+    const result = await waitForOpenChamberSession({
+      directory: args.dir,
+      timeoutSeconds: Number(args.timeout),
+      markerPrefix: args["marker-prefix"],
+      onSessionResolved: (sessionId) => {
+        if (!args.state || !existsSync(args.state)) return;
+        const state = JSON.parse(readFileSync(args.state, "utf8"));
+        writeFileSync(args.state, JSON.stringify({ ...state, sessionId }));
+      },
+    });
+    writeFileSync(args.result, JSON.stringify(result, null, 2));
+  }
 }
