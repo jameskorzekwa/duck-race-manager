@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleApi } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
 import { hasAllRoles, hasAnyRole, normalizeOperationalRoles } from "./authorization.ts";
+import { createWorker } from "./index.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 
 const migrationsUrl = new URL("../db/migrations/", import.meta.url);
@@ -375,6 +376,42 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   ]) {
     assert.equal((await api(actors.none, path)).status, 403, `roleless actor denied ${path}`);
   }
+
+  // Every race-control surface a race director exists to use lives inside the
+  // `/staff` Admin view, so the page has to open for them. `is_system_admin` is
+  // an account type, not a race-day role; `RACE_DIRECTOR` is the race-day role
+  // for changing the state of the overall race, and this actor holds only that.
+  const staffPage = async (actor, path) => {
+    const response = await createWorker(async () => actor).fetch(
+      new Request(`https://quickducks.com${path}`),
+      env,
+    );
+    return { status: response.status, location: response.headers.get("location"), body: await response.text() };
+  };
+  assert.equal(actors.director.isSystemAdmin, false, "the matrix director is not an administrator");
+  const directorConsole = await staffPage(actors.director, "/staff");
+  assert.equal(directorConsole.status, 200, "a race director opens the Admin view");
+  assert.match(directorConsole.body, /<a href="\/staff" aria-current="page">Admin<\/a>/);
+  for (const view of ["event", "heats", "participants"]) {
+    assert.match(
+      directorConsole.body,
+      new RegExp(`<section class="console-section" id="${view}"[^>]* data-role-allowed="true"`),
+      view,
+    );
+  }
+  // Administrator-only surfaces stay administrator-only inside that view.
+  assert.doesNotMatch(directorConsole.body, /<section class="console-section" id="support"/);
+  assert.doesNotMatch(directorConsole.body, /data-event-create-form|data-event-config-form|data-force-delete-form/);
+  assert.equal((await staffPage(actors.director, "/staff/access")).status, 403);
+  // A staffer with neither is still sent to a page they can use rather than
+  // being shown a console they cannot drive.
+  const announcerLanding = await staffPage(actors.announcer, "/staff");
+  assert.equal(announcerLanding.status, 303);
+  assert.equal(announcerLanding.location, "/staff/announcer");
+  // And a role-less account gets a page that says so instead of a dead end.
+  const rolelessLanding = await staffPage(actors.none, "/staff");
+  assert.equal(rolelessLanding.status, 200);
+  assert.match(rolelessLanding.body, /No operational roles assigned/);
 
   await json(await post(actors.director, `/api/v1/staff/events/${eventId}/close-registration`, {
     commandId: command(),

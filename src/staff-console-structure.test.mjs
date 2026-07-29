@@ -9,6 +9,7 @@ import {
   renderStaffAccess,
   renderStaffDuck,
   renderStaffHome,
+  renderStaffNoAccess,
   renderStaffRegistration,
   renderStartLine,
 } from "./site.ts";
@@ -114,10 +115,14 @@ test("every event-scoped console section ships hidden so no section flashes befo
     assert.match(events, / data-console-view="event"/, label);
   }
 
-  // A console user with no roles at all still gets no console script and a hidden event section.
+  // An account with no roles at all has no console to ship: it gets the real
+  // "No operational roles assigned" page instead of an empty console shell, so
+  // there is no section, no menu bar, and no console script to load.
   const noRoles = renderStaffHome("No Role", false, []);
-  assert.match(sectionTag(noRoles, "event"), / hidden>$/);
+  assert.match(noRoles, /No operational roles assigned/);
+  assert.equal(sectionTag(noRoles, "event"), null);
   assert.doesNotMatch(noRoles, /src="\/assets\/staff-home\.js"/);
+  assert.doesNotMatch(noRoles, /class="console-nav"|data-console-view|data-console-message/);
 });
 
 // The Admin console is a menu bar over separate views. Only one is displayed at
@@ -233,8 +238,9 @@ test("Admin menu-bar items are event-scoped, ship hidden, and stay role filtered
     navHrefs(consoleNav(renderStaffHome("Announcer", false, ["ANNOUNCER"]))),
     ["#event", "#heats"],
   );
-  // An account with no operational roles gets no menu item at all.
-  assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Roleless Staff", false, []))), []);
+  // An account with no operational roles gets no console, and therefore no
+  // menu bar to be filtered at all.
+  assert.doesNotMatch(renderStaffHome("Roleless Staff", false, []), /class="console-nav"/);
   assert.deepEqual(
     navHrefs(consoleNav(renderStaffHome("Registration Staff", false, ["REGISTRATION"]))),
     ["#event", "#participants"],
@@ -406,62 +412,81 @@ test("the staff nav lists only the pages the actor may open", () => {
     "/staff/start-line",
     "/staff/finish-line",
   ];
+  // The nav is read from the page each actor actually lands on, so a role is
+  // never asserted against a console it could not open. A station-only actor
+  // never sees `renderStaffHome` at all.
+  const stationPage = (roles) => roles.includes("HEAT_RUNNER")
+    ? renderStartLine("Staff", true, false, roles)
+    : roles.includes("RESULT_TAKER")
+      ? renderFinishLine("Staff", true, false, roles)
+      : roles.includes("ANNOUNCER")
+        ? renderAnnouncer("Staff", true, false, roles)
+        : roles.includes("REGISTRATION")
+          ? renderStaffRegistration("Staff", false, roles)
+          : renderStaffInventory("Staff", "https://quickducks.com", false, roles);
+
   const cases = [
     // An administrator reaches Inventory and Access from the Admin menu bar, so
     // the top-level nav does not repeat them.
     [renderStaffHome("Administrator", true, []), everyPage],
-    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), [
-      "/staff/registration", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory",
-    ]],
-    [renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"]), ["/staff/start-line"]],
-    [renderStaffHome("Result Taker", false, ["RESULT_TAKER"]), ["/staff/finish-line"]],
-    // A non-administrator duck manager has no Admin menu bar, so Inventory is
-    // the only link that can get them to their own page.
-    [renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]), ["/staff/inventory"]],
-    [renderStaffHome("Announcer", false, ["ANNOUNCER"]), ["/staff/announcer"]],
-    [renderStaffHome("Registration Staff", false, ["REGISTRATION"]), ["/staff/registration"]],
-    [renderStaffHome("No Role", false, []), []],
-    [renderStaffHome("Mixed Staff", false, ["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff/finish-line", "/staff/inventory"]],
-    [renderStaffHome("Mixed Race Staff", false, ["ANNOUNCER", "HEAT_RUNNER"]), ["/staff/announcer", "/staff/start-line"]],
+    // A race director opens the Admin view too, so Admin is offered and their
+    // Inventory link moves into that menu bar exactly as an administrator's does.
+    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), everyPage],
+    [stationPage(["HEAT_RUNNER"]), ["/staff/start-line"]],
+    [stationPage(["RESULT_TAKER"]), ["/staff/finish-line"]],
+    // A duck manager who is neither an administrator nor a race director has no
+    // Admin menu bar, so Inventory is the only link to their own page.
+    [stationPage(["DUCK_MANAGER"]), ["/staff/inventory"]],
+    [stationPage(["ANNOUNCER"]), ["/staff/announcer"]],
+    [stationPage(["REGISTRATION"]), ["/staff/registration"]],
+    [renderStaffNoAccess("No Role"), null],
+    [stationPage(["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff/finish-line", "/staff/inventory"]],
+    [stationPage(["ANNOUNCER", "HEAT_RUNNER"]), ["/staff/announcer", "/staff/start-line"]],
     [renderStaffAccess("Administrator"), everyPage],
     [renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]), ["/staff/registration"]],
   ];
 
   for (const [markup, expected] of cases) {
     const nav = staffNav(markup);
+    if (expected === null) {
+      // The no-roles page offers no staff page at all, because there is none.
+      assert.equal(nav, null, "the no-access page renders no staff nav");
+      continue;
+    }
     assert.ok(nav, "every staff page renders the staff nav");
     assert.deepEqual(navHrefs(nav), expected);
     assert.match(nav, /aria-label="Staff pages"/);
   }
 
-  // Admin is administrator-only: no operational role reaches `/staff`.
-  for (const role of ["RACE_DIRECTOR", "REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
-    assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /href="\/staff"/, role);
+  // Admin is offered to administrators and race directors and to nobody else.
+  for (const role of ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
+    assert.doesNotMatch(staffNav(stationPage([role])), /href="\/staff"/, role);
     // Access left the top-level nav entirely; it is an Admin menu-bar item.
-    assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /\/staff\/access/, role);
+    assert.doesNotMatch(staffNav(stationPage([role])), /\/staff\/access/, role);
   }
+  assert.match(staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])), /href="\/staff"/);
 
   // Registration is gated exactly like the registration APIs it fronts.
   for (const role of ["DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
-    assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /\/staff\/registration/, role);
+    assert.doesNotMatch(staffNav(stationPage([role])), /\/staff\/registration/, role);
   }
 
   // Announcer is a race-day station gated exactly like the two it reports on:
   // its own role, the race director, and an administrator implicitly.
   for (const role of ["REGISTRATION", "DUCK_MANAGER", "HEAT_RUNNER", "RESULT_TAKER"]) {
-    assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /\/staff\/announcer/, role);
+    assert.doesNotMatch(staffNav(stationPage([role])), /\/staff\/announcer/, role);
   }
 });
 
 // The staff nav reads Admin, Registration, Announcer, Start line, Finish line,
-// and finally the non-administrator Inventory fallback. Order is asserted as
-// adjacency and as ends of the list, not as fixed indexes, so the requirement
-// survives any later page being added or removed.
+// and finally the Inventory fallback for a duck manager with no Admin menu bar.
+// Order is asserted as adjacency and as ends of the list, not as fixed indexes,
+// so the requirement survives any later page being added or removed.
 test("the staff nav reads Admin, Registration, Announcer, Start line, Finish line", () => {
   const navs = [
     ["administrator", staffNav(renderStaffHome("Administrator", true, []))],
     ["race director", staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]))],
-    ["announcer and heat runner", staffNav(renderStaffHome("Mixed", false, ["ANNOUNCER", "HEAT_RUNNER"]))],
+    ["announcer and heat runner", staffNav(renderAnnouncer("Mixed", true, false, ["ANNOUNCER", "HEAT_RUNNER"]))],
   ];
 
   for (const [label, nav] of navs) {
@@ -474,27 +499,34 @@ test("the staff nav reads Admin, Registration, Announcer, Start line, Finish lin
     assert.match(nav, /<a href="\/staff\/announcer"[^>]*>Announcer<\/a><a href="\/staff\/start-line"[^>]*>Start line<\/a>/, label);
   }
 
-  // Admin is administrator-only and is the left-most entry when it appears.
-  const admin = navHrefs(staffNav(renderStaffHome("Administrator", true, [])));
-  assert.equal(admin[0], "/staff");
-  assert.deepEqual(admin, [
+  // Admin is the left-most entry when it appears, and it appears for both of
+  // the actors who can open it: an administrator and a race director. Neither
+  // repeats Inventory, because the Admin menu bar already carries it.
+  const everyAdminPage = [
     "/staff",
     "/staff/registration",
     "/staff/announcer",
     "/staff/start-line",
     "/staff/finish-line",
-  ]);
+  ];
+  const admin = navHrefs(staffNav(renderStaffHome("Administrator", true, [])));
+  assert.equal(admin[0], "/staff");
+  assert.deepEqual(admin, everyAdminPage);
 
-  // A race director is not an administrator, so they get Registration first and
-  // keep the Inventory fallback last.
   const director = navHrefs(staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])));
-  assert.equal(director[0], "/staff/registration");
-  assert.equal(director.at(-1), "/staff/inventory");
-  assert.ok(director.indexOf("/staff/announcer") < director.indexOf("/staff/finish-line"));
-  assert.ok(director.indexOf("/staff/finish-line") < director.indexOf("/staff/inventory"));
+  assert.equal(director[0], "/staff");
+  assert.deepEqual(director, everyAdminPage);
+
+  // The Inventory fallback belongs to a duck manager with no Admin menu bar,
+  // and it is the last item.
+  const duckManager = navHrefs(staffNav(
+    renderStaffInventory("Duck Manager", "https://quickducks.com", false, ["DUCK_MANAGER"]),
+  ));
+  assert.deepEqual(duckManager, ["/staff/inventory"]);
+  assert.equal(duckManager.at(-1), "/staff/inventory");
 
   // An announcer without the start-line role still gets exactly their own link.
-  assert.deepEqual(navHrefs(staffNav(renderStaffHome("Announcer", false, ["ANNOUNCER"]))), ["/staff/announcer"]);
+  assert.deepEqual(navHrefs(staffNav(renderAnnouncer("Announcer", true, false, ["ANNOUNCER"]))), ["/staff/announcer"]);
 });
 
 test("the staff nav is on every operational staff page and marks the current one", () => {

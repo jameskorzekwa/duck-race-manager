@@ -16,6 +16,7 @@ import {
   renderStaffDuck,
   renderStaffHome,
   renderStaffLogin,
+  renderStaffNoAccess,
   renderStaffPairing,
   renderStaffRegistration,
   renderStartLine,
@@ -708,6 +709,82 @@ test("the pairing page carries an unmissable heat-bag callout above everything e
 
   // A role that cannot pair is offered no bag panel at all.
   assert.doesNotMatch(renderStaffDuck("a".repeat(32), "Result staff", false, ["RESULT_TAKER"]), /data-heat-bag/);
+});
+
+// Closing registration folds a short tail heat into the heat before it, which
+// moves ducks that are already sealed in numbered bags. That is a physical task
+// for a person, so the console states it in exactly the same loud language the
+// pairing page used to put the duck in the bag in the first place.
+test("the Admin console carries a bag-move callout above everything, in the pairing callout's language", () => {
+  for (const [label, markup] of [
+    ["administrator", renderStaffHome("Administrator", true, [])],
+    ["race director", renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])],
+  ]) {
+    assert.match(
+      markup,
+      /<section class="heat-bag bag-move" data-bag-move hidden aria-live="assertive" aria-label="Move ducks between heat bags">/,
+      label,
+    );
+    for (const hook of [
+      "data-bag-move-instruction",
+      "data-bag-move-number",
+      "data-bag-move-ducks",
+      "data-bag-move-note",
+      "data-bag-move-dismiss",
+    ]) assert.ok(markup.includes(hook), `${label}: ${hook}`);
+    // Only a person can know a bag was moved, so only a person clears it.
+    assert.match(markup, /data-bag-move-dismiss>Done — the bags match the heats</, label);
+
+    // It sits above the whole console, and outside every view, so switching
+    // views cannot hide a physical instruction.
+    assert.ok(markup.indexOf("data-bag-move") < markup.indexOf('class="console-nav"'), label);
+    assert.ok(markup.indexOf("data-bag-move") < markup.indexOf('id="event"'), label);
+    const callout = markup.match(/<section class="heat-bag bag-move"[\s\S]*?<\/section>/)[0];
+    assert.doesNotMatch(callout, /data-console-view|data-event-scoped/, label);
+    // The server paints no heat number: the numbers come from the lifecycle
+    // response the transition itself returned.
+    assert.doesNotMatch(callout, /Heat \d|heat \d/, label);
+  }
+
+  // The registration desk runs no lifecycle transition, so it gets no callout.
+  assert.doesNotMatch(renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]), /data-bag-move/);
+});
+
+test("the bag-move callout reuses the pairing callout's loud styling with a readable heat pair", () => {
+  // Same box: the border, the paper colour, and the shadow are the heat-bag
+  // rule, so a physical instruction always looks like a physical instruction.
+  const callout = renderStaffHome("Administrator", true, [])
+    .match(/<section class="heat-bag bag-move"[\s\S]*?<\/section>/)[0];
+  assert.match(callout, /class="heat-bag bag-move"/);
+  assert.match(callout, /class="heat-bag-instruction"/);
+  assert.match(callout, /class="heat-bag-number"/);
+  assert.match(callout, /class="heat-bag-note"/);
+  // "Heat 5 → Heat 4" is two numbers and an arrow rather than one digit, so it
+  // is sized down from the pairing page's single display number and still wraps.
+  assert.match(style, /\.heat-bag\.bag-move \.heat-bag-number \{ font-size:clamp\(1\.8rem,9vw,3\.6rem\)/);
+});
+
+// A signed-in account with no operational role has no station and no console.
+// `/staff` is the return target of sign-in, so it can never refuse them: they
+// get a page that says what is missing and who grants it.
+test("an account with no operational roles gets a real page rather than an empty console", () => {
+  const page = renderStaffNoAccess("Sam Staffer");
+
+  assert.match(page, /No operational roles assigned/);
+  assert.match(page, /Ask a system administrator to assign the station roles this account needs/);
+  assert.match(page, /Sam Staffer/);
+  // It offers the two things that do work.
+  assert.match(page, /<a class="button secondary" href="\/">Back to public site<\/a>/);
+  assert.match(page, /<form class="staff-logout" method="post" action="\/staff\/logout">/);
+  // And none of the console shell it used to be handed.
+  assert.doesNotMatch(page, /<nav class="console-nav"|<nav class="staff-nav"/);
+  assert.doesNotMatch(page, /data-console-view=|data-console-message|data-operations-root/);
+  assert.doesNotMatch(page, /src="\/assets\/staff-home\.js"/);
+  assert.match(page, /<meta name="robots" content="noindex,nofollow">/);
+
+  // The console renderer answers the same way for the same account, so there is
+  // one no-roles experience rather than two.
+  assert.equal(renderStaffHome("Sam Staffer", false, []), page);
 });
 
 test("the heat-bag callout is styled loud, high contrast, and safe at 320px", () => {

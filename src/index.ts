@@ -32,6 +32,7 @@ import {
   type PublicPhase,
 } from "./public-phase.ts";
 import {
+  canOpenAdminConsole,
   faviconSvg,
   manifestJson,
   renderDuck,
@@ -50,6 +51,7 @@ import {
   renderStaffHome,
   renderStaffInventory,
   renderStaffLogin,
+  renderStaffNoAccess,
   renderStaffPairing,
   renderStaffRegistration,
   renderStartLine,
@@ -165,16 +167,19 @@ const stationPages = new Map<string, StationPage>([
 
 const inventoryRoles: readonly OperationalRole[] = ["DUCK_MANAGER", "RACE_DIRECTOR"];
 
-// Where `/staff` sends a signed-in non-administrator, in race-day priority
-// order. Each entry repeats the role set of the page it points at, and each of
-// those pages performs its own authoritative check on arrival; this list only
-// decides which one is offered first.
+// Where `/staff` sends a signed-in staffer who cannot open the Admin view, in
+// race-day priority order. `RACE_DIRECTOR` is deliberately absent from every
+// entry: a race director opens the Admin view itself — that is the role whose
+// whole job is changing the state of the overall race — and never reaches this
+// list. Each page named here performs its own authoritative check on arrival;
+// this list only decides which one is offered first, and none of them redirects
+// back to `/staff` while authenticated, so the redirect cannot loop.
 const staffLandingPages: readonly (readonly [string, readonly OperationalRole[]])[] = [
-  ["/staff/registration", ["REGISTRATION", "RACE_DIRECTOR"]],
-  ["/staff/start-line", ["HEAT_RUNNER", "RACE_DIRECTOR"]],
-  ["/staff/finish-line", ["RESULT_TAKER", "RACE_DIRECTOR"]],
-  ["/staff/announcer", ["ANNOUNCER", "RACE_DIRECTOR"]],
-  ["/staff/inventory", inventoryRoles],
+  ["/staff/registration", ["REGISTRATION"]],
+  ["/staff/start-line", ["HEAT_RUNNER"]],
+  ["/staff/finish-line", ["RESULT_TAKER"]],
+  ["/staff/announcer", ["ANNOUNCER"]],
+  ["/staff/inventory", ["DUCK_MANAGER"]],
 ];
 
 export const createWorker = (
@@ -418,29 +423,39 @@ export const createWorker = (
       return withSecurityHeaders(await staffLogoutResponse(request, env, tokenFetch));
     }
 
-    // `/staff` is both the sign-in page and, for an administrator, the Admin
-    // console. It is also the return target sign-in falls back to, so it can
-    // never simply 403 a regular staff member: a signed-in non-administrator is
-    // sent to the first page their own roles actually open. Every target is a
-    // distinct path with its own role check and none of them redirects back
-    // here while authenticated, so this cannot loop. A staff member with no
-    // operational role at all matches nothing and keeps the existing
-    // "No operational roles assigned" console page rather than bouncing.
+    // `/staff` is both the sign-in page and the Admin view. It is also the
+    // return target sign-in falls back to, so it can never simply 403 a regular
+    // staff member. Three outcomes, in this order:
+    //
+    // 1. A system administrator or a `RACE_DIRECTOR` receives the Admin view.
+    //    `is_system_admin` is an account type; `RACE_DIRECTOR` is the race-day
+    //    role for changing the state of the overall race, and every control
+    //    that does so — the lifecycle transitions, the heats, the rosters, the
+    //    result corrections, finalist verification — lives only here. The
+    //    per-view gating inside the page is unchanged, so a race director still
+    //    sees no Support view, no Access item, and none of the administrator
+    //    cards. `canOpenAdminConsole` is the same predicate the nav link uses.
+    // 2. Anyone else is sent to the first page their own roles actually open.
+    //    Every target is a distinct path with its own role check and none of
+    //    them redirects back here while authenticated, so this cannot loop.
+    // 3. A staff member with no operational role at all matches nothing and
+    //    receives the "No operational roles assigned" page, which says what is
+    //    missing and who grants it, rather than bouncing or dead-ending.
     if (url.pathname === "/staff" && request.method === "GET") {
       const actor = await authenticateRequest(request, env);
       const phase = await publicPhase();
       if (actor === null) {
         return withSessionCookies(staffHtml(renderStaffLogin(safeReturnTo(url.searchParams.get("returnTo")), phase)));
       }
-      if (!actor.isSystemAdmin) {
+      if (!canOpenAdminConsole(actor.isSystemAdmin, actor.roles)) {
         const landing = staffLandingPages
           .find(([, roles]) => roles.some((role) => actor.roles.includes(role)))?.[0];
-        if (landing !== undefined) {
-          return withSessionCookies(new Response(null, {
+        return withSessionCookies(landing === undefined
+          ? staffHtml(renderStaffNoAccess(actor.displayName ?? actor.email, phase))
+          : new Response(null, {
             status: 303,
             headers: { ...securityHeaders, location: landing },
           }));
-        }
       }
       return withSessionCookies(staffHtml(renderStaffHome(
         actor.displayName ?? actor.email,

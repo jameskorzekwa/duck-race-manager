@@ -479,29 +479,38 @@ test("the registration desk is gated to the registration and race-director roles
 });
 
 // `/staff` is where staff sign-in returns to, so it may never dead-end a
-// regular staff member. An administrator gets the Admin console; everyone else
-// is sent to the first page their own roles open.
-test("/staff renders the Admin console for an administrator and redirects everyone else", async () => {
+// regular staff member. Administrators and race directors get the Admin view;
+// everyone else is sent to the first page their own roles open, and an account
+// with no role at all gets a page that explains that.
+test("/staff renders the Admin view for administrators and race directors and redirects everyone else", async () => {
   const actor = (roles, isSystemAdmin = false) => ({
     id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Landing Staff",
     isSystemAdmin, roles, authentication: "bearer",
   });
-  const staffHome = (currentActor) => createWorker(async () => currentActor).fetch(
-    new Request("https://quickducks.com/staff"), env,
-  );
+  const staffHome = (currentActor, path = "/staff") =>
+    createWorker(async () => currentActor).fetch(new Request(`https://quickducks.com${path}`), env);
 
-  const admin = await staffHome(actor([], true));
-  const adminBody = await admin.text();
-  assert.equal(admin.status, 200);
-  assert.match(adminBody, /<nav class="console-nav" aria-label="Admin views">/);
-  assert.match(adminBody, /id="event"/);
-  assert.match(adminBody, /src="\/assets\/staff-home\.js"/);
+  for (const [label, currentActor] of [
+    ["administrator", actor([], true)],
+    ["race director", actor(["RACE_DIRECTOR"])],
+  ]) {
+    const response = await staffHome(currentActor);
+    const body = await response.text();
+    assert.equal(response.status, 200, label);
+    assert.match(body, /<nav class="console-nav" aria-label="Admin views">/, label);
+    assert.match(body, /id="event"/, label);
+    assert.match(body, /src="\/assets\/staff-home\.js"/, label);
+    // The hash is never sent to the server, so a deep link into a view is the
+    // very same request. A rule that redirected `/staff` would take `#heats`
+    // with it, which is how race control was lost.
+    const deepLink = await staffHome(currentActor, "/staff?view=heats");
+    assert.equal(deepLink.status, 200, label);
+  }
 
-  // Every operational role lands on the page it can actually work on, in
+  // Every other operational role lands on the page it can actually work on, in
   // race-day priority order.
   for (const [roles, destination] of [
     [["REGISTRATION"], "/staff/registration"],
-    [["RACE_DIRECTOR"], "/staff/registration"],
     [["HEAT_RUNNER"], "/staff/start-line"],
     [["RESULT_TAKER"], "/staff/finish-line"],
     [["ANNOUNCER"], "/staff/announcer"],
@@ -530,20 +539,89 @@ test("/staff renders the Admin console for an administrator and redirects everyo
     assert.equal(landed.status, 200, destination);
   }
 
-  // No operational role at all keeps the existing console page and its
-  // explanation rather than redirecting into a loop.
+  // No operational role at all: a real page saying what is missing and who
+  // grants it, rather than a redirect loop or an empty console shell with a
+  // menu bar, no displayed view, and a message line nothing resolves.
   const roleless = await staffHome(actor([]));
   const rolelessBody = await roleless.text();
   assert.equal(roleless.status, 200);
   assert.match(rolelessBody, /No operational roles assigned/);
+  assert.match(rolelessBody, /Ask a system administrator to assign the station roles/);
   assert.doesNotMatch(rolelessBody, /src="\/assets\/staff-home\.js"/);
+  assert.doesNotMatch(rolelessBody, /<nav class="console-nav"|data-console-view=|data-console-message/);
 
-  // Signed out, `/staff` is still the sign-in page and never redirects.
+  // Signed out, `/staff` is still the sign-in page and never redirects, so the
+  // `returnTo` handoff still works.
   const anonymous = await createWorker(async () => null).fetch(
     new Request("https://quickducks.com/staff?returnTo=%2Fstaff%2Fregistration"), env,
   );
   assert.equal(anonymous.status, 200);
-  assert.match(await anonymous.text(), /Staff sign in/);
+  const anonymousBody = await anonymous.text();
+  assert.match(anonymousBody, /Staff sign in/);
+  assert.match(anonymousBody, /\/staff\/login\/start\?returnTo=%2Fstaff%2Fregistration/);
+});
+
+// `is_system_admin` is an account type; `RACE_DIRECTOR` is the race-day role for
+// changing the state of the overall race. Every control that does so lives only
+// inside the Admin view, so a race director who is not an administrator has to
+// be able to open it — and must still see none of the administrator-only
+// surfaces inside it.
+test("a race director who is not an administrator opens the Admin view without its administrator surfaces", async () => {
+  const director = {
+    id: "staff", cognitoSub: "sub", email: "director@example.com", displayName: "Dana Director",
+    isSystemAdmin: false, roles: ["RACE_DIRECTOR"], authentication: "bearer",
+  };
+  const response = await createWorker(async () => director).fetch(
+    new Request("https://quickducks.com/staff"), env,
+  );
+  assert.equal(response.status, 200);
+  const body = await response.text();
+
+  // The Admin link is in the persistent staff nav.
+  const staffNav = body.match(/<nav class="staff-nav"[\s\S]*?<\/nav>/)?.[0];
+  assert.ok(staffNav);
+  assert.match(staffNav, /<a href="\/staff" aria-current="page">Admin<\/a>/);
+
+  // The three role-gated views are present and usable.
+  const menu = body.match(/<nav class="console-nav"[\s\S]*?<\/nav>/)?.[0];
+  assert.ok(menu);
+  assert.deepEqual(
+    [...menu.matchAll(/<a href="([^"]+)"/g)].map((match) => match[1]),
+    ["#event", "#heats", "#participants", "/staff/inventory"],
+  );
+  for (const view of ["event", "heats", "participants"]) {
+    assert.match(body, new RegExp(`<section class="console-section" id="${view}"[^>]* data-role-allowed="true"`), view);
+  }
+  // Everything a race director exists to do is reachable from here.
+  assert.match(body, /data-event-readiness/);
+  assert.match(body, /data-heat-list/);
+  assert.match(body, /data-heat-controls/);
+  assert.match(body, /data-finalist-list/);
+  assert.match(body, /data-participant-list/);
+
+  // The administrator-only view, page link, and cards are absent entirely.
+  assert.doesNotMatch(menu, /#support|\/staff\/access/);
+  assert.doesNotMatch(body, /<section class="console-section" id="support"/);
+  assert.doesNotMatch(body, /data-event-create-card|data-event-create-form/);
+  assert.doesNotMatch(body, /data-event-config-card|data-event-config-form/);
+  assert.doesNotMatch(body, /data-force-delete-card|data-force-delete-form|data-open-force-delete/);
+
+  // And `/staff/access` still refuses them at the route.
+  const access = await createWorker(async () => director).fetch(
+    new Request("https://quickducks.com/staff/access"), env,
+  );
+  assert.equal(access.status, 403);
+
+  // `/staff/inventory` opens, and renders the Admin menu bar so the race
+  // director can get back — which is why their top-level Inventory link moved.
+  const inventory = await createWorker(async () => director).fetch(
+    new Request("https://quickducks.com/staff/inventory"), env,
+  );
+  assert.equal(inventory.status, 200);
+  const inventoryBody = await inventory.text();
+  assert.match(inventoryBody, /<nav class="console-nav"/);
+  assert.match(inventoryBody, /<a href="\/staff#event">Event Details<\/a>/);
+  assert.doesNotMatch(inventoryBody, /\/staff\/access/);
 });
 
 test("the persistent staff nav renders exactly the pages each actor may open", async () => {
@@ -565,21 +643,39 @@ test("the persistent staff nav renders exactly the pages each actor may open", a
 
   // An administrator reaches Inventory and Access from the Admin menu bar, so
   // the top-level nav does not repeat them.
-  assert.deepEqual(await navFor(actor([], true), "/staff"), [
+  const everyAdminPage = [
     "/staff", "/staff/registration", "/staff/announcer", "/staff/start-line", "/staff/finish-line",
-  ]);
+  ];
+  assert.deepEqual(await navFor(actor([], true), "/staff"), everyAdminPage);
+  // A race director opens the Admin view too, so they get the Admin link and
+  // the same menu bar, which is where their Inventory link now lives.
+  assert.deepEqual(await navFor(actor(["RACE_DIRECTOR"]), "/staff"), everyAdminPage);
+  assert.deepEqual(await navFor(actor(["RACE_DIRECTOR"]), "/staff/registration"), everyAdminPage);
   assert.deepEqual(await navFor(actor(["REGISTRATION"]), "/staff/registration"), ["/staff/registration"]);
   assert.deepEqual(await navFor(actor(["ANNOUNCER"]), "/staff/announcer"), ["/staff/announcer"]);
   assert.deepEqual(await navFor(actor(["HEAT_RUNNER"]), "/staff/start-line"), ["/staff/start-line"]);
   assert.deepEqual(await navFor(actor(["RESULT_TAKER"]), "/staff/finish-line"), ["/staff/finish-line"]);
-  // The one non-role case: a non-administrator duck manager keeps a top-level
-  // Inventory link because they have no Admin menu bar to reach it from.
+  // The one non-role case: a duck manager who is neither an administrator nor a
+  // race director keeps a top-level Inventory link, because they have no Admin
+  // menu bar to reach it from.
   assert.deepEqual(await navFor(actor(["DUCK_MANAGER"]), "/staff/inventory"), ["/staff/inventory"]);
-  assert.deepEqual(await navFor(actor(["RACE_DIRECTOR"]), "/staff/registration"), [
-    "/staff/registration", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory",
-  ]);
-  // No roles: the console page renders, and offers no link anywhere.
-  assert.deepEqual(await navFor(actor([]), "/staff"), []);
+  // Nobody but an administrator or a race director is offered the Admin link.
+  for (const [role, path] of [
+    ["REGISTRATION", "/staff/registration"],
+    ["ANNOUNCER", "/staff/announcer"],
+    ["HEAT_RUNNER", "/staff/start-line"],
+    ["RESULT_TAKER", "/staff/finish-line"],
+    ["DUCK_MANAGER", "/staff/inventory"],
+  ]) {
+    assert.ok(!(await navFor(actor([role]), path)).includes("/staff"), role);
+  }
+  // No roles: the no-access page carries no staff nav, because there is no
+  // staff page to offer.
+  const roleless = await createWorker(async () => actor([])).fetch(
+    new Request("https://quickducks.com/staff"), env,
+  );
+  assert.equal(roleless.status, 200);
+  assert.doesNotMatch(await roleless.text(), /<nav class="staff-nav"/);
 });
 
 // The staff duck page immediately fetches GET /api/v1/staff/ducks/:token, so a

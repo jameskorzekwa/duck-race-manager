@@ -3,10 +3,16 @@ import { expect, test } from "@playwright/test";
 import {
   accountWith,
   baseUrl,
+  bootstrap,
   confirmAction,
+  finalizeHeat,
+  intakeDuck,
+  pairDuck,
   rawJson,
+  registerParticipant,
   seedState,
   signIn,
+  transitionHeat,
   unassignDuck,
   watchBrowserErrors,
 } from "./helpers.mjs";
@@ -95,6 +101,144 @@ test.describe("staff roles and the Admin views", () => {
     await menuLink(page, "Event Details").click();
     await expect(page).toHaveURL(`${baseUrl}/staff#event`);
     await expect.poll(() => visibleViews(page)).toEqual(["event"]);
+
+    expect(errors).toEqual([]);
+  });
+
+  // `is_system_admin` is an account type. `RACE_DIRECTOR` is the race-day role
+  // for changing the state of the overall race, and every control that does so —
+  // the five lifecycle transitions, the heats, the rosters, the result
+  // corrections, finalist verification — lives only inside the Admin view. So a
+  // race director who is not an administrator has to be able to open it and run
+  // the whole race from it, while still seeing none of its administrator-only
+  // surfaces.
+  test("a race director who is not an administrator runs the whole lifecycle from /staff", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    const seeded = await seedState("draft");
+    const director = accountWith(seeded.accounts, "RACE_DIRECTOR");
+    expect(director.isSystemAdmin, "the race director must be a regular staff account").toBe(false);
+
+    // Every API call below runs as the race director too, so the page and the
+    // handlers are proven against the same least-privileged actor.
+    const { client } = await bootstrap();
+    client.setToken(director.token);
+
+    const readiness = page.locator("[data-event-readiness]");
+    const summary = page.locator("[data-event-summary]");
+    const run = async (label, nextStatus) => {
+      await expect(readiness.getByRole("button", { name: label, exact: true })).toBeEnabled();
+      await readiness.getByRole("button", { name: label, exact: true }).click();
+      await confirmAction(page);
+      await expect(summary).toContainText(nextStatus);
+    };
+
+    // Signing in returns to `/staff`, and for a race director that is the Admin
+    // view rather than a redirect to the registration desk.
+    await signIn(page, director.email);
+    await expect(page).toHaveURL(`${baseUrl}/staff`);
+    await expect(page.getByRole("heading", { name: "Race control, in one place." })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Staff pages" }).getByRole("link")).toHaveText([
+      "Admin", "Registration", "Announcer", "Start line", "Finish line",
+    ]);
+    await expect(page.getByRole("navigation", { name: "Staff pages" })
+      .getByRole("link", { name: "Admin", exact: true })).toHaveAttribute("aria-current", "page");
+
+    // Event Details, Heats, and Participants; no Support and no Access.
+    const menu = page.getByRole("navigation", { name: "Admin views" });
+    await expect(menu.getByRole("link")).toHaveText(["Event Details", "Heats", "Participants", "Inventory"]);
+    await expect(menu.getByRole("link", { name: "Support" })).toHaveCount(0);
+    await expect(menu.getByRole("link", { name: "Access" })).toHaveCount(0);
+    // None of the administrator-only cards is rendered at all.
+    await expect(page.locator("[data-event-create-form]")).toHaveCount(0);
+    await expect(page.locator("[data-event-config-form]")).toHaveCount(0);
+    await expect(page.locator("[data-force-delete-card], [data-open-force-delete]")).toHaveCount(0);
+    // Reopening registration is administrator-only, so it is reported but never
+    // offered as an action here.
+    await expect(readiness).toContainText("Reopen registration");
+    await expect(readiness.getByRole("button", { name: "Reopen registration", exact: true })).toHaveCount(0);
+
+    // 1. Open registration.
+    await expect(summary).toContainText("Draft");
+    await run("Open registration", "Registration open");
+
+    // Fill the race through the same APIs the desk uses, as the race director.
+    const participants = [];
+    for (let index = 0; index < 6; index += 1) {
+      const participant = await registerParticipant(client, seeded.eventId, 800 + index);
+      const duck = await intakeDuck(client, seeded.eventId, 801 + index);
+      await pairDuck(client, seeded.eventId, duck, participant);
+      participants.push(participant);
+    }
+    await page.reload();
+    await expect(summary).toContainText("Registration open");
+
+    // 2. Close registration. 3. Start round one.
+    await run("Close registration", "Registration closed");
+    await run("Start round one", "Round one");
+
+    // The Heats view is theirs too: starting the round locked every roster.
+    await menuLink(page, "Heats").click();
+    await expect(page.locator("[data-heat-list] button").first()).toBeVisible();
+    await menuLink(page, "Event Details").click();
+
+    const roundOne = async () => {
+      const listed = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats`, { token: director.token });
+      expect(listed.status).toBe(200);
+      return listed.body.heats.filter((heat) => heat.round === "ROUND_ONE");
+    };
+    for (const heat of await roundOne()) {
+      const detail = await rawJson(
+        `/api/v1/staff/events/${seeded.eventId}/heats/${heat.id}`,
+        { token: director.token },
+      );
+      expect(detail.status).toBe(200);
+      const working = { ...heat, revision: detail.body.heat.revision };
+      for (const operation of ["ready", "call", "start", "finish"]) {
+        await transitionHeat(client, seeded.eventId, working, operation);
+      }
+      await finalizeHeat(client, seeded.eventId, working, [
+        { raceEntryId: detail.body.roster[0].raceEntryId, place: 1 },
+      ]);
+    }
+
+    // 4. Start the final, after verifying the promoted finalists in the console.
+    await page.reload();
+    await menuLink(page, "Heats").click();
+    await expect(page.locator("[data-finalist-list]")).toContainText("Heat 1");
+    await menuLink(page, "Event Details").click();
+    await run("Start final", "Final");
+
+    const finalHeat = (await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats`, { token: director.token }))
+      .body.heats.find((heat) => heat.round === "FINAL");
+    const finalDetail = await rawJson(
+      `/api/v1/staff/events/${seeded.eventId}/heats/${finalHeat.id}`,
+      { token: director.token },
+    );
+    const working = { ...finalHeat, revision: finalDetail.body.heat.revision };
+    for (const operation of ["ready", "call", "start", "finish"]) {
+      await transitionHeat(client, seeded.eventId, working, operation);
+    }
+    await finalizeHeat(
+      client,
+      seeded.eventId,
+      working,
+      finalDetail.body.roster
+        .slice(0, Math.min(3, finalDetail.body.roster.length))
+        .map((entry, index) => ({ raceEntryId: entry.raceEntryId, place: index + 1 })),
+    );
+
+    // 5. Complete the event.
+    await page.reload();
+    await run("Complete event", "Completed");
+
+    const completed = await rawJson(`/api/v1/staff/events/${seeded.eventId}`, { token: director.token });
+    expect(completed.status).toBe(200);
+    expect(completed.body.event.status).toBe("COMPLETED");
+
+    // Still no administrator surfaces at the end of the race.
+    await expect(page.locator("[data-force-delete-card], [data-open-force-delete]")).toHaveCount(0);
+    const access = await page.request.get("/staff/access", { maxRedirects: 0 });
+    expect(access.status()).toBe(403);
 
     expect(errors).toEqual([]);
   });

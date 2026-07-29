@@ -3891,7 +3891,7 @@ const heatBagHelpers = () => new Function(
 test("the heat-bag callout is a pure function of the server's own pairing heat", () => {
   const { heatBagCallout } = heatBagHelpers();
 
-  const roundOne = heatBagCallout({ round: "ROUND_ONE", number: 3 }, 12, false);
+  const roundOne = heatBagCallout({ round: "ROUND_ONE", number: 3 }, 12, false, "REGISTRATION_CLOSED");
   assert.equal(roundOne.pending, false);
   assert.equal(roundOne.instruction, "Put this duck in HEAT 3 bag");
   assert.equal(roundOne.number, "Heat 3");
@@ -3901,7 +3901,7 @@ test("the heat-bag callout is a pure function of the server's own pairing heat",
 
   // A repair pairing during racing can land in the final, which is a different
   // physical bag. Both the round and the number the server sent are used.
-  const final = heatBagCallout({ round: "FINAL", number: 1 }, 77, false);
+  const final = heatBagCallout({ round: "FINAL", number: 1 }, 77, false, "FINAL");
   assert.equal(final.pending, false);
   assert.equal(final.instruction, "Put this duck in FINAL heat 1 bag");
   assert.equal(final.number, "Final · Heat 1");
@@ -3910,10 +3910,10 @@ test("the heat-bag callout is a pure function of the server's own pairing heat",
 
   // A heat the server could not report is stated honestly. No blank, no guess.
   for (const pendingCase of [
-    heatBagCallout(null, 12, true),
-    heatBagCallout(null, 12, false),
-    heatBagCallout({ round: "ROUND_ONE", number: 3 }, 12, true),
-    heatBagCallout({ round: "ROUND_ONE" }, 12, false),
+    heatBagCallout(null, 12, true, "REGISTRATION_OPEN"),
+    heatBagCallout(null, 12, false, "REGISTRATION_OPEN"),
+    heatBagCallout({ round: "ROUND_ONE", number: 3 }, 12, true, "REGISTRATION_OPEN"),
+    heatBagCallout({ round: "ROUND_ONE" }, 12, false, "REGISTRATION_OPEN"),
   ]) {
     assert.equal(pendingCase.pending, true);
     assert.equal(pendingCase.instruction, "Do not bag this duck yet");
@@ -3926,13 +3926,209 @@ test("the heat-bag callout is a pure function of the server's own pairing heat",
   assert.doesNotMatch(heatBagHelpersScript, /number \+ 1|\+\+|length \+|Number\(/);
 });
 
+// The bag number is a promise about a physical object, so the note beside it
+// has to be true. Closing registration folds a short round-one tail heat into
+// the heat before it, which is the one operation that can still move an
+// already-paired duck's entry — so while registration is open the note must not
+// claim the bag is final, and once it has closed it must say plainly that it is.
+test("the heat-bag note only promises a permanent bag once nothing can fold it", () => {
+  const { heatBagCallout } = heatBagHelpers();
+  const permanent = /stays in that bag, in that position, for the rest of the race/;
+
+  // Registration open: the tail can still be folded, so no absolute claim.
+  const open = heatBagCallout({ round: "ROUND_ONE", number: 5 }, 12, false, "REGISTRATION_OPEN");
+  assert.equal(open.instruction, "Put this duck in HEAT 5 bag", "the bag is still named as loudly");
+  assert.equal(open.number, "Heat 5");
+  assert.doesNotMatch(open.note, permanent);
+  assert.match(open.note, /Walk Duck #12 to the heat 5 bag now/);
+  assert.match(open.note, /folded into the heat before it/);
+  assert.match(open.note, /pour one whole bag into another/);
+  assert.match(open.note, /Admin console names both bags/);
+
+  // Every state in which no fold can reach this entry any more says so.
+  for (const status of ["REGISTRATION_CLOSED", "ROUND_ONE", "FINAL", "COMPLETED"]) {
+    const settled = heatBagCallout({ round: "ROUND_ONE", number: 5 }, 12, false, status);
+    assert.equal(settled.instruction, "Put this duck in HEAT 5 bag", status);
+    assert.match(settled.note, permanent, status);
+    assert.doesNotMatch(settled.note, /folded into the heat before it/, status);
+  }
+
+  // A final-heat repair pairing is never folded, whatever the event status is.
+  assert.match(heatBagCallout({ round: "FINAL", number: 1 }, 77, false, "REGISTRATION_OPEN").note, permanent);
+  // A status the page could not resolve falls back to the cautious wording:
+  // an unknown state is not a licence to promise a permanent bag.
+  for (const unknown of [null, undefined, "", "DRAFT"]) {
+    assert.doesNotMatch(heatBagCallout({ round: "ROUND_ONE", number: 5 }, 12, false, unknown).note, permanent);
+  }
+});
+
+// The console's half of the same promise. Closing registration folds a short
+// tail heat into the heat before it; that is a physical task nobody else knows
+// about, so the console queues it, shows it in the same loud language as the
+// pairing callout, and keeps it there until a person says the bags match.
+const bagMoveHarness = () => {
+  const from = staffHomeScript.indexOf("const bagMoveStorageKey");
+  const to = staffHomeScript.indexOf("if (bagMove && bagMoveDismiss)");
+  assert.ok(from > 0 && to > from, "the console script defines the bag-move queue");
+  const store = new Map();
+  const storage = {
+    getItem: (key) => (store.has(key) ? store.get(key) : null),
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  };
+  const elements = {
+    bagMove: { hidden: true },
+    bagMoveInstruction: { textContent: "" },
+    bagMoveNumber: { textContent: "" },
+    bagMoveDucks: { textContent: "" },
+    bagMoveNote: { textContent: "" },
+  };
+  const api = new Function(
+    "bagMove",
+    "bagMoveInstruction",
+    "bagMoveNumber",
+    "bagMoveDucks",
+    "bagMoveNote",
+    "localStorage",
+    `${staffHomeScript.slice(from, to)}
+     return { renderBagMove, queueBagMoves, clearBagMoves, bagMoveRead, bagMoveWrite };`,
+  )(
+    elements.bagMove,
+    elements.bagMoveInstruction,
+    elements.bagMoveNumber,
+    elements.bagMoveDucks,
+    elements.bagMoveNote,
+    storage,
+  );
+  return { ...api, elements, store };
+};
+
+test("the console turns a reported fold into a physical bag instruction and keeps it queued", () => {
+  const merge = bagMoveHarness();
+  assert.equal(merge.elements.bagMove.hidden, true, "nothing is claimed before a transition reports one");
+
+  merge.queueBagMoves([{
+    action: "MERGE",
+    fromHeatNumber: 5,
+    intoHeatNumber: 4,
+    duckNumbers: [117, 118],
+    movedEntryCount: 2,
+  }], "command-a");
+
+  assert.equal(merge.elements.bagMove.hidden, false);
+  assert.equal(merge.elements.bagMoveInstruction.textContent, "Pour the Heat 5 bag into the Heat 4 bag");
+  assert.equal(merge.elements.bagMoveNumber.textContent, "Heat 5 → Heat 4");
+  assert.equal(merge.elements.bagMoveDucks.textContent, "2 ducks: Duck #117, Duck #118");
+  assert.match(merge.elements.bagMoveNote.textContent, /Empty the whole Heat 5 bag into the Heat 4 bag/);
+  assert.match(merge.elements.bagMoveNote.textContent, /too few ducks to race/);
+
+  // It is queued, not merely painted, so re-rendering after a reload restores
+  // exactly the same instruction rather than losing the physical task.
+  const reloaded = bagMoveHarness();
+  reloaded.bagMoveWrite(merge.bagMoveRead());
+  reloaded.renderBagMove();
+  assert.equal(reloaded.elements.bagMove.hidden, false);
+  assert.equal(reloaded.elements.bagMoveInstruction.textContent, "Pour the Heat 5 bag into the Heat 4 bag");
+
+  // The same command reported twice queues one task, not two.
+  merge.queueBagMoves([{
+    action: "MERGE",
+    fromHeatNumber: 5,
+    intoHeatNumber: 4,
+    duckNumbers: [117, 118],
+    movedEntryCount: 2,
+  }], "command-a");
+  assert.equal(merge.bagMoveRead().length, 1);
+
+  // A two-pass fold queues both, in the order the staff must perform them.
+  merge.queueBagMoves([
+    { action: "MERGE", fromHeatNumber: 3, intoHeatNumber: 2, duckNumbers: [9], movedEntryCount: 1 },
+    { action: "MERGE", fromHeatNumber: 2, intoHeatNumber: 1, duckNumbers: [8, 9], movedEntryCount: 2 },
+  ], "command-b");
+  assert.deepEqual(
+    merge.bagMoveRead().map((move) => move.fromHeatNumber + "->" + move.intoHeatNumber),
+    ["5->4", "3->2", "2->1"],
+  );
+
+  // Deleting the event removes every heat, so its bag instructions go too.
+  merge.clearBagMoves();
+  assert.deepEqual(merge.bagMoveRead(), []);
+  assert.equal(merge.elements.bagMove.hidden, true);
+});
+
+test("the console reports a reopen split by naming the exact ducks to take back out", () => {
+  const split = bagMoveHarness();
+  split.queueBagMoves([{
+    action: "SPLIT",
+    fromHeatNumber: 4,
+    intoHeatNumber: 5,
+    duckNumbers: [117, 118],
+    movedEntryCount: 2,
+  }], "command-c");
+
+  assert.equal(split.elements.bagMove.hidden, false);
+  assert.equal(
+    split.elements.bagMoveInstruction.textContent,
+    "Move 2 ducks: Duck #117, Duck #118 from the Heat 4 bag into a new Heat 5 bag",
+  );
+  assert.equal(split.elements.bagMoveNumber.textContent, "Heat 4 → Heat 5");
+  assert.match(split.elements.bagMoveNote.textContent, /Take exactly those ducks out of the Heat 4 bag/);
+  assert.match(split.elements.bagMoveNote.textContent, /leave every other duck exactly where it is/);
+
+  // A place whose duck assignment ended contributes no number, and the count
+  // still tells the staffer how many ducks are involved.
+  const countOnly = bagMoveHarness();
+  countOnly.queueBagMoves([{
+    action: "MERGE",
+    fromHeatNumber: 2,
+    intoHeatNumber: 1,
+    duckNumbers: [],
+    movedEntryCount: 1,
+  }], "command-d");
+  assert.equal(countOnly.elements.bagMoveDucks.textContent, "1 duck");
+  assert.equal(countOnly.elements.bagMoveInstruction.textContent, "Pour the Heat 2 bag into the Heat 1 bag");
+});
+
+test("the queued bag instruction survives everything except a person acknowledging it", () => {
+  // Only the Done button removes one, and it removes exactly one, so a
+  // two-pass fold is worked through rather than dismissed wholesale.
+  assert.match(
+    staffHomeScript,
+    /data-bag-move-dismiss\]"\);[\s\S]*?bagMoveDismiss\.addEventListener\("click", \(\) => \{\s*bagMoveWrite\(bagMoveRead\(\)\.slice\(1\)\);\s*renderBagMove\(\);/,
+  );
+  // Nothing else in the console hides it: no refresh, no view switch, no
+  // lifecycle repaint may take a physical instruction off the screen.
+  assert.equal((staffHomeScript.match(/bagMove\.hidden = true/g) ?? []).length, 1);
+  assert.match(staffHomeScript, /if \(queued\.length === 0\) \{\s*bagMove\.hidden = true;/);
+
+  // The queue is written before the response is applied to the page, so the
+  // instruction is on screen the moment the transition is known to have
+  // committed rather than after a refetch that might fail.
+  const queued = staffHomeScript.indexOf("queueBagMoves(result.bagMoves, commandId);");
+  const rendered = staffHomeScript.indexOf("renderLifecycleResult(result.event);");
+  assert.ok(queued > 0 && rendered > queued);
+
+  // Storage is best effort: an unavailable or corrupt queue must never take the
+  // console down.
+  assert.match(staffHomeScript, /const bagMoveRead = \(\) => \{\s*try \{/);
+  assert.match(staffHomeScript, /const bagMoveWrite = \(moves\) => \{\s*try \{/);
+
+  // DOM-safe like every other console render.
+  const source = staffHomeScript.slice(
+    staffHomeScript.indexOf("const bagMoveStorageKey"),
+    staffHomeScript.indexOf("if (bagMove && bagMoveDismiss)"),
+  );
+  assert.doesNotMatch(source, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
+});
+
 test("the pairing client paints the bag panel from the response and keeps it up", () => {
   assert.doesNotThrow(() => new Function(staffDuckScript));
 
-  // Every field comes from heatBagCallout, which takes only the response.
+  // Every field comes from heatBagCallout, which takes only the pairing
+  // response plus the authoritative event status the page already loaded.
   assert.match(
     staffDuckScript,
-    /const callout = heatBagCallout\(result\.heat, result\.duck\.visibleNumber, result\.heatAssignmentPending\)/,
+    /const callout = heatBagCallout\(\s*result\.heat,\s*result\.duck\.visibleNumber,\s*result\.heatAssignmentPending,\s*currentEvent \? currentEvent\.status : null,\s*\)/,
   );
   assert.match(staffDuckScript, /heatBag\.classList\.toggle\("pending", callout\.pending\)/);
   assert.match(staffDuckScript, /heatBagInstruction\.textContent = callout\.instruction/);

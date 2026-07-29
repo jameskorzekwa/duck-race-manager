@@ -423,12 +423,14 @@ test.describe("sitewide UI consistency", () => {
 
     const directorContext = await browser.newContext();
     const directorPage = await directorContext.newPage();
-    // The Admin console is administrator-only now, so a race director never
-    // reaches it: `/staff` sends them to their own landing page, and the delete
-    // controls exist on no page they can open.
-    await signIn(directorPage, director.email, "/staff/registration");
-    await directorPage.goto("/staff");
-    await expect(directorPage).toHaveURL(`${baseUrl}/staff/registration`);
+    // A race director opens the Admin view — that is the role that runs the
+    // race — but Delete event is administrator-only, so the card and its dialog
+    // are rendered on no page they can open.
+    await signIn(directorPage, director.email);
+    await expect(directorPage).toHaveURL(`${baseUrl}/staff`);
+    await expect(directorPage.getByRole("heading", { name: "Race control, in one place." })).toBeVisible();
+    await expect(directorPage.locator("[data-open-force-delete], [data-force-delete-dialog]")).toHaveCount(0);
+    await directorPage.goto("/staff/registration");
     await expect(directorPage.locator("[data-open-force-delete], [data-force-delete-dialog]")).toHaveCount(0);
     await directorContext.close();
   });

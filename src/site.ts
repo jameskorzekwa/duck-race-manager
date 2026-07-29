@@ -379,6 +379,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .heat-bag .button { width:100%; }
 .heat-bag.pending { border-color:#9f261c; background:#ffd8d2; }
 .heat-bag.pending .heat-bag-number { font-size:clamp(1.5rem,7vw,2.6rem); line-height:1.1; }
+.heat-bag.bag-move .heat-bag-number { font-size:clamp(1.8rem,9vw,3.6rem); line-height:1.05; letter-spacing:-.02em; }
 .station-ineligible { margin:1.2rem 0; padding:clamp(1rem,3.5vw,1.5rem); border:5px solid #9f261c; border-radius:.9rem; background:#ffd8d2; box-shadow:6px 6px 0 var(--ink); }
 .station-ineligible > * { margin-bottom:0; }
 .station-ineligible > * + * { margin-top:.5rem; }
@@ -993,25 +994,40 @@ const staffLogoutForm = (): string =>
 const staffFooter = (displayName: string): string =>
   `<footer class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</footer>`;
 
+// Who may open the `/staff` Admin view. `is_system_admin` is an account type,
+// not a race-day role, and the race-day role for changing the state of the
+// overall race — open/close registration, start the rounds, manage heats,
+// complete the event — is `RACE_DIRECTOR`. Both therefore open the Admin view,
+// and the per-view gating inside it still decides what each of them sees:
+// `#support`, `/staff/access`, Create event, Configure draft, and Delete event
+// remain administrator-only.
+//
+// `index.ts` imports this rather than restating it, so the route that serves
+// `/staff` and the nav link that offers it can never disagree.
+export const canOpenAdminConsole = (
+  isSystemAdmin: boolean,
+  roles: readonly OperationalRole[],
+): boolean => isSystemAdmin || roles.includes("RACE_DIRECTOR");
+
 // Persistent staff navigation. It is organised by the job a staffer is doing,
 // not by the shape of the application: Admin, Registration, and the three
 // race-day stations. It lists only the pages this actor may open, so a missing
 // link is a convenience filter; every page and API repeats the check.
 //
 // `anyOf` names the operational roles that may open the page and an
-// administrator implicitly passes it, so an empty list is administrator-only.
-// `adminReachesElsewhere` marks the one link that is not a plain role check.
-// Inventory has its own item in the Admin menu bar, so an administrator already
-// has a route to it and a second top-level link would only duplicate that. A
-// non-administrator duck manager or race director has no Admin menu bar at all
-// and would otherwise be left with no link to `/staff/inventory`, so the link
-// is rendered for exactly that case.
+// administrator implicitly passes it. `viaAdminMenu` marks the one link that is
+// not a plain role check. Inventory has its own item in the Admin menu bar, so
+// anyone who can open the Admin view already has a route to it and a second
+// top-level link would only duplicate that. A duck manager who is neither an
+// administrator nor a race director has no Admin menu bar at all and would
+// otherwise be left with no link to `/staff/inventory`, so the link is rendered
+// for exactly that case.
 interface StaffNavLink {
   href: string;
   label: string;
   access: {
     anyOf: readonly OperationalRole[];
-    adminReachesElsewhere?: true;
+    viaAdminMenu?: true;
   };
 }
 
@@ -1020,7 +1036,7 @@ interface StaffNavLink {
 // order the announcer reports on them — Announcer, Start line, Finish line —
 // and finally the Inventory link a non-administrator duck manager needs.
 const staffNavLinks: readonly StaffNavLink[] = [
-  { href: "/staff", label: "Admin", access: { anyOf: [] } },
+  { href: "/staff", label: "Admin", access: { anyOf: ["RACE_DIRECTOR"] } },
   { href: "/staff/registration", label: "Registration", access: { anyOf: ["REGISTRATION", "RACE_DIRECTOR"] } },
   { href: "/staff/announcer", label: "Announcer", access: { anyOf: ["ANNOUNCER", "RACE_DIRECTOR"] } },
   { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
@@ -1028,7 +1044,7 @@ const staffNavLinks: readonly StaffNavLink[] = [
   {
     href: "/staff/inventory",
     label: "Inventory",
-    access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"], adminReachesElsewhere: true },
+    access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"], viaAdminMenu: true },
   },
 ];
 
@@ -1038,8 +1054,8 @@ const staffNavLinkVisible = (
   roles: readonly OperationalRole[],
 ): boolean => {
   const holdsRole = access.anyOf.some((role) => roles.includes(role));
-  return access.adminReachesElsewhere === true
-    ? !isSystemAdmin && holdsRole
+  return access.viaAdminMenu === true
+    ? !canOpenAdminConsole(isSystemAdmin, roles) && holdsRole
     : isSystemAdmin || holdsRole;
 };
 
@@ -1096,6 +1112,10 @@ const adminMenu = (
 ): string => {
   const inConsole = current.startsWith("#");
   const hasRole = (role: OperationalRole): boolean => isSystemAdmin || roles.includes(role);
+  // Anyone with a console at all can see the event it is about. The rest stays
+  // exactly as role-gated as the surface it opens, so admitting race directors
+  // to the Admin view widens nothing else: Support and Access are still
+  // administrator-only items and are simply absent from a race director's bar.
   const allowed: Record<string, boolean> = {
     "#event": isSystemAdmin || roles.length > 0,
     "#heats": hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER") || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR"),
@@ -1115,6 +1135,59 @@ const adminMenu = (
     .join("");
   return `<nav class="console-nav" aria-label="Admin views">${links}</nav>`;
 };
+
+// Closing registration folds a short tail heat into the heat before it, and
+// reopening splits it back out. Both move ducks that are already sealed in
+// numbered bags, so neither may ever happen silently: the bags on the table
+// would stop matching the rosters QuickDucks prints and the finish line reads.
+//
+// This is the console's half of that promise. It is deliberately the same loud
+// visual language as the pairing page's own bag callout — the staffer who is
+// told "Put this duck in HEAT 5 bag" is the staffer who must later be told
+// "Pour the Heat 5 bag into the Heat 4 bag", and a physical instruction should
+// not look different from a physical instruction. It sits above everything
+// else, outside every console view so switching views cannot hide it, and it
+// survives a reload because the console re-reads its queue from the browser.
+// Only pressing Done clears one, because only a person can know a bag moved.
+//
+// The server never paints a heat number here: the numbers come from the
+// lifecycle response the transition itself returned.
+const bagMoveCallout = (): string => `<section class="heat-bag bag-move" data-bag-move hidden aria-live="assertive" aria-label="Move ducks between heat bags">
+        <p class="heat-bag-instruction" data-bag-move-instruction></p>
+        <p class="heat-bag-number" data-bag-move-number></p>
+        <p class="heat-bag-duck" data-bag-move-ducks></p>
+        <p class="heat-bag-note" data-bag-move-note></p>
+        <div class="actions"><button class="button secondary station-control" type="button" data-bag-move-dismiss>Done — the bags match the heats</button></div>
+      </section>`;
+
+// The page for a signed-in staff account that holds no operational role at all.
+//
+// `/staff` is the return target of staff sign-in, so it can never refuse this
+// account, and there is no station to send it to either. It used to be handed
+// the Admin console shell: an empty menu bar, no displayed view, and a message
+// line nothing would ever resolve. This is a real page instead. It says exactly
+// what is missing, who grants it, and offers the two things that do work — the
+// public site and signing out. It carries no console client and no live
+// surface, so it holds no socket either.
+export const renderStaffNoAccess = (
+  displayName: string,
+  phase: PublicPhase = "PREPARING",
+): string => page({
+  title: "Staff access",
+  description: "Protected QuickDucks staff account without operational roles.",
+  robots: "noindex,nofollow",
+  phase,
+  content: `
+    <section class="page-panel operations-panel staff-panel" data-staff-no-access data-live-staff data-system-admin="false" data-roles="">
+      ${duck()}
+      <p class="eyebrow">Staff account</p>
+      <h1 class="page-title operations-title">No operational roles assigned.</h1>
+      <p class="lede">You are signed in, but this account holds no race-day role yet, so there is no station for it to open.</p>
+      <div class="notice"><strong>Ask a system administrator to assign the station roles this account needs.</strong> Registration, duck manager, announcer, heat runner, result taker, and race director each open their own page, and signing in again picks the first one up as soon as one is granted.</div>
+      <div class="actions"><a class="button secondary" href="/">Back to public site</a></div>
+      ${staffFooter(displayName)}
+    </section>`,
+});
 
 // The one copy of the participants surface: the filter form, the walk-up card,
 // the participant list, and the detail card with its edit form, duck-name form
@@ -1149,19 +1222,26 @@ const participantsSurface = (): string => `
           </article>
         </div>`;
 
-// The administrator console. Its menu bar switches between four separate views —
+// The Admin view. Its menu bar switches between four separate views —
 // Event Details, Heats, Participants, Support — and links out to the Inventory
 // and Access pages. Exactly one view is displayed at a time; the sections keep
 // their existing event-scope and role gating, and the switcher only ever chooses
 // among the sections that gating already permits.
+//
+// `/staff` serves it to exactly the actors `canOpenAdminConsole` admits: system
+// administrators and race directors. An account with no operational role at all
+// has no console to render — an empty menu bar over no displayed view, with a
+// message line nothing would ever resolve — so it is handed the one real page
+// for that state instead. That is a single answer rather than two, which is why
+// the delegation lives here as well as in the route.
 export const renderStaffHome = (
   displayName: string,
   isSystemAdmin: boolean,
   roles: readonly OperationalRole[],
   phase: PublicPhase = "PREPARING",
 ): string => {
+  if (!isSystemAdmin && roles.length === 0) return renderStaffNoAccess(displayName, phase);
   const hasRole = (role: OperationalRole): boolean => isSystemAdmin || roles.includes(role);
-  const canUseConsole = isSystemAdmin || roles.length > 0;
   const canRegistration = hasRole("REGISTRATION") || hasRole("RACE_DIRECTOR");
   const canRaceRead = hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER")
     || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
@@ -1173,6 +1253,7 @@ export const renderStaffHome = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff")}
+      ${bagMoveCallout()}
       ${duck()}
       <p class="eyebrow">Staff operations</p>
       <h1 class="page-title operations-title">Race control, in one place.</h1>
@@ -1181,7 +1262,7 @@ export const renderStaffHome = (
       ${adminMenu(isSystemAdmin, roles)}
       <p class="message-line muted" data-console-message aria-live="polite">Loading operations…</p>
 
-      <section class="console-section" id="event" aria-labelledby="event-title" data-console-view="event" data-role-allowed="${canUseConsole ? "true" : "false"}"${canUseConsole ? "" : " hidden"}>
+      <section class="console-section" id="event" aria-labelledby="event-title" data-console-view="event" data-role-allowed="true">
         <p class="eyebrow">Event control</p><h2 id="event-title">Event Details</h2>
         <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>Create the race event to open participants, inventory, heats, and support. Until then this is the only view with anything to do.</span></div>
         ${isSystemAdmin ? `<details class="operation-card event-create-card" data-event-create-card hidden><summary>Create event</summary>
@@ -1254,7 +1335,7 @@ export const renderStaffHome = (
       </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/app-date-picker.js" defer></script>
-      ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
+      <script src="/assets/staff-home.js" defer></script>
       ${staffFooter(displayName)}
     </section>`,
   });
@@ -1485,7 +1566,7 @@ export const renderStaffInventory = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-inventory data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
       ${staffNav(isSystemAdmin, roles, "/staff/inventory")}
-      ${isSystemAdmin ? adminMenu(isSystemAdmin, roles, "/staff/inventory") : ""}
+      ${canOpenAdminConsole(isSystemAdmin, roles) ? adminMenu(isSystemAdmin, roles, "/staff/inventory") : ""}
       <p class="eyebrow">Physical ducks</p>
       <h1 class="page-title operations-title">Inventory</h1>
       <p class="lede">Every duck QuickDucks knows about. Scan a blank sticker to add one; scan a duck already in inventory and it opens here.</p>

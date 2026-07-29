@@ -605,6 +605,139 @@ test("a merge and a split replay their lifecycle command without moving entries 
   await assertRoundOneStarts(env, database);
 });
 
+// ---------------------------------------------------------------------------
+// The transition reports what has to happen to the physical bags
+// ---------------------------------------------------------------------------
+//
+// The pairing screen names a bag in the largest type on the page. A fold moves
+// an already-paired duck's entry into a different heat, so if the transition
+// said nothing the bags on the table would quietly stop matching the rosters.
+// The response therefore reports which heat was folded into which, with the
+// numbers printed on the ducks that moved, and the reverse for a split.
+
+test("closing registration reports the fold, and reopening reports the split, in bag terms", async (context) => {
+  const { database, env } = await setup(context, { ducksPerHeat: 4, participantCount: 5 });
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [4, 1]);
+  // Duck 5 is the one duck in the tail heat, so it is the one that moves.
+  assert.deepEqual(rosterOf(database, 2).map((entry) => entry.raceEntryId), ["entry-5"]);
+
+  const closed = await lifecycle(env, "close-registration");
+  assert.equal(closed.status, 201);
+  const closedBody = await closed.json();
+  assert.deepEqual(closedBody.bagMoves, [{
+    action: "MERGE",
+    fromHeatNumber: 2,
+    intoHeatNumber: 1,
+    duckNumbers: [5],
+    movedEntryCount: 1,
+  }]);
+  // The move it reports is the move it made.
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [5]);
+
+  const reopened = await lifecycle(env, "reopen-registration");
+  assert.equal(reopened.status, 201);
+  assert.deepEqual((await reopened.json()).bagMoves, [{
+    action: "SPLIT",
+    fromHeatNumber: 1,
+    intoHeatNumber: 2,
+    duckNumbers: [5],
+    movedEntryCount: 1,
+  }]);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [4, 1]);
+  assertStructurallySound(database);
+  await assertRoundOneStarts(env, database);
+});
+
+test("a two-pass fold reports both bag moves, in the order the staff must perform them", async (context) => {
+  const { database, env } = await setup(context, { ducksPerHeat: 10, participantCount: 11 });
+
+  const firstClose = await lifecycle(env, "close-registration");
+  assert.equal(firstClose.status, 201);
+  assert.deepEqual((await firstClose.json()).bagMoves, [{
+    action: "MERGE",
+    fromHeatNumber: 2,
+    intoHeatNumber: 1,
+    duckNumbers: [11],
+    movedEntryCount: 1,
+  }]);
+
+  // A late pairing opens a fresh heat behind the merged one, so the reopen
+  // leaves 10 + 1 + 1 and the next close has to fold twice.
+  const late = addLateParticipant(database, 1);
+  assert.equal((await pair(env, late)).heat.number, 2);
+  const reopened = await lifecycle(env, "reopen-registration");
+  assert.equal(reopened.status, 201);
+  assert.deepEqual((await reopened.json()).bagMoves, [{
+    action: "SPLIT",
+    fromHeatNumber: 1,
+    intoHeatNumber: 3,
+    duckNumbers: [11],
+    movedEntryCount: 1,
+  }]);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [10, 1, 1]);
+
+  // Heat 3 is poured into heat 2 first, then heat 2 into heat 1. Following the
+  // list in the other order would put the wrong ducks in the wrong bag.
+  const secondClose = await lifecycle(env, "close-registration");
+  assert.equal(secondClose.status, 201);
+  assert.deepEqual((await secondClose.json()).bagMoves, [
+    { action: "MERGE", fromHeatNumber: 3, intoHeatNumber: 2, duckNumbers: [11], movedEntryCount: 1 },
+    { action: "MERGE", fromHeatNumber: 2, intoHeatNumber: 1, duckNumbers: [901, 11], movedEntryCount: 2 },
+  ]);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [12]);
+  assertStructurallySound(database);
+  await assertRoundOneStarts(env, database);
+});
+
+test("a transition that moves no duck between bags reports no bag move at all", async (context) => {
+  const { database, env } = await setup(context, { ducksPerHeat: 3, participantCount: 6 });
+
+  const closed = await lifecycle(env, "close-registration");
+  assert.equal(closed.status, 201);
+  assert.deepEqual((await closed.json()).bagMoves, []);
+
+  const reopened = await lifecycle(env, "reopen-registration");
+  assert.equal(reopened.status, 201);
+  assert.deepEqual((await reopened.json()).bagMoves, []);
+
+  const opened = await lifecycle(env, "close-registration");
+  assert.equal(opened.status, 201);
+  assert.deepEqual((await opened.json()).bagMoves, []);
+
+  const started = await lifecycle(env, "start-round-one");
+  assert.equal(started.status, 201);
+  assert.deepEqual((await started.json()).bagMoves, []);
+  assertStructurallySound(database);
+});
+
+test("a replayed close reports no bag move, because the bags were already moved once", async (context) => {
+  const { database, env } = await setup(context, { ducksPerHeat: 4, participantCount: 5 });
+  const commandId = crypto.randomUUID();
+  const close = () => handleEventOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test/close-registration", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId }),
+    }),
+    env,
+    director,
+  );
+
+  const first = await close();
+  assert.equal(first.status, 201);
+  assert.equal((await first.json()).bagMoves.length, 1);
+
+  const replay = await close();
+  assert.equal(replay.status, 200);
+  const replayBody = await replay.json();
+  assert.equal(replayBody.replayed, true);
+  // The instruction is a physical task, and it was already given. Reporting it
+  // again on a retry would ask a staffer to pour an already-poured bag.
+  assert.deepEqual(replayBody.bagMoves, []);
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [5]);
+  assertStructurallySound(database);
+});
+
 test("reopening a close that merged nothing leaves every heat untouched", async (context) => {
   const { database, env } = await setup(context, { ducksPerHeat: 3, participantCount: 6 });
   assert.equal((await lifecycle(env, "close-registration")).status, 201);

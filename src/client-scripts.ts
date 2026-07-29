@@ -4678,6 +4678,141 @@ const updateEventSlugPreview = (form, preview, persistedEvent = null) => {
       : eventSlugFromName(name);
 };
 
+// --- Heat-bag move instructions ---------------------------------------------
+// Closing registration folds a short round-one tail heat into the heat before
+// it, and reopening splits it back out. Both move ducks that are already sealed
+// in numbered bags, and QuickDucks cannot move a bag, so the transition
+// response reports what changed and this turns it into a physical instruction.
+//
+// It behaves like a job ticket rather than like a message: it is queued in
+// localStorage, so it survives a reload, a view switch, and a live refresh, and
+// only the Done button removes one. That is deliberate — walking to the bags is
+// exactly the interval in which a page gets reloaded, and a physical task that
+// disappears when the page repaints is a task that does not get done.
+//
+// The registration desk loads this same client and renders no callout, so every
+// entry point checks the markup is present first.
+const bagMove = document.querySelector("[data-bag-move]");
+const bagMoveInstruction = document.querySelector("[data-bag-move-instruction]");
+const bagMoveNumber = document.querySelector("[data-bag-move-number]");
+const bagMoveDucks = document.querySelector("[data-bag-move-ducks]");
+const bagMoveNote = document.querySelector("[data-bag-move-note]");
+const bagMoveDismiss = document.querySelector("[data-bag-move-dismiss]");
+const bagMoveStorageKey = "quickducks.bag-moves";
+
+const bagMoveValid = (move) => Boolean(move)
+  && typeof move.id === "string"
+  && (move.action === "MERGE" || move.action === "SPLIT")
+  && Number.isInteger(move.fromHeatNumber)
+  && Number.isInteger(move.intoHeatNumber)
+  && Array.isArray(move.duckNumbers);
+
+// Storage can be unavailable or hold something else entirely, and neither may
+// take the console down; an unreadable queue is simply an empty one.
+const bagMoveRead = () => {
+  try {
+    const stored = JSON.parse(localStorage.getItem(bagMoveStorageKey) || "[]");
+    return Array.isArray(stored) ? stored.filter(bagMoveValid) : [];
+  } catch {
+    return [];
+  }
+};
+
+const bagMoveWrite = (moves) => {
+  try {
+    if (moves.length === 0) localStorage.removeItem(bagMoveStorageKey);
+    else localStorage.setItem(bagMoveStorageKey, JSON.stringify(moves));
+  } catch {}
+};
+
+const bagMoveDuckList = (move) => {
+  const count = Number.isInteger(move.movedEntryCount) ? move.movedEntryCount : move.duckNumbers.length;
+  const counted = count === 1 ? "1 duck" : count + " ducks";
+  return move.duckNumbers.length === 0
+    ? counted
+    : counted + ": " + move.duckNumbers.map((number) => "Duck #" + number).join(", ");
+};
+
+// Plain physical sentences. A merge pours one whole bag into another and needs
+// no searching; a split takes named ducks back out of one, which is why the
+// numbers are on screen.
+const bagMoveCopy = (move) => {
+  const from = "Heat " + move.fromHeatNumber;
+  const into = "Heat " + move.intoHeatNumber;
+  const arrow = from + " → " + into;
+  if (move.action === "MERGE") {
+    return {
+      instruction: "Pour the " + from + " bag into the " + into + " bag",
+      number: arrow,
+      ducks: bagMoveDuckList(move),
+      note: "Closing registration folded heat " + move.fromHeatNumber + " into heat "
+        + move.intoHeatNumber + ", because heat " + move.fromHeatNumber
+        + " had too few ducks to race. Empty the whole " + from + " bag into the " + into
+        + " bag and put the empty bag away. No other bag changes, and no duck changes"
+        + " position inside the " + into + " bag.",
+    };
+  }
+  return {
+    instruction: "Move " + bagMoveDuckList(move) + " from the " + from + " bag into a new " + into + " bag",
+    number: arrow,
+    ducks: bagMoveDuckList(move),
+    note: "Reopening registration split heat " + move.intoHeatNumber + " back out of heat "
+      + move.fromHeatNumber + ". Take exactly those ducks out of the " + from
+      + " bag, put them in a bag labelled " + into
+      + ", and leave every other duck exactly where it is.",
+  };
+};
+
+const renderBagMove = () => {
+  if (!bagMove) return;
+  const queued = bagMoveRead();
+  if (queued.length === 0) {
+    bagMove.hidden = true;
+    return;
+  }
+  const copy = bagMoveCopy(queued[0]);
+  // Reveal the live region before writing into it, so the announcement is a
+  // change inside a region that is already in the accessibility tree.
+  bagMove.hidden = false;
+  bagMoveInstruction.textContent = copy.instruction;
+  bagMoveNumber.textContent = copy.number;
+  bagMoveDucks.textContent = copy.ducks;
+  bagMoveNote.textContent = copy.note;
+};
+
+// The identifier is the lifecycle command that performed the move plus the
+// move's position in it, so a retried or double-rendered response can never
+// queue the same physical task twice.
+const queueBagMoves = (moves, commandId) => {
+  if (!bagMove || !Array.isArray(moves) || moves.length === 0) return;
+  const queued = bagMoveRead();
+  const known = new Set(queued.map((move) => move.id));
+  for (const [index, move] of moves.entries()) {
+    const queuedMove = { ...move, id: String(commandId) + ":" + index };
+    if (!bagMoveValid(queuedMove) || known.has(queuedMove.id)) continue;
+    known.add(queuedMove.id);
+    queued.push(queuedMove);
+  }
+  bagMoveWrite(queued);
+  renderBagMove();
+};
+
+// Deleting the event removes every heat and every roster, so the bags it named
+// mean nothing any more and the queue goes with them.
+const clearBagMoves = () => {
+  if (!bagMove) return;
+  bagMoveWrite([]);
+  renderBagMove();
+};
+
+if (bagMove && bagMoveDismiss) {
+  bagMoveDismiss.addEventListener("click", () => {
+    bagMoveWrite(bagMoveRead().slice(1));
+    renderBagMove();
+  });
+  renderBagMove();
+}
+
 const lifecycleLabels = {
   "open-registration": "Open registration",
   "close-registration": "Close registration",
@@ -4739,6 +4874,9 @@ const renderReadiness = (readiness) => {
             commandOptions("POST", { commandId }),
           );
           attempt.complete();
+          // Before anything repaints: this is a physical task and it must be on
+          // screen from the moment the transition is known to have committed.
+          queueBagMoves(result.bagMoves, commandId);
           renderLifecycleResult(result.event);
           const savedMessage = result.replayed || result.alreadyAtTarget
             ? "This transition was already saved. Current state: " + humanize(result.event.status) + "."
@@ -4873,6 +5011,7 @@ const loadEvents = async (preferredId) => {
       eventCreateCard.open = true;
     }
     showEventScopedSections(false);
+    clearBagMoves();
     setMessage("No event dataset exists. An administrator can create one.");
     return;
   }
@@ -6163,18 +6302,35 @@ const qrLoadDecoder = (documentRef, scope) => {
 };
 `;
 
-// Pairing puts a physical duck into a physical heat bag, and it stays in that
-// bag, in that position, for the whole race: nobody empties a bag on the bank to
-// find one duck, and heat entries are never reordered because the ducks inside a
-// bag are indistinguishable without scanning every one of them.
+// Pairing puts a physical duck into a physical heat bag, and nobody empties a
+// bag on the bank to find one duck: heat entries are never reordered, because
+// the ducks inside a bag are indistinguishable without scanning every one of
+// them.
 //
 // So the bag number is the loudest thing on the pairing screen, and it is ALWAYS
 // the heat the server's pairing command actually committed. This helper is a
 // pure function of that response on purpose: it takes the heat the server
 // returned and never counts entries, increments a previous number, or otherwise
 // derives one. A guessed number here puts a real duck in the wrong real bag.
+//
+// The note is the one thing that is not fixed, and it is a promise, so it has to
+// be true. There is exactly one operation that can still move an already-paired
+// duck's entry: closing registration folds a round-one tail heat that is too
+// short to race into the heat before it, and reopening splits it back out. That
+// can only happen while the event is REGISTRATION_OPEN and only to a round-one
+// heat, so:
+//
+//   - While registration is open the note says the bag is this duck's bag and
+//     that a fold is announced in the console if the tail heat turns out to be
+//     too short. It does not claim the bag is final, because it is not.
+//   - Once registration has closed, or for a final-heat repair pairing, no fold
+//     can reach this entry any more and the note says so absolutely.
+//
+// `eventStatus` is the status of the event the pairing command was run against,
+// straight from `GET /api/v1/events/current`; an unknown status falls back to
+// the cautious wording rather than the absolute one.
 export const heatBagHelpersScript = String.raw`
-const heatBagCallout = (heat, duckNumber, heatAssignmentPending) => {
+const heatBagCallout = (heat, duckNumber, heatAssignmentPending, eventStatus) => {
   const duckLabel = "Duck #" + duckNumber;
   // Say so plainly rather than printing a blank or an invented bag number.
   if (!heat || heatAssignmentPending === true || typeof heat.number !== "number") {
@@ -6191,13 +6347,19 @@ const heatBagCallout = (heat, duckNumber, heatAssignmentPending) => {
   // The round comes from the server too. A repair pairing during racing can land
   // in the final, and that is a different bag from round-one heat 1.
   const bag = heat.round === "FINAL" ? "FINAL heat " + heat.number : "HEAT " + heat.number;
+  const settled = heat.round === "FINAL"
+    || ["REGISTRATION_CLOSED", "ROUND_ONE", "FINAL", "COMPLETED"].includes(eventStatus);
   return {
     pending: false,
     instruction: "Put this duck in " + bag + " bag",
     number: (heat.round === "FINAL" ? "Final · Heat " : "Heat ") + heat.number,
     duck: duckLabel,
-    note: "Walk " + duckLabel + " to the " + bag.toLowerCase()
-      + " bag now. It stays in that bag, in that position, for the rest of the race.",
+    note: "Walk " + duckLabel + " to the " + bag.toLowerCase() + " bag now. " + (settled
+      ? "It stays in that bag, in that position, for the rest of the race."
+      : "While registration is open this whole bag can still be folded into the heat before it, "
+        + "if the heat is too short to race when registration closes. QuickDucks then tells the "
+        + "race director to pour one whole bag into another, and the Admin console names both "
+        + "bags. Nothing else ever moves this duck."),
   };
 };
 `;
@@ -6265,7 +6427,12 @@ const ineligibleStatusLabel = (status) => status === "WITHDRAWN"
 // returned, through the pure helper above. Nothing here decides a heat number.
 const showHeatBag = (result) => {
   if (!heatBag) return;
-  const callout = heatBagCallout(result.heat, result.duck.visibleNumber, result.heatAssignmentPending);
+  const callout = heatBagCallout(
+    result.heat,
+    result.duck.visibleNumber,
+    result.heatAssignmentPending,
+    currentEvent ? currentEvent.status : null,
+  );
   heatBag.classList.toggle("pending", callout.pending);
   // Reveal the live region before writing into it, so the announcement is a
   // change inside a region that is already in the accessibility tree.

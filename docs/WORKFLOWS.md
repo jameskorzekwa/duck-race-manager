@@ -55,10 +55,20 @@ not authorized.
 | Open `/staff/announcer` (read-only) | `ANNOUNCER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/finish-line` and resolve a roster duck by tag URL/number | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
+| Open the `/staff` Admin view | `RACE_DIRECTOR` | Yes |
 | Create/configure draft; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
-| Open `/staff/access` and the `/staff` Admin console | None | Yes |
+| Open `/staff/access` and the console's Support view | None | Yes |
 | Delete event: the whole dataset in any state | None | Yes |
+
+`is_system_admin` is an account type, not a race-day role. The race-day role for
+changing the state of the overall race — opening and closing registration,
+starting the rounds, managing the heats, correcting a published result,
+completing the event — is `RACE_DIRECTOR`, and every control that does so lives
+inside the `/staff` Admin view. Administrators and race directors therefore both
+open that view and both see the **Admin** navigation link. What stays
+administrator-only is what is not race-day work: Create event, Configure draft,
+Delete event, the Support view, and `/staff/access`.
 
 The operational role vocabulary is `REGISTRATION`, `DUCK_MANAGER`, `ANNOUNCER`,
 `HEAT_RUNNER`, `RESULT_TAKER`, and `RACE_DIRECTOR`. Granting or assigning any
@@ -120,12 +130,12 @@ Pairing is also the one-way door between the two ways a participant can leave:
   retrieve one duck, so the duck stays where it is and may still float past the
   finish line.
 
-Nothing about withdrawal or disqualification touches the physical race. Heats,
-heat entries, slot numbers, lane order, duck assignments, and recorded results
-are never renumbered, rebalanced, reordered, or removed — resorting the bags
-would mean rescanning every duck. The participant simply disappears from every
-public surface and can never be published as a winner. See Public Visibility of
-Withdrawn and Disqualified Participants.
+Nothing about withdrawal or disqualification touches the physical race. It
+renumbers, rebalances, reorders, and removes nothing: no heat, heat entry, slot
+number, lane order, duck assignment, or recorded result changes — resorting the
+bags would mean rescanning every duck. The participant simply disappears from
+every public surface and can never be published as a winner. See The Heat Bag
+Rule and Public Visibility of Withdrawn and Disqualified Participants.
 
 Because the write disturbs nothing physical, it is available at **every** point
 in the event lifecycle: a participant may be withdrawn or disqualified while
@@ -133,6 +143,41 @@ their heat is `PLANNED`, `LOADING`, locked, `READY`, `CALLING`, `RUNNING`,
 `AWAITING_RESULT`, or `FINALIZED`, and the heat is left byte for byte as it was.
 A non-`ACTIVE` roster entry is therefore a normal, expected race-day state: that
 duck rides in the bag, goes down the water, and simply cannot win.
+
+### The Heat Bag Rule
+
+This is the single governing rule about the physical ducks, and every other
+statement in this document about bags, slots, and rosters is an application of
+it rather than an exception to it.
+
+> A duck goes into a numbered heat bag when it is paired, and it comes out of
+> that bag only in the water. QuickDucks never reaches into a bag, never picks a
+> duck out of one, and never reorders the ducks inside one, because the ducks in
+> a bag are indistinguishable without scanning every one of them.
+>
+> The one physical change QuickDucks may cause is moving **one whole bag into
+> another whole bag**, which needs no searching at all. That happens in exactly
+> two places, both of them before any roster is locked: closing registration
+> pours a round-one tail heat that is too short to race into the heat before it,
+> and reopening registration takes it back out again.
+>
+> Neither of those is ever silent. The transition response reports which heat
+> moved into which and the numbers on the ducks that moved, and the Admin view
+> shows it as an explicit physical instruction — *"Pour the Heat 5 bag into the
+> Heat 4 bag"* — that stays on screen until a person acknowledges it.
+
+Two consequences follow, and they are what the rest of this document relies on:
+
+- Withdrawal, disqualification, reactivation, unassignment, deleting a duck, and
+  every result correction move no duck and no heat entry at all.
+- The pairing screen names a bag at pairing time and is honest about how firm
+  that answer is: while the event is `REGISTRATION_OPEN` the whole bag can still
+  be folded, and it says so; from `REGISTRATION_CLOSED` onwards nothing can move
+  it and it says that instead. See Duck Pairing and Minimum Heat Size and Tail
+  Rebalancing.
+
+QuickDucks records no bag placement and no physical-location confirmation. It
+states the instruction; carrying it out is an operator step.
 
 ### Heat
 
@@ -160,10 +205,13 @@ The supported complete sequence is:
    with an open slot, creating the next heat automatically when every existing
    heat is full. This is the only heat assignment model.
 6. A race director closes registration. If the last heat holds fewer than three
-   ducks, closing folds it into the heat before it, which goes over capacity.
+   ducks, closing folds it into the heat before it, which goes over capacity,
+   and the Admin view tells the staff which bag to pour into which. That
+   instruction stays up until somebody acknowledges it.
 7. Registration staff and the race director resolve every still-submitted
    participant and check readiness. An administrator may reopen registration at
-   any point before round one starts, which splits a folded tail back out.
+   any point before round one starts, which splits a folded tail back out and
+   names the ducks to take back out of that bag.
 8. The race director starts round one, which locks every round-one roster in the
    same command; heat runners run heats; result takers finish them and publish
    one winner per heat.
@@ -978,29 +1026,35 @@ checks.
 
 Every staff page also renders one persistent staff navigation, organised by the
 job a staffer is doing and listing only the pages the signed-in actor may open:
-**Admin** (`/staff`, system administrator), **Registration**
+**Admin** (`/staff`, `RACE_DIRECTOR` or system administrator), **Registration**
 (`/staff/registration`, `REGISTRATION` or `RACE_DIRECTOR`), **Announcer**
 (`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Start line**
 (`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), and **Finish line**
 (`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`).
 
-Inventory and Access are reached from the Admin console's own menu bar rather
-than from this navigation. The one exception is a **non-administrator** holding
-`DUCK_MANAGER` or `RACE_DIRECTOR`: they have no Admin menu bar, so they keep an
+Inventory and Access are reached from the Admin view's own menu bar rather than
+from this navigation. The one exception is a `DUCK_MANAGER` who is neither an
+administrator nor a race director: they have no Admin menu bar, so they keep an
 **Inventory** (`/staff/inventory`) link here as the last item. The current page
 is marked `aria-current="page"`. The navigation wraps rather than scrolling, so
 it never overflows a 320px viewport. Omitting a link is convenience only; each
 page repeats its own check.
 
 `/staff` is the return target of staff sign-in, so it never refuses a regular
-staff member. A signed-in system administrator receives the Admin console. A
-signed-in non-administrator receives `303` to the first page their own roles
-open, in this order: `/staff/registration`, `/staff/start-line`,
-`/staff/finish-line`, `/staff/announcer`, `/staff/inventory`. Each target is a
-distinct path with its own role check and none of them redirects back to
-`/staff` while authenticated, so the redirect cannot loop. A staff member with
-no operational role at all receives the console page and its **No operational
-roles assigned** notice instead of a redirect.
+staff member. It has exactly three outcomes:
+
+1. A system administrator or a `RACE_DIRECTOR` receives the Admin view. The URL
+   hash is never sent to the server, so a deep link such as `/staff#heats` is
+   the same request and lands on that view.
+2. Any other operational staffer receives `303` to the first page their own
+   roles open, in this order: `/staff/registration`, `/staff/start-line`,
+   `/staff/finish-line`, `/staff/announcer`, `/staff/inventory`. Each target is
+   a distinct path with its own role check and none of them redirects back to
+   `/staff` while authenticated, so the redirect cannot loop.
+3. A staff member with no operational role at all receives the **No operational
+   roles assigned** page. It names what is missing and who grants it, carries
+   the log-out control and a link to the public site, and runs no console
+   client — it is a real page rather than an empty console shell.
 
 The signed-in identity bar is the last element of each operational staff page,
 not a header. It contains only the escaped display name on the left and the
@@ -1048,14 +1102,20 @@ staff console. Event readiness and heat, announcer-roster, result, and finalist
 reads are limited to announcers, heat runners, result takers, race directors,
 and system administrators.
 
-### The Admin Console and Its Views
+### The Admin View and Its Views
 
-`/staff` is the administrator console. Its menu bar lists, in this order,
-**Event Details**, **Heats**, **Participants**, **Inventory**, **Support**, and
-**Access**. Event Details, Heats, Participants, and Support are separate views
-inside `/staff`; Inventory and Access are links to `/staff/inventory` and
-`/staff/access`, which render the same menu bar so an administrator can navigate
-back.
+`/staff` is the Admin view, opened by system administrators and race directors.
+Its menu bar lists, in this order, **Event Details**, **Heats**,
+**Participants**, **Inventory**, **Support**, and **Access**. Event Details,
+Heats, Participants, and Support are separate views inside `/staff`; Inventory
+and Access are links to `/staff/inventory` and `/staff/access`, which render the
+same menu bar so the actor can navigate back.
+
+Each menu item carries exactly the gating of the surface it opens, so a race
+director's bar reads Event Details, Heats, Participants, and Inventory: Support
+and Access are administrator-only and are absent rather than disabled. The
+administrator-only cards inside Event Details — Create event, Configure draft,
+and Delete event — are likewise not rendered for a race director.
 
 The views are not one stacked page: exactly one is displayed at a time. The URL
 hash names the displayed view — `#event`, `#heats`, `#participants`, `#support` —
@@ -1177,6 +1237,10 @@ they are the normal state at this point. Reopening also splits back out the
 slots closing had folded into an earlier heat, returning every heat to at most
 its capacity. See Minimum Heat Size and Tail Rebalancing for what that restores
 exactly and what it does not.
+
+Both transitions report the physical bag move they caused, and the Admin view
+states it as an instruction that stays up until it is acknowledged. See
+Reporting the Bag Move.
 
 ### Start Round One
 
@@ -1722,15 +1786,29 @@ the atomic command re-checks both the open slot and that capacity with guarded
 SQL. Pairing stays available through `REGISTRATION_CLOSED` so a participant
 paired after the close still lands in a heat.
 
-**Implemented:** because that duck immediately goes into a physical heat bag it
-does not come out of, a successful pairing paints one large, high-contrast,
-full-width callout at the very top of the pairing page and scrolls it into view.
-It reads *Put this duck in HEAT 3 bag* with the heat number at display size, the
-duck number beside it as secondary information, and a note that the duck stays in
-that bag, in that position, for the rest of the race. It carries an assertive
-`aria-live` announcement and stays on screen until the staffer presses **Done —
-this duck is in the bag** or scans the next duck, so a live refresh cannot take
-it away while they walk to the bags.
+**Implemented:** because that duck immediately goes into a physical heat bag, a
+successful pairing paints one large, high-contrast, full-width callout at the
+very top of the pairing page and scrolls it into view. It reads *Put this duck
+in HEAT 3 bag* with the heat number at display size and the duck number beside
+it as secondary information. It carries an assertive `aria-live` announcement
+and stays on screen until the staffer presses **Done — this duck is in the bag**
+or scans the next duck, so a live refresh cannot take it away while they walk to
+the bags.
+
+The note under it states exactly how firm that bag is, because The Heat Bag Rule
+allows one whole bag to be poured into another while registration is still open:
+
+- While the event is `REGISTRATION_OPEN` and the heat is a round-one heat, the
+  note says the duck goes to that bag now, that the whole bag can still be
+  folded into the heat before it if the heat is too short to race when
+  registration closes, and that the Admin view names both bags when that
+  happens. It does not claim the bag is final, because it is not.
+- From `REGISTRATION_CLOSED` onwards, and for a repair pairing that lands in the
+  final, nothing can move the entry any more and the note says plainly that the
+  duck stays in that bag, in that position, for the rest of the race.
+
+The wording is the only part that varies. The bag is named just as loudly in
+both cases, because naming it is the whole point of the callout.
 
 The bag is always the round and heat number the pairing command itself committed
 and returned; the browser never counts entries or derives a number. A repair
@@ -1788,6 +1866,11 @@ computes the next slot as `COUNT(*) + 1` and `UNIQUE (heat_id, slot_number)`
 would otherwise reject a repeat. Every operation below preserves that.
 
 ### Minimum Heat Size and Tail Rebalancing
+
+This is the one place The Heat Bag Rule permits a physical change, and it is
+permitted because a fold is not a search: it pours one whole bag into another
+and leaves every duck inside untouched. It is available only before any roster
+is locked, and it is always reported. See **Reporting the Bag Move** below.
 
 A heat can only be raced with at least three ducks. That minimum is enforced in
 three places:
@@ -1864,6 +1947,43 @@ Both operations are atomic without a post-commit repair step:
 Both are guarded on their own lifecycle command row, so a transition that loses
 its race writes nothing, and a replayed command identifier returns the recorded
 result without moving anything a second time.
+
+#### Reporting the Bag Move
+
+**Implemented:** a fold and a split both move ducks that are already sealed in
+numbered bags, so neither may be silent. Every lifecycle response carries a
+`bagMoves` array. It is empty for every transition that moves nothing, and for a
+replay — the move happened once, and asking a staffer to pour an already-poured
+bag would be worse than saying nothing. A successful close or reopen reports one
+entry per pass, in the order the staff must perform them:
+
+| Field | Meaning |
+| --- | --- |
+| `action` | `MERGE` for a fold on close, `SPLIT` for the reverse on reopen |
+| `fromHeatNumber` | the heat whose ducks move |
+| `intoHeatNumber` | the heat they move into |
+| `duckNumbers` | the numbers printed on the ducks that moved, in slot order |
+| `movedEntryCount` | how many roster places moved, including any with no current duck |
+
+`duckNumbers` matters for a split: pouring a whole bag needs no search, but
+taking specific ducks back out of one does, so the instruction names them.
+
+The Admin view turns each entry into one physical instruction, in the same loud
+visual language as the pairing page's own bag callout, at the very top of the
+page and outside every view so switching views cannot hide it:
+
+- A fold reads *Pour the Heat 5 bag into the Heat 4 bag*.
+- A split reads *Move 2 ducks: Duck #117, Duck #118 from the Heat 4 bag into a
+  new Heat 5 bag*.
+
+The instruction is queued in the browser rather than merely painted, so it
+survives a reload, a view switch, and a live refresh. Only pressing **Done — the
+bags match the heats** removes one, and it removes exactly one, so a two-pass
+fold is worked through instruction by instruction. Deleting the event clears the
+queue, because the heats it named no longer exist. QuickDucks still records no
+bag placement or physical confirmation: acknowledging is an operator step, and
+the audit records only the heat numbers and counts already written by
+`ROUND_ONE_TAIL_MERGED` and `ROUND_ONE_TAIL_SPLIT`.
 
 ### Reopening Registration
 

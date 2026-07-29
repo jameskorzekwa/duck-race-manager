@@ -401,12 +401,13 @@ test("the create-event card is revealed only while no event exists", () => {
     "eventCreateCard",
     "eventDetailRegion",
     "eventEmptyState",
+    "clearBagMoves",
     "showEventScopedSections",
     sliceBetween(
       "if (eventDetailRegion) eventDetailRegion.hidden = true;",
       'setMessage("No event dataset exists. An administrator can create one.");',
     ),
-  )(removed, { hidden: false }, { hidden: true }, () => undefined);
+  )(removed, { hidden: false }, { hidden: true }, () => undefined, () => undefined);
   assert.equal(removed.hidden, false, "deleting the event brings the create card back");
   assert.equal(removed.open, true);
 });
@@ -429,6 +430,7 @@ test("the selected-event region ships hidden and the generated script toggles it
   const emptyState = { hidden: true };
   const createCard = { open: false, hidden: false };
   const scoped = [];
+  const cleared = [];
   const showEventScopedSections = (exists) => scoped.push(exists);
 
   // renderEvent's tail reveals the server-hidden region and retires the no-event guidance.
@@ -447,16 +449,20 @@ test("the selected-event region ships hidden and the generated script toggles it
     "eventDetailRegion",
     "eventEmptyState",
     "eventCreateCard",
+    "clearBagMoves",
     "showEventScopedSections",
     sliceBetween(
       "if (eventDetailRegion) eventDetailRegion.hidden = true;",
       'setMessage("No event dataset exists. An administrator can create one.");',
     ),
-  )(region, emptyState, createCard, showEventScopedSections);
+  )(region, emptyState, createCard, () => cleared.push(true), showEventScopedSections);
   assert.equal(region.hidden, true);
   assert.equal(emptyState.hidden, false);
   assert.equal(createCard.open, true);
   assert.deepEqual(scoped, [true, false], "the no-events branch hides them again");
+  // Deleting the event removes every heat, so any queued heat-bag move it named
+  // is meaningless and the queue goes with it.
+  assert.deepEqual(cleared, [true], "the no-events branch clears queued bag moves");
 });
 
 test("the reworked event layout keeps the create card intentional and the detail cards responsive", () => {
