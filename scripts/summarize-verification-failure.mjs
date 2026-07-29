@@ -6,6 +6,7 @@ import { redactE2eOutput } from "./e2e-redaction.mjs";
 
 const DEFAULT_MAX_CHARACTERS = 15000;
 const DEFAULT_TAIL_LINES = 200;
+const DEFAULT_MAX_LINE_CHARACTERS = 400;
 const FAILURE_SECTION = /^\s*(?:\u2716 failing tests:|failing tests:|Failed tests:)/i;
 
 // Hosted verification output is untrusted candidate-derived text. Neutralize
@@ -17,13 +18,21 @@ function neutralizeMarkers(text) {
 export function summarizeVerificationFailure(log, {
   maxCharacters = DEFAULT_MAX_CHARACTERS,
   tailLines = DEFAULT_TAIL_LINES,
+  maxLineCharacters = DEFAULT_MAX_LINE_CHARACTERS,
 } = {}) {
-  const lines = String(log ?? "").split(/\r?\n/).map((line) => neutralizeMarkers(redactE2eOutput(line)));
+  // A single assertion can dump an entire rendered page. Clip each line so one
+  // value cannot crowd out the failing test name and the expected pattern.
+  const clip = (line) => (line.length > maxLineCharacters
+    ? `${line.slice(0, maxLineCharacters)} [line truncated]`
+    : line);
+  const lines = String(log ?? "").split(/\r?\n/)
+    .map((line) => clip(neutralizeMarkers(redactE2eOutput(line))));
   const start = lines.findIndex((line) => FAILURE_SECTION.test(line));
   const selected = start >= 0 ? lines.slice(start) : lines.slice(-tailLines);
   const text = selected.join("\n").trim();
   if (text.length <= maxCharacters) return text;
-  return `[truncated to the last ${maxCharacters} characters]\n${text.slice(-maxCharacters)}`;
+  // Keep the head: the failure identity and expectation lead the section.
+  return `${text.slice(0, maxCharacters)}\n[truncated to the first ${maxCharacters} characters]`;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
