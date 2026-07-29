@@ -1,23 +1,31 @@
 name: Agent Review
+run-name: Agent Review PR #${{ inputs.pr || github.event.pull_request.number }}
 
 on:
   pull_request_target:
     types: [edited, opened, synchronize, reopened, ready_for_review]
   pull_request_review:
     types: [edited, submitted]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to review
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: quickducks-agent-review-${{ github.event.pull_request.number }}
+  group: quickducks-agent-review-${{ inputs.pr || github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
   prepare:
     name: Prepare trusted context
     if: >-
-      github.event_name != 'pull_request_review' ||
-      (github.actor_id == '38769771' && github.event.review.user.id == 38769771)
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.user.id != 41898282) ||
+      (github.event_name == 'pull_request_review' && github.actor_id == '38769771' && github.event.review.user.id == 38769771)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -27,26 +35,35 @@ jobs:
     outputs:
       base: ${{ steps.context.outputs.base }}
       eligible: ${{ steps.context.outputs.eligible }}
+      head: ${{ steps.context.outputs.head }}
       issue: ${{ steps.context.outputs.issue }}
+      pr: ${{ steps.context.outputs.pr }}
       sensitive: ${{ steps.context.outputs.sensitive }}
     steps:
       - name: Validate event and linked issue
         id: context
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'Pull request input must be a positive integer.\n' >&2
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "$RUNNER_TEMP/agent-review-pr.json"
           node <<'NODE'
           const fs = require("node:fs");
 
           const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
-          const pr = event.pull_request;
+          const pr = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/agent-review-pr.json`, "utf8"));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `base=${pr.base.sha}\nhead=${pr.head.sha}\npr=${pr.number}\n`);
           const branchMatch = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
           const eligible = pr.head.repo.full_name === process.env.GITHUB_REPOSITORY
             && pr.head.repo.id === pr.base.repo.id
             && pr.base.ref === event.repository.default_branch
-            && pr.user.id === 219766164
+            && pr.user.id === 41898282
             && branchMatch !== null;
           fs.writeFileSync("agent-review-eligible.txt", String(eligible));
           if (!eligible) {
@@ -82,11 +99,11 @@ jobs:
             printf 'PR provenance does not reference Agent Task.\n' >&2
             exit 1
           fi
-          sensitive="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${{ github.event.pull_request.number }}/files?per_page=100" \
+          sensitive="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
             --jq '[.[].filename | select(startswith(".github/") or startswith(".opencode/") or startswith("infra/") or startswith("db/migrations/") or startswith("scripts/") or startswith("wrangler") or . == "opencode.json" or . == "package.json" or . == "package-lock.json" or . == "AGENTS.md")] | length' \
             | awk '{sum += $1} END {print (sum > 0 ? "true" : "false")}')"
-          printf 'base=%s\neligible=true\nissue=%s\nsensitive=%s\n' \
-            "${{ github.event.pull_request.base.sha }}" "$issue_number" "$sensitive" >> "$GITHUB_OUTPUT"
+          printf 'eligible=true\nissue=%s\nsensitive=%s\n' \
+            "$issue_number" "$sensitive" >> "$GITHUB_OUTPUT"
 
   reset-state:
     name: Clear stale approval
@@ -105,9 +122,9 @@ jobs:
         id: reset
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
           ISSUE_NUMBER: ${{ needs.prepare.outputs.issue }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -173,7 +190,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ needs.prepare.outputs.head }}
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -182,8 +199,8 @@ jobs:
 
       - name: Verify candidate SHA
         env:
-          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
+          EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
@@ -214,9 +231,9 @@ jobs:
       issues: read
       pull-requests: read
     env:
-      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+      EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
       ISSUE_NUMBER: ${{ needs.prepare.outputs.issue }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_NUMBER: ${{ needs.prepare.outputs.pr }}
     steps:
       - name: Check out trusted base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -224,7 +241,7 @@ jobs:
           fetch-depth: 0
           path: trusted
           persist-credentials: false
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ needs.prepare.outputs.base }}
 
       - name: Check out exact candidate as untrusted data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -232,7 +249,7 @@ jobs:
           fetch-depth: 0
           path: candidate
           persist-credentials: false
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ needs.prepare.outputs.head }}
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -246,18 +263,18 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_HEAD"
-          test "$(git -C trusted rev-parse HEAD)" = "${{ github.event.pull_request.base.sha }}"
+          test "$(git -C trusted rev-parse HEAD)" = "${{ needs.prepare.outputs.base }}"
           node trusted/scripts/validate-agent-patch.mjs \
             "$GITHUB_WORKSPACE/trusted" \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.base.sha }}"
+            "${{ needs.prepare.outputs.base }}" \
+            "${{ needs.prepare.outputs.base }}"
           state_root="$HOME/.local/state/quickducks-agent-runner"
           model_dir="$state_root/workspaces/review-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           rm -rf "$model_dir"
           mkdir -p "$model_dir"
-          git -C trusted archive "${{ github.event.pull_request.base.sha }}" | tar -x -C "$model_dir"
+          git -C trusted archive "${{ needs.prepare.outputs.base }}" | tar -x -C "$model_dir"
           mkdir -p "$model_dir/.pipeline" "$RUNNER_TEMP/agent-review"
-          git -C candidate diff --no-ext-diff --binary "${{ github.event.pull_request.base.sha }}..${EXPECTED_HEAD}" \
+          git -C candidate diff --no-ext-diff --binary "${{ needs.prepare.outputs.base }}..${EXPECTED_HEAD}" \
             > "$model_dir/.pipeline/candidate.patch"
           gh issue view "$ISSUE_NUMBER" --json number,title,body,state,url \
             > "$model_dir/.pipeline/review-context.json"
@@ -388,7 +405,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: agent-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          name: agent-review-${{ needs.prepare.outputs.pr }}-${{ needs.prepare.outputs.head }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/agent-review/review-result.json
           if-no-files-found: error
           retention-days: 7
@@ -422,8 +439,9 @@ jobs:
     needs: [prepare, reset-state, validate-candidate, independent-review]
     if: >-
       always() &&
-      (github.event_name != 'pull_request_review' ||
-      (github.actor_id == '38769771' && github.event.review.user.id == 38769771))
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' && github.event.pull_request.user.id != 41898282) ||
+      (github.event_name == 'pull_request_review' && github.actor_id == '38769771' && github.event.review.user.id == 38769771))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -436,11 +454,18 @@ jobs:
       - name: Publish invalid-provenance candidate check
         if: needs.prepare.result != 'success'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
         with:
           script: |
             const { owner, repo } = context.repo;
-            const prNumber = context.payload.pull_request.number;
-            const head = context.payload.pull_request.head.sha;
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!Number.isSafeInteger(prNumber) || prNumber < 1) {
+              core.setFailed("Pull request input must be a positive integer.");
+              return;
+            }
+            const pr = (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
+            const head = pr.head.sha;
             for (const label of ["agent:approved", "agent:merge-slot"]) {
               try {
                 await github.rest.issues.removeLabel({ owner, repo, issue_number: prNumber, name: label });
@@ -456,7 +481,7 @@ jobs:
                     pullRequest { number }
                   }
                 }
-              `, { pullRequestId: context.payload.pull_request.node_id });
+              `, { pullRequestId: pr.node_id });
             } catch (error) {
               core.warning(`Auto-merge was not active or could not be disabled: ${error.message}`);
             }
@@ -465,7 +490,7 @@ jobs:
               status: "completed", conclusion: "failure",
               external_id: `agent-review-invalid:${context.runId}`,
               details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-              output: { title: "Invalid agent PR provenance", summary: "The trusted issue, App, run, branch, body, and base markers did not agree." },
+               output: { title: "Invalid agent PR provenance", summary: "The trusted issue, automation author, run, branch, body, and base markers did not agree." },
             });
 
       - name: Reject invalid review context
@@ -482,29 +507,29 @@ jobs:
             const { owner, repo } = context.repo;
             await github.rest.checks.create({
               owner, repo, name: "Agent Review / Exact SHA",
-              head_sha: context.payload.pull_request.head.sha,
+              head_sha: "${{ needs.prepare.outputs.head }}",
               status: "completed", conclusion: "success",
               external_id: `agent-review-not-applicable:${context.runId}`,
               details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-              output: { title: "Agent review not applicable", summary: "This is not an OpenCode App pipeline PR; ordinary required CI still applies." },
+              output: { title: "Agent review not applicable", summary: "This is not an agent-pipeline PR; ordinary required CI still applies." },
             });
 
       - name: Download independent decision
         if: needs.prepare.outputs.eligible == 'true' && needs.independent-review.result == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: agent-review-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}-${{ github.run_attempt }}
+          name: agent-review-${{ needs.prepare.outputs.pr }}-${{ needs.prepare.outputs.head }}-${{ github.run_attempt }}
           path: review-result
 
       - name: Record exact-head decision
         if: needs.prepare.outputs.eligible == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
           EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
           CHECK_ID: ${{ needs.reset-state.outputs.check-id }}
           ISSUE_NUMBER: ${{ needs.prepare.outputs.issue }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr }}
           RESET_RESULT: ${{ needs.reset-state.result }}
           REVIEW_RESULT: ${{ needs.independent-review.result }}
           SENSITIVE: ${{ needs.prepare.outputs.sensitive }}

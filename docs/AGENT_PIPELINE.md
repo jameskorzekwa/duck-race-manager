@@ -111,11 +111,12 @@ files, access tokens, and refresh tokens never enter the
 runner environment, GitHub secrets, artifacts, logs, or repository.
 
 The model emits a patch artifact. A second job executes and validates that patch
-without write or OIDC authority. Only after verification does a model-free
-publisher exchange OIDC for the OpenCode GitHub App installation token, apply the
-same digest-bound patch without executing it, and create the branch and PR. App
-events trigger CI; normal workflow `GITHUB_TOKEN` writes do not recursively
-trigger most workflows.
+without write authority. Only after verification does a model-free publisher
+apply the same digest-bound patch without executing it and use its short-lived,
+repository-scoped `GITHUB_TOKEN` to create the branch and PR. Because workflow
+token writes do not recursively trigger most workflows, the publisher explicitly
+dispatches CI on the candidate branch and Agent Review from the trusted default
+branch. No external token exchange or long-lived credential is involved.
 
 Patch extraction occurs in a fresh trusted Git repository, never in the model's
 workspace. Known ignored OpenCode runtime dependencies under `.opencode` are
@@ -239,10 +240,13 @@ GitHub. Verify the local OpenChamber model list before enabling intake. The
 self-hosted job should call `openchamber session create --wait`; it must not load
 provider credentials into the Actions process.
 
-Install the official OpenCode Agent GitHub App on the target repository. Grant
-`id-token: write` only to a deterministic publisher that never executes candidate
-code or invokes a model. Exchange OIDC for the short-lived App installation token
-there. Never upload a local OpenCode `auth.json` or OAuth refresh token to Actions.
+Grant `contents: write`, `pull-requests: write`, and `actions: write` only to a
+deterministic publisher that never executes candidate code or invokes a model.
+Use its short-lived repository-scoped `GITHUB_TOKEN` to publish, then explicitly
+dispatch candidate CI and the trusted default-branch review workflow. Enable the
+repository's bundled "Allow GitHub Actions to create and approve pull requests"
+setting, but do not implement automated review approval. Never upload a local
+OpenCode `auth.json`, OAuth refresh token, or long-lived PAT to Actions.
 
 ### 4. Create labels
 
@@ -257,7 +261,8 @@ issue form references `agent:inbox`, so create labels before enabling the form.
 - Require `CI / Validate` and candidate-head `Agent Review / Exact SHA`.
 - Permit only the intended merge method.
 - Keep workflow token defaults read-only.
-- Do not allow Actions to approve reviews unless the design explicitly needs it.
+- Although GitHub bundles PR creation and review approval in one Actions setting,
+  do not implement automated review approval unless the design explicitly needs it.
 
 ### 6. Configure deployment
 
@@ -281,7 +286,8 @@ authoritative. Add this guide to the repository's main documentation index.
 3. Push a setup branch and let ordinary CI pass.
 4. Verify the self-hosted runner is online, OpenChamber is running, and both paid
    provider model families are visible.
-5. Install the OpenCode GitHub App and verify the model-free OIDC publisher.
+5. Enable workflow-token PR creation and verify native-token publication plus
+   explicit candidate CI and trusted review dispatch.
 6. Submit one documentation-only canary issue.
 7. Confirm local OpenChamber sessions, branch creation, PR CI, independent review,
    merge slot, environment approval, deployment, smoke tests, and final issue state.

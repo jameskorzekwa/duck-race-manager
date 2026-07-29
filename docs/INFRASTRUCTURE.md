@@ -121,9 +121,11 @@ issue or PR content never receives an automatic privileged execution path.
 Model jobs run on the repository-scoped `quickducks-model` runner and submit
 sessions to James's local OpenChamber runtime, which already owns the paid
 OpenAI and Anthropic OAuth credentials. Those credentials are never copied into
-GitHub secrets or the Actions environment. Repository writes use the OpenCode
-GitHub App's short-lived installation token so resulting branch and PR events
-still trigger CI. Agent jobs do not receive production credentials.
+GitHub secrets or the Actions environment. A model-free publisher uses its
+short-lived repository-scoped `GITHUB_TOKEN`, then explicitly dispatches
+candidate CI and trusted-default-branch review because workflow-token writes do
+not recursively trigger most workflows. Agent jobs do not receive production
+credentials.
 
 Local models receive unique plain-file snapshots with no `.git` directory.
 Deny-by-default agents cannot use shell, PTY, network/MCP tools, LSP, formatters,
