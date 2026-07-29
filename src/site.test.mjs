@@ -297,14 +297,40 @@ test("the home hero is copy and artwork only, with the CTA in the race-named sec
 
   assert.ok(hero);
   assert.ok(summary);
-  assert.match(hero, /<h1>Find your duck\. Cheer it home\.<\/h1>/);
+  assert.match(hero, /<h1><span>Find your duck\.<\/span><br><span>Cheer it home\.<\/span><\/h1>/);
   assert.doesNotMatch(hero, /class="actions"|<a\b|data-home-cta/);
   assert.match(summary, /<a class="button" href="\/register" data-home-cta>Register<\/a>/);
   // Preparing has no CTA, so it has no happening-now section, and the hero keeps
-  // its own empty-state sentence.
+  // the empty-state sentence in its own card below the artwork.
   const preparing = renderHome("PREPARING");
+  const preparingHero = preparing.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
+  assert.ok(preparingHero);
+  assert.doesNotMatch(preparingHero, /data-home-preparing|The next race is being prepared/);
+  assert.match(preparing, /<section class="status-section home-preparing-card"[^>]*><p class="eyebrow">Happening now<\/p><h2[^>]*data-home-preparing>/);
   assert.match(preparing, /data-home-preparing>The next race is being prepared\./);
   assert.doesNotMatch(preparing, /data-live-summary|data-home-cta|class="actions"/);
+});
+
+test("the populated race-status card always sits directly below the home hero", () => {
+  for (const phase of ["PREPARING", "REGISTRATION", "LOCKED_IN", "RACING", "RESULTS"]) {
+    const home = renderHome(phase);
+    const heroStart = home.indexOf('<section class="hero">');
+    const heroEnd = home.indexOf("</section>", heroStart) + "</section>".length;
+    const statusStart = phase === "PREPARING"
+      ? home.indexOf('<section class="status-section home-preparing-card"')
+      : home.indexOf('<section class="status-section" data-live-summary');
+    const tickerStart = home.indexOf('<div class="ticker"');
+
+    assert.ok(heroStart >= 0, phase);
+    assert.ok(statusStart > heroEnd, phase);
+    assert.ok(tickerStart > statusStart, phase);
+    assert.match(home.slice(statusStart, tickerStart), /<p class="eyebrow">Happening now<\/p>/, phase);
+    assert.match(
+      home.slice(statusStart, tickerStart),
+      phase === "PREPARING" ? /<h2[^>]*>The next race is being prepared\.<\/h2>/ : /<h2[^>]*>Checking the race…<\/h2>/,
+      phase,
+    );
+  }
 });
 
 test("no public card is singled out with the retired just-registered highlight", () => {

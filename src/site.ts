@@ -50,7 +50,7 @@ export const faviconSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 
 </svg>`;
 
 const styles = `
-:root { color-scheme: light; --ink:#112b3c; --cream:#fff7d6; --paper:#fffdf3; --yellow:#ffd43b; --orange:#ff7132; --water:#3294b0; --water-dark:#146780; --muted:#607078; --space-xs:.45rem; --space-sm:.75rem; --space-md:1rem; --space-lg:1.4rem; font-family:ui-rounded,"Avenir Next Rounded","Arial Rounded MT Bold",system-ui,sans-serif; letter-spacing:.01em; }
+:root { color-scheme: light; --ink:#112b3c; --cream:#fff7d6; --paper:#fffdf3; --yellow:#ffd43b; --orange:#ff7132; --water:#3294b0; --water-dark:#146780; --muted:#607078; --space-xs:.45rem; --space-sm:.75rem; --space-md:1rem; --space-lg:1.4rem; font-family:ui-rounded,"Avenir Next Rounded","Arial Rounded MT Bold",system-ui,sans-serif; letter-spacing:.005em; }
 * { box-sizing:border-box; }
 [hidden] { display:none !important; }
 html { scroll-behavior:smooth; }
@@ -58,21 +58,22 @@ body { margin:0; min-height:100vh; background:var(--cream); color:var(--ink); ov
 a { color:inherit; }
 .shell { width:min(70rem,calc(100% - 2rem)); margin:0 auto; }
 .site-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:1rem; padding:1rem 0; }
-.brand { display:inline-flex; align-items:center; gap:.55rem; color:var(--ink); text-decoration:none; font-size:1.12rem; font-weight:950; letter-spacing:.01em; }
+.brand { display:inline-flex; align-items:center; gap:.55rem; color:var(--ink); text-decoration:none; font-size:1.12rem; font-weight:950; letter-spacing:.005em; }
 .brand svg { width:3rem; height:2.35rem; color:var(--water-dark); }
 .nav { display:flex; gap:.35rem; }
 .nav a { padding:.7rem .9rem; border:2px solid transparent; border-radius:999px; font-weight:850; text-decoration:none; }
 .nav a:hover,.nav a:focus-visible { border-color:var(--ink); outline:none; }
-.hero { position:relative; overflow:hidden; display:grid; align-items:center; min-height:34rem; padding:clamp(2rem,6vw,5rem); padding-bottom:12rem; border:3px solid var(--ink); border-radius:2rem; background:var(--paper); box-shadow:9px 9px 0 var(--ink); }
+.hero { position:relative; overflow:hidden; display:grid; align-items:center; min-height:34rem; padding:clamp(2rem,6vw,5rem); padding-bottom:13.5rem; border:3px solid var(--ink); border-radius:2rem; background:var(--paper); box-shadow:9px 9px 0 var(--ink); }
 .hero-water { --wave-length:10rem; position:absolute; z-index:1; right:-2px; bottom:-1px; left:-2px; width:calc(100% + 4px); height:10.5rem; overflow:hidden; pointer-events:none; }
 .hero-water::before { content:""; position:absolute; top:0; right:0; left:0; height:3rem; background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='48' viewBox='0 0 160 48'%3E%3Cpath fill='%233294b0' d='M0 24 C20 0 60 0 80 24 S140 48 160 24 V48 H0 Z'/%3E%3C/svg%3E"); background-position:0 0; background-repeat:repeat-x; background-size:var(--wave-length) 3rem; }
 .hero-water::after { content:""; position:absolute; top:calc(3rem - 1px); right:0; bottom:0; left:0; background:var(--water); }
-.hero-copy { position:relative; z-index:3; max-width:42rem; }
+.hero-copy { position:relative; z-index:3; max-width:60rem; }
 .eyebrow { display:inline-flex; margin:0 0 1rem; padding:.48rem .78rem; border:2px solid var(--ink); border-radius:999px; background:var(--yellow); font-size:.8rem; font-weight:950; letter-spacing:.09em; text-transform:uppercase; }
 h1,h2,h3,p { margin-top:0; }
-h1 { max-width:10ch; margin-bottom:1.15rem; font-size:clamp(3.2rem,12vw,7.8rem); line-height:.82; letter-spacing:.01em; }
-h2 { font-size:clamp(2rem,6vw,3.7rem); line-height:.95; letter-spacing:.01em; }
-h3 { font-size:1.3rem; letter-spacing:.01em; }
+h1 { margin-bottom:1.15rem; font-size:clamp(3.2rem,11vw,7.8rem); line-height:.82; letter-spacing:.005em; }
+.hero h1 > span { white-space:nowrap; }
+h2 { font-size:clamp(2rem,6vw,3.7rem); line-height:.95; letter-spacing:.005em; }
+h3 { font-size:1.3rem; letter-spacing:.005em; }
 .lede { max-width:38rem; margin-bottom:1.5rem; color:#314a57; font-size:clamp(1.05rem,2.5vw,1.35rem); line-height:1.55; }
 .actions { display:flex; flex-wrap:wrap; gap:.8rem; }
 .actions > * { min-width:0; max-width:100%; }
@@ -346,7 +347,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .roster-entry-id { font-size:.78rem; color:var(--muted); }
 .roster-entry .actions { gap:.5rem; }
 .private-result { overflow-wrap:anywhere; }
-.page-title.message-title { max-width:26ch; font-size:clamp(1.9rem,5vw,3.2rem); line-height:1.05; letter-spacing:.01em; }
+.page-title.message-title { max-width:26ch; font-size:clamp(1.9rem,5vw,3.2rem); line-height:1.05; letter-spacing:.005em; }
 .my-ducks-flow { display:flex; flex-direction:column; }
 .my-ducks-flow > * { min-width:0; max-width:100%; }
 .my-ducks-flow[data-my-ducks-flow="empty"] > .my-ducks-search { order:-1; }
@@ -371,15 +372,15 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .heat-bag { margin:0 0 1.4rem; padding:clamp(1rem,4vw,1.7rem); border:6px solid var(--ink); border-radius:1rem; background:var(--yellow); box-shadow:8px 8px 0 var(--ink); text-align:center; }
 .heat-bag > * { margin-bottom:0; }
 .heat-bag > * + * { margin-top:.6rem; }
-.heat-bag-instruction { font-size:clamp(1.35rem,6vw,2.4rem); font-weight:950; line-height:1.05; letter-spacing:.01em; text-transform:uppercase; overflow-wrap:anywhere; }
-.heat-bag-number { font-size:clamp(3rem,17vw,7rem); font-weight:950; line-height:.95; letter-spacing:.01em; overflow-wrap:anywhere; }
+.heat-bag-instruction { font-size:clamp(1.35rem,6vw,2.4rem); font-weight:950; line-height:1.05; letter-spacing:.005em; text-transform:uppercase; overflow-wrap:anywhere; }
+.heat-bag-number { font-size:clamp(3rem,17vw,7rem); font-weight:950; line-height:.95; letter-spacing:.005em; overflow-wrap:anywhere; }
 .heat-bag-duck { font-size:clamp(1.05rem,4vw,1.5rem); font-weight:900; overflow-wrap:anywhere; }
 .heat-bag-note { font-size:clamp(.95rem,3.2vw,1.1rem); font-weight:800; line-height:1.45; overflow-wrap:anywhere; }
 .heat-bag .actions { justify-content:center; margin-top:1rem; }
 .heat-bag .button { width:100%; }
 .heat-bag.pending { border-color:#9f261c; background:#ffd8d2; }
 .heat-bag.pending .heat-bag-number { font-size:clamp(1.5rem,7vw,2.6rem); line-height:1.1; }
-.heat-bag.bag-move .heat-bag-number { font-size:clamp(1.8rem,9vw,3.6rem); line-height:1.05; letter-spacing:.01em; }
+.heat-bag.bag-move .heat-bag-number { font-size:clamp(1.8rem,9vw,3.6rem); line-height:1.05; letter-spacing:.005em; }
 .station-ineligible { margin:1.2rem 0; padding:clamp(1rem,3.5vw,1.5rem); border:5px solid #9f261c; border-radius:.9rem; background:#ffd8d2; box-shadow:6px 6px 0 var(--ink); }
 .station-ineligible > * { margin-bottom:0; }
 .station-ineligible > * + * { margin-top:.5rem; }
@@ -409,7 +410,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .announcer-results li { background:var(--cream); }
 .announcer-results li.final-heat { background:var(--yellow); }
 .announcer-label { color:var(--water-dark); font-size:.78rem; font-weight:950; letter-spacing:.08em; text-transform:uppercase; }
-.announcer-name { min-width:0; font-size:clamp(1.5rem,6vw,2.4rem); line-height:1.05; letter-spacing:.01em; overflow-wrap:anywhere; }
+.announcer-name { min-width:0; font-size:clamp(1.5rem,6vw,2.4rem); line-height:1.05; letter-spacing:.005em; overflow-wrap:anywhere; }
 .announcer-duck { font-size:clamp(1rem,3.4vw,1.25rem); font-weight:900; }
 .announcer-progress { margin:0 0 .9rem; font-weight:900; }
 .announcer-panel .podium { margin:0; padding:0; list-style:none; }
@@ -434,7 +435,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 li.ineligible,.data-card.ineligible { border-color:#9f261c; background:#fff3f1; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,minmax(0,1fr)); } .field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .inventory-layout { grid-template-columns:minmax(0,1.15fr) minmax(20rem,.85fr); } .inventory-detail-panel { position:sticky; top:5.75rem; max-height:calc(100vh - 6.75rem); overflow:auto; } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck-scene { --duck-center:50%; right:50%; bottom:4rem; width:13.5rem; } .hero-duck { --duck-lift:-.75rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 17rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .hero h1 { font-size:clamp(2.1rem,10.4vw,2.75rem); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck-scene { --duck-center:50%; right:50%; bottom:4rem; width:13.5rem; } .hero-duck { --duck-lift:-.75rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
 @media (prefers-reduced-motion:no-preference) { .button,.result-button { transition:transform 80ms ease-out,box-shadow 80ms ease-out,filter 80ms ease-out,background-color 80ms ease-out; } .hero-duck { animation:duck-bob 2.8s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-bob { 0%,100% { transform:translateY(var(--duck-lift)); } 50% { transform:translateY(calc(var(--duck-lift) - 7px)); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
 @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } .hero-water::before { background-position:-2.5rem 0; } }
 `;
@@ -556,9 +557,8 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">Race-day, simplified</p>
-        <h1>Find your duck. Cheer it home.</h1>
+        <h1><span>Find your duck.</span><br><span>Cheer it home.</span></h1>
         <p class="lede">A friendly home for the small races that bring a whole town down to the water. Built for the volunteers, families, and rubber ducks that make race day happen.</p>
-        ${cta === null ? '<p class="lede" data-home-preparing>The next race is being prepared. Check back soon for the next QuickDucks race.</p>' : ""}
       </div>
       <div class="hero-water" aria-hidden="true"></div>
       <div class="hero-duck-scene">
@@ -566,8 +566,8 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
         <span class="hero-duck-slit" aria-hidden="true"></span>
       </div>
     </section>
+    ${cta === null ? '<section class="status-section home-preparing-card" aria-labelledby="home-preparing-title"><p class="eyebrow">Happening now</p><h2 id="home-preparing-title" data-home-preparing>The next race is being prepared.</h2> <p class="lede">Check back soon for the next QuickDucks race.</p></section>' : happeningNow(cta)}
     <div class="ticker" aria-label="QuickDucks features"><span>Pick your duck</span><span>Find your heat</span><span>Cheer loudly</span></div>
-    ${cta === null ? "" : happeningNow(cta)}
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p></article>
       <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p></article>

@@ -296,7 +296,7 @@ test("the home page degrades to the Preparing hero instead of a 500", async () =
   assert.equal(response.status, 200);
   assert.equal(homeCta(body), null);
   assert.match(body, /data-home-preparing>The next race is being prepared\./);
-  assert.match(body, /Find your duck\. Cheer it home\./);
+  assert.match(body, /<h1><span>Find your duck\.<\/span><br><span>Cheer it home\.<\/span><\/h1>/);
 });
 
 test("/register degrades to its own preparing wording and /race degrades to the redirect", async () => {
@@ -503,7 +503,7 @@ test("the home page keeps the hero and the three link-free explainer cards", asy
   const { body } = await page("/", "FINAL");
 
   assert.match(body, /<section class="hero">/);
-  assert.match(body, /Find your duck\. Cheer it home\./);
+  assert.match(body, /<h1><span>Find your duck\.<\/span><br><span>Cheer it home\.<\/span><\/h1>/);
   const explainers = body.match(/<section id="how-it-works"[\s\S]*?<\/section>/)?.[0];
   assert.ok(explainers);
   for (const heading of ["Before the race", "At check-in", "On race day"]) {
@@ -573,7 +573,7 @@ test("the home page no longer offers a How it works button", async () => {
 test("the home hero and ticker carry the approved race-day copy", async () => {
   const { body } = await page("/", "REGISTRATION_OPEN");
 
-  assert.match(body, /<h1>Find your duck\. Cheer it home\.<\/h1>/);
+  assert.match(body, /<h1><span>Find your duck\.<\/span><br><span>Cheer it home\.<\/span><\/h1>/);
   assert.ok(body.includes(
     '<p class="lede">A friendly home for the small races that bring a whole town down to the water.'
     + " Built for the volunteers, families, and rubber ducks that make race day happen.</p>",

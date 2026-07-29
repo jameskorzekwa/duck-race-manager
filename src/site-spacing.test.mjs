@@ -22,8 +22,12 @@ const stylesheetFrom = (markup) => {
 test("the shared rounded type uses open tracking instead of compressed letters", () => {
   const css = stylesheetFrom(renderMyDucks());
 
-  assert.match(css, /:root \{[^}]*letter-spacing:\.01em;/);
+  assert.match(css, /:root \{[^}]*letter-spacing:\.005em;/);
+  assert.match(css, /h1 \{[^}]*letter-spacing:\.005em;/);
   assert.doesNotMatch(css, /letter-spacing:-/);
+  assert.match(css, /\.hero \{[^}]*padding-bottom:13\.5rem;/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.hero \{[^}]*padding:[^;]*17rem;/);
+  assert.doesNotMatch(css, /\.home-(?:status|preparing)-card \{[^}]*min-height/);
 });
 
 test("shared staff styles keep card and status rhythm without empty whitespace", () => {
