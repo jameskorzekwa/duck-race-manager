@@ -989,6 +989,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0014_simplified_lifecycle_schema.sql",
     "0015_participant_duck_names.sql",
     "0016_locked_final_winner_correction.sql",
+    "0017_final_podium_selections.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -1607,6 +1608,9 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       heatNumber: heat.number,
       round: "ROUND_ONE",
       participantDisplayName: `${winningParticipant.firstName} ${winningParticipant.lastName[0]}.`,
+      // Round one awards one place, so this scan publishes a winner outright
+      // and has no podium to choose from. The final's scan does.
+      podium: null,
     });
     if (heat === roundOneHeats[0]) {
       const forged = await post(`/api/v1/staff/ducks/${winningParticipant.tagToken}/heat-winner`, {

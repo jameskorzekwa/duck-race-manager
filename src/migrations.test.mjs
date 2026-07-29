@@ -20,6 +20,7 @@ const migrationNames = [
   "0014_simplified_lifecycle_schema.sql",
   "0015_participant_duck_names.sql",
   "0016_locked_final_winner_correction.sql",
+  "0017_final_podium_selections.sql",
 ];
 
 const lifecycleStatuses = [

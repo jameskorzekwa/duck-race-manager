@@ -22,6 +22,7 @@ import {
   participantQrDecoderScript,
   participantQrHelpersScript,
   participantScript,
+  podiumPlaceHelpersScript,
   registrationHandoffHelpersScript,
   registrationScript,
   rosterEligibilityHelpersScript,
@@ -730,6 +731,27 @@ const confirmationCallsites = [
       "Mark Duck #" + data.duck.visibleNumber + " as the official Heat " + candidate.heatNumber + " winner? This publishes immediately.",
       { danger: true, confirmLabel: "Mark winner" },
     )) return;`],
+  // Recording a podium place says which place, and says whether this one
+  // publishes the final. The staffer is pressing one of three near-identical
+  // buttons, so the read-back is the only thing standing between a mis-tap and
+  // a wrong official result.
+  [staffDuckScript, `if (!await appConfirm(
+    "Record " + duckLabel + " as " + podiumPlaceLabel(place) + " in the final?"
+      + (lastPlace
+        ? " That is the last place, so this publishes the official podium immediately."
+        : " You can clear this place by scanning this duck again."),
+    { danger: true, confirmLabel: "Record " + podiumPlaceLabel(place) },
+  )) return;`],
+  [staffDuckScript, `if (!await appConfirm(
+    "Clear " + duckLabel + " from " + podiumPlaceLabel(place) + " in the final?"
+      + " That place goes back to being open for the next duck scanned.",
+    { danger: true, confirmLabel: "Clear " + podiumPlaceLabel(place) },
+  )) return;`],
+  [finishLineScript, `if (!await appConfirm(
+    "Clear " + label + " from Duck #" + placement.visibleNumber + "? That place goes back to being open"
+      + " for the next duck scanned.",
+    { danger: true, confirmLabel: "Clear " + label },
+  )) return;`],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
   [participantScript, `  const confirmed = await appConfirm(
     "Delete the registration for " + participantDisplayName(registration)
@@ -744,7 +766,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
     assert.ok(script.includes(guardedWarning), `missing guarded confirmation: ${guardedWarning}`);
   }
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
+  // Submitting a podium the station assembled itself, and clearing a place that
+  // was scanned into one.
+  assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 2);
   // Inventory owns takeover, clearing a duck name, assign, unpair, release,
   // and delete duck. Every one of them is destructive or irreversible.
   assert.equal((staffInventoryScript.match(/\bappConfirm\(/g) ?? []).length, 6);
@@ -752,8 +776,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
   // mutations use the shared confirmation dialog.
   assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 10);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // The staff duck scan confirms both name moderation and winner publication.
-  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 2);
+  // The staff duck scan confirms name moderation, round-one winner
+  // publication, and both directions of a final podium place.
+  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 4);
   // My Ducks has exactly one destructive action: self-service deletion.
   assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The dialog is defined once, by the one bundle every page loads first, so
@@ -3403,16 +3428,68 @@ test("NFC scanning cleans up unsupported records and read errors so one retry ca
   assert.deepEqual(readers.map((reader) => reader.scanCalls), [1, 1, 1]);
 });
 
-test("round-one tag scans stay on inspection while the final keeps multi-place entry", () => {
+test("both rounds publish their result from the duck inspection page it was scanned on", () => {
   assert.doesNotMatch(staffDuckScript, /quickducks\.finishStation|finishStationHandoff|location\.replace\("\/staff\/finish-line/);
   assert.match(staffDuckScript, /"Mark Duck as Heat " \+ candidate\.heatNumber \+ " Winner"/);
   assert.match(staffDuckScript, /\/heat-winner/);
-  assert.match(staffDuckScript, /winnerSuccess = \{ duckNumber: data\.duck\.visibleNumber, heatNumber: candidate\.heatNumber \}/);
   assert.match(staffDuckScript, /const success = winnerSuccess;\s*winnerSuccess = null;/);
   assert.match(finishLineScript, /Scan the winning duck's permanent NFC or QR tag/);
   assert.match(finishLineScript, /finishHeat\.round === "FINAL"/);
   assert.match(finishLineScript, /Submit official podium/);
   assert.doesNotMatch(finishLineScript, /quickducks\.finishStation|finishPendingHandoff|finishConsumeHandoff/);
+});
+
+// A final awards up to three places, so the scan that records one has to ask
+// which. The buttons come from the server's own list of open places, the request
+// carries that place, and the duck already standing on the podium is offered the
+// way back off instead of a second place.
+test("a scanned final duck is offered only the podium places the server says are open", () => {
+  assert.doesNotThrow(() => new Function(staffDuckScript));
+
+  assert.match(staffDuckScript, /if \(candidate\.round === "FINAL" && candidate\.podium\) \{\s*renderPodiumAction\(data, candidate\);/);
+  assert.match(staffDuckScript, /const open = podiumOpenPlaces\(podium\);/);
+  assert.match(
+    staffDuckScript,
+    /const button = text\("button", "Mark Duck as " \+ podiumPlaceLabel\(place\), "button station-control"\);/,
+  );
+  // The place travels with the command, and nothing else about the round-one
+  // body changes: same endpoint, same scanned context, same revision guard.
+  assert.match(
+    staffDuckScript,
+    /raceEntryId: candidate\.raceEntryId,\s*revision: candidate\.revision,\s*place,/,
+  );
+  // Whether that scan published the podium is read back off the response, not
+  // guessed from the count the buttons were painted with.
+  assert.match(staffDuckScript, /const published = body\.heat && body\.heat\.status === "FINALIZED";/);
+  // A duck that already holds a place gets the way back off it and no second
+  // place to stand in.
+  assert.match(staffDuckScript, /if \(podium\.selectedPlace !== null\) \{/);
+  assert.match(staffDuckScript, /podium-place\/clear/);
+  const openPlaces = new Function(`${podiumPlaceHelpersScript}; return podiumOpenPlaces;`)();
+  assert.deepEqual(openPlaces({ availablePlaces: [1, 3] }), [1, 3]);
+  // Never invents a place the server did not offer, whatever arrives.
+  assert.deepEqual(openPlaces({ availablePlaces: [0, 4, 2, "1", null] }), [2]);
+  assert.deepEqual(openPlaces(null), []);
+  assert.deepEqual(openPlaces({}), []);
+});
+
+// The station and the duck page must never show two different podiums. The
+// moment a place is scanned, the station stops offering its own way to assemble
+// one and shows the scanned podium instead, with the way to undo a place.
+test("the finish line hands the podium over to the scans as soon as one place is recorded", () => {
+  assert.doesNotThrow(() => new Function(finishLineScript));
+
+  assert.match(
+    finishLineScript,
+    /const finishPodiumScanned = \(\) => finishHeat !== null && finishHeat\.round === "FINAL"\s*&& podiumTakenPlacements\(finishPodium\)\.length > 0;/,
+  );
+  assert.match(finishLineScript, /finishScanForm\.hidden = !awaiting \|\| !finalPodiumFlow \|\| scannedPodium;/);
+  assert.match(finishLineScript, /finishSubmit\.hidden = !awaiting \|\| !finalPodiumFlow \|\| scannedPodium;/);
+  // Hidden is a paint; the submit guard is the guard.
+  assert.match(finishLineScript, /\|\| finishSelected\.length !== required\s*(?:\/\/[^\n]*\n\s*)*\|\| finishPodiumScanned\(\);/);
+  assert.match(finishLineScript, /if \(finishPodiumScanned\(\)\) \{\s*finishRenderScannedPodium\(focusedRaceEntry\);/);
+  assert.match(finishLineScript, /finishPodium = detail\.podium \|\| null;/);
+  assert.doesNotMatch(finishLineScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
 });
 
 test("the staff console shows accumulating finalists and obeys server correction capabilities", () => {
@@ -4289,7 +4366,16 @@ test("the scanned-duck page presents an ineligible winner plainly, not as a fail
     staffDuckScript,
     /"Duck #" \+ data\.duck\.visibleNumber \+ " is " \+ ineligibleStatusLabel\(ineligible\.registrationStatus\)/,
   );
-  assert.match(staffDuckScript, /cannot be recorded as the Heat "\s*\+ ineligible\.heatNumber \+ " winner/);
+  // The heat is named the way staff name it in each round: a numbered round-one
+  // heat, or simply "the final", of which there is only ever one.
+  assert.match(
+    staffDuckScript,
+    /const heatLabel = ineligible\.round === "FINAL" \? "the final" : "Heat " \+ ineligible\.heatNumber;/,
+  );
+  assert.match(
+    staffDuckScript,
+    /\+ \(ineligible\.round === "FINAL" \? "a podium place in the final" : "the " \+ heatLabel \+ " winner"\)/,
+  );
   assert.match(staffDuckScript, /this duck stays in its heat/);
   assert.match(staffDuckScript, /Scan the next duck to pass the finish line/);
   // The real status, never a generic word.
@@ -5039,6 +5125,7 @@ const finishLineRenderHarness = () => {
     [
       rosterEligibilityHelpersScript,
       stationStateHelpersScript,
+      podiumPlaceHelpersScript,
       liftFrom(finishLineScript, "finishText", /const finishText = \(tag, value, className\) => \{[\s\S]*?\n\};/),
       liftFrom(finishLineScript, "finishHumanize", /const finishHumanize = \(value\) => .*;\n/),
       liftFrom(finishLineScript, "finishPlaceLabel", /const finishPlaceLabel = \(place\) => .*;\n/),
@@ -5051,15 +5138,26 @@ const finishLineRenderHarness = () => {
         "FINISH_NO_ELIGIBLE_MESSAGE",
         /const FINISH_NO_ELIGIBLE_MESSAGE = [\s\S]*?;\n/,
       ),
+      liftFrom(finishLineScript, "finishPodiumScanned", /const finishPodiumScanned = \(\) => [\s\S]*?;\n/),
       liftFrom(finishLineScript, "finishSubmitBlocked", /const finishSubmitBlocked = \(busy\) => \{[\s\S]*?\n\};/),
+      liftFrom(
+        finishLineScript,
+        "finishRenderScannedPodium",
+        /const finishRenderScannedPodium = \(focusedRaceEntry\) => \{[\s\S]*?\n\};/,
+      ),
       liftFrom(finishLineScript, "finishRenderSelections", /const finishRenderSelections = \(\) => \{[\s\S]*?\n\};/),
       liftFrom(finishLineScript, "finishRender", /const finishRender = \(event, detail\) => \{[\s\S]*?\n\};/),
       "let finishEvent = null; let finishHeat = null; let finishRosterEntries = [];",
       "let finishSelected = []; let finishRenderKey = null; let finishScanBusy = false;",
+      "let finishPodium = null; let finishCommandBusy = false;",
+      // The clear control is wired but never pressed by these render tests; the
+      // command it sends is covered by the real handler integration tests.
+      "const finishClearPodiumPlace = async () => {};",
       "const selectFor = (raceEntryId, place, visibleNumber) =>"
       + " finishSelected.push({ raceEntryId, place, visibleNumber, participantDisplayName: 'Racer ' + raceEntryId });",
       "const requiredPlaces = () => finishRequiredPlaces();",
       "const selectedPlaces = () => finishSelected.map((selection) => selection.raceEntryId + ':' + selection.place);",
+      "const submitBlocked = () => finishSubmitBlocked(false);",
     ].join("\n").split("\n"),
     {
       document,
@@ -5067,7 +5165,14 @@ const finishLineRenderHarness = () => {
       finishSubscription: null,
       globalThis: { quickDucksLive: { beginBusy: () => () => {} } },
     },
-    ["finishRender", "requiredPlaces", "selectFor", "selectedPlaces", "FINISH_NO_ELIGIBLE_MESSAGE"],
+    [
+      "finishRender",
+      "requiredPlaces",
+      "selectFor",
+      "selectedPlaces",
+      "submitBlocked",
+      "FINISH_NO_ELIGIBLE_MESSAGE",
+    ],
   );
   return { ...elements, ...runtime };
 };
@@ -5119,7 +5224,7 @@ test("the finish line requires as many places as there are racers who can win", 
   harness.finishRender(finalEvent, { heat: finalHeat, roster: [roster[0], withdrawn(roster[1]), roster[2]] });
   assert.equal(harness.requiredPlaces(), 2, "the podium is as deep as the racers who can take a place");
   assert.equal(factValue(harness.finishFacts, "Required result"), "2 podium places");
-  assert.match(harness.finishMessage.textContent, /^Select 2 distinct ducks, /);
+  assert.match(harness.finishMessage.textContent, /select 2 distinct ducks here/);
 
   // The roster itself is untouched: every duck is still in the bag, still in
   // the water, and still listed in its own slot.

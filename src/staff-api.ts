@@ -267,9 +267,12 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
   if (duck === null) return json({ error: "Duck not found." }, 404);
 
   const includePii = canViewParticipantPii(actor);
+  // Both racing rounds publish their result by scanning the ducks that
+  // finished, so this page carries the action in both of them. Round one offers
+  // one winner; the final offers the places its podium still has open.
   const resultTaker = hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"])
     && duck.assignment_id !== null
-    && duck.event_status === "ROUND_ONE";
+    && (duck.event_status === "ROUND_ONE" || duck.event_status === "FINAL");
   const winnerAction = resultTaker ? await winnerByTagCandidate(env, token) : null;
   // A duck paired to a racer who later withdrew or was disqualified is still in
   // its heat bag and still in the water, so it can still reach the line first.

@@ -1,6 +1,6 @@
 import type { StaffActor } from "./auth.ts";
 import { operationalRoles, requireAnyRole } from "./authorization.ts";
-import { eligibleRacerExists } from "./heat-operations.ts";
+import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -260,18 +260,6 @@ const inactiveRosterEntryCount = (round: string): string => `(SELECT COUNT(*)
           JOIN race_entries re ON re.id = he.race_entry_id
           JOIN registrations r ON r.id = re.registration_id
          WHERE he.event_id = e.id AND h.round = '${round}' AND r.status != 'ACTIVE')`;
-
-// A heat's podium is only as deep as the racers who can take a place, so the
-// completion check counts eligible entries exactly as `validateResultSet` does.
-// Counting every entry would demand a place a withdrawn finalist is forbidden to
-// hold and leave the event permanently incompletable.
-const eligibleEntryCountSql = (eventColumn: string, heatColumn: string): string => `(
-              SELECT COUNT(*) FROM heat_entries he
-                JOIN race_entries re ON re.id = he.race_entry_id
-                JOIN registrations r ON r.id = re.registration_id
-               WHERE he.event_id = ${eventColumn} AND he.heat_id = ${heatColumn}
-                 AND r.status = 'ACTIVE'
-            )`;
 
 // "This final published fewer podium places than its eligible finalists can
 // fill." The comparison is deliberately `<` and never `!=`.
@@ -2033,6 +2021,12 @@ const forceDeleteEvent = async (
       ).bind(commandId, now, now, fingerprint, eventId, revision, eventId),
       scoped("email_attempts"),
       scoped("email_notifications"),
+      // Provisional podium places reference the heat, its roster entry, the
+      // duck assignment, and the command that recorded them, so they go before
+      // any of those. Their foreign keys cascade, which makes this delete
+      // belt-and-braces rather than load-bearing — deliberately, because the
+      // only cleanup path this product has must never fail on scratch state.
+      scoped("final_podium_selections"),
       scoped("heat_result_history"),
       scoped("heat_results"),
       scoped("heat_entries"),

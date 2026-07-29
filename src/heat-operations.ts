@@ -133,6 +133,31 @@ export const FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL = `(${
   FINAL_RESULT_REVISABLE_EVENT_STATUSES.map((status) => `'${status}'`).join(", ")
 })`;
 
+/** The deepest podium a final can ever publish, before eligibility shrinks it. */
+export const FINAL_PODIUM_DEPTH = 3;
+
+// A heat's podium is only as deep as the racers who can take a place, so every
+// surface that counts places counts eligible entries exactly as
+// `validateResultSet` does. Counting every entry would demand a place a
+// withdrawn finalist is forbidden to hold and leave the event permanently
+// incompletable. Both column arguments are fixed internal SQL identifiers.
+export const eligibleEntryCountSql = (eventColumn: string, heatColumn: string): string => `(
+              SELECT COUNT(*) FROM heat_entries he
+                JOIN race_entries re ON re.id = he.race_entry_id
+                JOIN registrations r ON r.id = re.registration_id
+               WHERE he.event_id = ${eventColumn} AND he.heat_id = ${heatColumn}
+                 AND r.status = 'ACTIVE'
+            )`;
+
+// How many places this final still requires, as one SQL scalar. The scan flow
+// records a provisional place at a time, so the depth is re-read inside the
+// guarded command row of every single scan rather than trusted from the read
+// that painted the buttons: a finalist may withdraw between a staffer seeing
+// "3rd place" offered and pressing it, and that withdrawal shrinks the podium
+// from three places to two while the button is still on screen.
+const requiredPodiumPlacesSql = (eventColumn: string, heatColumn: string): string =>
+  `MIN(${FINAL_PODIUM_DEPTH}, ${eligibleEntryCountSql(eventColumn, heatColumn)})`;
+
 // The narrow, targeted meaning of "a duck has left this event": a duck
 // assignment named by a `heat_results` row this operation would supersede now
 // belongs to an `event_ducks` reservation that has been released.
@@ -367,6 +392,10 @@ const getHeatDetail = async (env: Env, eventId: string, heatId: string): Promise
     heat: heatSummary(heat),
     roster: roster.results.map(rosterResponse),
     results: results.results.map(resultResponseRow),
+    // The final builds its podium one scan at a time, so the places taken so far
+    // are part of the heat a station is looking at, not a separate thing it has
+    // to go and ask about. Round one has no provisional state to report.
+    podium: heat.round === "FINAL" ? await finalPodiumState(env, eventId, heatId, null) : null,
   });
 };
 
@@ -409,14 +438,40 @@ const announcerRoster = async (env: Env, eventId: string, heatId: string): Promi
   });
 };
 
+/** One provisional podium place a staffer has already scanned into a final. */
+export interface FinalPodiumPlacement {
+  place: number;
+  raceEntryId: string;
+  visibleNumber: number;
+  participantDisplayName: string;
+}
+
+/**
+ * Everything a scan station needs to offer the right places for one final.
+ *
+ * `requiredPlaces` is the podium depth the result will be validated against,
+ * `placements` are the places already taken, and `availablePlaces` is what is
+ * left. The three are produced together from one read so a station can never
+ * offer a place that is taken or a place the podium does not have.
+ */
+export interface FinalPodiumState {
+  requiredPlaces: number;
+  placements: FinalPodiumPlacement[];
+  availablePlaces: number[];
+  /** The place the scanned duck itself holds, when it already holds one. */
+  selectedPlace: number | null;
+}
+
 export interface WinnerByTagCandidate {
   eventId: string;
   heatId: string;
   raceEntryId: string;
   revision: number;
   heatNumber: number;
-  round: "ROUND_ONE";
+  round: Round;
   participantDisplayName: string;
+  /** Present only for a final, where a scan chooses a place instead of winning. */
+  podium: FinalPodiumState | null;
 }
 
 /**
@@ -497,12 +552,19 @@ export interface WinnerByTagIneligible extends IneligibleFinishDuck {
   eventId: string;
   heatId: string;
   heatNumber: number;
-  round: "ROUND_ONE";
+  round: Round;
   reason: typeof FINISH_DUCK_INELIGIBLE_REASON;
 }
 
+// The one round/event-status pairing every scanned result path shares. A tag is
+// only ever a live result candidate for a heat whose round is the round the
+// event is actually in, so round one cannot be published during the final and a
+// podium place cannot be recorded during round one.
+const SCANNED_RESULT_ROUND_SQL = `((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
+         OR (h.round = 'FINAL' AND e.status = 'FINAL'))`;
+
 // The mirror image of `winnerByTagCandidate`: the same tag, the same sole
-// awaiting round-one heat, the same current assignment and roster place — but a
+// awaiting heat, the same current assignment and roster place — but a
 // racer who left the race. It exists so the scan station can say "Withdrawn,
 // scan the next duck" instead of falling through to a bare "not the current
 // winner candidate" refusal. It is a read; nothing about the heat, its entries,
@@ -524,7 +586,7 @@ export const winnerByTagIneligible = async (
   if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return null;
   const row = await env.DB.prepare(
     `SELECT e.id AS event_id, h.id AS heat_id, he.race_entry_id,
-            h.heat_number, e.public_name_policy, d.visible_number,
+            h.heat_number, h.round, e.public_name_policy, d.visible_number,
             r.status AS registration_status, r.first_name, r.last_name
        FROM duck_tags dt
        JOIN duck_assignments da
@@ -534,13 +596,13 @@ export const winnerByTagIneligible = async (
          ON he.event_id = da.event_id AND he.race_entry_id = da.race_entry_id
        JOIN heats h
          ON h.id = he.heat_id AND h.event_id = he.event_id
-        AND h.round = 'ROUND_ONE' AND h.status = 'AWAITING_RESULT'
-       JOIN events e
-         ON e.id = h.event_id AND e.status = 'ROUND_ONE'
+        AND h.status = 'AWAITING_RESULT'
+       JOIN events e ON e.id = h.event_id
        JOIN race_entries re ON re.id = he.race_entry_id
        JOIN registrations r
          ON r.id = re.registration_id AND ${INELIGIBLE_REGISTRATION_STATUS_SQL}
       WHERE dt.token = ? AND dt.status = 'ACTIVE'
+        AND ${SCANNED_RESULT_ROUND_SQL}
         AND (SELECT COUNT(*) FROM heats awaiting
               WHERE awaiting.event_id = e.id
                 AND awaiting.status = 'AWAITING_RESULT') = 1
@@ -550,6 +612,7 @@ export const winnerByTagIneligible = async (
     heat_id: string;
     race_entry_id: string;
     heat_number: number;
+    round: Round;
     public_name_policy: string;
     visible_number: number;
     registration_status: string;
@@ -563,6 +626,7 @@ export const winnerByTagIneligible = async (
     || typeof row.race_entry_id !== "string"
     || !Number.isSafeInteger(row.heat_number)
     || !Number.isSafeInteger(row.visible_number)
+    || (row.round !== "ROUND_ONE" && row.round !== "FINAL")
     || typeof row.registration_status !== "string"
     || typeof row.first_name !== "string"
     || typeof row.last_name !== "string"
@@ -572,7 +636,7 @@ export const winnerByTagIneligible = async (
     heatId: row.heat_id,
     raceEntryId: row.race_entry_id,
     heatNumber: row.heat_number,
-    round: "ROUND_ONE",
+    round: row.round,
     reason: FINISH_DUCK_INELIGIBLE_REASON,
     registrationStatus: row.registration_status,
     visibleNumber: row.visible_number,
@@ -580,10 +644,93 @@ export const winnerByTagIneligible = async (
   };
 };
 
-// A tag offers a winner action only when it resolves through the current duck
+interface FinalPodiumSelectionRow {
+  place: number;
+  race_entry_id: string;
+  visible_number: number;
+  public_name_policy: string;
+  first_name: string;
+  last_name: string;
+  registration_status: string;
+}
+
+/**
+ * The provisional podium a final has collected so far, and the places it still
+ * needs.
+ *
+ * A recorded place is honoured only while the racer holding it is still
+ * `ACTIVE`. A finalist can withdraw or be disqualified after their duck was
+ * scanned, and the guarded batch that publishes the podium would refuse to write
+ * them, so a station that kept showing second place as taken would be asking the
+ * staffer to complete a podium that can never be published. Dropping the place
+ * back into `availablePlaces` is what lets them rescan the duck that actually
+ * took it. The stale row is left alone; the recording batch replaces it.
+ *
+ * Places deeper than `requiredPlaces` are ignored for the same reason. A
+ * withdrawal shrinks the podium, so a third place scanned while three finalists
+ * were eligible stops being a place this final has at all.
+ */
+export const finalPodiumState = async (
+  env: Env,
+  eventId: string,
+  heatId: string,
+  scannedRaceEntryId: string | null,
+): Promise<FinalPodiumState> => {
+  const [depth, selections] = await Promise.all([
+    env.DB.prepare(
+      `SELECT ${requiredPodiumPlacesSql("h.event_id", "h.id")} AS required_places
+         FROM heats h WHERE h.event_id = ? AND h.id = ? LIMIT 1`,
+    ).bind(eventId, heatId).first<{ required_places: number }>(),
+    env.DB.prepare(
+      `SELECT fps.place, fps.race_entry_id, d.visible_number, e.public_name_policy,
+              r.first_name, r.last_name, r.status AS registration_status
+         FROM final_podium_selections fps
+         JOIN events e ON e.id = fps.event_id
+         JOIN race_entries re ON re.id = fps.race_entry_id
+         JOIN registrations r ON r.id = re.registration_id
+         JOIN duck_assignments da ON da.id = fps.duck_assignment_id
+         JOIN ducks d ON d.id = da.duck_id
+        WHERE fps.event_id = ? AND fps.heat_id = ?
+        ORDER BY fps.place`,
+    ).bind(eventId, heatId).all<FinalPodiumSelectionRow>(),
+  ]);
+  const requiredPlaces = Number.isSafeInteger(depth?.required_places)
+    ? Math.max(0, Math.min(FINAL_PODIUM_DEPTH, depth?.required_places as number))
+    : 0;
+  const placements = selections.results
+    .filter((row) => row.registration_status === "ACTIVE" && row.place <= requiredPlaces)
+    .map((row) => ({
+      place: row.place,
+      raceEntryId: row.race_entry_id,
+      visibleNumber: row.visible_number,
+      participantDisplayName: publicDisplayName(row.public_name_policy, row.first_name, row.last_name),
+    }));
+  const taken = new Set(placements.map((placement) => placement.place));
+  const selectedPlace = placements
+    .find((placement) => placement.raceEntryId === scannedRaceEntryId)?.place ?? null;
+  return {
+    requiredPlaces,
+    placements,
+    // A duck that already holds a place is offered nothing: it took the place it
+    // took, and moving it means clearing that place first.
+    availablePlaces: selectedPlace !== null
+      ? []
+      : Array.from({ length: requiredPlaces }, (_, index) => index + 1)
+        .filter((place) => !taken.has(place)),
+    selectedPlace,
+  };
+};
+
+// A tag offers a result action only when it resolves through the current duck
 // assignment to the sole result waiting in the active round. This is also used
 // immediately before the mutation; the guarded finalization SQL repeats every
 // material race-state condition for concurrency safety.
+//
+// Round one and the final are the same query because they are the same
+// question — "is this duck the tag scan a station is waiting for?" — and only
+// the answer differs. Round one has exactly one place, so the action publishes
+// the winner outright; the final has up to three, so the action offers the
+// places that are still open and publishes only once the last one is chosen.
 export const winnerByTagCandidate = async (
   env: Env,
   token: string,
@@ -591,7 +738,7 @@ export const winnerByTagCandidate = async (
   if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return null;
   const row = await env.DB.prepare(
     `SELECT e.id AS event_id, h.id AS heat_id, he.race_entry_id,
-            h.revision, h.heat_number, e.public_name_policy,
+            h.revision, h.heat_number, h.round, e.public_name_policy,
             r.first_name, r.last_name
        FROM duck_tags dt
        JOIN duck_assignments da
@@ -600,12 +747,12 @@ export const winnerByTagCandidate = async (
          ON he.event_id = da.event_id AND he.race_entry_id = da.race_entry_id
        JOIN heats h
          ON h.id = he.heat_id AND h.event_id = he.event_id
-        AND h.round = 'ROUND_ONE' AND h.status = 'AWAITING_RESULT'
-       JOIN events e
-         ON e.id = h.event_id AND e.status = 'ROUND_ONE'
+        AND h.status = 'AWAITING_RESULT'
+       JOIN events e ON e.id = h.event_id
        JOIN race_entries re ON re.id = he.race_entry_id
        JOIN registrations r ON r.id = re.registration_id AND r.status = 'ACTIVE'
       WHERE dt.token = ? AND dt.status = 'ACTIVE'
+        AND ${SCANNED_RESULT_ROUND_SQL}
         AND (SELECT COUNT(*) FROM heats awaiting
               WHERE awaiting.event_id = e.id
                 AND awaiting.status = 'AWAITING_RESULT') = 1
@@ -616,6 +763,7 @@ export const winnerByTagCandidate = async (
     race_entry_id: string;
     revision: number;
     heat_number: number;
+    round: Round;
     public_name_policy: string;
     first_name: string;
     last_name: string;
@@ -627,6 +775,7 @@ export const winnerByTagCandidate = async (
     || typeof row.race_entry_id !== "string"
     || !validRevision(row.revision)
     || !Number.isSafeInteger(row.heat_number)
+    || (row.round !== "ROUND_ONE" && row.round !== "FINAL")
     || typeof row.first_name !== "string"
     || typeof row.last_name !== "string"
   ) return null;
@@ -636,8 +785,11 @@ export const winnerByTagCandidate = async (
     raceEntryId: row.race_entry_id,
     revision: row.revision,
     heatNumber: row.heat_number,
-    round: "ROUND_ONE",
+    round: row.round,
     participantDisplayName: publicDisplayName(row.public_name_policy, row.first_name, row.last_name),
+    podium: row.round === "FINAL"
+      ? await finalPodiumState(env, row.event_id, row.heat_id, row.race_entry_id)
+      : null,
   };
 };
 
@@ -1245,6 +1397,11 @@ const resetHeat = async (
                  AND rc.result_id = heats.id
             )`,
       ).bind(commandId, now, heatId, eventId, revision, commandId, eventId),
+      // A reset says the heat did not finish the way it was recorded, so any
+      // podium places its scans had collected describe a finish that is being
+      // thrown away. Leaving them would let the next running of this final
+      // inherit places nobody scanned for it.
+      clearPodiumSelectionsStatement(env, eventId, heatId, commandId),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -1441,6 +1598,25 @@ const activeSelectionGuardSql = (
         AND current_assignment.id IN (${assignmentPlaceholders})
   ) = ?`;
 
+// Provisional podium places are scratch state, so every command that ends a
+// final's wait for a result drops them: publishing turns them into the podium,
+// and resetting the heat throws away the finish they described. The delete is
+// tied to the command that authorized it so a batch whose guarded command row
+// was refused cannot still erase a station's scans.
+const clearPodiumSelectionsStatement = (
+  env: Env,
+  eventId: string,
+  heatId: string,
+  commandId: string,
+): D1PreparedStatement => env.DB.prepare(
+  `DELETE FROM final_podium_selections
+    WHERE event_id = ? AND heat_id = ?
+      AND EXISTS (
+        SELECT 1 FROM race_commands rc
+         WHERE rc.id = ? AND rc.event_id = ? AND rc.result_id = ?
+      )`,
+).bind(eventId, heatId, commandId, eventId, heatId);
+
 const finalizedResultResponse = async (
   env: Env,
   eventId: string,
@@ -1483,6 +1659,11 @@ const finalizeResultSet = async (
     resultRoster(env, eventId, heatId),
   ]);
   if (context === null) return json({ error: "Heat not found." }, 404);
+  // Deliberately still round one only. The final has always accepted a typed
+  // duck number at the finish-line station, and scanning a place is an added
+  // way to record the podium rather than a replacement for that station, so
+  // tightening this here would take away a working race-day path that nothing
+  // about the new flow makes unsafe.
   if (context.round === "ROUND_ONE" && tagToken === null && !hasAnyRole(actor, ["RACE_DIRECTOR"])) {
     return json({ error: "Scan the winning duck's permanent tag to publish a round-one winner." }, 403);
   }
@@ -1566,6 +1747,14 @@ const finalizeResultSet = async (
       assignments.get(result.raceEntryId), result.place, resultRevision, now, actor.id, commandId,
     ));
   }
+  if (context.round === "FINAL") {
+    // The podium is published, so the provisional places the scans collected
+    // have become the result and must not outlive it. This runs for the
+    // director's recovery form as well as for the scan that completes the
+    // podium, because a director publishing a different podium by hand is
+    // exactly the case where a leftover scanned place would contradict it.
+    statements.push(clearPodiumSelectionsStatement(env, eventId, heatId, commandId));
+  }
   if (context.round === "ROUND_ONE") {
     const finalHeatId = finalHeat?.id ?? crypto.randomUUID();
     if (finalHeat === null) {
@@ -1635,6 +1824,421 @@ const finalizeResults = async (
   return finalizeResultSet(env, actor, eventId, heatId, commandId, revision, results, null);
 };
 
+/**
+ * The places a scan is allowed to name, as spoken race-day words.
+ *
+ * A final's podium is short and fixed, so the labels are a fixed internal table
+ * rather than a general ordinal function nobody else needs.
+ */
+const PODIUM_PLACE_LABELS: Record<number, string> = { 1: "1st", 2: "2nd", 3: "3rd" };
+
+const podiumPlaceLabel = (place: number): string => PODIUM_PLACE_LABELS[place] ?? `${place}th`;
+
+// The tag, the racer, and the roster place a scanned podium command must still
+// resolve through, re-checked inside the batch that writes. It repeats every
+// condition `winnerByTagCandidate` answered, because that read cannot hold a
+// lock and a second station can record a place in the trips between.
+const scannedPodiumGuardSql = `AND h.round = 'FINAL' AND e.status = 'FINAL'
+    AND (SELECT COUNT(*) FROM heats awaiting
+          WHERE awaiting.event_id = h.event_id
+            AND awaiting.status = 'AWAITING_RESULT') = 1
+    AND EXISTS (
+      SELECT 1
+        FROM heat_entries tag_selected
+        JOIN race_entries tag_entry ON tag_entry.id = tag_selected.race_entry_id
+        JOIN registrations tag_racer
+          ON tag_racer.id = tag_entry.registration_id AND tag_racer.status = 'ACTIVE'
+        JOIN duck_assignments tag_assignment
+          ON tag_assignment.event_id = tag_selected.event_id
+         AND tag_assignment.race_entry_id = tag_selected.race_entry_id
+         AND tag_assignment.valid_to IS NULL
+        JOIN duck_tags tag
+          ON tag.duck_id = tag_assignment.duck_id
+         AND tag.status = 'ACTIVE' AND tag.token = ?
+       WHERE tag_selected.event_id = h.event_id
+         AND tag_selected.heat_id = h.id
+         AND tag_selected.race_entry_id = ?
+    )`;
+
+// The place is free and this duck is not already standing somewhere else on the
+// podium. "Free" means held by nobody who could still be published there: a row
+// whose racer has since left the race is not holding a place, because the batch
+// that would publish it refuses to write them. That is the same judgement
+// `finalPodiumState` shows the station, repeated where it is authoritative.
+const scannedPodiumPlaceOpenSql = `AND NOT EXISTS (
+      SELECT 1 FROM final_podium_selections held
+        JOIN race_entries held_entry ON held_entry.id = held.race_entry_id
+        JOIN registrations held_racer
+          ON held_racer.id = held_entry.registration_id AND held_racer.status = 'ACTIVE'
+       WHERE held.heat_id = h.id AND held.place = ?
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM final_podium_selections mine
+       WHERE mine.heat_id = h.id AND mine.race_entry_id = ?
+    )`;
+
+const commandExistsSql = `EXISTS (
+        SELECT 1 FROM race_commands rc
+         WHERE rc.id = ? AND rc.event_id = ? AND rc.result_id = ?
+      )`;
+
+/**
+ * What every scan of a final's duck returns, whether it recorded a place or
+ * published the podium.
+ *
+ * One shape for both outcomes is deliberate. The scanning staffer does not know
+ * or care which duck completes the podium — they scan the ducks that finished —
+ * so the station renders the same thing each time and simply sees a finalized
+ * heat and a full result set on the last one.
+ */
+const podiumScanResponse = async (
+  env: Env,
+  eventId: string,
+  heatId: string,
+  replayed: boolean,
+): Promise<Response> => {
+  const [heat, results, podium] = await Promise.all([
+    getHeatSummary(env, eventId, heatId),
+    publishedResults(env, eventId, heatId),
+    finalPodiumState(env, eventId, heatId, null),
+  ]);
+  return json({
+    heat: heat === null ? null : heatSummary(heat),
+    results: results.results.map(resultResponseRow),
+    podium,
+    replayed,
+  }, replayed ? 200 : 201);
+};
+
+/**
+ * Record the place one scanned duck took in the final, and publish the whole
+ * podium when that place was the last one it needed.
+ *
+ * Recording and publishing are one command rather than two because the staffer
+ * performs one action: they scan the duck and say where it finished. Splitting
+ * them would leave a complete podium sitting unpublished behind a separate
+ * button somebody has to remember to press, on the one result in the race that
+ * everybody is waiting for.
+ *
+ * Both outcomes therefore share one request fingerprint — the heat, the duck,
+ * the place, and the tag — so a retry of the scan that completed the podium
+ * replays as the published result instead of being read as a new command. The
+ * command *type* still tells the truth about what happened, which is what the
+ * audit trail and every later result correction read.
+ */
+const recordFinalPodiumPlace = async (
+  env: Env,
+  actor: StaffActor,
+  token: string,
+  eventId: string,
+  heatId: string,
+  raceEntryId: string,
+  revision: number,
+  place: number,
+  commandId: string,
+): Promise<Response> => {
+  const requestFingerprint = await fingerprint({ heatId, raceEntryId, place, tagToken: token });
+  const previous = await findCommand(env, commandId);
+  if (previous !== null) {
+    const replayable = previous.event_id === eventId
+      && previous.result_id === heatId
+      && (previous.command_type === "RECORD_FINAL_PODIUM_PLACE"
+        || previous.command_type === "FINALIZE_HEAT_RESULT")
+      && previous.request_fingerprint === requestFingerprint;
+    return replayable
+      ? podiumScanResponse(env, eventId, heatId, true)
+      : json({ error: "This command identifier was already used for another operation." }, 409);
+  }
+
+  const candidate = await winnerByTagCandidate(env, token);
+  if (candidate === null) {
+    const ineligible = await winnerByTagIneligible(env, token);
+    if (
+      ineligible !== null
+      && ineligible.eventId === eventId
+      && ineligible.heatId === heatId
+      && ineligible.raceEntryId === raceEntryId
+    ) return ineligibleFinishResponse(ineligible);
+  }
+  if (
+    candidate === null
+    || candidate.round !== "FINAL"
+    || candidate.podium === null
+    || candidate.eventId !== eventId
+    || candidate.heatId !== heatId
+    || candidate.raceEntryId !== raceEntryId
+    || candidate.revision !== revision
+  ) return json({ error: "This duck is not a current podium candidate for that heat revision." }, 409);
+
+  const podium = candidate.podium;
+  // Named refusals, because each one has a different next action: clear the
+  // place this duck already holds, scan a different duck for a place somebody
+  // else took, or accept that the podium got shorter while the buttons were on
+  // screen.
+  if (podium.selectedPlace !== null) {
+    return json({
+      error: `This duck already holds ${podiumPlaceLabel(podium.selectedPlace)} place in the final.`
+        + " Clear that place first if it finished somewhere else.",
+    }, 409);
+  }
+  if (place > podium.requiredPlaces) {
+    return json({
+      error: `This final has ${podium.requiredPlaces} podium place`
+        + `${podium.requiredPlaces === 1 ? "" : "s"} because of who is still racing,`
+        + ` so there is no ${podiumPlaceLabel(place)} place to record.`,
+    }, 409);
+  }
+  if (!podium.availablePlaces.includes(place)) {
+    return json({
+      error: `${podiumPlaceLabel(place)} place in the final is already taken by another duck.`
+        + " Choose one of the places that are still open.",
+    }, 409);
+  }
+
+  const carried = podium.placements;
+  const completesPodium = carried.length + 1 === podium.requiredPlaces;
+  const results = [...carried.map((placement) => ({
+    raceEntryId: placement.raceEntryId,
+    place: placement.place,
+  })), { raceEntryId, place }].sort((left, right) => left.place - right.place);
+
+  const [context, rosterResult] = await Promise.all([
+    resultContext(env, eventId, heatId),
+    resultRoster(env, eventId, heatId),
+  ]);
+  if (context === null) return json({ error: "Heat not found." }, 404);
+  if (context.status !== "AWAITING_RESULT" || context.revision !== revision) {
+    return json({ error: "The heat is not awaiting this result revision." }, 409);
+  }
+  if (context.round !== "FINAL" || context.event_status !== "FINAL") {
+    return json({ error: "The event is not in the required round." }, 409);
+  }
+  // The completing scan writes the whole podium, so it is held to exactly the
+  // rule the result form is held to. A scan that only records a place writes no
+  // result and is not: the podium is deliberately incomplete at that moment.
+  if (completesPodium) {
+    const validation = validateResultSet(context.round, results, rosterResult.results);
+    if (validation !== null) return validation;
+  }
+
+  const now = new Date().toISOString();
+  const commandType = completesPodium ? "FINALIZE_HEAT_RESULT" : "RECORD_FINAL_PODIUM_PLACE";
+  const assignments = new Map(rosterResult.results.map((entry) => [entry.race_entry_id, entry.duck_assignment_id]));
+  const carriedGuard = carried.map(() => `AND EXISTS (
+      SELECT 1 FROM final_podium_selections carried
+       WHERE carried.heat_id = h.id AND carried.place = ? AND carried.race_entry_id = ?
+    )`).join("\n    ");
+  // Publishing pins the depth exactly, because the podium it writes must be
+  // every place this final has. Recording only needs the place to be one this
+  // final still has room for.
+  const depthGuard = completesPodium
+    ? `AND ? = ${requiredPodiumPlacesSql("h.event_id", "h.id")}`
+    : `AND ? <= ${requiredPodiumPlacesSql("h.event_id", "h.id")}`;
+  const selectedPlaceholders = results.map(() => "?").join(", ");
+  const selectedAssignmentIds = results.map((result) => assignments.get(result.raceEntryId) as string);
+  const publishGuard = completesPodium
+    ? activeSelectionGuardSql(selectedPlaceholders, selectedAssignmentIds.map(() => "?").join(", "))
+    : "";
+  const statements: D1PreparedStatement[] = [env.DB.prepare(
+    `INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at,
+       actor_staff_profile_id, request_fingerprint)
+     SELECT ?, ?, '${commandType}', ?, ?, ?, ?, ?
+       FROM heats h JOIN events e ON e.id = h.event_id
+       WHERE h.id = ? AND h.event_id = ? AND h.status = 'AWAITING_RESULT' AND h.revision = ?
+          ${scannedPodiumGuardSql}
+          ${scannedPodiumPlaceOpenSql}
+          ${carriedGuard}
+          ${depthGuard}
+          ${publishGuard}`,
+  ).bind(
+    commandId, eventId, heatId, now, now, actor.id, requestFingerprint,
+    heatId, eventId, revision,
+    token, raceEntryId,
+    place, raceEntryId,
+    ...carried.flatMap((placement) => [placement.place, placement.raceEntryId]),
+    completesPodium ? results.length : place,
+    ...(completesPodium
+      ? [
+        ...results.map((result) => result.raceEntryId),
+        ...selectedAssignmentIds,
+        results.length,
+      ]
+      : []),
+  )];
+
+  if (completesPodium) {
+    const resultRevision = context.result_revision + 1;
+    for (const result of results) {
+      statements.push(env.DB.prepare(
+        `INSERT INTO heat_results
+          (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
+           status, revision, finalized_at, recorded_by_staff_profile_id, source_command_id)
+         VALUES (?, ?, ?, ?, ?, ?, 'FINALIZED', ?, ?, ?, ?)`,
+      ).bind(
+        crypto.randomUUID(), eventId, heatId, result.raceEntryId,
+        assignments.get(result.raceEntryId), result.place, resultRevision, now, actor.id, commandId,
+      ));
+    }
+    statements.push(
+      clearPodiumSelectionsStatement(env, eventId, heatId, commandId),
+      env.DB.prepare(
+        `UPDATE heats SET status = 'FINALIZED', finalized_at = ?, revision = revision + 1,
+                source_command_id = ?, updated_at = ?
+          WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT' AND revision = ?
+            AND ${commandExistsSql}`,
+      ).bind(now, commandId, now, heatId, eventId, revision, commandId, eventId, heatId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         VALUES (?, ?, ?, 'HEAT_RESULT_FINALIZED', 'HEAT', ?, 'STAFF', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(), eventId, commandId, heatId, now,
+        JSON.stringify({ staff_profile_id: actor.id, result_revision: resultRevision, results }),
+      ),
+    );
+  } else {
+    statements.push(
+      // Only a place nobody can still be published into can be standing here,
+      // and only because the guarded command row above accepted this scan for
+      // it. Clearing it is what lets the duck that actually finished there be
+      // scanned in after a finalist leaves mid-result.
+      env.DB.prepare(
+        `DELETE FROM final_podium_selections
+          WHERE heat_id = ? AND place = ? AND ${commandExistsSql}`,
+      ).bind(heatId, place, commandId, eventId, heatId),
+      env.DB.prepare(
+        `INSERT INTO final_podium_selections
+          (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
+           recorded_at, recorded_by_staff_profile_id, source_command_id)
+         SELECT ?, ?, ?, ?, da.id, ?, ?, ?, ?
+           FROM duck_assignments da
+          WHERE da.event_id = ? AND da.race_entry_id = ? AND da.valid_to IS NULL
+            AND ${commandExistsSql}`,
+      ).bind(
+        crypto.randomUUID(), eventId, heatId, raceEntryId, place, now, actor.id, commandId,
+        eventId, raceEntryId, commandId, eventId, heatId,
+      ),
+      // A recorded place changes what the next scan may choose, so it moves the
+      // heat forward the same way every other race operation does. The station
+      // that painted the buttons then has a stale revision and reloads, instead
+      // of offering a place another phone just took.
+      env.DB.prepare(
+        `UPDATE heats SET revision = revision + 1, source_command_id = ?, updated_at = ?
+          WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT' AND revision = ?
+            AND ${commandExistsSql}`,
+      ).bind(commandId, now, heatId, eventId, revision, commandId, eventId, heatId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         VALUES (?, ?, ?, 'FINAL_PODIUM_PLACE_RECORDED', 'HEAT', ?, 'STAFF', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(), eventId, commandId, heatId, now,
+        JSON.stringify({ staff_profile_id: actor.id, place, race_entry_id: raceEntryId }),
+      ),
+    );
+  }
+
+  try {
+    await env.DB.batch(statements);
+  } catch {
+    return json({ error: "That podium place conflicted with another update. Retry with the same command identifier." }, 409);
+  }
+  return podiumScanResponse(env, eventId, heatId, false);
+};
+
+/**
+ * Take one scanned duck back off the podium.
+ *
+ * Scanning is fast and a place is chosen by tapping one of three buttons, so
+ * choosing the wrong one is the mistake this flow will actually produce. Without
+ * a way back, a mis-tap is unfixable at the finish line: the wrong podium has to
+ * be published in full and then corrected by a race director, which is a heavy
+ * remedy for a wrong button and a slow one with a crowd waiting.
+ *
+ * It is deliberately reachable from both surfaces that show the podium, keyed by
+ * the heat, the place, and the duck standing in it rather than by a tag, so the
+ * station that can see the mistake can undo it without walking back to the duck.
+ */
+const clearFinalPodiumPlace = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  eventId: string,
+  heatId: string,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const raceEntryId = payload?.raceEntryId;
+  const place = payload?.place;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || typeof raceEntryId !== "string" || raceEntryId.length === 0 || raceEntryId.length > 128
+    || typeof place !== "number" || !Number.isSafeInteger(place)
+    || place < 1 || place > FINAL_PODIUM_DEPTH
+  ) return json({ error: "Command, the podium place, and the duck standing in it are required." }, 400);
+
+  const requestFingerprint = await fingerprint({ heatId, raceEntryId, place, operation: "clear-podium-place" });
+  const previous = await findCommand(env, commandId);
+  if (previous !== null) {
+    return commandMatches(previous, eventId, heatId, "CLEAR_FINAL_PODIUM_PLACE", requestFingerprint)
+      ? podiumScanResponse(env, eventId, heatId, true)
+      : json({ error: "This command identifier was already used for another operation." }, 409);
+  }
+
+  const now = new Date().toISOString();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at,
+           actor_staff_profile_id, request_fingerprint)
+         SELECT ?, ?, 'CLEAR_FINAL_PODIUM_PLACE', ?, ?, ?, ?, ?
+           FROM heats h JOIN events e ON e.id = h.event_id
+          WHERE h.id = ? AND h.event_id = ? AND h.status = 'AWAITING_RESULT'
+            AND h.round = 'FINAL' AND e.status = 'FINAL'
+            AND EXISTS (
+              SELECT 1 FROM final_podium_selections held
+               WHERE held.heat_id = h.id AND held.place = ? AND held.race_entry_id = ?
+            )`,
+      ).bind(
+        commandId, eventId, heatId, now, now, actor.id, requestFingerprint,
+        heatId, eventId, place, raceEntryId,
+      ),
+      env.DB.prepare(
+        `DELETE FROM final_podium_selections
+          WHERE event_id = ? AND heat_id = ? AND place = ? AND race_entry_id = ?
+            AND ${commandExistsSql}`,
+      ).bind(eventId, heatId, place, raceEntryId, commandId, eventId, heatId),
+      env.DB.prepare(
+        `UPDATE heats SET revision = revision + 1, source_command_id = ?, updated_at = ?
+          WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT'
+            AND ${commandExistsSql}`,
+      ).bind(commandId, now, heatId, eventId, commandId, eventId, heatId),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         VALUES (?, ?, ?, 'FINAL_PODIUM_PLACE_CLEARED', 'HEAT', ?, 'STAFF', ?, ?)`,
+      ).bind(
+        crypto.randomUUID(), eventId, commandId, heatId, now,
+        JSON.stringify({ staff_profile_id: actor.id, place, race_entry_id: raceEntryId }),
+      ),
+    ]);
+  } catch {
+    return json({ error: "That podium place conflicted with another update. Refresh and try again." }, 409);
+  }
+  const command = await findCommand(env, commandId);
+  if (command === null) {
+    return json({
+      error: "That podium place is not recorded for a final that is waiting for its result.",
+    }, 409);
+  }
+  return podiumScanResponse(env, eventId, heatId, false);
+};
+
 const finalizeWinnerByTag = async (
   request: Request,
   env: Env,
@@ -1647,6 +2251,7 @@ const finalizeWinnerByTag = async (
   const heatId = payload?.heatId;
   const raceEntryId = payload?.raceEntryId;
   const revision = payload?.revision;
+  const place = payload?.place;
   if (
     typeof commandId !== "string" || !isCommandId(commandId)
     || typeof eventId !== "string" || eventId.length === 0 || eventId.length > 128
@@ -1654,6 +2259,28 @@ const finalizeWinnerByTag = async (
     || typeof raceEntryId !== "string" || raceEntryId.length === 0 || raceEntryId.length > 128
     || !validRevision(revision)
   ) return json({ error: "Command and the exact scanned winner context are required." }, 400);
+
+  // A place is what separates the two scanned result flows, and it is the
+  // client's statement about which one it is asking for. Round one has exactly
+  // one place and never sends it; the final always does, because the staffer had
+  // to choose one before the request existed.
+  if (place !== undefined) {
+    if (
+      typeof place !== "number" || !Number.isSafeInteger(place)
+      || place < 1 || place > FINAL_PODIUM_DEPTH
+    ) return json({ error: "Choose 1st, 2nd, or 3rd place for this duck." }, 400);
+    return recordFinalPodiumPlace(
+      env,
+      actor,
+      token,
+      eventId,
+      heatId,
+      raceEntryId,
+      revision,
+      place,
+      commandId,
+    );
+  }
 
   const results = [{ raceEntryId, place: 1 }];
   const requestFingerprint = await fingerprint({ heatId, results, tagToken: token });
@@ -1676,6 +2303,16 @@ const finalizeWinnerByTag = async (
       && ineligible.heatId === heatId
       && ineligible.raceEntryId === raceEntryId
     ) return ineligibleFinishResponse(ineligible);
+  }
+  // A page loaded while the event was still in round one, left open through the
+  // start of the final, and then used. The duck is a live candidate, but for a
+  // heat that awards three places rather than one, so the honest answer is that
+  // this scan is missing the place — not that the duck cannot win.
+  if (candidate !== null && candidate.round === "FINAL") {
+    return json({
+      error: "This duck is racing in the final, so its result is a podium place."
+        + " Scan it again and choose the place it finished in.",
+    }, 422);
   }
   if (
     candidate === null
@@ -2239,6 +2876,11 @@ export const handleHeatOperations = async (
     const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
     if (denied !== null) return denied;
     return finalizeResults(request, env, actor, eventId, heatId);
+  }
+  if (operation === "/podium-place/clear" && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
+    return clearFinalPodiumPlace(request, env, actor, eventId, heatId);
   }
   if (operation === "/results/reopen" && request.method === "POST") {
     const denied = requireAnyRole(actor, ["RACE_DIRECTOR"]);

@@ -958,6 +958,10 @@ test("winner-by-tag candidates require one awaiting heat, its roster, and the cu
     heatNumber: 4,
     round: "ROUND_ONE",
     participantDisplayName: "Daisy D.",
+    // A round-one heat awards one place, so it carries no podium to choose
+    // from. The field is present and null rather than absent, so a client can
+    // branch on the round without guessing.
+    podium: null,
   });
   assert.equal(await winnerByTagCandidate(env, otherToken), null, "wrong-heat duck");
   assert.equal(await winnerByTagCandidate(env, "z".repeat(32)), null, "unknown duck");
@@ -2336,7 +2340,10 @@ test("the heat roster projection exposes exactly its documented identifier field
   assert.equal(detail.status, 200);
   const body = await detail.json();
 
-  assert.deepEqual(Object.keys(body).sort(), ["heat", "results", "roster"]);
+  assert.deepEqual(Object.keys(body).sort(), ["heat", "podium", "results", "roster"]);
+  // Round one has no provisional podium to report, so the field is null rather
+  // than an empty podium a station might try to render.
+  assert.equal(body.podium, null);
   const [entry] = body.roster;
   assert.deepEqual(Object.keys(entry).sort(), [
     "assignmentSource",
