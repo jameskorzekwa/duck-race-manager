@@ -26,7 +26,7 @@ jobs:
             const marker = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
             const eligible = pr.head.repo?.id === pr.base.repo?.id
               && pr.base.ref === context.payload.repository.default_branch
-              && pr.user.id === 219766164 && branch && marker
+              && pr.user.id === 41898282 && branch && marker
               && marker[1] === branch[2] && marker[2] === branch[1]
               && marker[3] === pr.base.sha;
             if (!eligible) return;

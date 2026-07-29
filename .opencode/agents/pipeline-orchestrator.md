@@ -77,7 +77,7 @@ For implementation, inspect the repository instructions before editing. Launch t
 
 Every feature or behavior fix requires appropriate real-handler or Playwright integration coverage. Add or update that coverage, but do not execute it locally; the unprivileged hosted verification job runs `npm test`, `npm run test:e2e`, `npm run check`, `npm audit --audit-level=high`, and migration validation. Do not weaken, skip, or narrow tests to obtain a pass.
 
-Do not change `.git`, `.github`, `.opencode`, `opencode.json`, or `.pipeline`; pipeline control-plane changes require the manual repository workflow. Do not switch branches, commit, push, label, comment, close issues, or open PRs. A separate unprivileged job verifies the patch, and a deterministic publisher with no model execution owns GitHub mutations and App-authored publication.
+Do not change `.git`, `.github`, `.opencode`, `opencode.json`, or `.pipeline`; pipeline control-plane changes require the manual repository workflow. Do not switch branches, commit, push, label, comment, close issues, or open PRs. A separate unprivileged job verifies the patch, and a deterministic publisher with no model execution owns GitHub mutations and native-token publication.
 
 End the final response with exactly one marker on its own line:
 
