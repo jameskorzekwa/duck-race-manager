@@ -460,6 +460,18 @@ export interface FinalPodiumState {
   availablePlaces: number[];
   /** The place the scanned duck itself holds, when it already holds one. */
   selectedPlace: number | null;
+  /**
+   * Every place this final requires is already standing on the podium.
+   *
+   * Normally the scan that fills the last place publishes it, so nobody ever
+   * sees this true. It exists for the one ordering that leaves a complete podium
+   * unpublished: a finalist withdrawing *after* enough places were recorded
+   * shrinks the podium to a depth the recorded places already satisfy, and no
+   * further scan is coming — the only ducks left belong to racers the result
+   * paths refuse. Without something to publish what is already there, the final
+   * could not be finished from the finish line at all.
+   */
+  complete: boolean;
 }
 
 export interface WinnerByTagCandidate {
@@ -718,6 +730,7 @@ export const finalPodiumState = async (
       : Array.from({ length: requiredPlaces }, (_, index) => index + 1)
         .filter((place) => !taken.has(place)),
     selectedPlace,
+    complete: requiredPlaces > 0 && placements.length >= requiredPlaces,
   };
 };
 

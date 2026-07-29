@@ -621,9 +621,49 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   finished = await json(await post(actors.results, `/api/v1/staff/events/${eventId}/heats/${finalHeatId}/finish`, {
     commandId: command(), revision,
   }), 201, "result taker finishes final");
-  await json(await post(actors.results, `/api/v1/staff/events/${eventId}/heats/${finalHeatId}/results/finalize`, {
-    commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }],
-  }), 201, "result taker finalizes podium");
+
+  // The final publishes by scanning each finishing duck and choosing its place,
+  // so both halves of that flow carry the result roles and nothing weaker. This
+  // final has one eligible finalist, so its podium is one place deep and the
+  // first scan is also the last.
+  const finalInspection = await json(
+    await api(actors.results, `/api/v1/staff/ducks/${duckOneToken}`),
+    200,
+    "result taker inspects a finalist",
+  );
+  assert.equal(finalInspection.winnerAction.round, "FINAL");
+  assert.deepEqual(finalInspection.winnerAction.podium.availablePlaces, [1]);
+  assert.equal(/email|phone|lookup|duckName|registrationId/i.test(JSON.stringify(finalInspection)), false);
+  const podiumPayload = {
+    commandId: command(),
+    eventId,
+    heatId: finalHeatId,
+    raceEntryId,
+    revision: finished.heat.revision,
+    place: 1,
+  };
+  for (const actorName of ["registration", "heats", "announcer"]) {
+    assert.equal(
+      (await post(actors[actorName], `/api/v1/staff/ducks/${duckOneToken}/heat-winner`, podiumPayload)).status,
+      403,
+      `${actorName} may not record a podium place`,
+    );
+    assert.equal(
+      (await post(actors[actorName], `/api/v1/staff/events/${eventId}/heats/${finalHeatId}/podium-place/clear`, {
+        commandId: command(), raceEntryId, place: 1,
+      })).status,
+      403,
+      `${actorName} may not clear a podium place`,
+    );
+  }
+  const scannedPodium = await json(
+    await post(actors.results, `/api/v1/staff/ducks/${duckOneToken}/heat-winner`, podiumPayload),
+    201,
+    "result taker publishes the scanned final podium",
+  );
+  assert.equal(scannedPodium.heat.status, "FINALIZED");
+  assert.deepEqual(scannedPodium.results.map((result) => result.place), [1]);
+  assert.equal(/email|phone|lookupCode/i.test(JSON.stringify(scannedPodium)), false);
   await json(await post(actors.director, `/api/v1/staff/events/${eventId}/complete`, {
     commandId: command(),
   }), 201, "race director completes event");

@@ -209,6 +209,29 @@ const seedFullEventDataset = (database, status) => {
        '2026-07-26T01:08:00Z', 'admin_test', '22222222-2222-4222-8222-222222222222',
        '2026-07-26T01:09:00Z', 'admin_test', '22222222-2222-4222-8222-222222222222',
        'Correction test', '2026-07-26T01:08:00Z');
+    -- A final that has physically finished and has one podium place already
+    -- scanned into it. These provisional rows reference the final heat, its
+    -- roster entry, the duck assignment, and the command that recorded them, so
+    -- they are the newest way the only cleanup path could be blocked by
+    -- something nobody thinks about. The entry goes in while the heat is still
+    -- PLANNED because the roster lock trigger is real.
+    INSERT INTO heats (id, event_id, round, heat_number, status)
+    VALUES ('final-heat', 'event_test', 'FINAL', 1, 'PLANNED');
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES
+      ('final-entry', 'event_test', 'final-heat', 'entry', 'FINAL', 1, 'WINNER_PROMOTION',
+       '2026-07-26T01:20:00Z');
+    UPDATE heats
+       SET status = 'AWAITING_RESULT', roster_locked_at = '2026-07-26T01:20:00Z',
+           started_at = '2026-07-26T01:25:00Z', finished_at = '2026-07-26T01:30:00Z'
+     WHERE id = 'final-heat';
+    INSERT INTO final_podium_selections
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, recorded_at,
+       recorded_by_staff_profile_id, source_command_id)
+    VALUES
+      ('podium-place', 'event_test', 'final-heat', 'entry', 'assignment', 1,
+       '2026-07-26T01:31:00Z', 'admin_test', '22222222-2222-4222-8222-222222222222');
     INSERT INTO email_notifications (id, event_id, registration_id, heat_id, notification_type, status)
     VALUES ('notification', 'event_test', 'registration', 'heat', 'HEAT_ASSIGNED', 'PENDING');
     INSERT INTO email_attempts (id, event_id, notification_id, attempt_number, stage, status, started_at)
@@ -238,6 +261,7 @@ const eventLinkedTables = [
   "heat_entries",
   "heat_results",
   "heat_result_history",
+  "final_podium_selections",
   "email_notifications",
   "email_attempts",
   "browser_registration_collections",
@@ -598,7 +622,9 @@ test("a concurrent revision change makes the guarded batch delete nothing", asyn
   assert.equal(response.status, 409);
   assert.equal(count(database, "events"), 1);
   assert.equal(count(database, "registrations"), 1);
-  assert.equal(count(database, "heats"), 1);
+  // The seeded dataset holds a round-one heat and the final that follows it.
+  assert.equal(count(database, "heats"), 2);
+  assert.equal(count(database, "final_podium_selections"), 1);
   assert.equal(count(database, "audit_events"), 1);
   assert.equal(count(database, "race_commands"), 3);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);

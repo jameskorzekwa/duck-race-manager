@@ -2738,6 +2738,48 @@ const finishClearPodiumPlace = async (placement, button) => {
 // here rather than only on the duck page because this is the screen where the
 // mistake is visible: the staffer reads the three places back and sees that two
 // of them are swapped, without the ducks in their hands.
+// Publish a podium that is already as deep as the final requires but was never
+// finished by a scan. Only reachable when a finalist left after enough places
+// were recorded, which shrank the podium underneath them; the scan that would
+// normally publish is never coming, because every duck still unscanned belongs
+// to a racer the result paths refuse.
+const finishPublishScannedPodium = async (button) => {
+  const placements = podiumTakenPlacements(finishPodium);
+  const readback = placements.map((placement) => finishPlaceLabel(placement.place) + ": Duck #"
+    + placement.visibleNumber).join(", ");
+  if (!await appConfirm(
+    "Publish this podium now? Read back: " + readback + ". This publishes immediately.",
+    { danger: true, confirmLabel: "Publish podium" },
+  )) return;
+  button.disabled = true;
+  finishCommandBusy = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  finishMessage.textContent = "Publishing the official podium…";
+  try {
+    await finishApi("/api/v1/staff/events/" + encodeURIComponent(finishEvent.id)
+      + "/heats/" + encodeURIComponent(finishHeat.id) + "/results/finalize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        revision: finishHeat.revision,
+        results: placements.map((placement) => ({ raceEntryId: placement.raceEntryId, place: placement.place })),
+      }),
+    });
+    await finishLoad();
+    finishMessage.textContent = "Official podium saved. Live race screens have been notified.";
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      button.disabled = false;
+      finishMessage.textContent = error.message;
+    }
+  } finally {
+    finishCommandBusy = false;
+    endBusy();
+    finishSubscription?.resume();
+  }
+};
+
 const finishRenderScannedPodium = (focusedRaceEntry) => {
   const placements = podiumTakenPlacements(finishPodium);
   const required = finishRequiredPlaces();
@@ -2758,6 +2800,14 @@ const finishRenderScannedPodium = (focusedRaceEntry) => {
     card.append(remove);
     finishSelections.append(card);
     if (focusedRaceEntry === placement.raceEntryId) remove.focus();
+  }
+  if (finishPodium && finishPodium.complete === true && finishHeat && finishHeat.status === "AWAITING_RESULT") {
+    const publish = finishText("button", "Publish official podium", "button station-control");
+    publish.type = "button";
+    publish.dataset.publishPodium = "true";
+    publish.disabled = finishScanBusy || finishCommandBusy;
+    publish.addEventListener("click", () => finishPublishScannedPodium(publish));
+    finishSelections.append(publish);
   }
 };
 const finishRenderSelections = () => {
@@ -2993,7 +3043,7 @@ const finishRender = (event, detail) => {
   } else if (scannedPodium) {
     const remaining = finishRequiredPlaces() - podiumTakenPlacements(finishPodium).length;
     finishMessage.textContent = remaining <= 0
-      ? "Every podium place is recorded."
+      ? "Every place this final needs is recorded. Publish the podium to make it official."
       : "Scan the next finishing duck's tag and choose its place. " + remaining + " place"
         + (remaining === 1 ? "" : "s") + " still to record.";
   } else {

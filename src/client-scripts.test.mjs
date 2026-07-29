@@ -752,6 +752,10 @@ const confirmationCallsites = [
       + " for the next duck scanned.",
     { danger: true, confirmLabel: "Clear " + label },
   )) return;`],
+  [finishLineScript, `if (!await appConfirm(
+    "Publish this podium now? Read back: " + readback + ". This publishes immediately.",
+    { danger: true, confirmLabel: "Publish podium" },
+  )) return;`],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
   [participantScript, `  const confirmed = await appConfirm(
     "Delete the registration for " + participantDisplayName(registration)
@@ -766,9 +770,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
     assert.ok(script.includes(guardedWarning), `missing guarded confirmation: ${guardedWarning}`);
   }
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // Submitting a podium the station assembled itself, and clearing a place that
-  // was scanned into one.
-  assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 2);
+  // Submitting a podium the station assembled itself, clearing a place that was
+  // scanned into one, and publishing a scanned podium a withdrawal completed.
+  assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 3);
   // Inventory owns takeover, clearing a duck name, assign, unpair, release,
   // and delete duck. Every one of them is destructive or irreversible.
   assert.equal((staffInventoryScript.match(/\bappConfirm\(/g) ?? []).length, 6);
