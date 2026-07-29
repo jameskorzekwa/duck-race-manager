@@ -471,9 +471,55 @@ test.describe("sitewide UI consistency", () => {
     await expect(page.locator("[data-home-cta]")).toHaveCount(1);
     await expect(summary.locator(".actions a")).toHaveText(["Register", "Open the full race board"]);
 
+    const [heroBox, summaryBox, tickerBox] = await Promise.all([
+      page.locator(".hero").boundingBox(),
+      summary.boundingBox(),
+      page.locator(".ticker").boundingBox(),
+    ]);
+    expect(summaryBox.y).toBeGreaterThanOrEqual(heroBox.y + heroBox.height);
+    expect(tickerBox.y).toBeGreaterThanOrEqual(summaryBox.y + summaryBox.height);
+
     await cta.click();
     await expect(page.locator("[data-registration-form]")).toBeVisible();
     expect(errors).toEqual([]);
+  });
+
+  test("the preparing notice matches the registration summary surface without forced height", async ({ page }) => {
+    const measure = async (locator) => {
+      const box = await locator.boundingBox();
+      const surface = await locator.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return {
+          backgroundColor: style.backgroundColor,
+          borderRadius: style.borderRadius,
+          borderWidth: style.borderWidth,
+          padding: style.padding,
+        };
+      });
+      return { width: box.width, height: box.height, surface };
+    };
+    const widths = [320, 1280];
+    const preparing = {};
+
+    await seedState("empty");
+    await page.goto("/");
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 1000 });
+      const card = page.locator(".home-preparing-card");
+      await expect(card.locator(".eyebrow")).toHaveText("Happening now");
+      preparing[width] = await measure(card);
+    }
+
+    await seedState("registration");
+    await page.goto("/");
+    await expect(page.locator("[data-live-summary-title]")).toHaveText("Harbor Duck Derby");
+    for (const width of widths) {
+      await page.setViewportSize({ width, height: 1000 });
+      const registration = await measure(page.locator("[data-live-summary]"));
+      expect(registration.width).toBeCloseTo(preparing[width].width, 0);
+      expect(preparing[width].height).toBeLessThan(352);
+      expect(registration.surface).toEqual(preparing[width].surface);
+    }
   });
 
   test("race status redirects home while a race is only being prepared", async ({ page }) => {
@@ -554,8 +600,8 @@ test.describe("sitewide UI consistency", () => {
     expect(errors).toEqual([]);
   });
 
-  test("the home duck bobs through a water slit without covering mobile hero copy", async ({ page }) => {
-    await seedState("registration");
+  test("the home duck and water stay clear of readable, comfortably tracked hero copy", async ({ page }) => {
+    await seedState("empty");
     await page.emulateMedia({ reducedMotion: "no-preference" });
     await page.goto("/");
     // The hero carries copy and artwork only now, so the duck must clear the
@@ -565,6 +611,39 @@ test.describe("sitewide UI consistency", () => {
     const duck = page.locator(".hero-duck");
     const slit = page.locator(".hero-duck-slit");
     const water = page.locator(".hero-water");
+    const preparingCard = page.locator(".home-preparing-card");
+    await expect(heroCopy.locator("[data-home-preparing]")).toHaveCount(0);
+    await expect(preparingCard).toHaveClass("status-section home-preparing-card");
+    await expect(preparingCard.locator(".eyebrow")).toHaveText("Happening now");
+    await expect(preparingCard.locator("h2")).toHaveText("The next race is being prepared.");
+    await expect(preparingCard.locator(".lede")).toHaveText("Check back soon for the next QuickDucks race.");
+    const [heroSurfaceBox, preparingBox, tickerBox] = await Promise.all([
+      page.locator(".hero").boundingBox(),
+      preparingCard.boundingBox(),
+      page.locator(".ticker").boundingBox(),
+    ]);
+    expect(preparingBox.y).toBeGreaterThanOrEqual(heroSurfaceBox.y + heroSurfaceBox.height);
+    expect(tickerBox.y).toBeGreaterThanOrEqual(preparingBox.y + preparingBox.height);
+    const expectCopyClearance = async () => {
+      const [copyBox, waterBox] = await Promise.all([
+        heroCopy.boundingBox(),
+        water.boundingBox(),
+      ]);
+      expect(waterBox.y - copyBox.y - copyBox.height).toBeGreaterThanOrEqual(16);
+    };
+    const expectHeadlineLines = async () => {
+      const heading = page.locator("h1");
+      const lines = heading.locator("span");
+      await expect(lines).toHaveText(["Find your duck.", "Cheer it home."]);
+      const [headingBox, firstBox, secondBox] = await Promise.all([
+        heading.boundingBox(),
+        lines.nth(0).boundingBox(),
+        lines.nth(1).boundingBox(),
+      ]);
+      expect(secondBox.y).toBeGreaterThan(firstBox.y);
+      expect(firstBox.x + firstBox.width).toBeLessThanOrEqual(headingBox.x + headingBox.width + 1);
+      expect(secondBox.x + secondBox.width).toBeLessThanOrEqual(headingBox.x + headingBox.width + 1);
+    };
     const expectSlitComposition = async () => {
       const [duckBox, slitBox, waterBox] = await Promise.all([
         duck.boundingBox(),
@@ -586,6 +665,12 @@ test.describe("sitewide UI consistency", () => {
     // The hero holds no action row at all; the phase CTA lives with the race.
     await expect(page.locator(".hero .actions")).toHaveCount(0);
     await expect(page.locator(".hero a")).toHaveCount(0);
+    expect(parseFloat(await page.locator("body").evaluate((element) => getComputedStyle(element).letterSpacing)))
+      .toBeGreaterThan(0);
+    expect(parseFloat(await page.locator("h1").evaluate((element) => getComputedStyle(element).letterSpacing)))
+      .toBeGreaterThan(0);
+    await expectHeadlineLines();
+    await expectCopyClearance();
     await expectSlitComposition();
     const [heroBox, desktopSceneBox, desktopSlitBox, desktopWaterBox] = await Promise.all([
       page.locator(".hero").boundingBox(),
@@ -597,9 +682,16 @@ test.describe("sitewide UI consistency", () => {
     expect(heroBox.y + heroBox.height - desktopSceneBox.y - desktopSceneBox.height).toBeCloseTo(43, 0);
     expect(desktopSlitBox.y).toBeGreaterThan(desktopWaterBox.y + 64);
 
+    await page.setViewportSize({ width: 768, height: 900 });
+    await expectHeadlineLines();
+    await expectCopyClearance();
+    await expectNoDocumentOverflow(page);
+
     for (const width of [320, 390]) {
       await page.setViewportSize({ width, height: 844 });
       await expect(duck).toHaveCSS("animation-name", "duck-bob");
+      await expectHeadlineLines();
+      await expectCopyClearance();
       await expectSlitComposition();
       const [copyBox, duckBox] = await Promise.all([
         heroCopy.boundingBox(),
