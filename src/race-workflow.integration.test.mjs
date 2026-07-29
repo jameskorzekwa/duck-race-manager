@@ -83,6 +83,293 @@ const jsonBody = async (response, status, label) => {
   return body;
 };
 
+// One Worker, one migrated database, and the same handler entry point the
+// deployed site uses. Both tests below drive it; nothing here writes event-domain
+// SQL directly.
+const createWorkerHarness = (database) => {
+  database.exec(`
+    INSERT INTO staff_profiles
+      (id, cognito_sub, email, display_name, is_system_admin, is_active)
+    VALUES
+      ('admin', 'admin-sub', 'admin@example.com', 'Race Administrator', 1, 1),
+      ('staff', 'staff-sub', 'staff@example.com', 'Race Staff', 0, 1);
+    INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)
+    VALUES
+      ('staff-registration', 'staff', 'REGISTRATION', '2026-07-26T00:00:00Z'),
+      ('staff-ducks', 'staff', 'DUCK_MANAGER', '2026-07-26T00:00:00Z'),
+      ('staff-heats', 'staff', 'HEAT_RUNNER', '2026-07-26T00:00:00Z'),
+      ('staff-results', 'staff', 'RESULT_TAKER', '2026-07-26T00:00:00Z'),
+      ('staff-director', 'staff', 'RACE_DIRECTOR', '2026-07-26T00:00:00Z');
+  `);
+  const updateTasks = [];
+  const env = {
+    APP_ORIGIN: "https://quickducks.com",
+    AWS_ACCESS_KEY_ID: "test-access-key",
+    AWS_REGION: "us-east-1",
+    AWS_SECRET_ACCESS_KEY: "test-secret-key",
+    COGNITO_USER_POOL_ID: "us-east-1_example",
+    COGNITO_USER_POOL_CLIENT_ID: "client-example",
+    COGNITO_DOMAIN: "https://quickducks-staff.example.com",
+    DB: createD1(database),
+    EMAIL_QUEUE: { async send() {} },
+    PUBLIC_SEARCH_RATE_LIMITER: { async limit() { return { success: true }; } },
+    RACE_UPDATES: {
+      idFromName() { return "race-updates-id"; },
+      get() {
+        return { async fetch() { return new Response(null, { status: 204 }); } };
+      },
+    },
+    TURNSTILE_SECRET_KEY: "turnstile-test-secret",
+  };
+  const worker = createWorker((request, currentEnv) =>
+    authenticateStaff(request, currentEnv, verifyStaffToken));
+  const api = (path, options = {}) => {
+    const headers = new Headers(options.headers);
+    if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
+    let body;
+    if (options.body !== undefined) {
+      headers.set("content-type", "application/json");
+      body = JSON.stringify(options.body);
+    }
+    return worker.fetch(new Request(`https://quickducks.com${path}`, {
+      method: options.method ?? "GET",
+      headers,
+      body,
+    }), env, { waitUntil(promise) { updateTasks.push(promise); } });
+  };
+  return {
+    api,
+    updateTasks,
+    post: (path, body, token = staffToken) => api(path, { method: "POST", body, token }),
+  };
+};
+
+// The blocker this covers: the final podium is sized by the finalists who can
+// still take a place, so a withdrawal reduces it. If any surface keeps demanding
+// three places, the third one can never be filled — its duck answers every scan
+// with DUCK_NOT_ELIGIBLE — and with no podium the event can never be completed.
+// The only honest proof is to publish the reduced podium and complete the event.
+test("a final reduced by a withdrawal is still published and the event completed", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const { api, post } = createWorkerHarness(database);
+
+  const created = await jsonBody(await post("/api/v1/staff/events", {
+    commandId: crypto.randomUUID(),
+    slug: "reduced-podium-race",
+    name: "Reduced Podium Race",
+    eventDate: "2026-09-12",
+    roundOneHeatCapacity: 3,
+  }, adminToken), 201, "create event");
+  const eventId = created.event.id;
+  await jsonBody(await api(`/api/v1/staff/events/${eventId}/configuration`, {
+    method: "PATCH",
+    token: adminToken,
+    body: {
+      commandId: crypto.randomUUID(),
+      revision: created.event.revision,
+      roundOneHeatCapacity: 3,
+      finalHeatCapacity: 3,
+      publicNamePolicy: "FIRST_NAME_LAST_INITIAL",
+    },
+  }), 200, "configure event");
+  await jsonBody(await post(`/api/v1/staff/events/${eventId}/open-registration`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "open registration");
+
+  // Nine racers over three heats of three, so round one promotes exactly three
+  // finalists: the default layout, and the one where a single withdrawal turns
+  // a three-place podium into a two-place one.
+  const participants = [];
+  for (let index = 0; index < 9; index += 1) {
+    const registration = await jsonBody(await post(`/api/v1/staff/events/${eventId}/registrations`, {
+      commandId: crypto.randomUUID(),
+      privateToken: randomToken(),
+      firstName: `Racer${index}`,
+      lastName: "Example",
+      email: `racer${index}@example.com`,
+    }), 201, `walk-up registration ${index}`);
+    participants.push({
+      registrationId: registration.registration.registrationId,
+      lookupCode: registration.registration.lookupCode,
+      raceEntryId: registration.registration.raceEntryId,
+    });
+  }
+
+  for (const participant of participants) {
+    const provisioning = await jsonBody(await post("/api/v1/staff/inventory/provisioning", {
+      commandId: crypto.randomUUID(),
+      eventId,
+    }), 201, "provision duck");
+    participant.visibleNumber = provisioning.visibleNumber;
+    participant.tagToken = provisioning.tagUrl.split("/").at(-1);
+    await jsonBody(await post("/api/v1/staff/inventory/provisioning/confirm", {
+      commandId: crypto.randomUUID(),
+      eventId,
+      duckId: provisioning.duckId,
+      provisioningCommandId: provisioning.provisioningCommandId,
+      physicalWriteVerified: true,
+    }), 201, "confirm duck");
+    const pairing = await jsonBody(await post(`/api/v1/staff/ducks/${participant.tagToken}/assignments`, {
+      commandId: crypto.randomUUID(),
+      eventId,
+      lookupCode: participant.lookupCode,
+    }), 201, `pair duck ${participant.visibleNumber}`);
+    // A paired racer's duck is in a numbered bag, which is exactly the claim the
+    // console makes when it refuses to delete them.
+    assert.equal(pairing.heatAssignmentPending, false);
+    const detail = await jsonBody(await api(
+      `/api/v1/staff/registrations/${participant.registrationId}`,
+      { token: staffToken },
+    ), 200, "paired registration projection");
+    assert.equal(detail.registration.currentlyPaired, true);
+    assert.equal(detail.registration.deletable, false);
+    assert.equal(detail.registration.heatAssignmentPending, false);
+  }
+
+  await jsonBody(await post(`/api/v1/staff/events/${eventId}/close-registration`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "close registration");
+  await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-round-one`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "start round one");
+
+  const transition = async (heat, operation) => {
+    const body = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/${operation}`,
+      { commandId: crypto.randomUUID(), revision: heat.revision },
+    ), 201, `${operation} heat ${heat.number}`);
+    heat.revision = body.heat.revision;
+    heat.status = body.heat.status;
+  };
+
+  const listed = await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats`, {
+    token: staffToken,
+  }), 200, "list heats");
+  const roundOneHeats = listed.heats.filter((heat) => heat.round === "ROUND_ONE");
+  assert.equal(roundOneHeats.length, 3);
+  for (const heat of roundOneHeats) {
+    const detail = await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats/${heat.id}`, {
+      token: staffToken,
+    }), 200, `round-one heat ${heat.number}`);
+    heat.revision = detail.heat.revision;
+    heat.roster = detail.roster;
+    for (const operation of ["ready", "call", "start", "finish"]) await transition(heat, operation);
+    const published = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`,
+      {
+        commandId: crypto.randomUUID(),
+        revision: heat.revision,
+        results: [{ raceEntryId: heat.roster[0].raceEntryId, place: 1 }],
+      },
+    ), 201, `publish round-one heat ${heat.number}`);
+    heat.revision = published.heat.revision;
+  }
+
+  await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-final`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "start final");
+  const finalHeat = (await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats`, {
+    token: staffToken,
+  }), 200, "list final")).heats.find((heat) => heat.round === "FINAL");
+  const finalDetail = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final roster");
+  finalHeat.revision = finalDetail.heat.revision;
+  assert.equal(finalDetail.roster.length, 3, "three heats promote three finalists");
+  assert.ok(finalDetail.roster.every((entry) => entry.eligible === true));
+  for (const operation of ["ready", "call", "start", "finish"]) await transition(finalHeat, operation);
+  assert.equal(finalHeat.status, "AWAITING_RESULT");
+
+  // A finalist withdraws while the final is awaiting its result. Their duck was
+  // bagged before they left, so it stays in the water and on every staff roster.
+  const leavingEntryId = finalDetail.roster[1].raceEntryId;
+  const leaving = participants.find((participant) => participant.raceEntryId === leavingEntryId);
+  const before = await jsonBody(await api(`/api/v1/staff/registrations/${leaving.registrationId}`, {
+    token: staffToken,
+  }), 200, "load the finalist who is leaving");
+  await jsonBody(await post(`/api/v1/staff/registrations/${leaving.registrationId}/withdraw`, {
+    commandId: crypto.randomUUID(),
+    expectedRevision: before.registration.revision,
+  }), 201, "withdraw a finalist mid-final");
+
+  const reducedRoster = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final roster after the withdrawal");
+  assert.equal(reducedRoster.roster.length, 3, "no finalist is dropped from a staff roster");
+  assert.deepEqual(reducedRoster.roster.map((entry) => entry.eligible), [true, false, true]);
+  // Nothing about the heat itself changed, which is exactly why a station that
+  // keys its render on the heat alone never repaints.
+  assert.equal(reducedRoster.heat.status, "AWAITING_RESULT");
+  assert.equal(reducedRoster.heat.revision, finalHeat.revision);
+
+  // The withdrawn finalist's duck is still physically in the water and can still
+  // reach the line first, and the scan says so rather than failing.
+  const scannedWithdrawn = await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/finish-scan?value=${leaving.visibleNumber}`,
+    { token: staffToken },
+  );
+  assert.equal(scannedWithdrawn.status, 422);
+  assert.equal((await scannedWithdrawn.json()).reason, "DUCK_NOT_ELIGIBLE");
+
+  // The old three-place podium is now impossible: the server requires exactly
+  // the number of places its eligible finalists can fill, and says which.
+  const eligibleEntries = reducedRoster.roster.filter((entry) => entry.eligible);
+  const threePlaces = await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: finalHeat.revision,
+      results: [
+        { raceEntryId: eligibleEntries[0].raceEntryId, place: 1 },
+        { raceEntryId: eligibleEntries[1].raceEntryId, place: 2 },
+        { raceEntryId: leavingEntryId, place: 3 },
+      ],
+    },
+  );
+  assert.equal(threePlaces.status, 422, "a three-place podium is refused permanently");
+  assert.match((await threePlaces.json()).error, /exactly places 1 through 2\.$/);
+
+  // Two scans, two places, published: the way out of the blocker.
+  const podium = [];
+  for (const [index, entry] of eligibleEntries.entries()) {
+    const participant = participants.find((item) => item.raceEntryId === entry.raceEntryId);
+    const scan = await jsonBody(await api(
+      `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/finish-scan?value=${participant.visibleNumber}`,
+      { token: staffToken },
+    ), 200, `scan podium place ${index + 1}`);
+    podium.push({ raceEntryId: scan.selection.raceEntryId, place: index + 1 });
+  }
+  const finalResult = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    { commandId: crypto.randomUUID(), revision: finalHeat.revision, results: podium },
+  ), 201, "publish the reduced podium");
+  assert.deepEqual(finalResult.results.map((result) => result.place), [1, 2]);
+  assert.equal(finalResult.heat.status, "FINALIZED");
+
+  // And the event is no longer stranded: completion is allowed and taken.
+  const readiness = await jsonBody(await api(`/api/v1/staff/events/${eventId}/readiness`, {
+    token: staffToken,
+  }), 200, "completion readiness");
+  assert.equal(readiness.readiness.complete.allowed, true, JSON.stringify(readiness.readiness.complete.blockers));
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete the event");
+  assert.equal(completed.event.status, "COMPLETED");
+
+  // The public podium is two deep and never names the racer who left.
+  const board = await jsonBody(await api("/api/v1/race-board"), 200, "completed public board");
+  assert.deepEqual(board.event.podium.map((entry) => entry.place), [1, 2]);
+  assert.equal(
+    board.event.podium.some((entry) => entry.duckNumber === leaving.visibleNumber),
+    false,
+    "the withdrawn finalist is absent from every public surface",
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("runs the complete race workflow through real API handlers and migrated SQLite", async (context) => {
   const { database, migrationNames } = createDatabase();
   context.after(() => database.close());

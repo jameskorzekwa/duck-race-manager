@@ -1347,17 +1347,31 @@ withdrawn/disqualified registration. These
 operations are revision-checked, idempotent, and audited.
 
 The participant detail pane offers **Withdraw** and **Disqualify** to every
-participant the delete endpoint would refuse — that is, whenever the projection's
-`deletable` flag is false — because those two are then the only exit that
-exists. It says so in one sentence beside the actions, and the sentence states
-the reason that actually applies: `currentlyPaired` participants are told the
-named duck is already sealed in a heat bag and stays in the race, and a
-participant who is no longer holding a duck but whose entry has already been in
-the race is told that instead. Neither sentence claims a duck is in a bag when
-`currentlyPaired` is false. **Reactivate** is unaffected by pairing. Neither
-control reads the status, because a reactivated participant can be `SUBMITTED`
-while still holding their duck. This is console convenience only: the API accepts
-a withdrawal or disqualification for a never-paired registration as well.
+`SUBMITTED` or `ACTIVE` participant, which is exactly the set the endpoints
+accept. It does **not** read `deletable`: leaving the race and deleting the
+registration are different questions, and a never-paired no-show is precisely
+who a registration desk needs to withdraw. Gating withdrawal on undeletability
+left destroying the registration as the only way to record that somebody did not
+turn up. **Reactivate** is offered for a withdrawn or disqualified registration.
+No control reads pairing, because a reactivated participant can be `SUBMITTED`
+while still holding their duck.
+
+An undeletable participant is additionally shown one sentence beside the actions
+explaining why Delete is missing, and that sentence states the reason that
+actually applies, in this order:
+
+1. the event's status is outside the deletable set, in which case nothing about
+   the participant is the reason and the sentence says so;
+2. they hold a duck and a heat is holding that duck, so the named duck is
+   already sealed in a numbered bag and stays in the race;
+3. they hold a duck but the projection reports `heatAssignmentPending`, so no
+   bag exists for it yet — the same state the pairing callout refuses to invent
+   a bag number for;
+4. they hold no duck now but their entry has already been in the race.
+
+No branch claims a duck is in a bag unless a heat is genuinely holding one. The
+registration projection carries `heatAssignmentPending` alongside
+`currentlyPaired` and `deletable` for exactly this reason.
 
 **Withdrawal or disqualification is allowed at any point in the event
 lifecycle.** The heat's state is not a precondition: `PLANNED`, `LOADING`,
@@ -1392,10 +1406,17 @@ the same predicate so the preflight, the transition, and the lock can never
 disagree. Reactivation, which is available at any point, is its remedy.
 
 Staff rosters — heat detail, the announcer roster, the start-line roster, the
-staff finalist list, and published results — keep showing withdrawn and
-disqualified racers with `eligible: false` and their `registrationStatus`. Staff
-must reconcile what is physically in the bag, and the announcer must know not to
-call that name. Only public surfaces omit them.
+finish-line roster, the staff finalist list, and published results — keep showing
+withdrawn and disqualified racers with `eligible: false` and their
+`registrationStatus`, and mark them. Staff must reconcile what is physically in
+the bag, and the announcer must know not to call that name. Only public surfaces
+omit them.
+
+The start-line and finish-line stations fold the roster's eligibility into their
+render key alongside the heat's id, revision, and status. A withdrawal changes
+none of those three, so without it the repaint would be discarded and the station
+would keep showing an unmarked racer — and, at the finish line, keep demanding a
+podium place that can never be filled.
 
 ### Delete Registration
 
@@ -1407,8 +1428,9 @@ are the correct tools for someone who registered legitimately and then stopped
 racing.
 
 The pane offers **Delete registration** only while the projection reports
-`deletable`, and offers it as the only destructive action there, so a
-participant is never shown a button whose command the server refuses. Because
+`deletable`, so a participant is never shown a button whose command the server
+refuses, and it is never offered to somebody who has been in the race. It is
+offered *alongside* Withdraw and Disqualify rather than instead of them. Because
 `deletable` is the delete endpoint's own predicate rather than a restatement of
 it, the console and the guarded write cannot disagree: a participant whose duck
 was later unassigned is not `currentlyPaired`, is still not `deletable`, and is
@@ -2174,8 +2196,21 @@ Nothing is written and **no heat entry is removed, reordered, renumbered, or
 rebalanced**: the withdrawn duck keeps its heat and its slot, and so does every
 other duck, both before and after a winner is recorded around it.
 
+The statement names a status word only for `WITHDRAWN` and `DISQUALIFIED`, which
+are the only two statuses that mean "this racer left the race". The
+`winnerByTagIneligible` lookup behind the duck inspection page matches exactly
+those two. It is deliberately narrower than the `ACTIVE`-only guard it mirrors
+and the two are not complements: a racer who is `SUBMITTED` — waiting to be
+paired again after their duck was deleted mid-race — may not be recorded as a
+winner either, but they never withdrew, so they fall through to the generic
+refusal rather than being announced under a status word that is not theirs. If
+such a duck is scanned at the finish line it is still refused, with a sentence
+that makes no claim about a status.
+
 The final keeps the complete-podium station flow. It requires distinct places 1
-through `min(3, final roster size)`. Every selection displays place,
+through `min(3, eligible final roster size)` — the same count the server's result
+validation requires, so a podium reduced by a withdrawal can actually be
+published. Every selection displays place,
 policy-filtered participant name, and visible duck number before one **Submit
 official podium** confirmation. Only one tag or number lookup can run at a time;
 the station discards a response if event, heat, revision, or intended place
@@ -2219,9 +2254,26 @@ by the authoritative lifecycle checks instead.
 
 The final follows the same lock, ready, call, start, and finish transitions.
 When it reaches `AWAITING_RESULT`, a result taker, race director, or administrator must publish exactly
-places 1 through `min(3, final roster size)`, using distinct finalists from the
-roster. All required places are written in one atomic command and the final
-becomes `FINALIZED`.
+places 1 through `min(3, eligible final roster size)`, using distinct finalists
+who are still `ACTIVE`. All required places are written in one atomic command and
+the final becomes `FINALIZED`.
+
+**A withdrawal shrinks the podium, and every surface counts it the same way.**
+The finish-line station and the console result form both derive the number of
+places from `eligible`, treating a projection that predates the field as
+eligible. If either sized the podium by the whole roster it would demand a place
+whose duck answers every scan with `DUCK_NOT_ELIGIBLE`; the final could never be
+published, `Complete event` would stay blocked, and the event would be stranded
+with no way out but reactivating the racer.
+
+The console result form — used for the FINAL finalize, the FINAL correction, and
+the ROUND_ONE correction — offers only eligible racers in its place selects, so
+it cannot propose a winner the server refuses, and it does not preselect a
+published place whose racer has since left. The heat roster above it is
+unchanged: every entry is still listed, marked. A heat with no eligible racer at
+all renders a plain explanation instead of an empty, unsubmittable form, and the
+finish-line station says the same thing rather than arming a submit for zero
+places.
 
 The event remains `FINAL` until a race director or administrator runs `Complete event`.
 There is no staged first-place, second-place, then third-place scan workflow;

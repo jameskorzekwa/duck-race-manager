@@ -4206,6 +4206,19 @@ test("the finish line reports an ineligible duck as an outcome and stays armed",
     registrationStatus: "DISQUALIFIED",
     participantDisplayName: "Donald D.",
   })[0], "Duck #7 is Disqualified");
+  // Only the two statuses that mean "this racer left the race" are named. Any
+  // other status still cannot be recorded, but announcing it by name would put
+  // a word in front of a staffer that describes something else entirely.
+  for (const status of ["SUBMITTED", "NO_SHOW", "", null, undefined]) {
+    const lines = finishIneligibleLines({
+      visibleNumber: 9,
+      registrationStatus: status,
+      participantDisplayName: "Daisy D.",
+    });
+    assert.equal(lines[0], "Duck #9 cannot be recorded", String(status));
+    assert.equal(lines[1], "Daisy D. cannot be recorded as a winner, and this duck stays in its heat.");
+    assert.equal(lines[2], "Scan the next duck to pass the finish line.");
+  }
   assert.deepEqual(finishIneligibleLines(null), [
     "That duck cannot be recorded",
     "Scan the next duck to pass the finish line.",
@@ -4386,7 +4399,6 @@ const startLineRosterHarness = () => {
       liftFrom(startLineScript, "startText", /const startText = \(tag, value, className\) => \{[\s\S]*?\n\};/),
       liftFrom(startLineScript, "startHumanize", /const startHumanize = \(value\) => .*;\n/),
       liftFrom(startLineScript, "startAddFact", /const startAddFact = \(label, value\) => \{[\s\S]*?\n\};/),
-      liftFrom(startLineScript, "startRosterEligibilityKey", /const startRosterEligibilityKey = \(roster\) => roster[\s\S]*?\n  \.join\(","\);/),
       "let startRenderKey = null;",
       liftFrom(startLineScript, "startRender", /const startRender = \(event, detail\) => \{[\s\S]*?\n\};/),
     ],
@@ -4641,15 +4653,283 @@ test("a readiness response without notes renders exactly as it did before", () =
   assert.equal(harness.readinessList.children[0].children.length, 2);
 });
 
+// Every surface on the console client checks for its own markup before touching
+// it, because the client also runs on the registration desk and one throw inside
+// a render silently kills every control after it. `renderLifecycleResult` is
+// only reachable from a button `renderReadiness` builds, and that function
+// returns early when the list is absent — but the guard is the repository rule,
+// not an argument about reachability, and the cost of being wrong is invisible.
+const lifecycleResultHarness = (readinessList) => {
+  const document = new FakeDocument();
+  const rendered = [];
+  const runtime = buildRuntime(
+    [
+      liftFrom(staffHomeScript, "text", /const text = \(tag, value, className\) => \{[\s\S]*?\n\};/),
+      liftFrom(staffHomeScript, "empty", /const empty = \(message\) => .*;\n/),
+      liftFrom(staffHomeScript, "renderLifecycleResult", /const renderLifecycleResult = \(event\) => \{[\s\S]*?\n\};/),
+    ],
+    {
+      document,
+      readinessList,
+      currentEventDetail: { event: { id: "event", status: "REGISTRATION_CLOSED" } },
+      renderEvent: (detail) => {
+        rendered.push(detail.event.status);
+        return true;
+      },
+    },
+    ["renderLifecycleResult"],
+  );
+  return { rendered, renderLifecycleResult: runtime.renderLifecycleResult };
+};
+
+test("a lifecycle transition renders without a readiness list on the page", () => {
+  const document = new FakeDocument();
+  const readinessList = document.createElement("div");
+  const present = lifecycleResultHarness(readinessList);
+  assert.equal(present.renderLifecycleResult({ id: "event", status: "ROUND_ONE" }), true);
+  assert.deepEqual(present.rendered, ["ROUND_ONE"]);
+  assert.equal(readinessList.children[0].textContent, "Refreshing lifecycle actions…");
+  assert.equal(readinessList.children[0].className, "empty-state");
+
+  // The page that loads this client without the Event Details view must still
+  // get its event re-rendered rather than a thrown property read.
+  const absent = lifecycleResultHarness(null);
+  assert.equal(absent.renderLifecycleResult({ id: "event", status: "ROUND_ONE" }), true);
+  assert.deepEqual(absent.rendered, ["ROUND_ONE"], "the event still repaints");
+
+  // An event that is not the loaded one is refused before anything is touched.
+  assert.equal(absent.renderLifecycleResult({ id: "other-event", status: "FINAL" }), false);
+  assert.deepEqual(absent.rendered, ["ROUND_ONE"]);
+});
+
 test("the roster marker never reaches for an unsafe DOM sink", () => {
   assert.doesNotThrow(() => new Function(rosterEligibilityHelpersScript));
   assert.doesNotMatch(rosterEligibilityHelpersScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   // Every marked surface builds its nodes through the same textContent factory.
-  for (const script of [announcerScript, startLineScript, staffHomeScript]) {
+  for (const script of [announcerScript, startLineScript, finishLineScript, staffHomeScript]) {
     assert.match(script, /const rosterMarkIneligible = \(container, entry, lead, text\) => \{/);
     assert.doesNotMatch(script, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
   }
   // Staff see everyone. No surface filters an ineligible entry out of a roster.
   assert.doesNotMatch(announcerScript, /roster\.filter\(/);
   assert.doesNotMatch(startLineScript, /roster\.filter\(/);
+});
+
+// ---------------------------------------------------------------------------
+// The finish line: how deep the podium is, and who is marked on it
+//
+// The station that decides who won is the one place where getting the number of
+// places wrong is unrecoverable. The server sizes the final podium by the
+// racers who can still take a place; if this client sizes it by the whole
+// roster it demands a place whose duck answers every scan with
+// DUCK_NOT_ELIGIBLE, Submit never enables, and the event has no way to finish.
+// ---------------------------------------------------------------------------
+
+const finishLineRenderHarness = () => {
+  const document = new FakeDocument();
+  const elements = {
+    finishEventLabel: document.createElement("p"),
+    finishHeatTitle: document.createElement("h2"),
+    finishFacts: document.createElement("dl"),
+    finishRoster: document.createElement("ul"),
+    finishAction: document.createElement("div"),
+    finishScanForm: document.createElement("form"),
+    finishSelections: document.createElement("div"),
+    finishSubmit: document.createElement("button"),
+    finishMessage: document.createElement("p"),
+    finishIneligible: document.createElement("div"),
+  };
+  const runtime = buildRuntime(
+    [
+      rosterEligibilityHelpersScript,
+      stationStateHelpersScript,
+      liftFrom(finishLineScript, "finishText", /const finishText = \(tag, value, className\) => \{[\s\S]*?\n\};/),
+      liftFrom(finishLineScript, "finishHumanize", /const finishHumanize = \(value\) => .*;\n/),
+      liftFrom(finishLineScript, "finishPlaceLabel", /const finishPlaceLabel = \(place\) => .*;\n/),
+      liftFrom(finishLineScript, "finishClearIneligible", /const finishClearIneligible = \(\) => \{[\s\S]*?\n\};/),
+      liftFrom(finishLineScript, "finishAddFact", /const finishAddFact = \(label, value\) => \{[\s\S]*?\n\};/),
+      liftFrom(finishLineScript, "finishEligibleEntries", /const finishEligibleEntries = \(\) => .*;\n/),
+      liftFrom(finishLineScript, "finishRequiredPlaces", /const finishRequiredPlaces = \(\) => .*;\n/),
+      liftFrom(finishLineScript, "finishSubmitBlocked", /const finishSubmitBlocked = \(busy\) => \{[\s\S]*?\n\};/),
+      liftFrom(finishLineScript, "finishRenderSelections", /const finishRenderSelections = \(\) => \{[\s\S]*?\n\};/),
+      liftFrom(finishLineScript, "finishRender", /const finishRender = \(event, detail\) => \{[\s\S]*?\n\};/),
+      "let finishEvent = null; let finishHeat = null; let finishRosterEntries = [];",
+      "let finishSelected = []; let finishRenderKey = null; let finishScanBusy = false;",
+      "const selectFor = (raceEntryId, place, visibleNumber) =>"
+      + " finishSelected.push({ raceEntryId, place, visibleNumber, participantDisplayName: 'Racer ' + raceEntryId });",
+      "const requiredPlaces = () => finishRequiredPlaces();",
+      "const selectedPlaces = () => finishSelected.map((selection) => selection.raceEntryId + ':' + selection.place);",
+    ].join("\n").split("\n"),
+    {
+      document,
+      ...elements,
+      finishSubscription: null,
+      globalThis: { quickDucksLive: { beginBusy: () => () => {} } },
+    },
+    ["finishRender", "requiredPlaces", "selectFor", "selectedPlaces"],
+  );
+  return { ...elements, ...runtime };
+};
+
+// The default `final` seed exactly: three finalists, one duck each.
+const finalistEntry = (slotNumber, lastName, visibleNumber, extra = {}) => ({
+  slotNumber,
+  raceEntryId: `entry-${slotNumber}`,
+  participant: { firstName: "Racer", lastName, registrationStatus: "ACTIVE" },
+  duck: { id: `duck-${visibleNumber}`, visibleNumber },
+  eligible: true,
+  ...extra,
+});
+
+const withdrawn = (entry) => ({
+  ...entry,
+  eligible: false,
+  participant: { ...entry.participant, registrationStatus: "WITHDRAWN" },
+});
+
+const finalEvent = { id: "event", name: "Annual Duck Race", status: "FINAL" };
+const finalHeat = { id: "final-heat", round: "FINAL", number: 1, status: "AWAITING_RESULT", revision: 7 };
+const factValue = (facts, label) => facts.children
+  .find((fact) => fact.children[0].textContent === label)?.children[1].textContent ?? null;
+
+test("the finish line requires as many places as there are racers who can win", () => {
+  const harness = finishLineRenderHarness();
+  const roster = [
+    finalistEntry(1, "Active", 101),
+    finalistEntry(2, "Leaving", 102),
+    finalistEntry(3, "Racing", 103),
+  ];
+  harness.finishRender(finalEvent, { heat: finalHeat, roster });
+  assert.equal(harness.requiredPlaces(), 3);
+  assert.equal(factValue(harness.finishFacts, "Required result"), "3 podium places");
+
+  // One finalist withdraws. Nothing about the heat changes — same id, same
+  // status, same revision — but the third place can now never be filled: the
+  // server refuses that duck with DUCK_NOT_ELIGIBLE and requires two places.
+  harness.finishRender(finalEvent, { heat: finalHeat, roster: [roster[0], withdrawn(roster[1]), roster[2]] });
+  assert.equal(harness.requiredPlaces(), 2, "the podium is as deep as the racers who can take a place");
+  assert.equal(factValue(harness.finishFacts, "Required result"), "2 podium places");
+  assert.match(harness.finishMessage.textContent, /^Select 2 distinct ducks, /);
+
+  // The roster itself is untouched: every duck is still in the bag, still in
+  // the water, and still listed in its own slot.
+  assert.equal(harness.finishRoster.children.length, 3);
+  assert.deepEqual(harness.finishRoster.children.map((row) => row.children[0]?.textContent ?? null), [
+    null,
+    "Cannot win · Withdrawn",
+    null,
+  ]);
+
+  // Two selections now arm Submit, which sizing by the whole roster never would.
+  harness.selectFor("entry-1", 1, 101);
+  harness.selectFor("entry-3", 2, 103);
+  harness.finishRender(finalEvent, {
+    heat: { ...finalHeat, revision: 7 },
+    roster: [roster[0], withdrawn(roster[1]), roster[2], finalistEntry(4, "Spare", 104)],
+  });
+  assert.equal(harness.requiredPlaces(), 3, "a fourth eligible racer restores the third place");
+});
+
+test("the finish line marks a racer who can no longer win on the roster it decides from", () => {
+  const harness = finishLineRenderHarness();
+  harness.finishRender(finalEvent, {
+    heat: finalHeat,
+    roster: [
+      finalistEntry(1, "Active", 101),
+      withdrawn(finalistEntry(2, "Gone", 102)),
+      {
+        ...finalistEntry(3, "Barred", 103),
+        eligible: false,
+        participant: { firstName: "Racer", lastName: "Barred", registrationStatus: "DISQUALIFIED" },
+      },
+      // A projection from before the field existed paints exactly as before,
+      // and counts toward the podium rather than silently shrinking it.
+      { ...finalistEntry(4, "Legacy", 104), eligible: undefined },
+    ],
+  });
+
+  const rows = harness.finishRoster.children;
+  assert.equal(rows.length, 4, "no roster entry is ever dropped from a staff station");
+  assert.deepEqual(rows.map((row) => row.textContent), [
+    "Slot 1 · Racer Active · Duck #101",
+    "Slot 2 · Racer Gone · Duck #102",
+    "Slot 3 · Racer Barred · Duck #103",
+    "Slot 4 · Racer Legacy · Duck #104",
+  ]);
+  for (const index of [0, 3]) {
+    assert.equal(rows[index].className, "");
+    assert.equal(markerOf(rows[index]), null);
+  }
+  assert.equal(rows[1].className, "ineligible");
+  assert.deepEqual(markerOf(rows[1]), { flag: "Cannot win · Withdrawn", note: INELIGIBLE_NOTE });
+  assert.equal(markerOf(rows[2]).flag, "Cannot win · Disqualified");
+  // Two of four can win, so the podium is two deep, not three.
+  assert.equal(harness.requiredPlaces(), 2);
+});
+
+test("the finish line repaints when a racer withdraws during AWAITING_RESULT", () => {
+  const harness = finishLineRenderHarness();
+  const roster = [
+    finalistEntry(1, "Active", 101),
+    finalistEntry(2, "Leaving", 102),
+    finalistEntry(3, "Racing", 103),
+  ];
+  harness.finishRender(finalEvent, { heat: finalHeat, roster });
+  assert.equal(markerOf(harness.finishRoster.children[1]), null);
+
+  // An unchanged payload is still discarded, so a live signal cannot churn the
+  // station or wipe reviewed selections under a staffer's hands.
+  harness.selectFor("entry-1", 1, 101);
+  harness.finishRender(finalEvent, { heat: finalHeat, roster });
+  assert.deepEqual(harness.selectedPlaces(), ["entry-1:1"], "an identical payload is a no-op");
+
+  // Withdrawing changes neither the heat status nor its revision. Without
+  // eligibility in the render key this repaint is thrown away and the station
+  // keeps an unmarked racer and an impossible third place on screen.
+  harness.finishRender(finalEvent, { heat: finalHeat, roster: [roster[0], withdrawn(roster[1]), roster[2]] });
+  assert.deepEqual(markerOf(harness.finishRoster.children[1]), {
+    flag: "Cannot win · Withdrawn",
+    note: INELIGIBLE_NOTE,
+  });
+  assert.equal(harness.requiredPlaces(), 2);
+  // The reviewed selection is a different racer, so it survives untouched.
+  assert.deepEqual(harness.selectedPlaces(), ["entry-1:1"]);
+});
+
+test("a reviewed selection whose racer leaves is dropped and the places close up", () => {
+  const harness = finishLineRenderHarness();
+  const roster = [
+    finalistEntry(1, "Leaving", 101),
+    finalistEntry(2, "Active", 102),
+    finalistEntry(3, "Racing", 103),
+  ];
+  harness.finishRender(finalEvent, { heat: finalHeat, roster });
+  harness.selectFor("entry-1", 1, 101);
+  harness.selectFor("entry-2", 2, 102);
+
+  harness.finishRender(finalEvent, { heat: finalHeat, roster: [withdrawn(roster[0]), roster[1], roster[2]] });
+  // First place left the race, so second place moves up rather than leaving a
+  // gap at place 1 that the server would refuse outright.
+  assert.deepEqual(harness.selectedPlaces(), ["entry-2:1"]);
+  assert.equal(harness.requiredPlaces(), 2);
+  assert.equal(harness.finishSubmit.disabled, true, "one of two places is not a submittable podium");
+});
+
+test("a final whose racers have all left says so instead of arming an empty submit", () => {
+  const harness = finishLineRenderHarness();
+  harness.finishRender(finalEvent, {
+    heat: finalHeat,
+    roster: [
+      withdrawn(finalistEntry(1, "Gone", 101)),
+      withdrawn(finalistEntry(2, "Also gone", 102)),
+    ],
+  });
+  assert.equal(harness.requiredPlaces(), 0);
+  assert.equal(factValue(harness.finishFacts, "Required result"), "0 podium places");
+  assert.match(
+    harness.finishMessage.textContent,
+    /^Every racer in this heat is withdrawn or disqualified, so no result can be recorded\./,
+  );
+  // Zero selections must never read as "the selections match what is required".
+  assert.equal(harness.finishSubmit.disabled, true);
 });
