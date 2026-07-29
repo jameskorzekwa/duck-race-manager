@@ -209,7 +209,7 @@ test.describe("a withdrawn duck at the finish line", () => {
     );
     // Marked, never dropped: the duck is still in the bag and still in the water.
     await expect(page.locator("[data-station-roster] li")).toHaveCount(3);
-    await expect(page.locator("[data-station-message]")).toContainText("Select 2 distinct ducks");
+    await expect(page.locator("[data-station-message]")).toContainText("select 2 distinct ducks here");
 
     // Two scans fill the whole podium, and Submit arms — which it never would
     // while the station demanded a third, unfillable place.
