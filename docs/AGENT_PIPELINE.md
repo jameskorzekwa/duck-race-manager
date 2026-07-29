@@ -140,14 +140,25 @@ rechecks the live head before adding
 implementation from current `main`, at most three times.
 
 The gate also publishes `Agent Review / Exact SHA` directly on the candidate
-commit. Control-plane, dependency, migration, and infrastructure changes require
-James's GitHub approval on that exact head in addition to model review.
+commit. That check is fully autonomous: it passes on deterministic validation of
+the exact candidate SHA plus an approving independent model review, and no
+human PR approval is required to run or satisfy either required check. Candidate
+CI is dispatched explicitly on the branch, so repository policy must not demand
+manual approval to run workflows for pipeline-authored pull requests.
+
+Autonomy stops at production. Merges are still serialized through the single
+merge slot, and deployment still requires James's approval in the protected
+production environment with no administrator bypass, so no autonomous change
+reaches users unreviewed. Autonomous patches also still cannot touch workflows,
+local actions, agent instructions, `opencode.json`, `AGENTS.md`, or pipeline
+helpers; `validate-agent-patch.mjs` rejects those outright rather than routing
+them to a human approval.
+
 Any review-dismissal event runs a separate non-concurrent hosted workflow that
 removes approval state, the merge slot, and auto-merge without launching a paid
-model session. This is a best-effort revocation, not an atomic native merge lock:
-selective human approval cannot be made race-free without requiring a review on
-every PR. Exact-head approval therefore authorizes merge; close the PR or disable
-auto-merge directly when an immediate stop is required.
+model session. Because the merge decision no longer depends on a human review,
+that revocation is a convenience control: close the PR or disable auto-merge
+directly when an immediate stop is required.
 
 ## Merge And Deployment
 

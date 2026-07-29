@@ -38,7 +38,6 @@ jobs:
       head: ${{ steps.context.outputs.head }}
       issue: ${{ steps.context.outputs.issue }}
       pr: ${{ steps.context.outputs.pr }}
-      sensitive: ${{ steps.context.outputs.sensitive }}
     steps:
       - name: Validate event and linked issue
         id: context
@@ -99,11 +98,7 @@ jobs:
             printf 'PR provenance does not reference Agent Task.\n' >&2
             exit 1
           fi
-          sensitive="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" \
-            --jq '[.[].filename | select(startswith(".github/") or startswith(".opencode/") or startswith("infra/") or startswith("db/migrations/") or startswith("scripts/") or startswith("wrangler") or . == "opencode.json" or . == "package.json" or . == "package-lock.json" or . == "AGENTS.md")] | length' \
-            | awk '{sum += $1} END {print (sum > 0 ? "true" : "false")}')"
-          printf 'eligible=true\nissue=%s\nsensitive=%s\n' \
-            "$issue_number" "$sensitive" >> "$GITHUB_OUTPUT"
+          printf 'eligible=true\nissue=%s\n' "$issue_number" >> "$GITHUB_OUTPUT"
 
   reset-state:
     name: Clear stale approval
@@ -517,7 +512,6 @@ jobs:
           PR_NUMBER: ${{ needs.prepare.outputs.pr }}
           RESET_RESULT: ${{ needs.reset-state.result }}
           REVIEW_RESULT: ${{ needs.independent-review.result }}
-          SENSITIVE: ${{ needs.prepare.outputs.sensitive }}
           VALIDATE_RESULT: ${{ needs.validate-candidate.result }}
         with:
           script: |
@@ -598,24 +592,12 @@ jobs:
                 core.warning(`Unable to parse review decision: ${error.message}`);
               }
             }
-            let humanApproved = process.env.SENSITIVE !== "true";
-            if (!humanApproved) {
-              const reviews = await github.paginate(github.rest.pulls.listReviews, {
-                owner, repo, pull_number: prNumber, per_page: 100,
-              });
-              const latest = reviews
-                .filter((review) => review.user?.id === 38769771 && review.commit_id === expectedHead)
-                .sort((left, right) => Date.parse(left.submitted_at) - Date.parse(right.submitted_at))
-                .at(-1);
-              humanApproved = latest?.state === "APPROVED";
-            }
             const approved = process.env.RESET_RESULT === "success"
               && process.env.REVIEW_RESULT === "success"
               && process.env.VALIDATE_RESULT === "success"
               && decision.sha === expectedHead
               && decision.verdict === "approved"
-              && !revokedAfterStart
-              && humanApproved;
+              && !revokedAfterStart;
 
             if (approved) {
               await removeLabel(prNumber, "agent:failed");
@@ -634,11 +616,9 @@ jobs:
             const infrastructureFailure = process.env.RESET_RESULT !== "success"
               || process.env.REVIEW_RESULT !== "success"
               || decision.exitStatus !== 0;
-            if (infrastructureFailure || !humanApproved || revokedAfterStart) {
+            if (infrastructureFailure || revokedAfterStart) {
               const reason = revokedAfterStart
-                ? "Approval was dismissed after this review started. Submit a new approval to run a fresh exact-head review."
-                : !humanApproved
-                ? "Sensitive pipeline, dependency, migration, or infrastructure changes require James's exact-head PR approval. Approve this head and rerun Agent Review."
+                ? "An approval was dismissed after this review started. Rerun Agent Review to produce a fresh exact-head decision."
                 : "Review infrastructure failed. Rerun Agent Review without replacing the candidate branch.";
               await completeCheck("failure", "Review requires intervention", reason);
               await github.rest.issues.createComment({
