@@ -312,11 +312,18 @@ test("release workflow publishes only the validated tag after deploy and smoke g
   assert.match(releaseWorkflow, /target_commitish: sha/g);
   assert.match(releaseWorkflow, /git\.getRef/);
   assert.match(releaseWorkflow, /git\.getTag/);
+  assert.match(releaseWorkflow, /repos\.getBranch\(\{ owner, repo, branch: defaultBranch \}\)/);
+  assert.match(releaseWorkflow, /currentDefault\.data\.commit\.sha !== sha/);
+  assert.match(releaseWorkflow, /if \(error\.status === 403\)/);
+  assert.match(releaseWorkflow, /taggedCommit = await resolveTagCommit\(\)/);
+  assert.match(releaseWorkflow, /latestDefault\.data\.commit\.sha !== sha/);
+  assert.match(releaseWorkflow, /throw error;/);
+  assert.match(releaseWorkflow, /the newer queued release owns tag and GitHub Release publication/);
   // The automatic tag is a lightweight Git ref created with the job-scoped
   // GITHUB_TOKEN; a rejected creation must fail the job loudly.
   assert.match(releaseWorkflow, /git\.createRef\(\{ owner, repo, ref: `refs\/tags\/\$\{tag\}`, sha \}\)/);
   assert.doesNotMatch(releaseWorkflow, /git\.createTag/);
-  assert.match(releaseWorkflow, /if \(error\.status !== 422\) throw error;/);
+  assert.match(releaseWorkflow, /else if \(error\.status === 422\)/);
   // The success path trusts the authoritative createRef response instead of an
   // immediate re-read that can lag replicas; the swallowed-422 path retries the
   // re-read and then surfaces the real rejection reason.
@@ -327,10 +334,13 @@ test("release workflow publishes only the validated tag after deploy and smoke g
 
   const smokeIndex = releaseWorkflow.indexOf("Smoke-test apex and www redirect");
   const releaseJobIndex = releaseWorkflow.indexOf("\n  release:");
+  const finalFreshnessIndex = releaseWorkflow.indexOf("repos.getBranch", releaseJobIndex);
   const tagCreationIndex = releaseWorkflow.indexOf("git.createRef");
   const releaseCreationIndex = releaseWorkflow.indexOf("repos.createRelease");
   assert.ok(smokeIndex > 0);
   assert.ok(smokeIndex < releaseJobIndex);
+  assert.ok(releaseJobIndex < finalFreshnessIndex);
+  assert.ok(finalFreshnessIndex < tagCreationIndex);
   assert.ok(releaseJobIndex < tagCreationIndex);
   assert.ok(tagCreationIndex < releaseCreationIndex);
   assert.equal(releaseWorkflow.match(/contents: write/g)?.length, 1);

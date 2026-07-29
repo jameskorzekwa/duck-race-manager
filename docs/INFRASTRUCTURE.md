@@ -784,7 +784,10 @@ no manual tag, but deployment requires production-environment approval:
 Tags created with the workflow's repository `GITHUB_TOKEN` do not start new
 workflow runs under GitHub's current recursive-workflow prevention behavior, so
 the automatic `v*.*.*` tag does not cause a second tag deployment. No tag is
-created before deployment. If deployment fails first, rerunning validation sees
+created before deployment. The final writer rechecks the default-branch tip: if
+another merge wins the narrow race after the post-approval deployment preflight,
+the older run records that it was superseded without attempting a stale tag, and
+the newer serialized run owns tag and release publication. If deployment fails first, rerunning validation sees
 the unchanged previous stable tag and derives the same patch. If deployment
 succeeds but tag creation or release publication is rejected, the final job
 fails loudly and the state is forward-recoverable: a rerun of the same source
@@ -896,6 +899,9 @@ changes and must be rolled back through their platform audit history.
 
 If only automatic tag or GitHub release publication fails after successful smoke
 tests, production is already deployed and the failure is forward-recoverable.
+When the default branch advanced during deployment and no exact tag exists, the
+final writer exits successfully as superseded instead of requesting workflow
+permission to tag the older workflow tree; the newer queued run owns publication.
 Rerun the failed job or complete workflow while the source is still the
 default-branch tip; it derives the same patch, and if the tag was already
 created it must resolve to the same source and is reused. If a fix or ordinary
