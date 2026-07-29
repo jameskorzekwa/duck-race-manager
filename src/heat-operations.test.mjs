@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import { handleApi } from "./api.ts";
 import { staffHomeScript } from "./client-scripts.ts";
 import { handleEventOperations } from "./event-operations.ts";
 import {
@@ -476,6 +477,10 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
     database.prepare("SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = ? AND status = 'SUPERSEDED'").get(finalHeat.id).count,
     2,
   );
+  // Correcting a final result never writes the event's status. Admitting `FINAL`
+  // to the correction gate must not let a correction walk a completed event
+  // backwards out of `COMPLETED`.
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "COMPLETED");
 
   const reopen = await handle(jsonRequest(
     `/api/v1/staff/events/event/heats/${finalHeat.id}/results/reopen`,
@@ -1655,6 +1660,305 @@ test("a final with a withdrawn finalist publishes a shorter podium and still com
   ), env, actor);
   assert.equal(completion.status, 201, JSON.stringify(await completion.clone().json()));
   assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "COMPLETED");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// ---------------------------------------------------------------------------
+// Revising a published final while the race is still the race
+// ---------------------------------------------------------------------------
+
+// A finalized final holding a published podium while the event is still
+// `FINAL`: exactly where a race director stands the moment they disqualify a
+// winner. `seedFinalHeat` promotes two finalists, so the podium is two deep.
+const seedPublishedFinal = async (database) => {
+  seedRace(database);
+  seedRoundOneHeats(database);
+  seedFinalHeat(database);
+  database.exec(`
+    UPDATE events SET status = 'FINAL' WHERE id = 'event';
+    UPDATE heats SET status = 'AWAITING_RESULT', roster_locked_at = '2026-07-26T12:00:00Z',
+           started_at = '2026-07-26T12:05:00Z', finished_at = '2026-07-26T12:10:00Z'
+     WHERE id = 'heat-final';
+  `);
+  const env = { DB: d1(database) };
+  const published = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/finalize",
+    "POST",
+    {
+      commandId: commandId(),
+      revision: 0,
+      results: [{ raceEntryId: "entry-1", place: 1 }, { raceEntryId: "entry-4", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(published.status, 201, JSON.stringify(await published.clone().json()));
+  return { env, revision: (await published.json()).heat.revision };
+};
+
+// The remedy that used to be circular. Correcting a final result demanded the
+// event already be `COMPLETED`, but a podium the completion check disagreed with
+// was exactly what stopped the event completing, so the documented instruction
+// "complete the event, then correct it" could not be followed. `FINAL` is
+// admitted because it is the state the director is actually in.
+test("a final result is correctable while the event is still FINAL", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { env, revision } = await seedPublishedFinal(database);
+
+  const detail = await handleHeatOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event/heats/heat-final"),
+    env,
+    actor,
+  );
+  const detailBody = await detail.json();
+  assert.equal(detailBody.heat.resultCorrectionAllowed, true, "the console is offered the same capability");
+  assert.equal(detailBody.heat.resultReopenAllowed, true);
+
+  // Least privilege: publishing a result and altering a published one stay
+  // different powers, and the state change does not blur them.
+  const resultTaker = { ...actor, roles: ["RESULT_TAKER"] };
+  assert.equal((await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "A result taker may not alter a published podium.",
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, resultTaker)).status, 403);
+
+  // Cookie-authenticated staff mutations require the exact application origin.
+  const cookieActor = { ...actor, authentication: "cookie" };
+  const apiEnv = { ...env, APP_ORIGIN: "https://quickducks.com" };
+  const crossOrigin = await handleApi(new Request(
+    "https://quickducks.com/api/v1/staff/events/event/heats/heat-final/results/correct",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://quickducks.com.evil.example" },
+      body: JSON.stringify({
+        commandId: commandId(), revision,
+        reason: "A cross-origin correction must never land.",
+        results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+      }),
+    },
+  ), apiEnv, async () => cookieActor);
+  assert.equal(crossOrigin.status, 403);
+
+  // A stale heat revision is a lifecycle conflict, not a silent overwrite.
+  assert.equal((await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision: revision + 5,
+      reason: "This correction was composed against a stale heat.",
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor)).status, 409);
+
+  const correctionCommand = commandId();
+  const correctedPodium = [
+    { raceEntryId: "entry-4", place: 1 },
+    { raceEntryId: "entry-1", place: 2 },
+  ];
+  const corrected = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: correctionCommand, revision,
+      reason: "Photo review changed the podium before the event was completed.",
+      results: correctedPodium,
+    },
+  ), env, actor);
+  assert.equal(corrected.status, 201, JSON.stringify(await corrected.clone().json()));
+  assert.deepEqual(
+    database.prepare(
+      "SELECT race_entry_id, place FROM heat_results WHERE heat_id = 'heat-final' AND status = 'FINALIZED' ORDER BY place",
+    ).all().map((row) => ({ ...row })),
+    [{ race_entry_id: "entry-4", place: 1 }, { race_entry_id: "entry-1", place: 2 }],
+  );
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-final' AND status = 'SUPERSEDED'",
+  ).get().count, 2);
+  // The event did not move. A `FINAL` correction never completes the event for
+  // the operator, and it can never walk a `COMPLETED` event backwards either.
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "FINAL");
+  // Finalist promotion belongs to round one alone; a FINAL correction computes
+  // none and must leave every promoted roster row exactly where it was.
+  assert.deepEqual(
+    database.prepare(
+      "SELECT id, race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-final' ORDER BY slot_number",
+    ).all().map((row) => ({ ...row })),
+    [
+      { id: "final-entry-1", race_entry_id: "entry-1", slot_number: 1 },
+      { id: "final-entry-2", race_entry_id: "entry-4", slot_number: 2 },
+    ],
+  );
+
+  // A matching retry replays instead of superseding the podium a second time.
+  const replay = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: correctionCommand, revision,
+      reason: "Photo review changed the podium before the event was completed.",
+      results: correctedPodium,
+    },
+  ), env, actor);
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).replayed, true);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-final' AND status = 'SUPERSEDED'",
+  ).get().count, 2);
+  // The same identifier for different material is a conflict.
+  const reused = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: correctionCommand, revision,
+      reason: "A different correction reusing the identifier.",
+      results: [{ raceEntryId: "entry-1", place: 1 }, { raceEntryId: "entry-4", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(reused.status, 409);
+
+  const completion = await handleEventOperations(jsonRequest(
+    "/api/v1/staff/events/event/complete",
+    "POST",
+    { commandId: commandId() },
+  ), env, actor);
+  assert.equal(completion.status, 201, JSON.stringify(await completion.clone().json()));
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a final result is reopenable while the event is still FINAL and the event never moves", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { env, revision } = await seedPublishedFinal(database);
+
+  const reopened = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/reopen",
+    "POST",
+    { commandId: commandId(), revision, reason: "The podium needs one more video review." },
+  ), env, actor);
+  assert.equal(reopened.status, 201, JSON.stringify(await reopened.clone().json()));
+  const reopenedRevision = (await reopened.json()).heat.revision;
+  assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-final'").get().status, "AWAITING_RESULT");
+  // Reopening a `COMPLETED` event's final walks it back to `FINAL`. Reopening
+  // one that is already `FINAL` must leave it there rather than anywhere else.
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "FINAL");
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-final' AND status = 'FINALIZED'",
+  ).get().count, 0);
+  // The final roster is untouched: a FINAL reopen removes no promotion.
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_entries WHERE heat_id = 'heat-final'",
+  ).get().count, 2);
+
+  const republished = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/finalize",
+    "POST",
+    {
+      commandId: commandId(),
+      revision: reopenedRevision,
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(republished.status, 201, JSON.stringify(await republished.clone().json()));
+  const completion = await handleEventOperations(jsonRequest(
+    "/api/v1/staff/events/event/complete",
+    "POST",
+    { commandId: commandId() },
+  ), env, actor);
+  assert.equal(completion.status, 201, JSON.stringify(await completion.clone().json()));
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The old refusal blamed "return processing", a concept this product does not
+// have: no role, no status, no endpoint, and no column implements it. What the
+// guard actually reads is `event_ducks.released_at`, set when a duck is deleted
+// or released back to inventory, plus the event's own status.
+test("final correction and reopen name their real preconditions", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { env, revision } = await seedPublishedFinal(database);
+
+  // A duck has left the event, so a result row's assignment no longer describes
+  // a duck in this race.
+  database.exec(`
+    UPDATE event_ducks
+       SET released_at = '2026-07-26T13:00:00Z', release_reason = 'STAFF_RELEASED',
+           released_by_staff_profile_id = 'staff'
+     WHERE id = 'event-duck-6'
+  `);
+  const correction = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "A correction attempted after a duck left the event.",
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(correction.status, 409);
+  assert.equal(
+    (await correction.json()).error,
+    "Final results cannot be corrected once a duck has been released from this event.",
+  );
+  const reopen = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/reopen",
+    "POST",
+    { commandId: commandId(), revision, reason: "A reopen attempted after a duck left the event." },
+  ), env, actor);
+  assert.equal(reopen.status, 409);
+  assert.equal(
+    (await reopen.json()).error,
+    "Final results cannot be reopened once a duck has been released from this event.",
+  );
+  // The console is told the same thing rather than offering a control the
+  // server refuses.
+  const detail = await (await handleHeatOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event/heats/heat-final"),
+    env,
+    actor,
+  )).json();
+  assert.equal(detail.heat.resultCorrectionAllowed, false);
+  assert.equal(detail.heat.resultReopenAllowed, false);
+  // Nothing was written by either refusal.
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-final'",
+  ).get().count, 0);
+
+  // The other precondition, stated separately so a caller is never told the
+  // wrong reason: the event has to be in a state where a final result exists to
+  // revise at all.
+  database.exec(`
+    UPDATE event_ducks SET released_at = NULL, release_reason = NULL,
+           released_by_staff_profile_id = NULL WHERE id = 'event-duck-6';
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+  `);
+  const wrongState = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "A correction attempted from the wrong event state.",
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(wrongState.status, 409);
+  assert.equal(
+    (await wrongState.json()).error,
+    "Final results can be corrected only while the event is FINAL or COMPLETED.",
+  );
+  const wrongStateReopen = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/reopen",
+    "POST",
+    { commandId: commandId(), revision, reason: "A reopen attempted from the wrong event state." },
+  ), env, actor);
+  assert.equal(wrongStateReopen.status, 409);
+  assert.equal(
+    (await wrongStateReopen.json()).error,
+    "Final results can be reopened only while the event is FINAL or COMPLETED.",
+  );
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 

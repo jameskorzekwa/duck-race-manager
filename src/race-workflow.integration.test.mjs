@@ -144,6 +144,155 @@ const createWorkerHarness = (database) => {
   };
 };
 
+// Drives a whole race through the real handlers up to the moment the final is
+// `AWAITING_RESULT`, which is where every completion question below starts.
+// Nothing here writes event-domain SQL: the event, the registrations, the
+// ducks, the pairings, the heats, and the round-one podium all come out of the
+// same endpoints the console calls, so the layout under test is a layout the
+// application can actually produce.
+//
+// `racerCount / heatCapacity` round-one heats each promote their winner, so the
+// caller chooses the finalist count by choosing those two numbers.
+const raceToAwaitingFinal = async (database, { name, slug, racerCount, heatCapacity }) => {
+  const { api, post } = createWorkerHarness(database);
+  const created = await jsonBody(await post("/api/v1/staff/events", {
+    commandId: crypto.randomUUID(),
+    slug,
+    name,
+    eventDate: "2026-09-12",
+    roundOneHeatCapacity: heatCapacity,
+  }, adminToken), 201, "create event");
+  const eventId = created.event.id;
+  await jsonBody(await api(`/api/v1/staff/events/${eventId}/configuration`, {
+    method: "PATCH",
+    token: adminToken,
+    body: {
+      commandId: crypto.randomUUID(),
+      revision: created.event.revision,
+      roundOneHeatCapacity: heatCapacity,
+      finalHeatCapacity: 10,
+      publicNamePolicy: "FIRST_NAME_LAST_INITIAL",
+    },
+  }), 200, "configure event");
+  await jsonBody(await post(`/api/v1/staff/events/${eventId}/open-registration`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "open registration");
+
+  const participants = [];
+  for (let index = 0; index < racerCount; index += 1) {
+    const registration = await jsonBody(await post(`/api/v1/staff/events/${eventId}/registrations`, {
+      commandId: crypto.randomUUID(),
+      privateToken: randomToken(),
+      firstName: `Racer${index}`,
+      lastName: "Example",
+      email: `racer${index}@example.com`,
+    }), 201, `walk-up registration ${index}`);
+    const participant = {
+      registrationId: registration.registration.registrationId,
+      lookupCode: registration.registration.lookupCode,
+      raceEntryId: registration.registration.raceEntryId,
+    };
+    const provisioning = await jsonBody(await post("/api/v1/staff/inventory/provisioning", {
+      commandId: crypto.randomUUID(),
+      eventId,
+    }), 201, "provision duck");
+    participant.visibleNumber = provisioning.visibleNumber;
+    participant.tagToken = provisioning.tagUrl.split("/").at(-1);
+    await jsonBody(await post("/api/v1/staff/inventory/provisioning/confirm", {
+      commandId: crypto.randomUUID(),
+      eventId,
+      duckId: provisioning.duckId,
+      provisioningCommandId: provisioning.provisioningCommandId,
+      physicalWriteVerified: true,
+    }), 201, "confirm duck");
+    await jsonBody(await post(`/api/v1/staff/ducks/${participant.tagToken}/assignments`, {
+      commandId: crypto.randomUUID(),
+      eventId,
+      lookupCode: participant.lookupCode,
+    }), 201, `pair duck ${participant.visibleNumber}`);
+    participants.push(participant);
+  }
+
+  await jsonBody(await post(`/api/v1/staff/events/${eventId}/close-registration`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "close registration");
+  await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-round-one`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "start round one");
+
+  const transition = async (heat, operation) => {
+    const body = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/${operation}`,
+      { commandId: crypto.randomUUID(), revision: heat.revision },
+    ), 201, `${operation} heat ${heat.number}`);
+    heat.revision = body.heat.revision;
+    heat.status = body.heat.status;
+  };
+
+  const listed = await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats`, {
+    token: staffToken,
+  }), 200, "list heats");
+  const roundOneHeats = listed.heats.filter((heat) => heat.round === "ROUND_ONE");
+  assert.equal(roundOneHeats.length, racerCount / heatCapacity, "the requested round-one layout");
+  for (const heat of roundOneHeats) {
+    const detail = await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats/${heat.id}`, {
+      token: staffToken,
+    }), 200, `round-one heat ${heat.number}`);
+    heat.revision = detail.heat.revision;
+    for (const operation of ["ready", "call", "start", "finish"]) await transition(heat, operation);
+    const published = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`,
+      {
+        commandId: crypto.randomUUID(),
+        revision: heat.revision,
+        results: [{ raceEntryId: detail.roster[0].raceEntryId, place: 1 }],
+      },
+    ), 201, `publish round-one heat ${heat.number}`);
+    heat.revision = published.heat.revision;
+  }
+
+  await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-final`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "start final");
+  const finalHeat = (await jsonBody(await api(`/api/v1/staff/events/${eventId}/heats`, {
+    token: staffToken,
+  }), 200, "list final")).heats.find((heat) => heat.round === "FINAL");
+  const finalDetail = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final roster");
+  finalHeat.revision = finalDetail.heat.revision;
+  for (const operation of ["ready", "call", "start", "finish"]) await transition(finalHeat, operation);
+  assert.equal(finalHeat.status, "AWAITING_RESULT");
+
+  // The participant record for each finalist, in the roster order the promotion
+  // wrote, so a caller can name a podium finisher by position.
+  const finalists = finalDetail.roster.map((entry) =>
+    participants.find((participant) => participant.raceEntryId === entry.raceEntryId));
+  const registrationRevision = async (participant) => (await jsonBody(await api(
+    `/api/v1/staff/registrations/${participant.registrationId}`,
+    { token: staffToken },
+  ), 200, "load a registration before changing its status")).registration.revision;
+  const leaveRace = async (participant, operation) => jsonBody(await post(
+    `/api/v1/staff/registrations/${participant.registrationId}/${operation}`,
+    { commandId: crypto.randomUUID(), expectedRevision: await registrationRevision(participant) },
+  ), 201, `${operation} racer ${participant.visibleNumber}`);
+  const completionReadiness = async () => (await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/readiness`,
+    { token: staffToken },
+  ), 200, "completion readiness")).readiness.complete;
+  return {
+    api,
+    post,
+    eventId,
+    participants,
+    finalists,
+    finalHeat,
+    leaveRace,
+    completionReadiness,
+  };
+};
+
 // The blocker this covers: the final podium is sized by the finalists who can
 // still take a place, so a withdrawal reduces it. If any surface keeps demanding
 // three places, the third one can never be filled — its duck answers every scan
@@ -367,6 +516,294 @@ test("a final reduced by a withdrawal is still published and the event completed
     false,
     "the withdrawn finalist is absent from every public surface",
   );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// ---------------------------------------------------------------------------
+// A published podium is immutable; the eligible count is not.
+// ---------------------------------------------------------------------------
+//
+// The release blocker these cover: the completion check compared the number of
+// published podium places against `MIN(3, eligible finalists)` with `!=`. The
+// left side is frozen the moment the podium is finalized. The right side moves
+// every time somebody leaves the race, and leaving is allowed at any heat state
+// including `FINALIZED`. So disqualifying a winner after the podium was
+// published retroactively judged a correct podium "incomplete" and shut every
+// exit at once: `complete` refused, the same expression guarded the batch, the
+// final result could not be corrected while the event was still `FINAL`, and
+// `Reset heat` refuses a published result. The only way out was undoing the
+// disqualification — which is exactly the record a race director must keep.
+//
+// "Disqualify the winner after the race" is the single most likely reason
+// `DISQUALIFIED` exists, so each of these drives it through the real endpoints.
+
+test("a podium finisher disqualified after publication never strands the event", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Disqualified Winner Race",
+    slug: "disqualified-winner-race",
+    racerCount: 9,
+    heatCapacity: 3,
+  });
+  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness } = race;
+  assert.equal(finalists.length, 3, "three heats promote three finalists");
+
+  const published = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: finalHeat.revision,
+      results: finalists.map((finalist, index) => ({
+        raceEntryId: finalist.raceEntryId,
+        place: index + 1,
+      })),
+    },
+  ), 201, "publish the full three-place podium");
+  assert.deepEqual(published.results.map((result) => result.place), [1, 2, 3]);
+  const publishedFinalRevision = published.heat.revision;
+
+  assert.equal((await completionReadiness()).allowed, true, "completion is allowed before the disqualification");
+
+  // The race director disqualifies the published second place, through the real
+  // endpoint, with a real revision. Nothing about the heat or the results moves.
+  await leaveRace(finalists[1], "disqualify");
+  assert.equal(
+    database.prepare(
+      "SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = ? AND status = 'FINALIZED'",
+    ).get(finalHeat.id).count,
+    3,
+    "the published podium rows are untouched by a status change",
+  );
+
+  // This is the assertion the blocker fails: readiness must still allow it, and
+  // must report no blocker at all.
+  const after = await completionReadiness();
+  assert.deepEqual(after.blockers, [], "a disqualification is never a completion blocker");
+  assert.equal(after.allowed, true);
+
+  // And the guarded batch must agree with the preflight, because they now share
+  // one expression. A 409 here would mean readiness lied.
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete the event after disqualifying a podium finisher");
+  assert.equal(completed.event.status, "COMPLETED");
+  // Completion did not have to renumber, supersede, or delete anything.
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE event_id = ?",
+  ).get(eventId).count, 0);
+  assert.equal(database.prepare(
+    "SELECT revision FROM heats WHERE id = ?",
+  ).get(finalHeat.id).revision, publishedFinalRevision);
+
+  // S4, decided and documented in docs/WORKFLOWS.md: the public podium keeps the
+  // historical place numbers, so a disqualified second place leaves a visible
+  // gap at places 1 and 3 rather than promoting the third-place racer. Privacy
+  // is absolute — the disqualified racer appears nowhere — but renumbering would
+  // publish a claim the race never made about who finished second.
+  const board = await jsonBody(await api("/api/v1/race-board"), 200, "completed public board");
+  assert.deepEqual(board.event.podium.map((entry) => entry.place), [1, 3]);
+  assert.deepEqual(
+    board.event.podium.map((entry) => entry.duckNumber),
+    [finalists[0].visibleNumber, finalists[2].visibleNumber],
+  );
+  assert.equal(
+    board.event.podium.some((entry) => entry.duckNumber === finalists[1].visibleNumber),
+    false,
+    "the disqualified finisher is absent from every public surface",
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a podium finisher who withdraws after publication never strands the event", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Withdrawn Winner Race",
+    slug: "withdrawn-winner-race",
+    racerCount: 9,
+    heatCapacity: 3,
+  });
+  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness } = race;
+
+  await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: finalHeat.revision,
+      results: finalists.map((finalist, index) => ({
+        raceEntryId: finalist.raceEntryId,
+        place: index + 1,
+      })),
+    },
+  ), 201, "publish the full three-place podium");
+
+  // The published *winner* leaves. Nothing shallower is worth pinning: if first
+  // place can go without stranding the race, no place can.
+  await leaveRace(finalists[0], "withdraw");
+  const after = await completionReadiness();
+  assert.deepEqual(after.blockers, []);
+  assert.equal(after.allowed, true);
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete the event after the winner withdraws");
+  assert.equal(completed.event.status, "COMPLETED");
+
+  const board = await jsonBody(await api("/api/v1/race-board"), 200, "completed public board");
+  assert.deepEqual(board.event.podium.map((entry) => entry.place), [2, 3]);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The variant that fires without anybody touching the podium at all.
+test("withdrawing non-podium finalists below the published depth never strands the event", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Five Finalist Race",
+    slug: "five-finalist-race",
+    racerCount: 15,
+    heatCapacity: 3,
+  });
+  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness } = race;
+  assert.equal(finalists.length, 5, "five heats promote five finalists");
+
+  const published = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: finalHeat.revision,
+      results: finalists.slice(0, 3).map((finalist, index) => ({
+        raceEntryId: finalist.raceEntryId,
+        place: index + 1,
+      })),
+    },
+  ), 201, "publish a three-place podium out of five finalists");
+  assert.deepEqual(published.results.map((result) => result.place), [1, 2, 3]);
+
+  // Three finalists who hold no place at all leave. The podium is not touched
+  // and every published place still belongs to an eligible racer, but the
+  // eligible finalist count drops from five to two — below the published depth
+  // of three, which is precisely what the `!=` comparison could not survive.
+  for (const finalist of finalists.slice(2, 5)) await leaveRace(finalist, "withdraw");
+  assert.equal(
+    database.prepare(
+      `SELECT COUNT(*) AS count FROM heat_entries he
+         JOIN race_entries re ON re.id = he.race_entry_id
+         JOIN registrations r ON r.id = re.registration_id
+        WHERE he.heat_id = ? AND r.status = 'ACTIVE'`,
+    ).get(finalHeat.id).count,
+    2,
+    "two eligible finalists against three published places",
+  );
+
+  const after = await completionReadiness();
+  assert.deepEqual(after.blockers, []);
+  assert.equal(after.allowed, true);
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete the event with a podium deeper than the eligible count");
+  assert.equal(completed.event.status, "COMPLETED");
+
+  const board = await jsonBody(await api("/api/v1/race-board"), 200, "completed public board");
+  assert.deepEqual(board.event.podium.map((entry) => entry.place), [1, 2]);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// Publication and completion measure the same podium with two different
+// comparisons on purpose: exact-on-write, at-least-on-read. This proves they can
+// never contradict each other in either direction.
+test("whatever a final publication accepts, completion accepts immediately", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Publication Agreement Race",
+    slug: "publication-agreement-race",
+    racerCount: 9,
+    heatCapacity: 3,
+  });
+  const { post, eventId, finalHeat, finalists, leaveRace, completionReadiness } = race;
+
+  // A finalist leaves before the podium is published, so publication itself
+  // sizes the podium at two places.
+  await leaveRace(finalists[2], "withdraw");
+  const shallow = await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: finalHeat.revision,
+      results: [{ raceEntryId: finalists[0].raceEntryId, place: 1 }],
+    },
+  );
+  assert.equal(shallow.status, 422, "publication stays exact and refuses a podium that is too shallow");
+  assert.match((await shallow.json()).error, /exactly places 1 through 2\.$/);
+
+  await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: finalHeat.revision,
+      results: [
+        { raceEntryId: finalists[0].raceEntryId, place: 1 },
+        { raceEntryId: finalists[1].raceEntryId, place: 2 },
+      ],
+    },
+  ), 201, "publish the podium publication itself demanded");
+  assert.equal(
+    (await completionReadiness()).allowed,
+    true,
+    "a podium the publisher just accepted is always completable",
+  );
+
+  // The one direction that legitimately raises the requirement: reactivating a
+  // finalist restores a racer who can hold a place, so the podium genuinely owes
+  // them one. Completion says so, names which side is short, and the remedy is
+  // reachable rather than circular.
+  const reactivated = await jsonBody(await post(
+    `/api/v1/staff/registrations/${finalists[2].registrationId}/reactivate`,
+    {
+      commandId: crypto.randomUUID(),
+      expectedRevision: database.prepare(
+        "SELECT revision FROM registrations WHERE id = ?",
+      ).get(finalists[2].registrationId).revision,
+    },
+  ), 201, "reactivate the finalist");
+  assert.equal(reactivated.registration.status, "ACTIVE");
+  const owed = await completionReadiness();
+  assert.equal(owed.allowed, false);
+  assert.deepEqual(owed.blockers, [
+    "A finalized final published fewer podium places than its eligible finalists can fill."
+    + " Correct or reopen that final result and publish the full podium.",
+  ]);
+  const refused = await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  });
+  assert.equal(refused.status, 409, "the guarded batch agrees with the preflight");
+
+  // The documented remedy, reachable while the event is still FINAL.
+  const currentFinal = await jsonBody(await race.api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final heat before the correction");
+  assert.equal(currentFinal.heat.resultCorrectionAllowed, true);
+  const corrected = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/correct`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: currentFinal.heat.revision,
+      reason: "The third finalist was reactivated and holds the third place.",
+      results: [
+        { raceEntryId: finalists[0].raceEntryId, place: 1 },
+        { raceEntryId: finalists[1].raceEntryId, place: 2 },
+        { raceEntryId: finalists[2].raceEntryId, place: 3 },
+      ],
+    },
+  ), 201, "correct the final podium while the event is still FINAL");
+  assert.deepEqual(corrected.results.map((result) => result.place), [1, 2, 3]);
+  assert.equal((await completionReadiness()).allowed, true);
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete after the correction");
+  assert.equal(completed.event.status, "COMPLETED");
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 

@@ -1355,3 +1355,155 @@ test("event operations migration retains defaults independently of event deletio
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM organization_event_defaults").get().count, 1);
   database.close();
 });
+
+// The readiness stat and the guarded `COMPLETE_EVENT` command share one SQL
+// expression, and it is a `<`, not a `!=`. The published place count is frozen
+// when the podium is finalized; `MIN(3, eligible finalists)` moves every time
+// somebody withdraws or is disqualified, which is allowed at any heat state
+// including `FINALIZED`. Comparing the two for equality retroactively judged a
+// correct podium incomplete and left the event with no exit at all.
+//
+// This drives the real readiness route and the real `complete` transition
+// against the migrated schema, in both directions, so neither the preflight nor
+// the batch can drift.
+test("completion readiness is monotone: leaving the race only ever lowers the podium it demands", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  database.exec("PRAGMA foreign_keys = ON");
+  const migrationsUrl = new URL("../db/migrations/", import.meta.url);
+  for (const name of readdirSync(migrationsUrl).filter((item) => /^\d{4}_.+\.sql$/.test(item)).sort()) {
+    database.exec(readFileSync(new URL(name, migrationsUrl), "utf8"));
+  }
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, display_name)
+    VALUES ('staff_test', 'staff-sub', 'staff@example.com', 'Race Director');
+    INSERT INTO events
+      (id, slug, name, event_date, timezone, status, heat_assignment_mode,
+       round_one_heat_capacity, final_heat_capacity)
+    VALUES ('event_test', 'monotone-race', 'Monotone Race', '2026-08-30', 'America/Denver',
+            'FINAL', 'IMMEDIATE_FIXED', 3, 10);
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('final', 'event_test', 'FINAL', 1, 'PLANNED', 3);
+  `);
+  const registration = database.prepare(`
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES (?, 'event_test', ?, 'Duck', 'ACTIVE', ?, ?, '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z')
+  `);
+  const raceEntry = database.prepare(
+    "INSERT INTO race_entries (id, event_id, registration_id) VALUES (?, 'event_test', ?)",
+  );
+  const duck = database.prepare(`
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES (?, ?, 'IN_USE', '2026-07-26T00:00:00Z')
+  `);
+  const eventDuck = database.prepare(`
+    INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES (?, 'event_test', ?, '2026-07-26T00:00:00Z', 'staff_test')
+  `);
+  const assignCommand = database.prepare(`
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES (?, 'event_test', 'ASSIGN_DUCK', ?, '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff_test')
+  `);
+  const assignment = database.prepare(`
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES (?, 'event_test', ?, ?, ?, '2026-07-26T00:00:00Z', 'staff_test', ?)
+  `);
+  const heatEntry = database.prepare(`
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES (?, 'event_test', 'final', ?, 'FINAL', ?, 'WINNER_PROMOTION', '2026-07-26T01:00:00Z')
+  `);
+  for (let index = 1; index <= 3; index += 1) {
+    registration.run(`registration-${index}`, `Finalist${index}`, `CODE000${index}`, `hash-${index}`);
+    raceEntry.run(`entry-${index}`, `registration-${index}`);
+    duck.run(`duck-${index}`, index);
+    eventDuck.run(`event-duck-${index}`, `duck-${index}`);
+    assignCommand.run(`assign-${index}`, `assignment-${index}`);
+    assignment.run(`assignment-${index}`, `entry-${index}`, `event-duck-${index}`, `duck-${index}`, `assign-${index}`);
+    heatEntry.run(`final-entry-${index}`, `entry-${index}`, index);
+  }
+  // A published three-place podium on a finalized final: the immutable side.
+  database.exec(`
+    UPDATE heats SET status = 'FINALIZED', roster_locked_at = '2026-07-26T01:30:00Z',
+           finalized_at = '2026-07-26T02:00:00Z' WHERE id = 'final';
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('final-result', 'event_test', 'FINALIZE_HEAT_RESULT', 'final',
+            '2026-07-26T02:00:00Z', '2026-07-26T02:00:00Z', 'staff_test');
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('place-1', 'event_test', 'final', 'entry-1', 'assignment-1', 1, 1, '2026-07-26T02:00:00Z', 'staff_test', 'final-result'),
+           ('place-2', 'event_test', 'final', 'entry-2', 'assignment-2', 2, 1, '2026-07-26T02:00:00Z', 'staff_test', 'final-result'),
+           ('place-3', 'event_test', 'final', 'entry-3', 'assignment-3', 3, 1, '2026-07-26T02:00:00Z', 'staff_test', 'final-result');
+  `);
+  const env = makeEnv(sqliteD1(database));
+  const completionReadiness = async () => {
+    const response = await handleEventOperations(
+      new Request("https://quickducks.com/api/v1/staff/events/event_test/readiness"),
+      env,
+      staff,
+    );
+    assert.equal(response.status, 200);
+    return (await response.json()).readiness.complete;
+  };
+
+  assert.equal((await completionReadiness()).allowed, true, "a full podium completes");
+
+  // Every way the eligible count can shrink below the published depth, at every
+  // depth, still completes. Three published places against zero eligible
+  // finalists is the extreme, and it is still not a blocker.
+  for (const [label, sql] of [
+    ["one disqualified", "UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-2'"],
+    ["two gone", "UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1'"],
+    ["nobody eligible", "UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-3'"],
+  ]) {
+    database.exec(sql);
+    const readiness = await completionReadiness();
+    assert.deepEqual(readiness.blockers, [], label);
+    assert.equal(readiness.allowed, true, label);
+  }
+
+  // The other direction is a real shortfall and must still be refused, with a
+  // message that names which side is short rather than claiming a place is
+  // missing when the podium has one too many.
+  database.exec("UPDATE registrations SET status = 'ACTIVE'");
+  database.exec("DELETE FROM heat_results WHERE id = 'place-3'");
+  const short = await completionReadiness();
+  assert.equal(short.allowed, false);
+  assert.deepEqual(short.blockers, [
+    "A finalized final published fewer podium places than its eligible finalists can fill."
+    + " Correct or reopen that final result and publish the full podium.",
+  ]);
+  // The guarded batch is the authority and agrees with the preflight.
+  const refused = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/complete", "POST", { commandId: crypto.randomUUID() }),
+    env,
+    staff,
+  );
+  assert.equal(refused.status, 409);
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status, "FINAL");
+
+  // Restore the podium and the transition commits.
+  database.exec(`
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('place-3', 'event_test', 'final', 'entry-3', 'assignment-3', 3, 1,
+            '2026-07-26T02:00:00Z', 'staff_test', 'final-result');
+  `);
+  database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-1'");
+  const completed = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/complete", "POST", { commandId: crypto.randomUUID() }),
+    env,
+    staff,
+  );
+  assert.equal(completed.status, 201, JSON.stringify(await completed.clone().json()));
+  assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status, "COMPLETED");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});

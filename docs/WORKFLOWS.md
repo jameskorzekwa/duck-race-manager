@@ -1313,12 +1313,39 @@ winner, and that batch requires an `ACTIVE` racer. A finalist who leaves after
 being promoted stays on the final roster and simply cannot take a place.
 
 A race director or system administrator can complete the event when the final is finalized,
-all final heats are finalized or cancelled, and each finalized final contains
-exactly places 1 through `min(3, eligible final roster size)`. The podium is only
-as deep as the racers who can hold a place, counted the same way in
-`validateResultSet`, in the readiness stats, and in the guarded `COMPLETE_EVENT`
-command; counting a withdrawn finalist would demand a place nobody is allowed to
-fill and leave the event permanently incompletable.
+all final heats are finalized or cancelled, and each finalized final holds **at
+least** `min(3, eligible final roster size)` published places. The podium is only
+as deep as the racers who can hold a place, and a withdrawn finalist would
+otherwise demand a place nobody is allowed to fill.
+
+**The completion check is monotone: leaving the race can only ever lower the
+podium it demands, never invalidate one already published.** Publication and
+completion measure the same podium with two deliberately different comparisons:
+
+- **Exact on write.** `validateResultSet` requires a new or corrected final
+  result to contain exactly places 1 through `min(3, eligible final roster
+  size)`, so a director can neither skip a place an eligible finalist could hold
+  nor invent one nobody can.
+- **At least on read.** The completion readiness stat and the guarded
+  `COMPLETE_EVENT` command share one SQL expression that refuses only when the
+  published place count is **less than** `min(3, eligible final roster size)`.
+
+The two sides are not the same kind of number. The published place count is
+frozen the moment the podium is finalized. The eligible finalist count is not,
+because withdrawal and disqualification are allowed at any heat state including
+`FINALIZED`. Comparing them for equality meant that disqualifying a winner after
+the race retroactively judged a correct podium "incomplete" and stranded the
+event with no exit: completion refused, the same expression guarded the batch,
+and `Reset heat` refuses a published result. A podium holding *more* places than
+the current requirement is the normal, correct state after somebody leaves, and
+it completes. Nothing is renumbered and no result row is rewritten.
+
+Reactivation is the one change that moves the requirement upward, because it
+restores a racer who can hold a place. Completion then reports which side is
+short — "A finalized final published fewer podium places than its eligible
+finalists can fill. Correct or reopen that final result and publish the full
+podium." — and the remedy is reachable, because a final result can be corrected
+or reopened while the event is still `FINAL`.
 
 `COMPLETED` is the final lifecycle status. There is no transition past it; the
 event stays there, with results publicly visible, until an administrator runs
@@ -2266,6 +2293,11 @@ whose duck answers every scan with `DUCK_NOT_ELIGIBLE`; the final could never be
 published, `Complete event` would stay blocked, and the event would be stranded
 with no way out but reactivating the racer.
 
+**A withdrawal after the podium is published shrinks nothing.** Publication
+sizes the podium at the moment it is written; completion afterwards only ever
+requires that the published podium be *at least* as deep as the current eligible
+count, never exactly equal to it. See Start Final and Complete Event.
+
 The console result form — used for the FINAL finalize, the FINAL correction, and
 the ROUND_ONE correction — offers only eligible racers in its place selects, so
 it cannot propose a winner the server refuses, and it does not preselect a
@@ -2304,17 +2336,46 @@ the final roster is locked or underway.
 
 ### Final Correction
 
-Current final result correction and reopen routes are available only after the
-event has been moved to `COMPLETED`. Therefore an operator who finds a podium
-error must first complete the event, then correct or reopen it.
+A published final result can be corrected or reopened while the event is
+**`FINAL` or `COMPLETED`**. `FINAL` is the state a race director is actually in
+the moment they disqualify a winner, so it is the state the remedy has to work
+from.
+
+Requiring `COMPLETED` alone made the documented remedy circular: an event whose
+podium the completion check disagreed with could not be completed, and the
+correction that would have fixed the podium refused to run until the event was
+completed. Admitting `FINAL` breaks that loop with the state the director
+already has. It cannot corrupt anything the `COMPLETED` path protects: a
+`FINAL`-round correction computes no finalist promotion at all, because only a
+round-one winner feeds a final roster, and neither correction nor reopen writes
+the event's status forward, so an event that is already `COMPLETED` stays where
+it is.
 
 A direct final correction supersedes the old podium and publishes a new result
-revision while the event remains `COMPLETED`. Reopening supersedes and removes
-the podium, changes the heat to `AWAITING_RESULT`, and moves the event back to
-`FINAL`; staff must republish the podium and complete the event again.
+revision, leaving the event's status untouched. Reopening supersedes and removes
+the podium and changes the heat to `AWAITING_RESULT`; if the event was
+`COMPLETED` it is moved back to `FINAL`, and if it was already `FINAL` it stays
+there. Staff republish the podium and complete the event.
 
-Final correction and reopen are blocked after any event duck reservation is
-released.
+Both carry the same discipline as every other result mutation: `RACE_DIRECTOR`
+or a system administrator, the exact application `Origin` for cookie-
+authenticated sessions, the currently loaded heat revision, a 4-to-500-character
+reason, an RFC 4122 v4 `commandId` whose matching retry replays and whose reuse
+for different material is `409`, and one guarded batch that repeats every
+precondition the preflight checked.
+
+Final correction and reopen are blocked once any event duck reservation has been
+released — a deleted or released duck means a published result's duck assignment
+no longer describes a duck in this race. The refusal says exactly that: "Final
+results cannot be corrected once a duck has been released from this event."
+Attempting either from any other event status reports the other precondition
+separately: "Final results can be corrected only while the event is FINAL or
+COMPLETED." Neither message refers to return processing, which is not a concept
+this product implements.
+
+The console follows the server-projected `resultCorrectionAllowed` and
+`resultReopenAllowed` capabilities rather than re-deriving the rule, so it offers
+the forms during `FINAL` and hides them once a duck has been released.
 
 Historical result revisions remain until the event is deleted.
 
@@ -2408,6 +2469,38 @@ finalist who withdrew held first place, second place is **not** promoted to
 first, it is simply the only place still published. A heat whose whole roster
 withdrew is still published as a heat, with its number and status and an empty
 roster, because its bags physically still exist.
+
+#### The Public Podium Keeps Its Place Numbers
+
+**Decided:** disqualifying or withdrawing a published podium finisher leaves a
+**visible gap** in the public podium. Disqualifying the published second place
+publishes places 1 and 3, two entries with a hole between them. QuickDucks does
+not renumber, promote, or close the gap.
+
+That gap is the honest answer. The place numbers are what the race produced and
+what the official `heat_results` rows still say; an appeal is decided from those
+rows. Renumbering third place to second would publish a claim the race never
+made about who finished second, and it would disagree with the staff heat
+detail, the audit history, and the participant's own private status page, all of
+which keep reporting the place that was actually raced. A gap invites the
+question "what happened to second?", which has a real answer; a silent promotion
+answers it wrongly and unrecoverably.
+
+The gap is also self-limiting. It only appears because the podium row is
+retained while its racer is hidden, and the retention is deliberate: privacy is
+absolute, and the racer who left appears nowhere in the public payload — no
+name, no duck number, no place. A race director who wants the places closed up
+has a real remedy rather than an automatic one, and it is reachable from `FINAL`:
+correct the final result, which supersedes the old podium and publishes a
+genuinely new one under a recorded reason. See Final Correction.
+
+The same rule already governs a round-one heat whose published winner leaves.
+That heat stays `FINALIZED` and publishes its surviving roster with nobody
+holding first place, rather than promoting a racer who did not win.
+
+`race-board.test.mjs` pins this behaviour, and
+`race-workflow.integration.test.mjs` proves it end to end through the real
+handlers after a real disqualification.
 
 A followed collection link is never deleted by this rule, so reactivating the
 participant restores the followed card by itself with nothing to re-follow.

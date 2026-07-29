@@ -131,7 +131,7 @@ const heatSummarySql = `SELECT h.id, h.event_id, h.round, h.heat_number, h.statu
          ))
          OR (h.round = 'FINAL' AND EXISTS (
            SELECT 1 FROM events e
-            WHERE e.id = h.event_id AND e.status = 'COMPLETED'
+            WHERE e.id = h.event_id AND e.status IN ('FINAL', 'COMPLETED')
               AND NOT EXISTS (
                 SELECT 1 FROM event_ducks ed
                  WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
@@ -155,7 +155,7 @@ const heatSummarySql = `SELECT h.id, h.event_id, h.round, h.heat_number, h.statu
          ))
          OR (h.round = 'FINAL' AND EXISTS (
            SELECT 1 FROM events e
-            WHERE e.id = h.event_id AND e.status = 'COMPLETED'
+            WHERE e.id = h.event_id AND e.status IN ('FINAL', 'COMPLETED')
               AND NOT EXISTS (
                 SELECT 1 FROM event_ducks ed
                  WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
@@ -1285,6 +1285,19 @@ const validateResultSet = (
   // place where a non-`ACTIVE` roster entry changes a number, and it changes only
   // how many places exist — never who may hold one, which stays `ACTIVE`-only
   // below and in the guarded SQL.
+  //
+  // This stays an exact count and deliberately does not copy the `<` that the
+  // completion check uses. The two measure different things. This one validates
+  // a set about to be written, where the eligible count *is* the count at write
+  // time and there is no earlier publication to preserve; completion judges a
+  // set written in the past against a requirement that has moved since.
+  // Exact-on-write plus at-least-on-read is precisely what makes the two
+  // impossible to contradict: anything accepted here is immediately
+  // `>= MIN(3, eligible)`, so a heat that just published can always be
+  // completed, and anything completion still refuses leaves at least one more
+  // eligible finalist than published places, which is exactly a correction this
+  // function will accept. Loosening this to `<` instead would let a director
+  // publish a two-place podium for three eligible finalists.
   const eligibleRosterCount = roster.filter((entry) => entry.registration_status === "ACTIVE").length;
   const finalPlaceCount = Math.min(3, eligibleRosterCount);
   if (eligibleRosterCount === 0) {
@@ -1634,6 +1647,24 @@ const supersedeResultStatements = (
   ).bind(eventId, heatId),
 ];
 
+// A published final result may be revised while the race is still the race:
+// `FINAL` is the state a director is actually in the moment they disqualify a
+// winner, and `COMPLETED` is where they are if they notice afterwards.
+//
+// Requiring `COMPLETED` alone made the documented remedy circular. The event
+// could not be completed while its podium disagreed with the current eligible
+// count, and the correction that would fix the podium refused to run until the
+// event was completed. Admitting `FINAL` breaks that loop with the state
+// transition the director already has, and it cannot corrupt anything the
+// `COMPLETED` path protects: a `FINAL`-round correction computes no finalist
+// promotion at all (only a `ROUND_ONE` winner feeds a final roster), and neither
+// correction nor reopen writes the event's status forward, so an event that is
+// already `COMPLETED` stays exactly where it was.
+const FINAL_RESULT_REVISABLE_EVENT_STATUSES = ["FINAL", "COMPLETED"];
+
+// The one remaining hard stop, and the only thing the retired "return
+// processing" wording was ever really guarding: a duck has left this event, so
+// the assignment a result row points at no longer describes a duck in the race.
 const downstreamFinalGuard = async (env: Env, eventId: string): Promise<boolean> => {
   const dependency = await env.DB.prepare(
     `SELECT 1 AS blocked FROM event_ducks ed
@@ -1642,6 +1673,14 @@ const downstreamFinalGuard = async (env: Env, eventId: string): Promise<boolean>
   ).bind(eventId).first<{ blocked: number }>();
   return dependency !== null;
 };
+
+// Named preconditions rather than one message that blamed a concept this
+// product does not have. `operation` is a fixed internal literal.
+const finalResultStateError = (operation: "corrected" | "reopened"): string =>
+  `Final results can be ${operation} only while the event is FINAL or COMPLETED.`;
+
+const finalResultReleasedDuckError = (operation: "corrected" | "reopened"): string =>
+  `Final results cannot be ${operation} once a duck has been released from this event.`;
 
 const reopenResults = async (
   request: Request,
@@ -1680,8 +1719,11 @@ const reopenResults = async (
       return json({ error: "This result feeds a final roster that is already locked or underway." }, 409);
     }
   } else {
-    if (context.event_status !== "COMPLETED" || await downstreamFinalGuard(env, eventId)) {
-      return json({ error: "Final results cannot be reopened after return processing has begun." }, 409);
+    if (!FINAL_RESULT_REVISABLE_EVENT_STATUSES.includes(context.event_status)) {
+      return json({ error: finalResultStateError("reopened") }, 409);
+    }
+    if (await downstreamFinalGuard(env, eventId)) {
+      return json({ error: finalResultReleasedDuckError("reopened") }, 409);
     }
   }
 
@@ -1695,11 +1737,11 @@ const reopenResults = async (
          FROM heats h JOIN events e ON e.id = h.event_id
         WHERE h.id = ? AND h.event_id = ? AND h.status = 'FINALIZED' AND h.revision = ?
           AND ((h.round = 'ROUND_ONE' AND e.status IN ('ROUND_ONE', 'FINAL'))
-            OR (h.round = 'FINAL' AND e.status = 'COMPLETED'
+            OR (h.round = 'FINAL' AND e.status IN ('FINAL', 'COMPLETED')
               AND NOT EXISTS (
                 SELECT 1 FROM event_ducks ed
-                 WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
-              )))`,
+                    WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
+                 )))`,
     ).bind(commandId, eventId, heatId, now, now, actor.id, reason, requestFingerprint, heatId, eventId, revision),
     ...supersedeResultStatements(env, eventId, heatId, actor.id, commandId, reason, now),
   ];
@@ -1790,8 +1832,10 @@ const correctResults = async (
     if (promotion === null || !["PLANNED", "LOADING"].includes(promotion.final_heat_status)) {
       return json({ error: "This winner can be corrected only before the final heat is ready." }, 409);
     }
-  } else if (context.event_status !== "COMPLETED" || await downstreamFinalGuard(env, eventId)) {
-    return json({ error: "Final results cannot be corrected after return processing has begun." }, 409);
+  } else if (!FINAL_RESULT_REVISABLE_EVENT_STATUSES.includes(context.event_status)) {
+    return json({ error: finalResultStateError("corrected") }, 409);
+  } else if (await downstreamFinalGuard(env, eventId)) {
+    return json({ error: finalResultReleasedDuckError("corrected") }, 409);
   }
 
   const now = new Date().toISOString();
@@ -1815,7 +1859,7 @@ const correctResults = async (
                   AND final_heat.round = 'FINAL'
                   AND final_heat.status IN ('PLANNED', 'LOADING')
              ))
-             OR (h.round = 'FINAL' AND e.status = 'COMPLETED'
+             OR (h.round = 'FINAL' AND e.status IN ('FINAL', 'COMPLETED')
                AND NOT EXISTS (
                  SELECT 1 FROM event_ducks ed
                   WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL

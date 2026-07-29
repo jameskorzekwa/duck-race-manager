@@ -273,6 +273,34 @@ const eligibleEntryCountSql = (eventColumn: string, heatColumn: string): string 
                  AND r.status = 'ACTIVE'
             )`;
 
+// "This final published fewer podium places than its eligible finalists can
+// fill." The comparison is deliberately `<` and never `!=`.
+//
+// The published place count is immutable once the podium is finalized; the
+// eligible entry count is not, because withdrawal and disqualification are
+// allowed at any heat state including `FINALIZED`. Demanding equality compared
+// a frozen number against a moving one, so disqualifying a winner after the
+// podium was published retroactively judged a correct podium "incomplete" and
+// stranded the event: `complete` was refused, the final result could not be
+// corrected while the event was still `FINAL`, and `Reset heat` refuses a
+// published result. The only exit was undoing the disqualification, which is
+// exactly the record a director must be able to keep.
+//
+// `<` makes the requirement monotone in the only direction a withdrawal moves
+// it: leaving the race can shrink `MIN(3, eligible)` but can never invalidate a
+// podium that is already at least that deep. A podium with more places than the
+// current requirement is the expected, correct state after somebody leaves —
+// the historical places stay exactly as they were raced.
+//
+// The readiness computation and the guarded `COMPLETE_EVENT` command both
+// interpolate this one string, so a preflight that says "allowed" and a batch
+// that commits can never disagree about the podium.
+const podiumShorterThanEligibleDepthSql = (eventColumn: string, heatColumn: string): string => `(
+               SELECT COUNT(*) FROM heat_results hr
+                WHERE hr.event_id = ${eventColumn} AND hr.heat_id = ${heatColumn}
+                  AND hr.status = 'FINALIZED'
+             ) < MIN(3, ${eligibleEntryCountSql(eventColumn, heatColumn)})`;
+
 const normalizedHeatCapacity = (value: unknown, minimum: number): number | null =>
   Number.isInteger(value) && (value as number) >= minimum && (value as number) <= 10_000
     ? value as number
@@ -787,10 +815,7 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
            AND h.status = 'FINALIZED') AS final_finalized_heat_count,
         (SELECT COUNT(*) FROM heats h
           WHERE h.event_id = e.id AND h.round = 'FINAL' AND h.status = 'FINALIZED'
-            AND (
-              SELECT COUNT(*) FROM heat_results hr
-               WHERE hr.event_id = e.id AND hr.heat_id = h.id AND hr.status = 'FINALIZED'
-            ) != MIN(3, ${eligibleEntryCountSql("e.id", "h.id")})) AS final_missing_result_count
+            AND ${podiumShorterThanEligibleDepthSql("e.id", "h.id")}) AS final_missing_result_count
      FROM events e
      WHERE e.id = ?`,
   ).bind(eventId).first<ReadinessStats>();
@@ -999,10 +1024,7 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
         AND NOT EXISTS (
           SELECT 1 FROM heats h
            WHERE h.event_id = e.id AND h.round = 'FINAL' AND h.status = 'FINALIZED'
-             AND (
-               SELECT COUNT(*) FROM heat_results hr
-                WHERE hr.event_id = e.id AND hr.heat_id = h.id AND hr.status = 'FINALIZED'
-             ) != MIN(3, ${eligibleEntryCountSql("e.id", "h.id")})
+             AND ${podiumShorterThanEligibleDepthSql("e.id", "h.id")}
         )`,
     updateSql: `UPDATE events SET status = 'COMPLETED', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'FINAL'
@@ -1227,7 +1249,16 @@ const readinessFor = (
     case "complete":
       if (stats.final_finalized_heat_count === 0) blockers.push("At least one final heat must be finalized.");
       if (stats.final_unfinished_heat_count > 0) blockers.push("Every final heat must be finalized or cancelled.");
-      if (stats.final_missing_result_count > 0) blockers.push("Every finalized final heat needs a complete podium result.");
+      // Names which side is short, because only one direction is a problem. A
+      // podium holding *more* places than the current requirement is the normal
+      // state after a finalist leaves and is never reported here at all — the
+      // old wording claimed a place was missing in exactly that case.
+      if (stats.final_missing_result_count > 0) {
+        blockers.push(
+          "A finalized final published fewer podium places than its eligible finalists can fill."
+          + " Correct or reopen that final result and publish the full podium.",
+        );
+      }
       break;
     case "close-registration":
       break;

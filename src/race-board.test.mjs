@@ -317,10 +317,24 @@ test("withdrawn and disqualified racers vanish from every board surface without 
   assert.deepEqual(after.event.roundOneHeats[0].roster.map((entry) => entry.duckNumber), [2, 4]);
   assert.deepEqual(after.event.finalHeats[0].roster.map((entry) => entry.duckNumber), [2, 4]);
   assert.deepEqual(after.event.podium.map((entry) => [entry.place, entry.duckNumber]), [[1, 2], [3, 4]]);
-  // Nothing was renumbered to close the gap: the surviving finisher keeps third
-  // place, not second, because the physical bags and the official results are
-  // unchanged.
+  // S4, the recorded product decision — see "The Public Podium Keeps Its Place
+  // Numbers" in docs/WORKFLOWS.md. Disqualifying the published second place
+  // leaves a visible gap at places 1 and 3, and that gap stays. Renumbering the
+  // survivor to second would publish a claim the race never made about who
+  // finished second, and the official result rows, which are what an appeal is
+  // decided from, still say third. Privacy is absolute either way: the racer who
+  // left is nowhere in the payload. A director who wants the places closed up
+  // corrects the final result, which republishes a genuinely new podium.
+  assert.deepEqual(after.event.podium.map((entry) => entry.place), [1, 3]);
+  assert.equal(after.event.podium.length, 2, "the podium shrinks rather than promoting anybody");
   assert.deepEqual(after.event.finalHeats[0].roster.map((entry) => entry.place), [1, 3]);
+  // The projection reports exactly the stored places, unmodified.
+  assert.deepEqual(
+    database.prepare(
+      "SELECT place FROM heat_results WHERE heat_id = 'final' AND status = 'FINALIZED' ORDER BY place",
+    ).all().map((row) => row.place),
+    [1, 2, 3],
+  );
   assert.equal(after.event.roundOneHeats[0].roster[0].participantDisplayName, "Bravo");
 
   // The round-one heat's published winner was the racer who withdrew. That heat
