@@ -9,6 +9,8 @@ import {
   renderStaffAccess,
   renderStaffDuck,
   renderStaffHome,
+  renderStaffNoAccess,
+  renderStaffRegistration,
   renderStartLine,
 } from "./site.ts";
 
@@ -39,11 +41,16 @@ const navHrefs = (nav) => [...nav.matchAll(/<a href="([^"]+)"/g)].map((match) =>
 const eventScopedToggle = () => {
   const source = staffHomeScript.match(/const showEventScopedSections = \(eventExists\) => \{[\s\S]*?\n\};/)?.[0];
   assert.ok(source, "the console script defines showEventScopedSections");
-  return (elements, noRaceState) => new Function(
+  // The view switcher is the other half of the same gating pass, so it is
+  // injected here and its calls are recorded rather than reimplemented.
+  return (elements, noRaceState, appliedViews = []) => new Function(
     "eventScopedElements",
     "noRaceState",
+    "applyConsoleView",
+    "requestedConsoleView",
+    "appliedViews",
     `${source} return showEventScopedSections;`,
-  )(elements, noRaceState);
+  )(elements, noRaceState, (view) => appliedViews.push(view), () => null, appliedViews);
 };
 
 const scopedElement = (roleAllowed) => ({ hidden: true, dataset: roleAllowed === undefined ? {} : { roleAllowed } });
@@ -99,17 +106,94 @@ test("every event-scoped console section ships hidden so no section flashes befo
       assert.match(tag, / data-role-allowed="(?:true|false)"/, `${label}: ${id} must declare role gating`);
       assert.match(tag, / hidden>$/, `${label}: ${id} must ship hidden`);
     }
-    // The Event section is never event-scoped: it is the section that creates one.
-    const events = sectionTag(markup, "events");
+    // The Event Details view is never event-scoped: it is the view that creates one.
+    const events = sectionTag(markup, "event");
     assert.ok(events);
-    assert.doesNotMatch(events, /data-event-scoped/, `${label}: the event section is always available`);
-    assert.doesNotMatch(events, /hidden/, `${label}: the event section is not hidden`);
+    assert.doesNotMatch(events, /data-event-scoped/, `${label}: the event view is always available`);
+    assert.doesNotMatch(events, /hidden/, `${label}: the event view is not hidden`);
+    // Every section is also an Admin view, so exactly one can be displayed.
+    assert.match(events, / data-console-view="event"/, label);
   }
 
-  // A console user with no roles at all still gets no console script and a hidden event section.
+  // An account with no roles at all has no console to ship: it gets the real
+  // "No operational roles assigned" page instead of an empty console shell, so
+  // there is no section, no menu bar, and no console script to load.
   const noRoles = renderStaffHome("No Role", false, []);
-  assert.match(sectionTag(noRoles, "events"), / hidden>$/);
+  assert.match(noRoles, /No operational roles assigned/);
+  assert.equal(sectionTag(noRoles, "event"), null);
   assert.doesNotMatch(noRoles, /src="\/assets\/staff-home\.js"/);
+  assert.doesNotMatch(noRoles, /class="console-nav"|data-console-view|data-console-message/);
+});
+
+// The Admin console is a menu bar over separate views. Only one is displayed at
+// a time, and the switcher is driven by the URL hash so a view is linkable and
+// moves with browser back and forward.
+test("the Admin menu bar lists six items in order and every view is a separate section", () => {
+  const markup = renderStaffHome("Administrator", true, []);
+  const menu = consoleNav(markup);
+
+  assert.match(menu, /aria-label="Admin views"/);
+  assert.deepEqual(navHrefs(menu), [
+    "#event",
+    "#heats",
+    "#participants",
+    "/staff/inventory",
+    "#support",
+    "/staff/access",
+  ]);
+  assert.deepEqual(
+    [...menu.matchAll(/<a [^>]*>([^<]+)<\/a>/g)].map((match) => match[1]),
+    ["Event Details", "Heats", "Participants", "Inventory", "Support", "Access"],
+  );
+
+  // Event Details is the default view and is marked current in the served markup.
+  assert.match(menu, /<a href="#event" data-console-view-link="event" aria-current="page">Event Details<\/a>/);
+  assert.equal((menu.match(/aria-current="page"/g) ?? []).length, 1);
+
+  // Each in-page item names the view it switches to; the two page links do not.
+  for (const view of ["event", "heats", "participants", "support"]) {
+    assert.match(menu, new RegExp(`<a href="#${view}" data-console-view-link="${view}"`), view);
+    assert.match(markup, new RegExp(`<section class="console-section" id="${view}"[^>]* data-console-view="${view}"`), view);
+  }
+  assert.doesNotMatch(menu, /\/staff\/(?:inventory|access)" data-console-view-link/);
+
+  // Exactly one view is visible in the served markup: Event Details. The other
+  // three keep their existing event scope and ship hidden.
+  const viewTags = [...markup.matchAll(/<section class="console-section" id="[a-z]+"[^>]*>/g)].map((match) => match[0]);
+  assert.equal(viewTags.length, 4);
+  assert.equal(viewTags.filter((tag) => / hidden>$/.test(tag)).length, 3);
+});
+
+test("the Admin menu bar also renders on the two pages it links out to", () => {
+  const inventory = renderStaffInventory("Administrator", "https://quickducks.com", true, []);
+  const access = renderStaffAccess("Administrator", true, []);
+
+  // Off the console the hash items are absolute links back into /staff, they
+  // carry no console hooks, and none of them ships hidden — nothing on those
+  // pages would ever reveal them.
+  for (const [label, markup, current] of [
+    ["inventory", inventory, "/staff/inventory"],
+    ["access", access, "/staff/access"],
+  ]) {
+    const menu = consoleNav(markup);
+    assert.deepEqual(navHrefs(menu), [
+      "/staff#event",
+      "/staff#heats",
+      "/staff#participants",
+      "/staff/inventory",
+      "/staff#support",
+      "/staff/access",
+    ], label);
+    assert.doesNotMatch(menu, /data-console-view-link|data-event-scoped|hidden/, label);
+    assert.match(menu, new RegExp(`<a href="${current}" aria-current="page">`), label);
+    assert.equal((menu.match(/aria-current="page"/g) ?? []).length, 1, label);
+  }
+
+  // A non-administrator duck manager has no Admin console, so no menu bar; the
+  // top-level staff nav carries their Inventory link instead.
+  const duckManager = renderStaffInventory("Duck Manager", "https://quickducks.com", false, ["DUCK_MANAGER"]);
+  assert.doesNotMatch(duckManager, /class="console-nav"/);
+  assert.match(staffNav(duckManager), /<a href="\/staff\/inventory" aria-current="page">Inventory<\/a>/);
 });
 
 test("role gating is recorded on each event-scoped section and survives event existence", () => {
@@ -138,36 +222,43 @@ test("role gating is recorded on each event-scoped section and survives event ex
   assert.equal(sectionTag(director, "support"), null);
 });
 
-test("console-nav anchors are event-scoped, ship hidden, and stay role filtered", () => {
+test("Admin menu-bar items are event-scoped, ship hidden, and stay role filtered", () => {
   const admin = consoleNav(renderStaffHome("Administrator", true, []));
-  assert.deepEqual(navHrefs(admin), ["#events", "#participants", "#heats", "#support"]);
-  // Inventory and Access are pages in the persistent staff nav, not repeated here.
-  assert.doesNotMatch(admin, /\/staff\/(?:inventory|access)|#access/);
-  for (const anchor of admin.matchAll(/<a href="#([a-z]+)"([^>]*)>/g)) {
-    if (anchor[1] === "events") {
-      assert.equal(anchor[2], "", "the event anchor is always visible");
+  for (const anchor of admin.matchAll(/<a href="#([a-z]+)" data-console-view-link="[a-z]+"([^>]*)>/g)) {
+    if (anchor[1] === "event") {
+      assert.equal(anchor[2], ' aria-current="page"', "the event item is always visible and starts current");
       continue;
     }
-    assert.equal(anchor[2], ' data-event-scoped hidden', `#${anchor[1]} must ship hidden and event-scoped`);
+    assert.equal(anchor[2], " data-event-scoped hidden", `#${anchor[1]} must ship hidden and event-scoped`);
   }
 
-  // Role filtering still removes anchors entirely for roles that cannot use them.
-  assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Announcer", false, ["ANNOUNCER"]))), ["#events", "#heats"]);
-  // An account with no operational roles gets no console anchor at all.
-  assert.deepEqual(navHrefs(consoleNav(renderStaffHome("Roleless Staff", false, []))), []);
+  // Role filtering removes items entirely for roles that cannot use them, and
+  // the item's gating always matches the gating of the surface it opens.
+  assert.deepEqual(
+    navHrefs(consoleNav(renderStaffHome("Announcer", false, ["ANNOUNCER"]))),
+    ["#event", "#heats"],
+  );
+  // An account with no operational roles gets no console, and therefore no
+  // menu bar to be filtered at all.
+  assert.doesNotMatch(renderStaffHome("Roleless Staff", false, []), /class="console-nav"/);
   assert.deepEqual(
     navHrefs(consoleNav(renderStaffHome("Registration Staff", false, ["REGISTRATION"]))),
-    ["#events", "#participants"],
+    ["#event", "#participants"],
   );
+  // A duck manager reaches Inventory from the menu bar's page link.
   assert.deepEqual(
     navHrefs(consoleNav(renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]))),
-    ["#events"],
+    ["#event", "/staff/inventory"],
   );
+  // Support and Access stay administrator-only.
+  for (const role of ["RACE_DIRECTOR", "REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
+    assert.doesNotMatch(consoleNav(renderStaffHome("Staff", false, [role])), /#support|\/staff\/access/, role);
+  }
 });
 
 test("the console renders a hidden No race yet state that the no-events branch reveals", () => {
   const markup = renderStaffHome("Administrator", true, []);
-  const eventsSection = markup.match(/<section class="console-section" id="events"[^]*?<\/section>/)?.[0];
+  const eventsSection = markup.match(/<section class="console-section" id="event"[^]*?<\/section>/)?.[0];
 
   assert.ok(eventsSection);
   assert.match(eventsSection, /<div class="notice" data-no-race hidden><strong>No race yet\.<\/strong>/);
@@ -182,7 +273,8 @@ test("the generated gating function reveals only role-allowed sections and follo
   const deniedSection = scopedElement("false");
   const navAnchor = scopedElement();
   const noRaceState = { hidden: true };
-  const showEventScopedSections = build([allowedSection, deniedSection, navAnchor], noRaceState);
+  const appliedViews = [];
+  const showEventScopedSections = build([allowedSection, deniedSection, navAnchor], noRaceState, appliedViews);
 
   // An event exists: role-allowed sections and their anchors appear, denied ones do not.
   showEventScopedSections(true);
@@ -204,6 +296,87 @@ test("the generated gating function reveals only role-allowed sections and follo
   assert.equal(allowedSection.hidden, false);
   assert.equal(deniedSection.hidden, true);
   assert.equal(noRaceState.hidden, true);
+
+  // Every pass hands the final say over section visibility to the view switcher.
+  assert.equal(appliedViews.length, 4);
+});
+
+// The switcher itself, lifted out of the generated script so the shipped
+// browser code is exercised rather than a copy of it.
+const consoleViewSwitcher = (sections, links, eventExists) => {
+  const source = staffHomeScript.match(
+    /const consoleViewAvailable = [\s\S]*?\nconst applyConsoleView = \(requested\) => \{[\s\S]*?\n\};/,
+  )?.[0];
+  assert.ok(source, "the console script defines the Admin view switcher");
+  return new Function(
+    "consoleViewSections",
+    "consoleViewLinks",
+    "consoleEventExists",
+    `${source} return applyConsoleView;`,
+  )(sections, links, eventExists);
+};
+
+const viewSection = (view, { eventScoped = false, roleAllowed } = {}) => ({
+  hidden: true,
+  dataset: roleAllowed === undefined ? { consoleView: view } : { consoleView: view, roleAllowed },
+  hasAttribute: (name) => name === "data-event-scoped" && eventScoped,
+});
+
+const viewLink = (view) => ({
+  dataset: { consoleViewLink: view },
+  current: null,
+  setAttribute(name, value) {
+    if (name === "aria-current") this.current = value;
+  },
+  removeAttribute(name) {
+    if (name === "aria-current") this.current = null;
+  },
+});
+
+test("the view switcher shows exactly one permitted view and falls back when one is unavailable", () => {
+  const event = viewSection("event");
+  const heats = viewSection("heats", { eventScoped: true, roleAllowed: "true" });
+  const participants = viewSection("participants", { eventScoped: true, roleAllowed: "false" });
+  const links = ["event", "heats", "participants"].map(viewLink);
+
+  // No event yet: only the always-available Event Details view can show, so a
+  // hash pointing at an event-scoped view falls back to it.
+  const beforeEvent = consoleViewSwitcher([event, heats, participants], links, false);
+  assert.equal(beforeEvent("heats"), "event");
+  assert.deepEqual([event.hidden, heats.hidden, participants.hidden], [false, true, true]);
+  assert.deepEqual(links.map((link) => link.current), ["page", null, null]);
+
+  // Once the event loads the same hash resolves to the requested view.
+  const afterEvent = consoleViewSwitcher([event, heats, participants], links, true);
+  assert.equal(afterEvent("heats"), "heats");
+  assert.deepEqual([event.hidden, heats.hidden, participants.hidden], [true, false, true]);
+  assert.deepEqual(links.map((link) => link.current), [null, "page", null]);
+
+  // A role-denied view can never be reached, however it is requested.
+  assert.equal(afterEvent("participants"), "event");
+  assert.equal(participants.hidden, true, "the switcher never reveals a role-denied section");
+  // An unknown or absent hash lands on the first permitted, available view.
+  assert.equal(afterEvent(null), "event");
+  assert.equal(afterEvent("nonsense"), "event");
+  // Exactly one section is visible after every pass.
+  assert.equal([event, heats, participants].filter((section) => !section.hidden).length, 1);
+});
+
+test("the console binds the view switcher to the hash, page load, and roster deep links", () => {
+  assert.ok(staffHomeScript.includes('const consoleViewSections = [...document.querySelectorAll("[data-console-view]")];'));
+  assert.ok(staffHomeScript.includes('const consoleViewLinks = [...document.querySelectorAll("[data-console-view-link]")];'));
+  // Linkable, reload-safe, and back/forward aware.
+  assert.ok(staffHomeScript.includes('const hash = location.hash.replace(/^#/, "");'));
+  assert.ok(staffHomeScript.includes('globalThis.addEventListener("hashchange", () => applyConsoleView(requestedConsoleView()));'));
+  assert.ok(staffHomeScript.includes("\napplyConsoleView(requestedConsoleView());"));
+  // A heat-roster participant link switches views through the same hash path.
+  assert.ok(staffHomeScript.includes('revealConsoleSection("participants");'));
+  assert.ok(staffHomeScript.includes("else location.hash = view;"));
+  // Loading data never depends on a view being displayed: hidden views stay
+  // populated so switching to one is instant and refresh keeps working.
+  assert.ok(staffHomeScript.includes("if (canRegistration) loads.push(loadParticipants(true));"));
+  assert.ok(staffHomeScript.includes("if (canRaceRead) loads.push(loadHeats(), loadFinalists());"));
+  assert.doesNotMatch(staffHomeScript, /if \([a-zA-Z]+\.hidden\) return;\s*\n\s*(?:await )?load/);
 });
 
 test("the console drives gating from the event load and the no-events branch", () => {
@@ -232,48 +405,88 @@ test("the console drives gating from the event load and the no-events branch", (
 });
 
 test("the staff nav lists only the pages the actor may open", () => {
-  const everyPage = ["/staff", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory", "/staff/access"];
+  const everyPage = [
+    "/staff",
+    "/staff/registration",
+    "/staff/announcer",
+    "/staff/start-line",
+    "/staff/finish-line",
+  ];
+  // The nav is read from the page each actor actually lands on, so a role is
+  // never asserted against a console it could not open. A station-only actor
+  // never sees `renderStaffHome` at all.
+  const stationPage = (roles) => roles.includes("HEAT_RUNNER")
+    ? renderStartLine("Staff", true, false, roles)
+    : roles.includes("RESULT_TAKER")
+      ? renderFinishLine("Staff", true, false, roles)
+      : roles.includes("ANNOUNCER")
+        ? renderAnnouncer("Staff", true, false, roles)
+        : roles.includes("REGISTRATION")
+          ? renderStaffRegistration("Staff", false, roles)
+          : renderStaffInventory("Staff", "https://quickducks.com", false, roles);
+
   const cases = [
+    // An administrator reaches Inventory and Access from the Admin menu bar, so
+    // the top-level nav does not repeat them.
     [renderStaffHome("Administrator", true, []), everyPage],
-    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), ["/staff", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory"]],
-    [renderStaffHome("Heat Runner", false, ["HEAT_RUNNER"]), ["/staff", "/staff/start-line"]],
-    [renderStaffHome("Result Taker", false, ["RESULT_TAKER"]), ["/staff", "/staff/finish-line"]],
-    [renderStaffHome("Duck Manager", false, ["DUCK_MANAGER"]), ["/staff", "/staff/inventory"]],
-    [renderStaffHome("Announcer", false, ["ANNOUNCER"]), ["/staff", "/staff/announcer"]],
-    [renderStaffHome("Registration Staff", false, ["REGISTRATION"]), ["/staff"]],
-    [renderStaffHome("No Role", false, []), ["/staff"]],
-    [renderStaffHome("Mixed Staff", false, ["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff", "/staff/finish-line", "/staff/inventory"]],
-    [renderStaffHome("Mixed Race Staff", false, ["ANNOUNCER", "HEAT_RUNNER"]), ["/staff", "/staff/announcer", "/staff/start-line"]],
+    // A race director opens the Admin view too, so Admin is offered and their
+    // Inventory link moves into that menu bar exactly as an administrator's does.
+    [renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]), everyPage],
+    [stationPage(["HEAT_RUNNER"]), ["/staff/start-line"]],
+    [stationPage(["RESULT_TAKER"]), ["/staff/finish-line"]],
+    // A duck manager who is neither an administrator nor a race director has no
+    // Admin menu bar, so Inventory is the only link to their own page.
+    [stationPage(["DUCK_MANAGER"]), ["/staff/inventory"]],
+    [stationPage(["ANNOUNCER"]), ["/staff/announcer"]],
+    [stationPage(["REGISTRATION"]), ["/staff/registration"]],
+    [renderStaffNoAccess("No Role"), null],
+    [stationPage(["RESULT_TAKER", "DUCK_MANAGER"]), ["/staff/finish-line", "/staff/inventory"]],
+    [stationPage(["ANNOUNCER", "HEAT_RUNNER"]), ["/staff/announcer", "/staff/start-line"]],
     [renderStaffAccess("Administrator"), everyPage],
+    [renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]), ["/staff/registration"]],
   ];
 
   for (const [markup, expected] of cases) {
     const nav = staffNav(markup);
+    if (expected === null) {
+      // The no-roles page offers no staff page at all, because there is none.
+      assert.equal(nav, null, "the no-access page renders no staff nav");
+      continue;
+    }
     assert.ok(nav, "every staff page renders the staff nav");
     assert.deepEqual(navHrefs(nav), expected);
     assert.match(nav, /aria-label="Staff pages"/);
   }
 
-  // Only an administrator ever sees the access link.
-  for (const role of ["RACE_DIRECTOR", "REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
-    assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /\/staff\/access/, role);
+  // Admin is offered to administrators and race directors and to nobody else.
+  for (const role of ["REGISTRATION", "DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
+    assert.doesNotMatch(staffNav(stationPage([role])), /href="\/staff"/, role);
+    // Access left the top-level nav entirely; it is an Admin menu-bar item.
+    assert.doesNotMatch(staffNav(stationPage([role])), /\/staff\/access/, role);
+  }
+  assert.match(staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])), /href="\/staff"/);
+
+  // Registration is gated exactly like the registration APIs it fronts.
+  for (const role of ["DUCK_MANAGER", "ANNOUNCER", "HEAT_RUNNER", "RESULT_TAKER"]) {
+    assert.doesNotMatch(staffNav(stationPage([role])), /\/staff\/registration/, role);
   }
 
   // Announcer is a race-day station gated exactly like the two it reports on:
   // its own role, the race director, and an administrator implicitly.
   for (const role of ["REGISTRATION", "DUCK_MANAGER", "HEAT_RUNNER", "RESULT_TAKER"]) {
-    assert.doesNotMatch(staffNav(renderStaffHome("Staff", false, [role])), /\/staff\/announcer/, role);
+    assert.doesNotMatch(staffNav(stationPage([role])), /\/staff\/announcer/, role);
   }
 });
 
-// The staff nav reads Console, Announcer, Start line, Finish line, Inventory,
-// Access. Order is asserted as adjacency and as ends of the list, not as fixed
-// indexes, so the requirement survives any later page being added or removed.
-test("the staff nav reads Console, Announcer, Start line, Finish line, Inventory, Access", () => {
+// The staff nav reads Admin, Registration, Announcer, Start line, Finish line,
+// and finally the Inventory fallback for a duck manager with no Admin menu bar.
+// Order is asserted as adjacency and as ends of the list, not as fixed indexes,
+// so the requirement survives any later page being added or removed.
+test("the staff nav reads Admin, Registration, Announcer, Start line, Finish line", () => {
   const navs = [
     ["administrator", staffNav(renderStaffHome("Administrator", true, []))],
     ["race director", staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]))],
-    ["announcer and heat runner", staffNav(renderStaffHome("Mixed", false, ["ANNOUNCER", "HEAT_RUNNER"]))],
+    ["announcer and heat runner", staffNav(renderAnnouncer("Mixed", true, false, ["ANNOUNCER", "HEAT_RUNNER"]))],
   ];
 
   for (const [label, nav] of navs) {
@@ -284,26 +497,42 @@ test("the staff nav reads Console, Announcer, Start line, Finish line, Inventory
       `start line must follow announcer for ${label}`,
     );
     assert.match(nav, /<a href="\/staff\/announcer"[^>]*>Announcer<\/a><a href="\/staff\/start-line"[^>]*>Start line<\/a>/, label);
-    assert.equal(hrefs[0], "/staff", `console is the left-most entry for ${label}`);
   }
 
-  // Access is administrator-only and is always the right-most entry.
+  // Admin is the left-most entry when it appears, and it appears for both of
+  // the actors who can open it: an administrator and a race director. Neither
+  // repeats Inventory, because the Admin menu bar already carries it.
+  const everyAdminPage = [
+    "/staff",
+    "/staff/registration",
+    "/staff/announcer",
+    "/staff/start-line",
+    "/staff/finish-line",
+  ];
   const admin = navHrefs(staffNav(renderStaffHome("Administrator", true, [])));
-  assert.equal(admin.at(-1), "/staff/access");
-  assert.deepEqual(admin, ["/staff", "/staff/announcer", "/staff/start-line", "/staff/finish-line", "/staff/inventory", "/staff/access"]);
+  assert.equal(admin[0], "/staff");
+  assert.deepEqual(admin, everyAdminPage);
 
-  // An announcer without the start-line role still gets the link, and it stays
-  // ahead of the finish line and the inventory page.
-  assert.deepEqual(navHrefs(staffNav(renderStaffHome("Announcer", false, ["ANNOUNCER"]))), ["/staff", "/staff/announcer"]);
   const director = navHrefs(staffNav(renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])));
-  assert.ok(director.indexOf("/staff/announcer") < director.indexOf("/staff/finish-line"));
-  assert.ok(director.indexOf("/staff/finish-line") < director.indexOf("/staff/inventory"));
+  assert.equal(director[0], "/staff");
+  assert.deepEqual(director, everyAdminPage);
+
+  // The Inventory fallback belongs to a duck manager with no Admin menu bar,
+  // and it is the last item.
+  const duckManager = navHrefs(staffNav(
+    renderStaffInventory("Duck Manager", "https://quickducks.com", false, ["DUCK_MANAGER"]),
+  ));
+  assert.deepEqual(duckManager, ["/staff/inventory"]);
+  assert.equal(duckManager.at(-1), "/staff/inventory");
+
+  // An announcer without the start-line role still gets exactly their own link.
+  assert.deepEqual(navHrefs(staffNav(renderAnnouncer("Announcer", true, false, ["ANNOUNCER"]))), ["/staff/announcer"]);
 });
 
 test("the staff nav is on every operational staff page and marks the current one", () => {
   const pages = [
     [renderStaffHome("Administrator", true, []), "/staff"],
-    [renderStaffAccess("Administrator"), "/staff/access"],
+    [renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]), "/staff/registration"],
     [renderStartLine("Heat Runner", true, false, ["HEAT_RUNNER"]), "/staff/start-line"],
     [renderAnnouncer("Announcer", true, false, ["ANNOUNCER"]), "/staff/announcer"],
     [renderFinishLine("Result Taker", true, false, ["RESULT_TAKER"]), "/staff/finish-line"],
@@ -385,10 +614,13 @@ test("the access page keeps every hook, field name, and control the access clien
   assert.match(markup, /<script src="\/assets\/staff-access\.js" defer><\/script>/);
   assert.doesNotMatch(markup, /staff-home\.js/);
 
-  // It is event-independent: no event picker, console sections, or console nav.
+  // It is event-independent: no event picker, no console sections, and no
+  // console client. The Admin menu bar is the one console surface it carries,
+  // so an administrator can navigate back out of it.
   const panel = markup.match(/<main class="shell">[\s\S]*<\/main>/)?.[0];
   assert.ok(panel);
-  assert.doesNotMatch(panel, /data-event-select|data-operations-root|console-section|console-nav|data-event-scoped/);
+  assert.doesNotMatch(panel, /data-event-select|data-operations-root|console-section|data-event-scoped/);
+  assert.match(panel, /<nav class="console-nav" aria-label="Admin views">/);
 });
 
 test("the access client is standalone, DOM-safe, and subscribes to the staff domain", () => {

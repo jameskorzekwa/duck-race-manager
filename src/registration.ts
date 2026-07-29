@@ -123,9 +123,15 @@ const deletableEventStatusSql =
 // of `race_entries`, and they are exactly the race-integrity rows a delete must
 // never tear down. Any assignment counts, including an ended one, because an
 // ended row still restricts the parent delete and still means this entry was
-// paired. `heat_entries` additionally carries the roster-lock trigger, which
-// this path can never reach: a race entry with any heat row is refused outright,
-// so no locked roster is ever touched.
+// paired — and pairing is what put a physical duck into a sealed heat bag.
+// `heat_entries` additionally carries the roster-lock trigger, which this path
+// can never reach: a race entry with any heat row is refused outright, so no
+// locked roster is ever touched and no heat is ever renumbered.
+//
+// The consequence is the product rule: unpaired participants are deleted, paired
+// participants are withdrawn or disqualified instead and their duck stays in the
+// bag. This predicate is the single place that decides which of the two a given
+// registration is eligible for.
 const unpairedRaceEntrySql = `NOT EXISTS (
              SELECT 1 FROM duck_assignments da WHERE da.race_entry_id = re.id
            )

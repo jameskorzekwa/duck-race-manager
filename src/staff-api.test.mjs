@@ -1507,3 +1507,219 @@ test("the pairing list in migrated SQLite shows only participants who still need
   assert.equal(stillUnpaired.exactMatch.lookupCode, participants[1].lookupCode);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
+
+// A pairing decides which physical bag a physical duck goes into, so the
+// response is the only authority on the heat and the browser is forbidden from
+// deriving one. These cover what the bag panel is painted from.
+test("pairing returns the authoritative heat the command committed, including the pending case", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  const participants = seedImmediatePairingEvent(database, { ducksPerHeat: 2, finalHeatCapacity: 10 });
+  const env = makeEnv(sqliteD1(database));
+
+  const bagged = [];
+  for (const participant of participants) {
+    const response = await handleStaffApi(pairRequest(participant.token, participant.lookupCode), env, actor);
+    const body = await response.json();
+    assert.equal(response.status, 201);
+    bagged.push({ heat: body.heat, pending: body.heatAssignmentPending, duck: body.duck.visibleNumber });
+  }
+  // Every response names a round and a number. The third pairing opens heat two,
+  // so a browser that counted pairings would have said "heat 2" for the second.
+  assert.deepEqual(bagged, [
+    { heat: { round: "ROUND_ONE", number: 1 }, pending: false, duck: 1 },
+    { heat: { round: "ROUND_ONE", number: 1 }, pending: false, duck: 2 },
+    { heat: { round: "ROUND_ONE", number: 2 }, pending: false, duck: 3 },
+  ]);
+  // Those are the heats actually stored, so the bag panel matches the database.
+  assert.deepEqual(
+    database.prepare(
+      `SELECT h.heat_number, he.race_entry_id, he.slot_number
+         FROM heat_entries he JOIN heats h ON h.id = he.heat_id
+        ORDER BY h.heat_number, he.slot_number`,
+    ).all().map((row) => ({ ...row })),
+    [
+      { heat_number: 1, race_entry_id: "entry-1", slot_number: 1 },
+      { heat_number: 1, race_entry_id: "entry-2", slot_number: 2 },
+      { heat_number: 2, race_entry_id: "entry-3", slot_number: 1 },
+    ],
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// A replay whose participant holds no heat entry at all reports the pending
+// case honestly instead of inventing a bag number.
+test("a pairing with no resolvable heat reports heatAssignmentPending rather than a number", async () => {
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands")) {
+      return {
+        assignment_id: "assignment_test",
+        visible_number: 42,
+        event_id: "event_test",
+        round_one_heat_capacity: 10,
+        final_heat_capacity: 50,
+        registration_id: "registration_test",
+        registration_status: "ACTIVE",
+        registration_revision: 1,
+        race_entry_id: "entry_test",
+        race_entry_revision: 1,
+        first_name: "Daisy",
+        last_name: "Duck",
+        email: null,
+        phone: null,
+        lookup_code: "DAASY234",
+        heat_round: null,
+        heat_number: null,
+      };
+    }
+    return null;
+  });
+  const response = await handleStaffApi(pairRequest("a".repeat(32), "DAASY234"), makeEnv(db), actor);
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.replayed, true);
+  assert.equal(body.heat, null);
+  assert.equal(body.heatAssignmentPending, true);
+  assert.equal(db.batches.length, 0);
+});
+
+const seedIneligibleScannedDuck = (database, status) => {
+  database.exec("PRAGMA foreign_keys = ON");
+  for (const name of migrationNames) {
+    database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
+  }
+  const token = "w".repeat(32);
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, display_name, is_system_admin, is_active)
+    VALUES ('staff_test', 'staff-sub', 'staff@example.com', 'Staff Member', 0, 1);
+    INSERT INTO events
+      (id, slug, name, event_date, timezone, status, heat_assignment_mode,
+       round_one_heat_capacity, final_heat_capacity)
+    VALUES ('event_test', 'test-race', 'Test Duck Race', '2026-08-30', 'UTC', 'ROUND_ONE',
+            'IMMEDIATE_FIXED', 3, 10);
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES ('registration-1', 'event_test', 'Daisy', 'Duck', '${status}', 'DDDDDDD2',
+            'private-hash-1', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-1', 'event_test', 'registration-1');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck-1', 12, 'IN_USE', '2026-07-26T00:00:00Z');
+    INSERT INTO duck_tags (id, duck_id, token, status, activated_at)
+    VALUES ('tag-1', 'duck-1', '${token}', 'ACTIVE', '2026-07-26T00:00:00Z');
+    INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck-1', 'event_test', 'duck-1', '2026-07-26T00:00:00Z', 'staff_test');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('assign-command-1', 'event_test', 'ASSIGN_DUCK', 'assignment-1',
+            '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', 'staff_test');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES ('assignment-1', 'event_test', 'entry-1', 'event-duck-1', 'duck-1',
+            '2026-07-26T00:00:00Z', 'staff_test', 'assign-command-1');
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-1', 'event_test', 'ROUND_ONE', 3, 'PLANNED', 3);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry-1', 'event_test', 'heat-1', 'entry-1', 'ROUND_ONE', 1, 'PAIRING',
+            '2026-07-26T00:30:00Z');
+    UPDATE heats
+       SET status = 'AWAITING_RESULT', revision = 5,
+           roster_locked_at = '2026-07-26T01:00:00Z', finished_at = '2026-07-26T01:10:00Z'
+     WHERE id = 'heat-1';
+  `);
+  return token;
+};
+
+for (const status of ["WITHDRAWN", "DISQUALIFIED"]) {
+  test(`the scanned duck of a ${status} racer reports an ineligible winner instead of nothing`, async (context) => {
+    const database = new DatabaseSync(":memory:");
+    context.after(() => database.close());
+    const token = seedIneligibleScannedDuck(database, status);
+    const env = makeEnv(sqliteD1(database));
+    const inspect = (roles, isSystemAdmin = false) => handleStaffApi(
+      new Request(`https://quickducks.com/api/v1/staff/ducks/${token}`),
+      env,
+      { ...actor, isSystemAdmin, roles },
+    );
+
+    const response = await inspect(["RESULT_TAKER"]);
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.winnerAction, null, "an inactive racer is never a winner candidate");
+    assert.deepEqual(body.winnerIneligible, {
+      eventId: "event_test",
+      heatId: "heat-1",
+      raceEntryId: "entry-1",
+      heatNumber: 3,
+      round: "ROUND_ONE",
+      reason: "DUCK_NOT_ELIGIBLE",
+      registrationStatus: status,
+      visibleNumber: 12,
+      participantDisplayName: "Daisy D.",
+    });
+    // A result taker still receives no contact detail or lookup code here.
+    assert.deepEqual(Object.keys(body.assignment.participant), ["registrationStatus"]);
+    assert.equal(JSON.stringify(body).includes("DDDDDDD2"), false);
+
+    // Roles that cannot take a result are told nothing about the winner surface.
+    for (const roles of [["REGISTRATION"], ["DUCK_MANAGER"]]) {
+      const narrow = await (await inspect(roles)).json();
+      assert.equal(narrow.winnerAction, null, roles[0]);
+      assert.equal(narrow.winnerIneligible, null, roles[0]);
+    }
+    // An administrator passes the result-taker check implicitly.
+    assert.equal((await (await inspect([], true)).json()).winnerIneligible.registrationStatus, status);
+
+    // Reactivating restores the ordinary winner action, and nothing about the
+    // heat entry moved while the racer was inactive.
+    database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-1'");
+    const reactivated = await (await inspect(["RESULT_TAKER"])).json();
+    assert.equal(reactivated.winnerIneligible, null);
+    assert.equal(reactivated.winnerAction.heatNumber, 3);
+    assert.deepEqual(
+      database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries").all()
+        .map((row) => ({ ...row })),
+      [{ id: "heat-entry-1", heat_id: "heat-1", race_entry_id: "entry-1", slot_number: 1 }],
+    );
+  });
+}
+
+// The ineligible answer is still a staff mutation response, so it sits behind
+// the exact-Origin gate like every other cookie-authenticated staff POST.
+test("confirming an ineligible scanned winner is refused off-origin before any database read", async (context) => {
+  const database = new DatabaseSync(":memory:");
+  context.after(() => database.close());
+  const token = seedIneligibleScannedDuck(database, "WITHDRAWN");
+  const env = makeEnv(sqliteD1(database));
+  const cookieActor = { ...actor, roles: ["RESULT_TAKER"], authentication: "cookie" };
+  const confirm = (origin) => handleApi(
+    new Request(`https://quickducks.com/api/v1/staff/ducks/${token}/heat-winner`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(origin === null ? {} : { origin }),
+      },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: "event_test",
+        heatId: "heat-1",
+        raceEntryId: "entry-1",
+        revision: 5,
+      }),
+    }),
+    env,
+    async () => cookieActor,
+  );
+
+  assert.equal((await confirm(null)).status, 403);
+  assert.equal((await confirm("https://evil.example")).status, 403);
+  const allowed = await confirm("https://quickducks.com");
+  assert.equal(allowed.status, 422);
+  assert.equal((await allowed.json()).reason, "DUCK_NOT_ELIGIBLE");
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'").get().count, 0);
+});

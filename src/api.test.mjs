@@ -1115,8 +1115,14 @@ test("the public duck number lookup is bound and scoped to the current public ev
 // Every public selection lists its statuses explicitly. With the lifecycle down
 // to six statuses, the public allow-list is the five post-draft ones and the
 // retired names must not appear in any public query.
+//
+// Registration statuses are swept in the same pass and held to their own
+// allow-list: a public surface may only ever show a participant who is still
+// racing, so `SUBMITTED` and `ACTIVE` are the complete set and a public query
+// that silently readmits `WITHDRAWN` or `DISQUALIFIED` fails here.
 test("public event, status, and board selections allow exactly the five public statuses", async () => {
   const publicStatuses = "'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED'";
+  const racingStatuses = "'SUBMITTED', 'ACTIVE'";
   const collected = [];
   // Each public entry point is swept on its own so dropping COMPLETED from any
   // single one of them fails here instead of hiding behind the others.
@@ -1127,8 +1133,15 @@ test("public event, status, and board selections allow exactly the five public s
     const selections = swept.filter((sql) => /FROM events|JOIN events/.test(sql) && /status IN \(/.test(sql));
     assert.ok(selections.length > 0, `${label} must pin an explicit public status allow-list`);
     for (const sql of selections) {
-      const list = sql.match(/status IN \(([^)]*)\)/s)[1].replace(/\s+/g, " ").trim();
-      assert.equal(list, publicStatuses, `${label}: ${sql}`);
+      for (const [, qualifier, group] of sql.matchAll(/(?:(\w+)\.)?status IN \(([^)]*)\)/gs)) {
+        const list = group.replace(/\s+/g, " ").trim();
+        const registrationStatus = qualifier === "r" || qualifier === "followed";
+        assert.equal(
+          list,
+          registrationStatus ? racingStatuses : publicStatuses,
+          `${label}: ${sql}`,
+        );
+      }
     }
     return selections.length;
   };

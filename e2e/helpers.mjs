@@ -145,6 +145,67 @@ export const rawJson = async (path, { token, method = "GET", body, origin = base
   };
 };
 
+// Ends a participant's current duck assignment through the inventory API. The
+// registration keeps the ended assignment row and its heat place, which is
+// exactly the state that makes `currentlyPaired` false while `deletable` stays
+// false — the case the staff console used to get wrong.
+export const unassignDuck = async (token, eventId, registrationId) => {
+  const ducks = await rawJson("/api/v1/staff/inventory/ducks", { token });
+  expect(ducks.status).toBe(200);
+  const duck = ducks.body.ducks.find((candidate) =>
+    candidate.assignment !== null && candidate.participant?.registrationId === registrationId
+  );
+  expect(duck, `no current assignment for ${registrationId}`).toBeTruthy();
+  const response = await rawJson(`/api/v1/staff/inventory/assignments/${duck.assignment.id}/unassign`, {
+    token,
+    method: "POST",
+    body: {
+      commandId: crypto.randomUUID(),
+      eventId,
+      expectedRevision: duck.revision,
+      releaseReservation: false,
+      reason: "Playwright verifies the unassigned-but-undeletable console rule.",
+    },
+  });
+  expect(response.status, `unassign ${duck.visibleNumber}: ${JSON.stringify(response.body)}`).toBe(201);
+  return duck;
+};
+
+// Withdrawal, disqualification, and reactivation through the same staff API the
+// console posts to, revision and all. Nothing here writes SQL, so a spec can
+// only reach states the application itself allows: if the server refuses the
+// transition the spec fails here rather than silently testing a fiction.
+export const changeRegistrationStatus = async (token, registrationId, operation) => {
+  const current = await rawJson(`/api/v1/staff/registrations/${registrationId}`, { token });
+  expect(current.status, `load ${registrationId} before ${operation}`).toBe(200);
+  const response = await rawJson(`/api/v1/staff/registrations/${registrationId}/${operation}`, {
+    token,
+    method: "POST",
+    body: { commandId: crypto.randomUUID(), expectedRevision: current.body.registration.revision },
+  });
+  expect(response.status, `${operation} ${registrationId}: ${JSON.stringify(response.body)}`).toBe(201);
+  return response.body.registration;
+};
+
+// The public board as the browser sees it, reduced to the two things a
+// withdrawal must never disturb: which heats exist, and the exact order of the
+// racers and duck numbers inside them.
+export const publicBoardShape = async () => {
+  const board = await rawJson("/api/v1/race-board");
+  expect(board.status).toBe(200);
+  const heats = [...board.body.event.roundOneHeats, ...board.body.event.finalHeats];
+  return {
+    heats: heats.map((heat) => ({
+      round: heat.round,
+      number: heat.number,
+      roster: heat.roster.map((entry) => `${entry.participantDisplayName}|${entry.duckNumber}|${entry.place}`),
+    })),
+    podium: board.body.event.podium.map((entry) =>
+      `${entry.place}|${entry.participantDisplayName}|${entry.duckNumber}`
+    ),
+  };
+};
+
 export const rejectSensitiveKeys = (value) => {
   const forbidden = new Set([
     "email", "phone", "lookupCode", "privateToken", "privateStatusPath",

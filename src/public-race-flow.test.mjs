@@ -14,7 +14,6 @@ import {
   phaseShowsRegisterNav,
   publicPhaseForRender,
   publicPhaseForStatus,
-  racePreparingMessage,
   registrationClosedMessage,
   registrationPreparingMessage,
 } from "./public-phase.ts";
@@ -265,9 +264,10 @@ test("the render-time resolver degrades a failed phase query to Preparing", asyn
 });
 
 test("every public page still renders with the Preparing nav when the phase query fails", async () => {
-  // `/my-ducks` is deliberately absent: it is unreachable in the Preparing
-  // phase, so a degraded paint sends the visitor home instead of rendering.
-  for (const path of ["/", "/register", "/race", "/r/mock", "/t/mock"]) {
+  // `/my-ducks` and `/race` are deliberately absent: both are unreachable in the
+  // Preparing phase, so a degraded paint sends the visitor home instead of
+  // rendering.
+  for (const path of ["/", "/register", "/r/mock", "/t/mock"]) {
     const { queries, response, body } = await failedPage(path);
 
     assert.equal(response.status, 200, path);
@@ -296,20 +296,21 @@ test("the home page degrades to the Preparing hero instead of a 500", async () =
   assert.equal(response.status, 200);
   assert.equal(homeCta(body), null);
   assert.match(body, /data-home-preparing>The next race is being prepared\./);
-  assert.match(body, /Find your duck\. Follow the race\./);
+  assert.match(body, /Find your duck\. Cheer it home\./);
 });
 
-test("/register and /race degrade to their own preparing wording, never each other's", async () => {
+test("/register degrades to its own preparing wording and /race degrades to the redirect", async () => {
   const register = await failedPage("/register");
   assert.equal(register.response.status, 200);
   assert.ok(register.body.includes(registrationPreparingMessage));
-  assert.equal(register.body.includes(racePreparingMessage), false);
   assert.match(register.body, /data-registration-preparing/);
 
+  // A failed phase query resolves to Preparing, which is exactly the phase in
+  // which `/race` has nothing to report, so it takes the same route home.
   const race = await failedPage("/race");
-  assert.equal(race.response.status, 200);
-  assert.ok(race.body.includes(racePreparingMessage));
-  assert.equal(race.body.includes(registrationPreparingMessage), false);
+  assert.equal(race.response.status, 303);
+  assert.equal(race.response.headers.get("location"), "/");
+  assert.equal(race.body, "");
 });
 
 test("/my-ducks renders its saved-ducks surface once there is a race to have ducks in", async () => {
@@ -354,6 +355,34 @@ test("/my-ducks stays reachable in every phase that has a public race", async ()
   }
 });
 
+test("/race redirects home while the race is being prepared, degraded phase or not", async () => {
+  // Preparing is "no event at all" and "a DRAFT event": there is no stage, no
+  // heat, and no result to report, and the nav does not offer the page, so a
+  // bookmark or an old link goes home instead of to an empty race-status page.
+  for (const status of [undefined, "DRAFT"]) {
+    const { response, body } = await page("/race", status);
+    const where = `status ${status ?? "no event"}`;
+    assert.equal(response.status, 303, where);
+    assert.equal(response.headers.get("location"), "/", where);
+    assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000", where);
+    assert.equal(body, "", where);
+  }
+
+  const dead = await worker.fetch(new Request("https://quickducks.com/race"), deadDatabaseEnv());
+  assert.equal(dead.status, 303);
+  assert.equal(dead.headers.get("location"), "/");
+});
+
+test("/race stays reachable in every phase that has a public race", async () => {
+  for (const { phase, statuses } of phaseMatrix) {
+    if (phase === "PREPARING") continue;
+    for (const status of statuses) {
+      const { response } = await page("/race", status);
+      assert.equal(response.status, 200, `${phase} (${status})`);
+    }
+  }
+});
+
 test("a failed phase query cannot 500 the record-backed public pages either", async () => {
   // `/duck/<number>` resolves its record first and only then the phase, so the
   // failing phase read must not change its outcome. The mock resolves no duck,
@@ -380,7 +409,7 @@ test("the not-found page still resolves no phase at all, failing database or not
 });
 
 test("a total database outage still paints the public pages", async () => {
-  for (const path of ["/", "/register", "/race"]) {
+  for (const path of ["/", "/register"]) {
     const response = await worker.fetch(new Request(`https://quickducks.com${path}`), deadDatabaseEnv());
     const body = await response.text();
 
@@ -474,7 +503,7 @@ test("the home page keeps the hero and the three link-free explainer cards", asy
   const { body } = await page("/", "FINAL");
 
   assert.match(body, /<section class="hero">/);
-  assert.match(body, /Find your duck\. Follow the race\./);
+  assert.match(body, /Find your duck\. Cheer it home\./);
   const explainers = body.match(/<section id="how-it-works"[\s\S]*?<\/section>/)?.[0];
   assert.ok(explainers);
   for (const heading of ["Before the race", "At check-in", "On race day"]) {
@@ -496,6 +525,64 @@ test("the home page carries a compact happening-now summary instead of the full 
   assert.doesNotMatch(body, /data-live-board\b/);
   assert.doesNotMatch(body, /data-live-board-content/);
   assert.doesNotMatch(body, /data-live-board-stage/);
+});
+
+test("the home call to action lives in the section titled with the race, not in the hero", async () => {
+  for (const { phase, statuses } of phaseMatrix) {
+    if (phase === "PREPARING") continue;
+    for (const status of statuses) {
+      const { body } = await page("/", status);
+      const where = `${phase} (${status})`;
+      const hero = body.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
+      const summary = body.match(/<section class="status-section" data-live-summary[\s\S]*?<\/section>/)?.[0];
+
+      assert.ok(hero, where);
+      assert.ok(summary, where);
+      // The hero is copy and artwork only; it carries no action row at all.
+      assert.doesNotMatch(hero, /class="actions"/, where);
+      assert.doesNotMatch(hero, /<a\b/, where);
+      assert.doesNotMatch(hero, /data-home-cta/, where);
+      // The CTA is the primary action of the happening-now section, whose title
+      // `live.js` replaces with the event's own name, and it comes before the
+      // secondary board link.
+      assert.deepEqual(homeCta(summary), expectedHomeCta[phase], where);
+      assert.match(
+        summary,
+        /<div class="actions"><a class="button" href="[^"]+" data-home-cta>[^<]+<\/a><a class="button secondary" href="\/race">Open the full race board<\/a><\/div>/,
+        where,
+      );
+      assert.ok(summary.indexOf("data-live-summary-title") < summary.indexOf("data-home-cta"), where);
+      // Exactly one CTA on the page.
+      assert.equal((body.match(/data-home-cta/g) ?? []).length, 1, where);
+    }
+  }
+});
+
+test("the home page no longer offers a How it works button", async () => {
+  for (const { statuses } of phaseMatrix) {
+    for (const status of statuses) {
+      const { body } = await page("/", status);
+      assert.doesNotMatch(body, /How it works/, String(status));
+      assert.doesNotMatch(body, /href="#how-it-works"/, String(status));
+      // The cards section it used to jump to stays exactly where it was.
+      assert.match(body, /<section id="how-it-works" class="cards"/, String(status));
+    }
+  }
+});
+
+test("the home hero and ticker carry the approved race-day copy", async () => {
+  const { body } = await page("/", "REGISTRATION_OPEN");
+
+  assert.match(body, /<h1>Find your duck\. Cheer it home\.<\/h1>/);
+  assert.ok(body.includes(
+    '<p class="lede">A friendly home for the small races that bring a whole town down to the water.'
+    + " Built for the volunteers, families, and rubber ducks that make race day happen.</p>",
+  ));
+  assert.match(
+    body,
+    /<div class="ticker" aria-label="QuickDucks features"><span>Pick your duck<\/span><span>Find your heat<\/span><span>Cheer loudly<\/span><\/div>/,
+  );
+  assert.doesNotMatch(body, /Tap the tag|Follow the race\./);
 });
 
 test("the name search no longer appears anywhere on the home page", async () => {
@@ -594,50 +681,30 @@ test("/race renders the full live board for the five post-DRAFT statuses", async
     assert.match(body, /data-live-board-content/, status);
     assert.match(body, /<p class="message-line muted" data-live-board-error role="alert" hidden><\/p>/, status);
     assert.match(body, /src="\/assets\/live\.js"/, status);
+    // The retired preparing panel cannot come back through this route.
     assert.doesNotMatch(body, /data-race-preparing/, status);
   }
 });
 
-test("/race falls back to its own race-status preparing message before a race exists", async () => {
-  for (const status of [undefined, "DRAFT"]) {
-    const { response, body } = await page("/race", status);
-    const panel = body.match(/<main class="shell">([\s\S]*?)<\/main>/)?.[1];
-
-    assert.equal(response.status, 200, String(status));
-    assert.ok(panel);
-    assert.match(panel, /data-race-preparing/, String(status));
-    // `/race` is a race-status page, so it says what will appear here.
-    assert.ok(panel.includes(racePreparingMessage), String(status));
-    assert.equal(
-      racePreparingMessage,
-      "The next race is being prepared. Live race status will appear here once the race begins.",
-    );
-    // It must never carry the `/register` call to action.
-    assert.doesNotMatch(panel, new RegExp(escapeForRegExp(registrationPreparingMessage)), String(status));
-    assert.doesNotMatch(panel, /come back later to register/, String(status));
-    assert.doesNotMatch(panel, /Registration is not open yet/, String(status));
-    assert.doesNotMatch(panel, /href="\/register"/, String(status));
-    // Still one clear message page and nothing else.
-    assert.equal((panel.match(/<section class="page-panel"/g) ?? []).length, 1, String(status));
-    assert.equal((panel.match(/<h1 /g) ?? []).length, 1, String(status));
-    assert.doesNotMatch(panel, /<form|class="privacy"|class="notice"|class="actions"/, String(status));
-    assert.doesNotMatch(panel, /data-live-board/, String(status));
-    assert.doesNotMatch(body, /src="\/assets\/live\.js"/, String(status));
+test("/race carries no preparing panel and never the /register call to action", async () => {
+  // The preparing branch is gone from the renderer as well as from the route,
+  // so there is no way to paint it and no wording left to confuse with
+  // `/register`'s own approved sentence.
+  for (const status of ["REGISTRATION_OPEN", "ROUND_ONE", "COMPLETED"]) {
+    const { body } = await page("/race", status);
+    assert.doesNotMatch(body, /data-race-preparing/, status);
+    assert.doesNotMatch(body, new RegExp(escapeForRegExp(registrationPreparingMessage)), status);
+    assert.doesNotMatch(body, /come back later to register/, status);
+    assert.doesNotMatch(body, /Live race status will appear here/, status);
   }
-});
 
-test("the two preparing pages never share one another's wording", () => {
-  assert.notEqual(racePreparingMessage, registrationPreparingMessage);
-  // Only `/register` may tell a visitor to come back and register.
+  // Only `/register` may tell a visitor to come back and register, and it still
+  // owns that sentence unchanged.
   assert.match(registrationPreparingMessage, /come back later to register/);
-  assert.doesNotMatch(racePreparingMessage, /register/i);
-
   const registerPreparing = renderRegistration(undefined, "PREPARING");
-  const racePreparing = renderRace("PREPARING");
   assert.ok(registerPreparing.includes(registrationPreparingMessage));
-  assert.equal(registerPreparing.includes(racePreparingMessage), false);
-  assert.ok(racePreparing.includes(racePreparingMessage));
-  assert.equal(racePreparing.includes(registrationPreparingMessage), false);
+  assert.match(registerPreparing, /data-registration-preparing/);
+  assert.equal(renderRace("ROUND_ONE").includes(registrationPreparingMessage), false);
 });
 
 test("/race is noindex and shares the public page security headers", async () => {
@@ -948,7 +1015,6 @@ test("the nav client builds links with safe DOM APIs and no unsafe sinks", () =>
 const publicContentPaths = [
   ["/", "REGISTRATION_OPEN"],
   ["/race", "ROUND_ONE"],
-  ["/race", undefined],
   ["/my-ducks", "ROUND_ONE"],
   ["/register", "REGISTRATION_OPEN"],
   ["/register", undefined],
@@ -1303,8 +1369,8 @@ test("the rendered phase surfaces never disagree with the resolver", () => {
     assert.deepEqual(visibleNav(renderMyDucks(phase)), expectedNav[phase], phase);
     assert.deepEqual(homeCta(home), expectedHomeCta[phase], phase);
     assert.equal(register.includes(registrationPreparingMessage), phase === "PREPARING", phase);
-    assert.equal(race.includes(racePreparingMessage), phase === "PREPARING", phase);
     assert.equal(race.includes(registrationPreparingMessage), false, phase);
+    assert.doesNotMatch(race, /data-race-preparing/, phase);
     assert.equal(
       register.includes(`<h1 class="page-title message-title">${registrationClosedMessage}</h1>`),
       !phaseAllowsRegistration(phase) && phase !== "PREPARING",

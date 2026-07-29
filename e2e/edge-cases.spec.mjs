@@ -109,34 +109,110 @@ test.describe("race edge cases", () => {
   test("keeps role pages least-privileged", async ({ browser }) => {
     const seeded = await seedState("round-one");
     const protectedPages = [
+      ["Registration", "/staff/registration"],
       ["Announcer", "/staff/announcer"],
       ["Start line", "/staff/start-line"],
       ["Finish line", "/staff/finish-line"],
       ["Inventory", "/staff/inventory"],
-      ["Access", "/staff/access"],
     ];
+    // Each role's landing page, the pages it may open, the persistent nav it is
+    // offered, and whether `/staff` gives it the Admin view or sends it on.
+    //
+    // `RACE_DIRECTOR` is the race-day role for changing the state of the overall
+    // race, and every control that does so lives inside the Admin view, so a
+    // race director opens it exactly as an administrator does. `is_system_admin`
+    // remains an account type, and it alone unlocks Support and Access.
     const matrix = [
-      ["ANNOUNCER", "/staff/announcer", "Read this out loud", ["Console", "Announcer"]],
-      ["HEAT_RUNNER", "/staff/start-line", "Prepare the next heat", ["Console", "Start line"]],
-      ["RESULT_TAKER", "/staff/finish-line", "Record one official result", ["Console", "Finish line"]],
-      ["DUCK_MANAGER", "/staff/inventory", "Inventory", ["Console", "Inventory"]],
-      ["REGISTRATION", "/staff", "Race control, in one place", ["Console"]],
-      [
-        "RACE_DIRECTOR", "/staff", "Race control, in one place",
-        ["Console", "Announcer", "Start line", "Finish line", "Inventory"],
-      ],
+      {
+        role: "ANNOUNCER",
+        landing: "/staff/announcer",
+        heading: "Read this out loud",
+        navigation: ["Announcer"],
+        opens: ["Announcer"],
+        adminView: false,
+      },
+      {
+        role: "HEAT_RUNNER",
+        landing: "/staff/start-line",
+        heading: "Prepare the next heat",
+        navigation: ["Start line"],
+        opens: ["Start line"],
+        adminView: false,
+      },
+      {
+        role: "RESULT_TAKER",
+        landing: "/staff/finish-line",
+        heading: "Record one official result",
+        navigation: ["Finish line"],
+        opens: ["Finish line"],
+        adminView: false,
+      },
+      {
+        role: "DUCK_MANAGER",
+        landing: "/staff/inventory",
+        heading: "Inventory",
+        navigation: ["Inventory"],
+        opens: ["Inventory"],
+        adminView: false,
+      },
+      {
+        role: "REGISTRATION",
+        landing: "/staff/registration",
+        heading: "Get people into the race",
+        navigation: ["Registration"],
+        opens: ["Registration"],
+        adminView: false,
+      },
+      {
+        role: "RACE_DIRECTOR",
+        landing: "/staff",
+        heading: "Race control, in one place",
+        // Inventory leaves the top-level nav because the Admin menu bar carries
+        // it, exactly as it does for an administrator.
+        navigation: ["Admin", "Registration", "Announcer", "Start line", "Finish line"],
+        opens: ["Registration", "Announcer", "Start line", "Finish line", "Inventory"],
+        adminView: true,
+      },
     ];
 
-    for (const [role, path, heading, expectedNavigation] of matrix) {
+    for (const { role, landing, heading, navigation, opens, adminView } of matrix) {
       const context = await browser.newContext();
       const page = await context.newPage();
       const account = accountWith(seeded.accounts, role);
-      await signIn(page, account.email, path);
+      expect(account.isSystemAdmin, `${role} must be a regular staff account`).toBe(false);
+      await signIn(page, account.email, landing);
       await expect(page.getByRole("heading", { name: new RegExp(heading, "i") })).toBeVisible();
-      await expect(page.getByRole("navigation", { name: "Staff pages" }).getByRole("link")).toHaveText(expectedNavigation);
+      await expect(page.getByRole("navigation", { name: "Staff pages" }).getByRole("link")).toHaveText(navigation);
       for (const [label, protectedPath] of protectedPages) {
         const response = await page.goto(protectedPath);
-        expect(response.status(), `${role} opening ${label}`).toBe(expectedNavigation.includes(label) ? 200 : 403);
+        expect(response.status(), `${role} opening ${label}`).toBe(opens.includes(label) ? 200 : 403);
+      }
+      // Staff access management is administrator-only for every operational
+      // role, race director included.
+      const access = await page.goto("/staff/access");
+      expect(access.status(), `${role} opening Access`).toBe(403);
+
+      // `/staff` never refuses a regular staff member: it is either their Admin
+      // view or a redirect to the page their own roles open.
+      const staff = await page.request.get("/staff", { maxRedirects: 0 });
+      if (adminView) {
+        expect(staff.status(), `${role} opening the Admin view`).toBe(200);
+        await page.goto("/staff");
+        const menu = page.getByRole("navigation", { name: "Admin views" });
+        await expect(menu.getByRole("link")).toHaveText([
+          "Event Details",
+          "Heats",
+          "Participants",
+          "Inventory",
+        ]);
+        // Support, Access, and every administrator-only card stay absent.
+        await expect(page.locator("#support")).toHaveCount(0);
+        await expect(page.locator("[data-event-create-form]")).toHaveCount(0);
+        await expect(page.locator("[data-event-config-form]")).toHaveCount(0);
+        await expect(page.locator("[data-force-delete-card], [data-open-force-delete]")).toHaveCount(0);
+      } else {
+        expect(staff.status(), `${role} opening the Admin view`).toBe(303);
+        expect(staff.headers().location, `${role} landing page`).toBe(landing);
       }
       await context.close();
     }

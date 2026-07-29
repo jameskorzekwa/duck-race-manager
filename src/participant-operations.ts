@@ -86,6 +86,8 @@ interface RegistrationRow {
   assignment_valid_from: string | null;
   duck_id: string | null;
   duck_visible_number: number | null;
+  is_deletable: number;
+  heat_assignment_pending: number;
 }
 
 const registrationSelect = `
@@ -99,7 +101,19 @@ const registrationSelect = `
          r.revision AS registration_revision,
          re.revision AS race_entry_revision, re.duck_name,
          da.id AS assignment_id, da.valid_from AS assignment_valid_from,
-         d.id AS duck_id, d.visible_number AS duck_visible_number
+         d.id AS duck_id, d.visible_number AS duck_visible_number,
+         -- The exact predicate the delete endpoint re-checks inside its guarded
+         -- write, so the console's Delete control and the write that follows it
+         -- can never disagree about whether a participant is still removable.
+         (${removableRegistrationSql}) AS is_deletable,
+         -- "This race entry holds no place in any heat", stated exactly as the
+         -- pairing response states it. A heat is a physical numbered bag, so
+         -- this is the only thing that licenses a staff surface to say a duck
+         -- is in one; without it the console would have to guess, and a wrong
+         -- reason on a race-day panel is a lie a staffer acts on.
+         (NOT EXISTS (
+            SELECT 1 FROM heat_entries he WHERE he.race_entry_id = re.id
+          )) AS heat_assignment_pending
     FROM registrations r
     JOIN events e ON e.id = r.event_id
     JOIN race_entries re ON re.registration_id = r.id
@@ -139,6 +153,26 @@ const registrationJson = (row: RegistrationRow): Record<string, unknown> => ({
       visibleNumber: row.duck_visible_number,
     },
   },
+  // The two lifecycle answers the console needs, stated explicitly rather than
+  // inferred from `status` or from the shape of `assignment`.
+  //
+  // `currentlyPaired` is "a physical duck is in this participant's hands right
+  // now": a duck assignment that is still open. It is exactly
+  // `assignment !== null` and is deliberately independent of registration
+  // status, because a reactivated participant is `SUBMITTED` while still
+  // holding their duck, and a withdrawn one keeps theirs.
+  //
+  // `deletable` is the stricter question the Delete control must ask. A
+  // participant whose duck was already unassigned still has an ended assignment
+  // row and a heat place, so their duck went into a heat bag and the
+  // registration can no longer be removed; they are withdrawn or disqualified
+  // instead.
+  currentlyPaired: row.assignment_id !== null,
+  deletable: row.is_deletable === 1,
+  // The third question, and the only one that decides whether a duck may be
+  // described as sealed in a heat bag: a paired participant with no heat place
+  // has a duck in their hands and no bag to put it in yet.
+  heatAssignmentPending: row.heat_assignment_pending === 1,
 });
 
 const eventJson = (row: EventRow | RegistrationRow): Record<string, unknown> => ({
@@ -578,6 +612,23 @@ const editRegistration = async (
 
 type StatusOperation = "withdraw" | "reactivate" | "disqualify";
 
+// Withdrawal and disqualification are the only way to remove a paired
+// participant from the race, and they are deliberately bookkeeping-only. The
+// batch below writes exactly three things: the guarded command row, the
+// registration status, and the audit event. It never closes the duck
+// assignment, never deletes the heat entry, and never renumbers, rebalances, or
+// reorders any heat, slot, or lane, because the duck is physically inside a
+// sealed heat bag and re-sorting the bags would mean rescanning every duck.
+//
+// The duck therefore still floats down the water; it simply stops existing on
+// every public surface (board, leaderboard, podium, name search, duck pages)
+// and can never be recorded as a winner.
+//
+// Because the write disturbs nothing physical, it is available at every point in
+// the event lifecycle the event-status gate admits: a heat that is PLANNED,
+// LOADING, locked, READY, CALLING, RUNNING, AWAITING_RESULT, or FINALIZED is
+// left byte for byte as it was. A non-`ACTIVE` roster entry is a normal,
+// expected state — that duck rides in the bag and simply cannot win.
 const statusConfiguration = {
   withdraw: {
     commandType: "WITHDRAW_REGISTRATION",
@@ -641,24 +692,36 @@ const changeRegistrationStatus = async (
   if (!(configuration.allowedStatuses as readonly string[]).includes(current.status)) {
     return json({ error: "This registration cannot make that status transition." }, 409);
   }
-  const eligibilityChange = operation === "withdraw" || operation === "disqualify";
-  if (eligibilityChange) {
-    const protectedHeat = await env.DB.prepare(
-      `SELECT 1 AS protected
-         FROM heat_entries he
-         JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
-        WHERE he.race_entry_id = ?
-          AND (h.roster_locked_at IS NOT NULL
-            OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
-        LIMIT 1`,
-    ).bind(current.race_entry_id).first<{ protected: number }>();
-    if (protectedHeat !== null) {
-      return json({
-        error: "This participant is already on a locked or completed heat. Keep them ACTIVE and resolve the heat or result with the race director.",
-      }, 409);
-    }
-  }
-
+  // There is deliberately no heat guard here, and removing one from a guarded
+  // batch is not something to do casually, so this records why the heat stopped
+  // being protective.
+  //
+  // The old model refused withdrawal once the participant's heat was locked,
+  // running, awaiting its result, or finalized, because a withdrawn racer had to
+  // come off the roster and a locked roster is immovable. That model is gone.
+  // The duck is sealed into a numbered heat bag at pairing, nobody unpacks a bag
+  // on the bank, and heat entries may never be reordered because the only way to
+  // identify a duck is to physically scan it. So the racer stays on the roster
+  // forever and is merely ineligible to win.
+  //
+  // With nothing to remove, the heat's state protects nothing: this operation
+  // writes only the command row, the registration status, and the audit event,
+  // and a locked, running, or finalized heat is no more disturbed by it than a
+  // planned one. Refusing here instead made the whole feature unreachable — a
+  // racer paired into a locked heat could never leave, and one who left before
+  // the lock stopped the race from starting at all.
+  //
+  // Every other guard stays exactly where it was: the event-status gate above,
+  // the revision check, the allowed-transition check, command idempotency, and
+  // the audit write. Eligibility to *win* is guarded separately and untouched,
+  // in `winnerByTagCandidate`, `validateResultSet`, the selected-result SQL, and
+  // the finish-line scan.
+  //
+  // Reactivation restores the status the participant would have had if they had
+  // never left: `ACTIVE` while a current duck assignment still exists, otherwise
+  // `SUBMITTED`. It reads the open assignment, never the ended one and never the
+  // heat entry, so a participant whose duck was unassigned returns to the
+  // pairing queue rather than pretending to still hold a duck.
   const targetStatus = operation === "withdraw"
     ? "WITHDRAWN"
     : operation === "disqualify"
@@ -674,15 +737,7 @@ const changeRegistrationStatus = async (
            FROM registrations r
            JOIN events e ON e.id = r.event_id
            WHERE r.id = ? AND r.revision = ? AND r.status = ?
-             AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
-             AND (? = 0 OR NOT EXISTS (
-               SELECT 1 FROM race_entries re
-               JOIN heat_entries he ON he.race_entry_id = re.id
-               JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
-                WHERE re.registration_id = r.id
-                  AND (h.roster_locked_at IS NOT NULL
-                    OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
-             ))`,
+             AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
       ).bind(
         commandId,
         configuration.commandType,
@@ -691,7 +746,6 @@ const changeRegistrationStatus = async (
         registrationId,
         expectedRevision,
         current.status,
-        eligibilityChange ? 1 : 0,
       ),
       env.DB.prepare(
         `UPDATE registrations
@@ -700,18 +754,9 @@ const changeRegistrationStatus = async (
              AND event_id IN (
                SELECT id FROM events
                 WHERE status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
-             )
-             AND (? = 0 OR NOT EXISTS (
-               SELECT 1 FROM race_entries re
-               JOIN heat_entries he ON he.race_entry_id = re.id
-               JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
-                WHERE re.registration_id = registrations.id
-                  AND (h.roster_locked_at IS NOT NULL
-                    OR h.status IN ('RUNNING', 'AWAITING_RESULT', 'FINALIZED'))
-             ))`,
+             )`,
       ).bind(
         targetStatus, now, now, registrationId, expectedRevision, current.status,
-        eligibilityChange ? 1 : 0,
       ),
       env.DB.prepare(
         `INSERT INTO audit_events
@@ -749,12 +794,26 @@ const changeRegistrationStatus = async (
 };
 
 // Staff removal of a registration that should never have existed. It is a real
-// delete, not a status change, so it protects race integrity instead of tearing
-// it down: a participant holding a duck assignment, or already placed on a heat
-// roster, is refused with the unassign-first instruction rather than having
-// those rows removed underneath the race. The guarded command insert re-checks
-// both conditions inside the batch, so the roster-lock trigger on `heat_entries`
-// is never reachable from this path at all.
+// delete, not a status change, and it is available only while the participant
+// has never been paired with a duck.
+//
+// The rule is physical, not bookkeeping. Pairing puts the duck into a heat bag,
+// and on race day nobody is going to unpack a bag to find one duck again. So a
+// participant who has been paired can no longer be deleted at all: they are
+// withdrawn or disqualified instead, their duck stays exactly where it is, and
+// every public surface simply stops showing them. An already-unassigned duck
+// does not reopen this path either — the ended assignment row and the heat place
+// both survive, and they are the evidence that this entry did enter the race.
+//
+// Both refusals are `409`, matching every other lifecycle/state conflict in this
+// file (revision mismatch, event status, illegal status transition). The request
+// is well formed and would have been accepted a moment earlier in the
+// participant's life, so it is a state conflict rather than a `422` semantic
+// failure of the submitted values.
+//
+// The guarded command insert re-checks both conditions inside the batch, so the
+// preflight below only produces the message and the roster-lock trigger on
+// `heat_entries` is never reachable from this path at all.
 const deleteRegistration = async (
   request: Request,
   env: Env,
@@ -803,12 +862,12 @@ const deleteRegistration = async (
   }>();
   if (blocking?.has_assignment === 1) {
     return json({
-      error: "This participant still has a duck assignment. Unassign the duck from inventory first, then delete the registration.",
+      error: "This participant has been paired with a duck, so they can no longer be deleted. Their duck is already in a heat bag and stays there. Withdraw or disqualify them instead.",
     }, 409);
   }
   if (blocking?.has_heat_entry === 1) {
     return json({
-      error: "This participant is on a heat roster. Unassign their duck and remove them from the heat first, then delete the registration.",
+      error: "This participant is on a heat roster, so they can no longer be deleted. The heat stays exactly as it is. Withdraw or disqualify them instead.",
     }, 409);
   }
 

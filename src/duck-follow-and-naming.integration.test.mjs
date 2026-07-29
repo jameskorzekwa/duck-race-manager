@@ -380,25 +380,258 @@ test("the public duck page offers the identical follow control and identifier", 
   clean(database);
 });
 
-test("a participant who left the public search can no longer be followed from a tag", async (context) => {
-  const { api, database } = harness(context);
-  seedEvent(database);
-  const owner = await register(api, context, "Daisy", "Duck");
-  pairDuck(database, owner.registrationId, 12, tagToken);
-  database.prepare("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = ?").run(owner.registrationId);
+// A participant who withdrew or was disqualified keeps their duck: it is sealed
+// in a heat bag and nobody unpacks a bag on race day. Publicly, though, the duck
+// is not racing, so a scan of its tag and a visit to its numbered page both stop
+// resolving to that participant entirely. They fall back to the behaviour those
+// routes already have for a duck with no current racer — the tag redirects home
+// and the number serves the shared friendly 404 — so no new page shape and no
+// participant identity is exposed, and there is nothing left to follow.
+for (const status of ["WITHDRAWN", "DISQUALIFIED"]) {
+  test(`a ${status} participant disappears from the tag scan and the public duck page`, async (context) => {
+    const { api, database } = harness(context);
+    seedEvent(database);
+    const owner = await register(api, context, "Daisy", "Duck");
+    pairDuck(database, owner.registrationId, 12, tagToken);
 
-  // The public status still resolves, but the follow control is gone from both
-  // the page and the API, exactly as the follow endpoint would refuse it.
-  const page = await (await api(`/t/${tagToken}`)).text();
-  assert.match(page, /Duck #12/);
-  assert.doesNotMatch(page, /data-duck-follow data-follow-id/);
-  assert.doesNotMatch(page, /data-follow-button|data-follow-added/);
-  const scan = await jsonBody(await api(`/api/v1/ducks/${tagToken}`), 200, "withdrawn scan");
-  assert.equal(scan.destination, "RACE_STATUS");
-  assert.equal(Object.hasOwn(scan.raceStatus, "followId"), false);
-  assert.equal(Object.hasOwn(scan.raceStatus, "inMyDucks"), false);
-  clean(database);
-});
+    // While still racing, both public surfaces resolve normally.
+    assert.equal((await api(`/t/${tagToken}`)).status, 200);
+    assert.equal((await api("/duck/12")).status, 200);
+
+    database.prepare("UPDATE registrations SET status = ? WHERE id = ?")
+      .run(status, owner.registrationId);
+
+    const tagPage = await api(`/t/${tagToken}`);
+    assert.equal(tagPage.status, 303);
+    assert.equal(tagPage.headers.get("location"), "/");
+    const scan = await jsonBody(await api(`/api/v1/ducks/${tagToken}`), 200, "withdrawn scan");
+    assert.deepEqual(scan, { destination: "HOME" });
+
+    const duckPage = await api("/duck/12");
+    assert.equal(duckPage.status, 404);
+    const duckPageHtml = await duckPage.text();
+    // The page is honest about the duck the visitor is holding without naming
+    // anyone: it is the shared "isn't racing" page, with no participant, no duck
+    // name, and no follow control.
+    assert.match(duckPageHtml, /Duck #12 isn’t racing\./);
+    assert.equal(/Daisy|Mallard|data-follow-button|data-duck-follow data-follow-id/.test(duckPageHtml), false);
+    assert.deepEqual(
+      await jsonBody(await api("/api/v1/ducks/number/12"), 404, "withdrawn duck number"),
+      { error: "Not found." },
+    );
+
+    // Nothing about the participant survives on either public response.
+    assert.equal(/Daisy|lookupCode|followId/i.test(JSON.stringify(scan)), false);
+
+    // The duck, its tag, its assignment, and the registration are all untouched:
+    // this is a projection rule, not a data change.
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM duck_assignments WHERE valid_to IS NULL").get().count,
+      1,
+    );
+    assert.equal(
+      database.prepare("SELECT status FROM duck_tags WHERE token = ?").get(tagToken).status,
+      "ACTIVE",
+    );
+    clean(database);
+  });
+}
+
+// A shared round-one heat and a shared finalized final for two racers. The
+// entries go in while both heats are still open plans and the final is
+// finalized only afterwards, which is the same order the real roster lock uses
+// and the only order the roster-lock trigger permits.
+const seedSharedHeats = (database, racers) => {
+  database.exec(`
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('shared-round', 'event-ducks', 'ROUND_ONE', 1, 'PLANNED', 2),
+           ('shared-final', 'event-ducks', 'FINAL', 1, 'PLANNED', 2);
+  `);
+  for (const [index, racer] of racers.entries()) {
+    for (const [heatId, round] of [["shared-round", "ROUND_ONE"], ["shared-final", "FINAL"]]) {
+      database.prepare(
+        `INSERT INTO heat_entries
+           (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+         VALUES (?, 'event-ducks', ?, ?, ?, ?, 'PAIRING', '2026-08-01T00:00:00Z')`,
+      ).run(`${heatId}-slot-${index + 1}`, heatId, racer.entryId, round, index + 1);
+    }
+  }
+  database.exec(`
+    UPDATE heats
+       SET status = 'FINALIZED', roster_locked_at = '2026-08-01T00:30:00Z',
+           finalized_at = '2026-08-01T01:00:00Z'
+     WHERE id = 'shared-final';
+    INSERT INTO race_commands (id, event_id, command_type, requested_at, completed_at)
+    VALUES ('shared-final-result', 'event-ducks', 'FINALIZE_HEAT_RESULT',
+            '2026-08-01T01:00:00Z', '2026-08-01T01:00:00Z');
+  `);
+  for (const [index, racer] of racers.entries()) {
+    const assignmentId = database
+      .prepare("SELECT id FROM duck_assignments WHERE race_entry_id = ? AND valid_to IS NULL")
+      .get(racer.entryId).id;
+    database.prepare(
+      `INSERT INTO heat_results
+         (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status, revision,
+          finalized_at, recorded_by_staff_profile_id, source_command_id)
+       VALUES (?, 'event-ducks', 'shared-final', ?, ?, ?, 'FINALIZED', 1,
+               '2026-08-01T01:00:00Z', 'staff', 'shared-final-result')`,
+    ).run(`shared-final-place-${index + 1}`, racer.entryId, assignmentId, index + 1);
+  }
+};
+
+// The complete public-versus-owner split for a participant who leaves the race.
+// The duck is still in its bag and may still float past the finish line, so this
+// is a projection rule everywhere and a data change nowhere.
+for (const leftStatus of ["WITHDRAWN", "DISQUALIFIED"]) {
+  test(`a ${leftStatus} participant leaves every public surface but stays visible to their owner`, async (context) => {
+    const { api, database } = harness(context);
+    seedEvent(database);
+    const secondTag = "s".repeat(32);
+
+    const leaver = await register(api, context, "Daisy", "Duck");
+    const stayer = await register(api, context, "Donald", "Mallard");
+    const leaverEntry = pairDuck(database, leaver.registrationId, 12, tagToken);
+    const stayerEntry = pairDuck(database, stayer.registrationId, 13, secondTag);
+    seedSharedHeats(database, [{ entryId: leaverEntry }, { entryId: stayerEntry }]);
+    database.prepare("UPDATE events SET status = 'COMPLETED' WHERE id = 'event-ducks'").run();
+
+    // A third browser follows the participant who is about to leave.
+    const follower = await followFrom(api, leaverEntry);
+
+    const boardBefore = await jsonBody(await api("/api/v1/race-board"), 200, "board before");
+    assert.deepEqual(boardBefore.event.podium.map((entry) => [entry.place, entry.duckNumber]), [[1, 12], [2, 13]]);
+
+    const heatEntriesBefore = database
+      .prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id")
+      .all().map((row) => ({ ...row }));
+
+    database.prepare("UPDATE registrations SET status = ? WHERE id = ?")
+      .run(leftStatus, leaver.registrationId);
+
+    // --- public surfaces: gone -------------------------------------------
+    const search = await jsonBody(
+      await api("/api/v1/race-status/search?eventId=event-ducks&name=Daisy"),
+      200,
+      "public search",
+    );
+    assert.deepEqual(search.results, []);
+    const stillSearchable = await jsonBody(
+      await api("/api/v1/race-status/search?eventId=event-ducks&name=Donald"),
+      200,
+      "public search for the racer who stayed",
+    );
+    assert.equal(stillSearchable.results.length, 1);
+
+    const board = await jsonBody(await api("/api/v1/race-board"), 200, "board after");
+    assert.deepEqual(board.event.roundOneHeats[0].roster.map((entry) => entry.duckNumber), [13]);
+    assert.deepEqual(board.event.finalHeats[0].roster.map((entry) => entry.duckNumber), [13]);
+    // The winner is simply absent; second place is not promoted to first.
+    assert.deepEqual(board.event.podium.map((entry) => [entry.place, entry.duckNumber]), [[2, 13]]);
+    assert.equal(JSON.stringify(board).includes("Daisy"), false);
+
+    assert.deepEqual(
+      await jsonBody(await api(`/api/v1/ducks/${tagToken}`), 200, "tag scan"),
+      { destination: "HOME" },
+    );
+    assert.equal((await api("/api/v1/ducks/number/12")).status, 404);
+    // The racer who stayed is untouched on both duck surfaces.
+    assert.equal((await api("/api/v1/ducks/number/13")).status, 200);
+    assert.equal(
+      (await jsonBody(await api(`/api/v1/ducks/${secondTag}`), 200, "other tag scan")).destination,
+      "RACE_STATUS",
+    );
+
+    // The follow endpoint refuses them, so no new follower can appear either.
+    assert.equal(
+      (await api("/api/v1/registrations/mine/follow", {
+        method: "POST",
+        headers: { origin: "https://quickducks.com" },
+        body: { followId: leaverEntry },
+      })).status,
+      404,
+    );
+
+    // --- the follower's saved list: gone ---------------------------------
+    const followerCollection = await jsonBody(
+      await api("/api/v1/registrations/mine", { cookie: follower }),
+      200,
+      "follower collection",
+    );
+    assert.deepEqual(followerCollection.registrations, []);
+    assert.deepEqual(
+      await jsonBody(
+        await api("/api/v1/registrations/mine/presence", { cookie: follower }),
+        200,
+        "follower presence",
+      ),
+      { hasRegistrations: false },
+    );
+    // The link row itself survives, so reactivation restores the followed card
+    // rather than silently losing it.
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM browser_collection_registrations WHERE added_via = 'FOLLOWED'").get().count,
+      1,
+    );
+
+    // --- the owner's own surfaces: unchanged and honest -------------------
+    const privateToken = leaver.privateStatusPath.replace("/r/", "");
+    const privateStatus = await jsonBody(
+      await api(`/api/v1/registrations/${privateToken}`),
+      200,
+      "private status",
+    );
+    assert.equal(privateStatus.status, leftStatus);
+    assert.equal(privateStatus.raceStatus.outcome, leftStatus);
+    assert.equal(privateStatus.firstName, "Daisy");
+    const privatePage = await api(`/r/${privateToken}`);
+    assert.equal(privatePage.status, 200);
+    assert.match(
+      await privatePage.text(),
+      leftStatus === "WITHDRAWN" ? /Registration withdrawn, Daisy\./ : /Race status updated, Daisy\./,
+    );
+
+    const ownerCollection = await jsonBody(
+      await api("/api/v1/registrations/mine", { cookie: leaver.cookie }),
+      200,
+      "owner collection",
+    );
+    assert.equal(ownerCollection.registrations.length, 1);
+    assert.equal(ownerCollection.registrations[0].registrationStatus, leftStatus);
+    assert.equal(ownerCollection.registrations[0].raceStatus.outcome, leftStatus);
+    assert.equal(ownerCollection.registrations[0].paired, true);
+    assert.deepEqual(
+      await jsonBody(
+        await api("/api/v1/registrations/mine/presence", { cookie: leaver.cookie }),
+        200,
+        "owner presence",
+      ),
+      { hasRegistrations: true },
+    );
+
+    // --- nothing physical moved ------------------------------------------
+    assert.deepEqual(
+      database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY id")
+        .all().map((row) => ({ ...row })),
+      heatEntriesBefore,
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM duck_assignments WHERE valid_to IS NULL").get().count,
+      2,
+    );
+    // The official result rows are untouched too: the participant who left keeps
+    // their recorded first place in the database, it simply stops being
+    // published.
+    assert.deepEqual(
+      database.prepare("SELECT id, race_entry_id, place FROM heat_results ORDER BY place")
+        .all().map((row) => ({ ...row })),
+      [
+        { id: "shared-final-place-1", race_entry_id: leaverEntry, place: 1 },
+        { id: "shared-final-place-2", race_entry_id: stayerEntry, place: 2 },
+      ],
+    );
+    clean(database);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Unfollowing
