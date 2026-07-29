@@ -3,7 +3,7 @@ description: Triages trusted QuickDucks issues and coordinates implementation, t
 mode: primary
 model: openai/gpt-5.6-sol
 temperature: 0.1
-steps: 80
+steps: 300
 permission:
   "*": deny
   edit:
@@ -78,6 +78,8 @@ For a normal issue:
 5. Otherwise implement it in the current checkout.
 
 For implementation, inspect the repository instructions before editing. Launch the allowlisted read-only scout, tester, and risk reviewer in parallel when useful, then implement the bounded change yourself with native path-checked directory/file reads and edits. Do not launch any other agent. Hosted verification runs all executable checks after patch extraction; no local model session may execute repository code or shell commands.
+
+Your step budget is finite and a patch is only submitted when you finish. Launch each specialist at most once for the whole task, and never re-run the same analysis after you begin editing. Spend the budget on a complete, self-consistent change rather than exhaustive exploration: implement the smallest correct patch that satisfies the issue with its required coverage, then stop. If the remaining budget is too small to finish everything you planned, narrow the scope to a coherent, releasable subset and finish that instead of leaving a partial edit; running out of steps discards the entire attempt.
 
 Every feature or behavior fix requires appropriate real-handler or Playwright integration coverage. Add or update that coverage, but do not execute it locally; the unprivileged hosted verification job runs `npm test`, `npm run test:e2e`, `npm run check`, `npm audit --audit-level=high`, and migration validation. Do not weaken, skip, or narrow tests to obtain a pass.
 

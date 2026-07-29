@@ -105,7 +105,7 @@ jobs:
     needs: prepare
     if: needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true'
     runs-on: [self-hosted, macOS, ARM64, quickducks-model]
-    timeout-minutes: 105
+    timeout-minutes: 170
     permissions:
       contents: read
       issues: read
@@ -304,7 +304,7 @@ jobs:
             --dir "$PIPELINE_MODEL_DIR" \
             --result "$RUNNER_TEMP/agent-task/session-result.json" \
             --state "$HOME/.local/state/quickducks-agent-runner/active.json" \
-            --timeout 5100 \
+            --timeout 9600 \
             --marker-prefix PIPELINE_TASK_ || status=$?
           printf '%s\n' "$status" > "$RUNNER_TEMP/agent-task/task-exit-status.txt"
 
