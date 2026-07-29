@@ -62,7 +62,7 @@ function pipelinePullProvenance(pr, defaultBranch) {
   const branch = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
   const marker = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
   const linked = closingIssueNumbers(pr.body);
-  return pr.user?.id === 219766164
+  return pr.user?.id === 41898282
     && pr.base.ref === defaultBranch
     && pr.head.repo?.id === pr.base.repo?.id
     && branch !== null
@@ -74,7 +74,7 @@ function pipelinePullProvenance(pr, defaultBranch) {
     && marker[3] === pr.base.sha;
 }
 
-async function validExactCheck(github, owner, repo, pr) {
+export async function validExactCheck(github, owner, repo, pr) {
   const checks = await github.rest.checks.listForRef({
     owner, repo, ref: pr.head.sha, check_name: "Agent Review / Exact SHA", per_page: 100,
   });
@@ -85,8 +85,11 @@ async function validExactCheck(github, owner, repo, pr) {
       || check.app?.slug !== "github-actions" || !match) return false;
   try {
     const run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: Number(match[1]) })).data;
-    return run.path === ".github/workflows/agent-review.yml"
-      && ["pull_request_target", "pull_request_review"].includes(run.event);
+    if (run.path !== ".github/workflows/agent-review.yml") return false;
+    if (["pull_request_target", "pull_request_review"].includes(run.event)) return true;
+    return run.event === "workflow_dispatch"
+      && run.head_branch === pr.base.ref
+      && run.head_sha === pr.base.sha;
   } catch (error) {
     if (error.status === 404) return false;
     throw error;
@@ -282,6 +285,61 @@ export async function reconcileAgentPipeline({ github, context, core }) {
   const issuesWithOpenPulls = new Set(openPulls
     .filter((pr) => pipelinePullProvenance(pr, defaultBranch))
     .flatMap((pr) => closingIssueNumbers(pr.body)));
+  for (const pr of openPulls.filter((candidate) => pipelinePullProvenance(candidate, defaultBranch))) {
+    const [issueNumber] = closingIssueNumbers(pr.body);
+    const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+    if (!labelNames(issue).has("agent:review")) continue;
+
+    const ciRuns = await github.rest.actions.listWorkflowRuns({
+      owner, repo, workflow_id: "ci.yml", event: "workflow_dispatch", head_sha: pr.head.sha, per_page: 100,
+    });
+    const reviewChecks = await github.rest.checks.listForRef({
+      owner, repo, ref: pr.head.sha, check_name: "Agent Review / Exact SHA", per_page: 100,
+    });
+    const reviewRuns = await github.rest.actions.listWorkflowRuns({
+      owner, repo, workflow_id: "agent-review.yml", event: "workflow_dispatch", branch: defaultBranch, per_page: 100,
+    });
+    const ciSettled = ciRuns.data.workflow_runs.some((run) => run.status !== "completed"
+      || ["success", "failure"].includes(run.conclusion));
+    const reviewTitle = `Agent Review PR #${pr.number}`;
+    const activeReview = reviewRuns.data.workflow_runs.some((run) => run.display_title === reviewTitle
+      && run.head_branch === defaultBranch && run.head_sha === pr.base.sha && run.status !== "completed");
+    const decidedReview = reviewChecks.data.check_runs.some((check) => check.status === "completed");
+    const needsCi = !ciSettled;
+    const needsReview = !activeReview && !decidedReview;
+    if (!needsCi && !needsReview) continue;
+
+    const comments = await commentsFor(issueNumber);
+    const recoveryPrefix = `<!-- agent-pipeline gate-recovery=${pr.number}-${pr.head.sha}-`;
+    const attempts = comments.filter((comment) => comment.user?.id === 41898282
+      && comment.body?.includes(recoveryPrefix)).length;
+    if (attempts >= 3) {
+      await setState(issueNumber, "agent:failed");
+      await commentOnce(
+        issueNumber,
+        `<!-- agent-pipeline gate-recovery-exhausted=${pr.number}-${pr.head.sha} -->`,
+        `Gate-dispatch recovery exhausted three attempts for PR #${pr.number} at \`${pr.head.sha}\`.`,
+      );
+      continue;
+    }
+    await github.rest.issues.createComment({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      body: `${recoveryPrefix}${attempts + 1} -->\nRecovery attempt ${attempts + 1} is dispatching missing gates for PR #${pr.number} at \`${pr.head.sha}\`.`,
+    });
+    if (needsCi) {
+      await github.rest.actions.createWorkflowDispatch({
+        owner, repo, workflow_id: "ci.yml", ref: pr.head.ref,
+      });
+    }
+    if (needsReview) {
+      await github.rest.actions.createWorkflowDispatch({
+        owner, repo, workflow_id: "agent-review.yml", ref: defaultBranch,
+        inputs: { pr: String(pr.number) },
+      });
+    }
+  }
   const closedPulls = await github.paginate(github.rest.pulls.list, {
     owner, repo, state: "closed", sort: "updated", direction: "desc", per_page: 100,
   });

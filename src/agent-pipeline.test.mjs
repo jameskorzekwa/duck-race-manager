@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closingIssueNumbers, markerNumbers } from "../scripts/agent-pipeline.mjs";
+import { closingIssueNumbers, markerNumbers, validExactCheck } from "../scripts/agent-pipeline.mjs";
 
 test("closingIssueNumbers extracts unique durable closing references", () => {
   assert.deepEqual(closingIssueNumbers("Closes #12\nFixes #12\nResolved #30"), [12, 30]);
@@ -15,4 +15,41 @@ test("markerNumbers extracts comma-separated machine state", () => {
   ];
   assert.deepEqual(markerNumbers(comments, "blocked-by"), [4, 9]);
   assert.deepEqual(markerNumbers(comments, "canonical-issue"), []);
+});
+
+test("validExactCheck accepts trusted-default-branch workflow dispatch", async () => {
+  const github = {
+    rest: {
+      checks: {
+        listForRef: async () => ({ data: { check_runs: [{
+          app: { slug: "github-actions" },
+          conclusion: "success",
+          external_id: "agent-review:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:123",
+          started_at: "2026-07-28T12:00:00Z",
+          status: "completed",
+        }] } }),
+      },
+      actions: {
+        getWorkflowRun: async () => ({ data: {
+          event: "workflow_dispatch",
+          head_branch: "main",
+          head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          path: ".github/workflows/agent-review.yml",
+        } }),
+      },
+    },
+  };
+  const pr = {
+    base: { ref: "main", sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    head: { sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+  };
+
+  assert.equal(await validExactCheck(github, "owner", "repo", pr), true);
+  github.rest.actions.getWorkflowRun = async () => ({ data: {
+    event: "workflow_dispatch",
+    head_branch: "feature",
+    head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    path: ".github/workflows/agent-review.yml",
+  } });
+  assert.equal(await validExactCheck(github, "owner", "repo", pr), false);
 });

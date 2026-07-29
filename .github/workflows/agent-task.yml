@@ -78,7 +78,7 @@ jobs:
               const branchName = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
               const marker = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
               const linked = closingIssues(pr.body);
-              return pr.user.id === 219766164 && pr.base.ref === context.payload.repository.default_branch
+              return pr.user.id === 41898282 && pr.base.ref === context.payload.repository.default_branch
                 && pr.head.repo?.id === pr.base.repo?.id && branchName && marker
                 && linked.length === 1 && linked[0] === issueNumber
                 && marker[1] === branchName[2] && marker[2] === branchName[1]
@@ -104,16 +104,14 @@ jobs:
   implement:
     needs: prepare
     if: needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    runs-on: [self-hosted, macOS, ARM64, quickducks-model]
+    timeout-minutes: 105
     permissions:
       contents: read
       issues: read
-      models: read
       pull-requests: read
     env:
       EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
-      OPENCODE_ENSEMBLE_TIMEOUT: "2700000"
       PIPELINE_ISSUE: ${{ needs.prepare.outputs.issue }}
     outputs:
       decision: ${{ steps.result.outputs.decision }}
@@ -133,10 +131,8 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install locked agent dependencies
-        run: |
-          npm ci
-          npm ci --prefix .opencode/ensemble-package --ignore-scripts
+      - name: Reject unsafe trusted-base filesystem entries
+        run: node scripts/validate-agent-patch.mjs "$GITHUB_WORKSPACE" "$EXPECTED_BASE" "$EXPECTED_BASE"
 
       - name: Build immutable trusted context
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -148,7 +144,8 @@ jobs:
             const fs = require("node:fs");
             const { owner, repo } = context.repo;
             const issueNumber = Number(process.env.ISSUE_NUMBER);
-            const trustedIds = new Set([38769771, 219766164, 41898282]);
+            const trustedUserId = 38769771;
+            const automationIds = new Set([219766164, 41898282]);
             const closingIssues = (body) => [...String(body ?? "").matchAll(
               /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi,
             )].map((match) => Number(match[1]));
@@ -167,7 +164,7 @@ jobs:
             const validRelatedPull = (pr) => {
               const branch = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
               const marker = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
-              return pr.user.id === 219766164 && pr.head.repo?.id === pr.base.repo?.id
+              return pr.user.id === 41898282 && pr.head.repo?.id === pr.base.repo?.id
                 && branch && marker && branch[1] === String(issueNumber)
                 && marker[1] === branch[2] && marker[2] === branch[1]
                 && closingIssues(pr.body).length === 1;
@@ -182,11 +179,14 @@ jobs:
                 mergedAt: pr.merged_at,
                 headSha: pr.head.sha,
                 labels: pr.labels.map((label) => label.name),
-                comments: prComments.filter((comment) => trustedIds.has(comment.user.id))
+                untrustedReviewEvidence: prComments.filter((comment) => automationIds.has(comment.user.id))
                   .map(({ user, body, created_at }) => ({ author: user.login, body, createdAt: created_at })),
               });
             }
-            fs.writeFileSync("/tmp/quickducks-task-context.json", JSON.stringify({
+            const artifactDir = `${process.env.RUNNER_TEMP}/agent-task`;
+            fs.mkdirSync(artifactDir, { recursive: true });
+            const contextPath = `${artifactDir}/context.json`;
+            fs.writeFileSync(contextPath, JSON.stringify({
               repository: `${owner}/${repo}`,
               baseSha: process.env.EXPECTED_BASE,
               issue: {
@@ -194,8 +194,10 @@ jobs:
                 title: issue.title,
                 body: issue.body,
                 labels: issue.labels.map((label) => label.name),
-                comments: comments.filter((comment) => trustedIds.has(comment.user.id))
+                comments: comments.filter((comment) => comment.user.id === trustedUserId)
                   .map(({ user, body, created_at }) => ({ author: user.login, body, createdAt: created_at })),
+                automationMarkers: comments.filter((comment) => automationIds.has(comment.user.id))
+                  .flatMap(({ body }) => String(body ?? "").match(/<!-- agent-pipeline [^>]+ -->/g) ?? []),
               },
               activeWork: openIssues.map((item) => ({
                 number: item.number,
@@ -206,36 +208,139 @@ jobs:
               relatedPulls,
             }, null, 2));
 
-      - name: Install pinned OpenCode
-        run: npm install --global opencode-ai@1.18.8
-
-      - name: Run unprivileged implementation orchestrator
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          NO_COLOR: "1"
+      - name: Verify local control plane and recover prior session
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/agent-task"
+          command -v openchamber > /dev/null
+          openchamber status --json | node -e '
+            let body = "";
+            process.stdin.on("data", (chunk) => body += chunk);
+            process.stdin.on("end", () => {
+              const status = JSON.parse(body);
+              if (status.status !== "ok" || status.runningCount < 1) {
+                throw new Error("OpenChamber is not running locally.");
+              }
+            });'
+          state_root="$HOME/.local/state/quickducks-agent-runner"
+          state_path="$state_root/active.json"
+          mkdir -p "$state_root/workspaces"
+          if [[ -f "$state_path" ]]; then
+            previous_dir="$(STATE_PATH="$state_path" STATE_ROOT="$state_root" node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
+          const root = path.resolve(process.env.STATE_ROOT, "workspaces") + path.sep;
+          const directory = path.resolve(String(state.directory ?? ""));
+          if (!directory.startsWith(root)) throw new Error("Persistent model state points outside its workspace root.");
+          process.stdout.write(directory);
+          NODE
+            )"
+            openchamber session list --dir "$previous_dir" --with-status --all --limit 100 --json > "$state_root/prior-status.json"
+            STATUS_PATH="$state_root/prior-status.json" STATE_PATH="$state_path" node <<'NODE'
+          const fs = require("node:fs");
+          const body = JSON.parse(fs.readFileSync(process.env.STATUS_PATH, "utf8"));
+          const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
+          if (state.phase === "dispatching" && (body.sessions ?? []).length === 0) {
+            throw new Error("A prior dispatched model session is missing from OpenChamber status.");
+          }
+          const busy = (body.sessions ?? []).filter((session) => session.status?.type !== "idle");
+          if (busy.length > 0) throw new Error(`A prior local model session is still active: ${busy.map((session) => session.id).join(", ")}`);
+          NODE
+            node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
+              "$state_path" "$state_root/workspaces" "$previous_dir"
+            rm -f "$state_root/prior-status.json"
+          fi
+
+      - name: Build isolated model workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_root="$HOME/.local/state/quickducks-agent-runner"
+          model_dir="$state_root/workspaces/task-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "$model_dir"
+          mkdir -p "$model_dir"
+          git archive "$EXPECTED_BASE" | tar -x -C "$model_dir"
+          mkdir -p "$model_dir/.pipeline"
+          cp "$RUNNER_TEMP/agent-task/context.json" "$model_dir/.pipeline/context.json"
+          chmod -R a-w "$model_dir/.pipeline"
+          MODEL_DIR="$model_dir" STATE_PATH="$state_root/active.json" node <<'NODE'
+          const fs = require("node:fs");
+          fs.writeFileSync(process.env.STATE_PATH, JSON.stringify({
+            directory: process.env.MODEL_DIR,
+            phase: "prepared",
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+          }));
+          NODE
+          printf 'PIPELINE_MODEL_DIR=%s\n' "$model_dir" >> "$GITHUB_ENV"
+
+      - name: Run local OAuth implementation lead in OpenChamber
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATE_PATH="$HOME/.local/state/quickducks-agent-runner/active.json" node <<'NODE'
+          const fs = require("node:fs");
+          const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
+          state.phase = "dispatching";
+          fs.writeFileSync(process.env.STATE_PATH, JSON.stringify(state));
+          NODE
           set +e
-          opencode run \
+          openchamber session create \
+            --dir "$PIPELINE_MODEL_DIR" \
+            --title "QuickDucks issue #${PIPELINE_ISSUE} implementation" \
+            --prompt "Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot at .pipeline/context.json. Follow the pipeline-orchestrator contract and emit exactly one final task marker." \
+            --model openai/gpt-5.6-sol \
             --agent pipeline-orchestrator \
-            --format json \
-            --model github-models/openai/gpt-4.1 \
-            --share=false \
-            "Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot. Follow the pipeline-orchestrator contract and emit exactly one final task marker." \
-            > "$RUNNER_TEMP/agent-task/task.jsonl"
+            --variant xhigh \
+            --wait \
+            --last-assistant \
+            --timeout 5400 \
+            --json \
+            > "$RUNNER_TEMP/agent-task/session-result.json"
           status=$?
           set -e
           printf '%s\n' "$status" > "$RUNNER_TEMP/agent-task/task-exit-status.txt"
+
+      - name: Confirm local model session is idle
+        shell: bash
+        run: |
+          set -euo pipefail
+          openchamber session list --dir "$PIPELINE_MODEL_DIR" --with-status --all --limit 100 --json \
+            > "$RUNNER_TEMP/agent-task/session-status.json"
+          STATUS_PATH="$RUNNER_TEMP/agent-task/session-status.json" node <<'NODE'
+          const fs = require("node:fs");
+          const body = JSON.parse(fs.readFileSync(process.env.STATUS_PATH, "utf8"));
+          if (!Array.isArray(body.sessions) || body.sessions.length === 0) {
+            throw new Error("OpenChamber did not report the implementation session.");
+          }
+          const busy = body.sessions.filter((session) => session.status?.type !== "idle");
+          if (busy.length > 0) throw new Error(`Local model sessions remain active: ${busy.map((session) => session.id).join(", ")}`);
+          NODE
 
       - name: Build deterministic task artifact
         id: result
         shell: bash
         run: |
           set -euo pipefail
-          git add -A
-          git diff --cached --binary --full-index > "$RUNNER_TEMP/agent-task/task.patch"
+          rm -rf \
+            "$PIPELINE_MODEL_DIR/.opencode/node_modules" \
+            "$PIPELINE_MODEL_DIR/.opencode/package.json" \
+            "$PIPELINE_MODEL_DIR/.opencode/package-lock.json" \
+            "$PIPELINE_MODEL_DIR/.opencode/bun.lock"
+          node "$GITHUB_WORKSPACE/scripts/validate-agent-patch.mjs" --source "$PIPELINE_MODEL_DIR"
+          chmod -R u+w "$PIPELINE_MODEL_DIR/.pipeline"
+          rm -rf "$PIPELINE_MODEL_DIR/.pipeline"
+          node "$GITHUB_WORKSPACE/scripts/validate-agent-patch.mjs" --source "$PIPELINE_MODEL_DIR"
+          chmod -R a-w "$PIPELINE_MODEL_DIR"
+          patch_repo="$RUNNER_TEMP/agent-task/patch-repo"
+          rm -rf "$patch_repo"
+          git clone --quiet --no-hardlinks "$GITHUB_WORKSPACE" "$patch_repo"
+          git -C "$patch_repo" checkout --quiet --detach "$EXPECTED_BASE"
+          rsync -a --delete --exclude '.git/' "$PIPELINE_MODEL_DIR/" "$patch_repo/"
+          git -C "$patch_repo" add -A
+          node "$GITHUB_WORKSPACE/scripts/validate-agent-patch.mjs" "$patch_repo"
+          git -C "$patch_repo" diff --cached --binary --full-index HEAD > "$RUNNER_TEMP/agent-task/task.patch"
           node <<'NODE'
           const crypto = require("node:crypto");
           const fs = require("node:fs");
@@ -243,18 +348,12 @@ jobs:
           const issue = Number(process.env.PIPELINE_ISSUE);
           const artifactDir = `${process.env.RUNNER_TEMP}/agent-task`;
           const exitStatus = Number(fs.readFileSync(`${artifactDir}/task-exit-status.txt`, "utf8").trim());
-          const texts = fs.readFileSync(`${artifactDir}/task.jsonl`, "utf8")
-            .split(/\r?\n/)
-            .filter(Boolean)
-            .flatMap((line) => {
-              try {
-                const event = JSON.parse(line);
-                return event.type === "text" && typeof event.part?.text === "string" ? [event.part.text] : [];
-              } catch {
-                return [];
-              }
-            });
-          const report = texts.at(-1)?.trim() ?? "Implementation produced no final report.";
+          let sessionResult = {};
+          try {
+            sessionResult = JSON.parse(fs.readFileSync(`${artifactDir}/session-result.json`, "utf8"));
+          } catch {}
+          const report = sessionResult.lastAssistantMessage?.text?.trim()
+            ?? "Implementation produced no final report.";
           const marker = report.split(/\r?\n/).at(-1)?.trim() ?? "";
           const patch = fs.readFileSync(`${artifactDir}/task.patch`);
           let decision = { type: "failed", numbers: [] };
@@ -295,6 +394,30 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Clean local model context
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_root="$HOME/.local/state/quickducks-agent-runner"
+          if [[ -n "${PIPELINE_MODEL_DIR:-}" ]] && command -v openchamber > /dev/null; then
+            openchamber session list --dir "$PIPELINE_MODEL_DIR" --with-status --all --limit 100 --json \
+              > "$RUNNER_TEMP/agent-task/cleanup-status.json"
+            STATUS_PATH="$RUNNER_TEMP/agent-task/cleanup-status.json" STATE_PATH="$state_root/active.json" MODEL_DIR="$PIPELINE_MODEL_DIR" node -e '
+              const fs = require("node:fs");
+              const body = JSON.parse(fs.readFileSync(process.env.STATUS_PATH, "utf8"));
+              const sessions = body.sessions ?? [];
+              const state = fs.existsSync(process.env.STATE_PATH)
+                ? JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8")) : {};
+              if (state.directory === process.env.MODEL_DIR && state.phase === "dispatching" && sessions.length === 0) process.exit(1);
+              process.exit(sessions.every((session) => session.status?.type === "idle") ? 0 : 1);
+            '
+            node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
+              "$state_root/active.json" "$state_root/workspaces" "$PIPELINE_MODEL_DIR"
+          fi
+          node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
+            "$state_root/active.json" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-task"
+
   verify:
     needs: [prepare, implement]
     if: needs.implement.result == 'success' && needs.implement.outputs.decision == 'ready'
@@ -333,9 +456,11 @@ jobs:
           }
           if (result.decision?.type !== "ready") throw new Error("Task artifact is not ready for verification.");
           NODE
+          cp scripts/validate-agent-patch.mjs "$RUNNER_TEMP/validate-agent-patch.mjs"
           git apply --index --check task-artifact/task.patch
           git apply --index task-artifact/task.patch
           test -n "$(git diff --cached --name-only)"
+          node "$RUNNER_TEMP/validate-agent-patch.mjs" "$GITHUB_WORKSPACE"
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -343,14 +468,11 @@ jobs:
           node-version: 24
 
       - name: Install locked dependencies
-        run: |
-          npm ci
-          npm ci --prefix .opencode/ensemble-package --ignore-scripts
+        run: npm ci
 
       - name: Run deterministic release gate
         run: |
           npm audit --audit-level=high
-          npm audit --prefix .opencode/ensemble-package --audit-level=high
           npm run typecheck
           npm test
           npx playwright install --with-deps chromium
@@ -364,8 +486,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: read
-      id-token: write
+      actions: write
+      contents: write
       issues: write
       pull-requests: write
     env:
@@ -478,55 +600,60 @@ jobs:
             throw new Error("Task artifact failed publication identity checks.");
           }
           NODE
+          cp scripts/validate-agent-patch.mjs "$RUNNER_TEMP/validate-agent-patch.mjs"
           git apply --index --check task-artifact/task.patch
           git apply --index task-artifact/task.patch
           test -n "$(git diff --cached --name-only)"
+          node "$RUNNER_TEMP/validate-agent-patch.mjs" "$GITHUB_WORKSPACE"
 
-      - name: Exchange OIDC for OpenCode App token
-        id: app-token
-        if: needs.implement.result == 'success' && needs.implement.outputs.decision == 'ready' && needs.verify.result == 'success'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const oidcToken = await core.getIDToken("opencode-github-action");
-            const response = await fetch("https://api.opencode.ai/exchange_github_app_token", {
-              method: "POST",
-              headers: { Authorization: `Bearer ${oidcToken}` },
-            });
-            if (!response.ok) {
-              let detail = response.statusText;
-              try { detail = (await response.json()).error ?? detail; } catch {}
-              throw new Error(`OpenCode App token exchange failed: ${response.status} ${detail}`);
-            }
-            const { token } = await response.json();
-            if (!token) throw new Error("OpenCode App token exchange returned no token.");
-            core.setSecret(token);
-            core.setOutput("token", token);
-
-      - name: Publish App-authored branch and PR
+      - name: Publish branch and PR
+        id: publication
         if: needs.implement.result == 'success' && needs.implement.outputs.decision == 'ready' && needs.verify.result == 'success'
         env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           branch="opencode/issue${ISSUE_NUMBER}-run${GITHUB_RUN_ID}"
-          git config user.name "opencode-agent[bot]"
-          git config user.email "opencode-agent[bot]@users.noreply.github.com"
+          published_pr=false
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
           git commit -m "Implement issue #${ISSUE_NUMBER}"
-          auth="$(printf 'x-access-token:%s' "$APP_TOKEN" | base64)"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64)"
+          cleanup_orphan_branch() {
+            if [[ "$published_pr" == "false" ]]; then
+              if existing_pr="$(gh pr list --head "$branch" --state all --json number --jq '.[0].number // empty')"; then
+                if [[ -z "$existing_pr" ]]; then
+                  git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+                    push "https://github.com/${GITHUB_REPOSITORY}.git" ":refs/heads/${branch}" || true
+                else
+                  printf 'Preserving branch because PR #%s exists.\n' "$existing_pr" >&2
+                fi
+              else
+                printf 'Unable to verify whether a PR exists; preserving branch for reconciliation.\n' >&2
+              fi
+            fi
+          }
+          trap cleanup_orphan_branch ERR
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
             push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
           title="$(gh issue view "$ISSUE_NUMBER" --json title --jq '.title')"
-          gh pr create \
+          pr_url="$(gh pr create \
             --base "${{ github.event.repository.default_branch }}" \
             --head "$branch" \
             --title "$title" \
             --body "<!-- agent-pipeline task-run=${GITHUB_RUN_ID} issue=${ISSUE_NUMBER} base=${EXPECTED_BASE} -->
 
-          Closes #${ISSUE_NUMBER}"
+          Closes #${ISSUE_NUMBER}")"
+          published_pr=true
+          trap - ERR
+          pr_number="${pr_url##*/}"
+          if [[ ! "$pr_number" =~ ^[1-9][0-9]*$ ]]; then
+            printf 'Unable to parse created pull request number from %s.\n' "$pr_url" >&2
+            exit 1
+          fi
+          printf 'pr=%s\n' "$pr_number" >> "$GITHUB_OUTPUT"
 
       - name: Mark issue under review
         if: needs.implement.result == 'success' && needs.implement.outputs.decision == 'ready' && needs.verify.result == 'success'
@@ -548,15 +675,31 @@ jobs:
               owner, repo, issue_number: issueNumber, labels: [...labels, "agent:review"],
             });
 
+      - name: Dispatch candidate CI and trusted review
+        if: needs.implement.result == 'success' && needs.implement.outputs.decision == 'ready' && needs.verify.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.publication.outputs.pr }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch="opencode/issue${ISSUE_NUMBER}-run${GITHUB_RUN_ID}"
+          gh workflow run ci.yml --ref "$branch"
+          gh workflow run agent-review.yml \
+            --ref "${{ github.event.repository.default_branch }}" \
+            -f pr="$PR_NUMBER"
+
       - name: Mark failed implementation or publication
         if: failure() || needs.implement.result != 'success' || (needs.implement.outputs.decision == 'ready' && needs.verify.result != 'success')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+          PR_NUMBER: ${{ steps.publication.outputs.pr }}
         with:
           script: |
             const { owner, repo } = context.repo;
             const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const requestedPr = Number(process.env.PR_NUMBER);
             const states = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:running",
               "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
@@ -564,10 +707,33 @@ jobs:
             ];
             const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
             const labels = issue.labels.map((label) => label.name).filter((label) => !states.includes(label));
+            let pr;
+            if (Number.isSafeInteger(requestedPr) && requestedPr > 0) {
+              try {
+                pr = (await github.rest.pulls.get({ owner, repo, pull_number: requestedPr })).data;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            }
+            if (!pr) {
+              const pulls = await github.paginate(github.rest.pulls.list, { owner, repo, state: "open", per_page: 100 });
+              pr = pulls.find((candidate) => {
+                const branch = candidate.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
+                const marker = (candidate.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
+                const closing = [...(candidate.body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)]
+                  .map((match) => Number(match[1]));
+                return candidate.user?.id === 41898282 && candidate.head.repo?.id === candidate.base.repo?.id
+                  && branch?.[1] === String(issueNumber) && marker?.[1] === branch?.[2]
+                  && marker?.[2] === branch?.[1] && closing.length === 1 && closing[0] === issueNumber;
+              });
+            }
+            const published = pr?.state === "open" && pr.user?.id === 41898282;
             await github.rest.issues.setLabels({
-              owner, repo, issue_number: issueNumber, labels: [...labels, "agent:failed"],
+              owner, repo, issue_number: issueNumber, labels: [...labels, published ? "agent:review" : "agent:failed"],
             });
             await github.rest.issues.createComment({
               owner, repo, issue_number: issueNumber,
-              body: `<!-- agent-pipeline run-failed=${context.runId} --> Agent Task failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              body: published
+                ? `<!-- agent-pipeline gate-dispatch-failed=${context.runId} pr=${pr.number} --> Candidate PR #${pr.number} was published, but gate dispatch failed. Reconciliation will recover missing gates: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+                : `<!-- agent-pipeline run-failed=${context.runId} --> Agent Task failed: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
             });
