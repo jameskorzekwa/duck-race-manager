@@ -2130,6 +2130,68 @@ test("winnerByTagIneligible mirrors the candidate query and answers only for a r
   assert.equal(await winnerByTagIneligible(env, tokens["duck-2"]), null, "duck no longer assigned");
 });
 
+// "Not eligible to win" and "left the race" are different sets, and only the
+// second has a status word a staffer can act on. SUBMITTED is the state a racer
+// is left in when their duck is deleted mid-race: they are waiting to be paired
+// again, they were never withdrawn, and telling the finish line their duck
+// cannot win because they are "Submitted" describes something that never
+// happened. The strict candidate guard is unchanged — it still admits only
+// ACTIVE — so nothing about who may be recorded as a winner moves here.
+test("a racer who never left the race is not reported as withdrawn or disqualified", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const tokens = seedAwaitingFinishHeat(database);
+  const env = { APP_ORIGIN: "https://quickducks.com", DB: d1(database) };
+
+  database.exec("UPDATE registrations SET status = 'SUBMITTED' WHERE id = 'registration-2'");
+  // Still not a winner candidate: winning requires ACTIVE and always will.
+  assert.equal(await winnerByTagCandidate(env, tokens["duck-2"]), null, "SUBMITTED is no candidate");
+  // But the "this racer left the race" projection does not claim them, so the
+  // duck inspection page falls through to its generic refusal rather than
+  // announcing a status word that is not theirs.
+  assert.equal(await winnerByTagIneligible(env, tokens["duck-2"]), null, "SUBMITTED never left the race");
+
+  const confirmed = await handleHeatOperations(jsonRequest(
+    `/api/v1/staff/ducks/${tokens["duck-2"]}/heat-winner`,
+    "POST",
+    { commandId: commandId(), eventId: "event", heatId: "heat-1", raceEntryId: "entry-2", revision: 5 },
+  ), env, actor);
+  assert.equal(confirmed.status, 409, "the generic refusal, not the withdrawal outcome");
+  const confirmedBody = await confirmed.json();
+  assert.equal(confirmedBody.reason, undefined);
+  assert.match(confirmedBody.error, /not the current winner candidate/);
+
+  // The two statuses that do mean "left the race" are matched exactly as before.
+  for (const status of ["WITHDRAWN", "DISQUALIFIED"]) {
+    database.exec(`UPDATE registrations SET status = '${status}' WHERE id = 'registration-2'`);
+    const ineligible = await winnerByTagIneligible(env, tokens["duck-2"]);
+    assert.equal(ineligible?.registrationStatus, status, status);
+    assert.equal(ineligible.reason, FINISH_DUCK_INELIGIBLE_REASON, status);
+  }
+
+  // The scan station still refuses every non-ACTIVE duck, because none of them
+  // may be recorded — but the sentence names a status only when there is a true
+  // one to name, rather than humanising whatever it was handed.
+  database.exec("UPDATE registrations SET status = 'SUBMITTED' WHERE id = 'registration-2'");
+  const scan = await handleHeatOperations(new Request(
+    "https://quickducks.com/api/v1/staff/events/event/heats/heat-1/finish-scan?value=2",
+  ), env, actor);
+  assert.equal(scan.status, 422);
+  const scanBody = await scan.json();
+  assert.equal(scanBody.reason, FINISH_DUCK_INELIGIBLE_REASON);
+  assert.equal(scanBody.error.includes("Submitted"), false, "no invented status word");
+  assert.match(scanBody.error, /^Duck #2 · Donald D\. is not an active racer and cannot be recorded as the winner\./);
+  assert.match(scanBody.error, /scan the next duck to pass the finish line\.$/i);
+
+  database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-2'");
+  const withdrawnScan = await handleHeatOperations(new Request(
+    "https://quickducks.com/api/v1/staff/events/event/heats/heat-1/finish-scan?value=2",
+  ), env, actor);
+  assert.match((await withdrawnScan.json()).error, /^Duck #2 · Donald D\. is Withdrawn and cannot be recorded/);
+
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
+});
+
 test("the finish-line ineligible outcome is refused to roles that may not take results", async (context) => {
   const database = createDatabase();
   context.after(() => database.close());

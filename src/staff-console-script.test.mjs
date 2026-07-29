@@ -141,29 +141,65 @@ test("the Delete control is gated on deletable and the bag wording on currentlyP
     /const participantIsCurrentlyPaired = \(registration\) => registration\.currentlyPaired === true\s*\|\| \(registration\.currentlyPaired === undefined/,
   );
 
-  // Both destructive branches read the deletable predicate and nothing else.
+  // The deletable predicate is read once, and the two halves it decides are
+  // written as one boolean and its negation, so no future edit can leave Delete
+  // and the explanation both showing, or both missing.
+  assert.ok(staffHomeScript.includes("const deletable = participantIsDeletable(registration);"));
   assert.ok(staffHomeScript.includes(
-    'if (participantIsDeletable(registration)) {\n    addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));',
+    'if (deletable) {\n    addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));',
   ));
   assert.ok(staffHomeScript.includes(
-    'if (!participantIsDeletable(registration)) {\n    const note = text("p", participantUndeletableReason(registration), "muted participant-action-note");',
+    'if (!deletable) {\n    const note = text("p", participantUndeletableReason(registration), "muted participant-action-note");',
   ));
+
+  // Withdrawal is not inside either half. It is a question about being in the
+  // race, and the server accepts it for a never-paired no-show too, so hiding
+  // it behind undeletability left Delete as the only way to record one.
+  const render = staffHomeScript.match(/const renderParticipantDetail = \(registration\) => \{[\s\S]*?\n\};/);
+  assert.ok(render, "the console defines renderParticipantDetail");
+  const withdrawIndex = render[0].indexOf('addParticipantAction("Withdraw"');
+  const deleteHalfIndex = render[0].indexOf("if (deletable) {");
+  const noteHalfIndex = render[0].indexOf("if (!deletable) {");
+  assert.ok(withdrawIndex > 0, "the console offers Withdraw");
+  assert.ok(
+    withdrawIndex > noteHalfIndex && withdrawIndex < deleteHalfIndex,
+    "Withdraw sits between the two deletable halves rather than inside either one",
+  );
+  assert.match(
+    render[0].slice(withdrawIndex - 200, withdrawIndex),
+    /if \(\["SUBMITTED", "ACTIVE"\]\.includes\(registration\.status\)\) \{\n\s*$/,
+    "Withdraw is gated only on the statuses the endpoint accepts",
+  );
 
   // The renderer itself no longer touches `assignment`: every read of it is
   // inside the two small helpers that exist to guard it, so a projection with
   // an assignment shape this console does not expect cannot throw part-way
   // through the render and silently drop every control below it.
-  const render = staffHomeScript.match(/const renderParticipantDetail = \(registration\) => \{[\s\S]*?\n\};/);
-  assert.ok(render, "the console defines renderParticipantDetail");
   assert.doesNotMatch(render[0], /registration\.assignment/);
 
-  // And the bag sentence is reachable only through the pairing question, so it
-  // can never claim a duck is in a bag for a participant who holds none.
+  // The sealed-bag sentence is reachable only when this participant holds a
+  // duck AND a heat is holding it, so it can never claim a bag that does not
+  // exist. The race-status branch comes first and says nothing about ducks at
+  // all, and the history branch names no bag of its own.
   const reason = staffHomeScript.match(/const participantUndeletableReason = \(registration\) => \{[\s\S]*?\n\};/);
   assert.ok(reason, "the console defines participantUndeletableReason");
-  const [bagBranch, historyBranch] = reason[0].split("return \"This participant has already been in the race");
-  assert.match(bagBranch, /sealed in a heat bag/);
-  assert.ok(historyBranch !== undefined, "the second reason exists");
+  const sealedIndex = reason[0].indexOf("is already sealed in a heat bag");
+  const pendingIndex = reason[0].indexOf("has no heat yet");
+  const eventIndex = reason[0].indexOf("participantEventBlocksDeletion()");
+  assert.ok(eventIndex > 0 && eventIndex < pendingIndex && pendingIndex < sealedIndex,
+    "the race-status branch is tested first, then the no-heat case, then the sealed bag");
+  assert.match(
+    reason[0].slice(0, sealedIndex),
+    /if \(participantIsCurrentlyPaired\(registration\)\) \{\s*return duckLabel \+ " $/,
+    "the sealed-bag sentence is guarded by the pairing question",
+  );
+  assert.match(
+    reason[0].slice(0, pendingIndex),
+    /if \(participantIsCurrentlyPaired\(registration\) && registration\.heatAssignmentPending === true\) \{\s*return duckLabel \+ " is paired with this participant but $/,
+    "the no-bag sentence is guarded by the projection's own heat answer",
+  );
+  const [, historyBranch] = reason[0].split('return "This participant has already been in the race');
+  assert.ok(historyBranch !== undefined, "the history reason exists");
   assert.doesNotMatch(historyBranch, /sealed in a heat bag/);
 });
 

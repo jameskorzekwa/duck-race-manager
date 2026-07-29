@@ -87,6 +87,7 @@ interface RegistrationRow {
   duck_id: string | null;
   duck_visible_number: number | null;
   is_deletable: number;
+  heat_assignment_pending: number;
 }
 
 const registrationSelect = `
@@ -104,7 +105,15 @@ const registrationSelect = `
          -- The exact predicate the delete endpoint re-checks inside its guarded
          -- write, so the console's Delete control and the write that follows it
          -- can never disagree about whether a participant is still removable.
-         (${removableRegistrationSql}) AS is_deletable
+         (${removableRegistrationSql}) AS is_deletable,
+         -- "This race entry holds no place in any heat", stated exactly as the
+         -- pairing response states it. A heat is a physical numbered bag, so
+         -- this is the only thing that licenses a staff surface to say a duck
+         -- is in one; without it the console would have to guess, and a wrong
+         -- reason on a race-day panel is a lie a staffer acts on.
+         (NOT EXISTS (
+            SELECT 1 FROM heat_entries he WHERE he.race_entry_id = re.id
+          )) AS heat_assignment_pending
     FROM registrations r
     JOIN events e ON e.id = r.event_id
     JOIN race_entries re ON re.registration_id = r.id
@@ -160,6 +169,10 @@ const registrationJson = (row: RegistrationRow): Record<string, unknown> => ({
   // instead.
   currentlyPaired: row.assignment_id !== null,
   deletable: row.is_deletable === 1,
+  // The third question, and the only one that decides whether a duck may be
+  // described as sealed in a heat bag: a paired participant with no heat place
+  // has a duck in their hands and no bag to put it in yet.
+  heatAssignmentPending: row.heat_assignment_pending === 1,
 });
 
 const eventJson = (row: EventRow | RegistrationRow): Record<string, unknown> => ({

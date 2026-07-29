@@ -1635,6 +1635,25 @@ const rosterMarkIneligible = (container, entry, lead, text) => {
   container.append(text("strong", marker.flag, "roster-flag"), text("p", marker.note, "roster-flag-note"));
   return true;
 };
+// "Can this entry still be recorded as a winner?" — the single question every
+// surface that counts, offers, or requires a place must ask, stated once.
+//
+// It is the exact complement of the marker above: only an explicit
+// eligible:false is ineligible. A projection served before the field existed
+// reports undefined and is treated as eligible, which keeps such a response
+// behaving exactly as it did before rather than silently shrinking a podium to
+// zero places and stranding an event that has no other way out.
+const rosterEntryEligible = (entry) => !entry || entry.eligible !== false;
+const rosterEligibleEntries = (roster) => (Array.isArray(roster) ? roster : []).filter(rosterEntryEligible);
+// A locked roster cannot gain or lose an entry, but a racer on it can withdraw
+// or be disqualified at any heat state, and that changes nothing the heat itself
+// records — not its status and not its revision. A station that keys its render
+// on the heat alone would throw the repaint away and keep showing an unmarked
+// racer whose duck can no longer win, and keep demanding a place nobody is
+// allowed to fill. Every station roster therefore folds this into its key.
+const rosterEligibilityKey = (roster) => (Array.isArray(roster) ? roster : [])
+  .map((entry) => (entry && entry.raceEntryId) + (rosterEntryEligible(entry) ? ":1" : ":0"))
+  .join(",");
 `;
 
 export const stationStateHelpersScript = String.raw`
@@ -2058,17 +2077,11 @@ const startCommand = async (path, revision) => {
     startSubscription?.resume();
   }
 };
-// A locked roster cannot gain or lose an entry, but a racer on it can withdraw
-// or be disqualified at any heat state now, and that changes nothing the heat
-// itself records — not its status and not its revision. This station already
-// subscribes to the "participants" domain, so it is told; without the roster's
-// eligibility in the render key it would throw the repaint away and keep showing
-// an unmarked racer whose duck can no longer win.
-const startRosterEligibilityKey = (roster) => roster
-  .map((entry) => entry.raceEntryId + (entry.eligible === false ? ":0" : ":1"))
-  .join(",");
+// This station already subscribes to the "participants" domain, so it is told
+// when a racer on its locked roster leaves; the shared eligibility key is what
+// stops that repaint from being discarded as an unchanged heat.
 const startRender = (event, detail) => {
-  const renderKey = stationHeatRenderKey(event, detail) + "|" + startRosterEligibilityKey(detail.roster);
+  const renderKey = stationHeatRenderKey(event, detail) + "|" + rosterEligibilityKey(detail.roster);
   if (renderKey === startRenderKey) return;
   startRenderKey = renderKey;
   const restoreActionFocus = startAction.contains(document.activeElement);
@@ -2397,21 +2410,33 @@ const finishSelectionProblem = (selected, roster, raceEntryId) => {
 // so it is still in the water and can still cross the line first. That is an
 // expected race-day outcome, not a failure: name the duck, name its real status,
 // and send the staffer straight back to scanning.
+//
+// Only the two statuses that mean "this racer left the race" are named, mirroring
+// the server. Any other status still cannot be recorded — every result path
+// requires ACTIVE — but announcing it as, say, "Submitted" would put a word in
+// front of a staffer that describes something else entirely, so the headline
+// drops the claim rather than inventing one.
 const finishIneligibleStatusLabel = (status) => status === "WITHDRAWN"
   ? "Withdrawn"
   : status === "DISQUALIFIED"
     ? "Disqualified"
-    : String(status || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
-const finishIneligibleLines = (duck) => duck
-  ? [
-    "Duck #" + duck.visibleNumber + " is " + finishIneligibleStatusLabel(duck.registrationStatus),
+    : null;
+const finishIneligibleLines = (duck) => {
+  if (!duck) {
+    return [
+      "That duck cannot be recorded",
+      "Scan the next duck to pass the finish line.",
+    ];
+  }
+  const label = finishIneligibleStatusLabel(duck.registrationStatus);
+  return [
+    label === null
+      ? "Duck #" + duck.visibleNumber + " cannot be recorded"
+      : "Duck #" + duck.visibleNumber + " is " + label,
     duck.participantDisplayName + " cannot be recorded as a winner, and this duck stays in its heat.",
     "Scan the next duck to pass the finish line.",
-  ]
-  : [
-    "That duck cannot be recorded",
-    "Scan the next duck to pass the finish line.",
   ];
+};
 `;
 
 export const finishScanSerializationScript = String.raw`
@@ -2500,7 +2525,7 @@ const finishCreateNfcScanner = ({ createReader, createController, decode, onValu
 };
 `;
 
-export const finishLineScript = stationStateHelpersScript
+export const finishLineScript = rosterEligibilityHelpersScript + stationStateHelpersScript
   + finishSelectionValidationScript + finishScanSerializationScript
   + finishNfcHelpersScript + String.raw`
 const finishRoot = document.querySelector("[data-finish-line]");
@@ -2580,7 +2605,22 @@ const finishAddFact = (label, value) => {
   fact.append(finishText("dt", label), finishText("dd", value));
   finishFacts.append(fact);
 };
-const finishRequiredPlaces = () => !finishHeat ? 0 : finishHeat.round === "ROUND_ONE" ? 1 : Math.min(3, finishRosterEntries.length);
+// The podium is exactly as deep as the racers who can still take a place, which
+// is the number the server's own result validation requires. Sizing it from the
+// whole roster instead demands a place no duck may ever fill: the third duck
+// answers every scan with DUCK_NOT_ELIGIBLE, Submit never enables, the final
+// can never be published, and the event is stranded with no way out.
+const finishEligibleEntries = () => rosterEligibleEntries(finishRosterEntries);
+const finishRequiredPlaces = () => !finishHeat ? 0 : finishHeat.round === "ROUND_ONE" ? 1 : Math.min(3, finishEligibleEntries().length);
+// Zero required places means every racer in this heat left, so there is no
+// result to submit at all. That is deliberately not the same as "the selections
+// happen to match", which is why it is tested for on its own rather than being
+// left to a 0 === 0 comparison that would arm an empty, always-refused submit.
+const finishSubmitBlocked = (busy) => {
+  const required = finishRequiredPlaces();
+  return busy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT"
+    || required === 0 || finishSelected.length !== required;
+};
 const finishSetScanBusy = (busy) => {
   finishScanBusy = busy;
   if (busy && finishScanEndBusy === null) finishScanEndBusy = globalThis.quickDucksLive.beginBusy();
@@ -2592,8 +2632,7 @@ const finishSetScanBusy = (busy) => {
   for (const control of finishScanForm.querySelectorAll("input, button")) control.disabled = busy;
   finishNfcButton.disabled = busy;
   for (const control of finishSelections.querySelectorAll("button")) control.disabled = busy;
-  const required = finishRequiredPlaces();
-  finishSubmit.disabled = busy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT" || finishSelected.length !== required;
+  finishSubmit.disabled = finishSubmitBlocked(busy);
 };
 const finishRenderSelections = () => {
   const focusedRaceEntry = finishSelections.contains(document.activeElement)
@@ -2621,8 +2660,7 @@ const finishRenderSelections = () => {
     finishSelections.append(card);
     if (focusedRaceEntry === selection.raceEntryId) remove.focus();
   }
-  const required = finishRequiredPlaces();
-  finishSubmit.disabled = finishScanBusy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT" || finishSelected.length !== required;
+  finishSubmit.disabled = finishSubmitBlocked(finishScanBusy);
   finishSubmit.textContent = finishHeat && finishHeat.round === "FINAL" ? "Submit official podium" : "Submit official winner";
 };
 const finishSelectionContext = () => {
@@ -2675,6 +2713,11 @@ const finishSelectValue = async (value) => {
     finishMessage.textContent = "Mark the running heat finished before selecting results.";
     return;
   }
+  if (finishRequiredPlaces() === 0) {
+    finishMessage.textContent = "Every racer in this heat is withdrawn or disqualified, so no result can be recorded."
+      + " Ask the race director to reactivate the racer who should hold the place.";
+    return;
+  }
   if (finishSelected.length >= finishRequiredPlaces()) {
     finishMessage.textContent = "Every required place is filled. Remove a selection to change it.";
     return;
@@ -2694,7 +2737,12 @@ const finishSelectValue = async (value) => {
   }
 };
 const finishRender = (event, detail) => {
-  const renderKey = stationHeatRenderKey(event, detail);
+  // Eligibility is part of the key, not just the heat: a racer who withdraws
+  // during AWAITING_RESULT changes neither the heat's status nor its revision,
+  // yet it changes both the marker this roster must show and how many places
+  // this station requires. Without it the repaint is discarded and the station
+  // keeps asking for a place that can never be filled.
+  const renderKey = stationHeatRenderKey(event, detail) + "|" + rosterEligibilityKey(detail.roster);
   if (renderKey === finishRenderKey) return;
   const changedHeatContext = !finishHeat
     || finishHeat.id !== detail.heat.id
@@ -2709,7 +2757,14 @@ const finishRender = (event, detail) => {
     finishSelected = [];
     finishClearIneligible();
   }
-  else finishSelected = finishSelected.filter((selection) => finishRosterEntries.some((entry) => entry.raceEntryId === selection.raceEntryId));
+  // A reviewed selection survives a repaint only while it is still a duck this
+  // heat may award a place to. A racer who left between the scan and the submit
+  // is dropped here for the same reason the submit response drops them, and the
+  // remaining places close up rather than leaving a gap the server would refuse.
+  else finishSelected = finishSelected
+    .filter((selection) => finishRosterEntries.some((entry) => entry.raceEntryId === selection.raceEntryId
+      && rosterEntryEligible(entry)))
+    .map((selection, index) => ({ ...selection, place: index + 1 }));
   finishEventLabel.textContent = event.name + " · " + finishHumanize(event.status);
   finishHeatTitle.textContent = (finishHeat.round === "FINAL" ? "Final" : "Round one") + " · Heat " + finishHeat.number;
   finishFacts.replaceChildren();
@@ -2717,8 +2772,13 @@ const finishRender = (event, detail) => {
   finishAddFact("Required result", finishHeat.round === "ROUND_ONE" ? "One winner" : finishRequiredPlaces() + " podium places");
   finishRoster.replaceChildren();
   for (const entry of finishRosterEntries) {
-    finishRoster.append(finishText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
-      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned")));
+    const item = finishText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
+      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned"));
+    // This is the roster a staffer reads to decide who won, so it is the last
+    // place that may leave a racer who cannot win looking like one who can. The
+    // row keeps its slot: the duck is still in the bag and still in the water.
+    rosterMarkIneligible(item, entry, "Cannot win", finishText);
+    finishRoster.append(item);
   }
   finishAction.replaceChildren();
   const finalPodiumFlow = finishHeat.round === "FINAL";
@@ -2755,10 +2815,16 @@ const finishRender = (event, detail) => {
     finishAction.append(button);
     if (restoreActionFocus) button.focus();
     finishMessage.textContent = "When the race physically finishes, press the one finish button.";
+  } else if (finishHeat.round === "ROUND_ONE") {
+    finishMessage.textContent = "Scan the winning duck's permanent NFC or QR tag. Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner.";
+  } else if (finishRequiredPlaces() === 0) {
+    // Every racer in this heat left. There is no podium to take, so say that
+    // instead of asking for zero ducks and leaving a dead Submit on screen.
+    finishMessage.textContent = "Every racer in this heat is withdrawn or disqualified, so no result can be recorded."
+      + " Ask the race director to reactivate the racer who should hold the place.";
   } else {
-    finishMessage.textContent = finishHeat.round === "ROUND_ONE"
-      ? "Scan the winning duck's permanent NFC or QR tag. Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner."
-      : "Select " + finishRequiredPlaces() + " distinct ducks, then review every place before submitting.";
+    finishMessage.textContent = "Select " + finishRequiredPlaces() + " distinct duck"
+      + (finishRequiredPlaces() === 1 ? "" : "s") + ", then review every place before submitting.";
   }
   finishRenderSelections();
 };
@@ -2813,7 +2879,7 @@ finishScanForm.addEventListener("submit", async (event) => {
   await finishSelectValue(finishScanForm.elements.duck.value);
 });
 finishSubmit.addEventListener("click", async () => {
-  if (!finishEvent || !finishHeat || finishScanBusy || finishSelected.length !== finishRequiredPlaces()) return;
+  if (!finishEvent || !finishHeat || finishScanBusy || finishRequiredPlaces() === 0 || finishSelected.length !== finishRequiredPlaces()) return;
   const readback = finishSelected.map((selection) => finishPlaceLabel(selection.place) + ": "
     + selection.participantDisplayName + ", Duck #" + selection.visibleNumber).join("; ");
   if (!await appConfirm("Submit this official result now? Read back: " + readback + ". This publishes immediately.", { danger: true })) return;
@@ -4825,7 +4891,12 @@ const renderEvent = (detail, readiness) => {
 const renderLifecycleResult = (event) => {
   if (currentEventDetail === null || currentEventDetail.event.id !== event.id) return false;
   const rendered = renderEvent({ ...currentEventDetail, event }, { readiness: {} });
-  if (rendered) readinessList.replaceChildren(empty("Refreshing lifecycle actions…"));
+  // Only renderReadiness can create the button that reaches here, and it
+  // returns early when this element is missing, so today the guard can never
+  // fire. It is still written, because every other surface on this client is
+  // guarded the same way and one throw inside a console render silently kills
+  // every control after it — the cost of being wrong is invisible and total.
+  if (rendered && readinessList) readinessList.replaceChildren(empty("Refreshing lifecycle actions…"));
   return rendered;
 };
 
@@ -5206,21 +5277,51 @@ const participantDuckFact = (registration) => {
   return participantIsCurrentlyPaired(registration) ? "Paired" : "Unassigned";
 };
 
+// The event statuses the delete endpoint accepts at all, mirroring
+// DELETABLE_EVENT_STATUSES in registration.ts. Outside them nothing about the
+// participant is the reason — the race itself is — and saying anything about
+// heat bags there would be false about someone who has never held a duck.
+const PARTICIPANT_DELETABLE_EVENT_STATUSES = [
+  "REGISTRATION_OPEN", "REGISTRATION_CLOSED", "ROUND_ONE", "FINAL", "COMPLETED",
+];
+
+// True only when the console can positively see a race whose status forbids
+// deletion. An unknown or not-yet-loaded event is not evidence of anything, so
+// it falls through to the participant-shaped reasons rather than blaming a race
+// state nobody has confirmed.
+const participantEventBlocksDeletion = () => Boolean(currentEvent)
+  && typeof currentEvent.status === "string"
+  && !PARTICIPANT_DELETABLE_EVENT_STATUSES.includes(currentEvent.status);
+
 // One sentence for the one participant who is being told they cannot be deleted.
-// There are two honest reasons, and claiming the wrong one is a lie a staffer
-// acts on: either the duck is in a bag right now, or this participant has
-// already been in the race and their duck went into a bag earlier.
+// Each branch is a separate fact, and claiming the wrong one is a lie a staffer
+// acts on. In order of what the console can actually prove:
+//
+//   1. the race's own status forbids deleting any registration;
+//   2. this participant holds a duck that is already in a numbered heat bag;
+//   3. this participant holds a duck that has no heat, and therefore no bag,
+//      yet — the same heatAssignmentPending state the pairing callout refuses
+//      to invent a bag number for;
+//   4. this participant has been in the race before: an ended assignment or a
+//      heat place, either of which the delete endpoint refuses on.
+//
+// A duck is never described as bagged unless a heat is genuinely holding it.
 const participantUndeletableReason = (registration) => {
+  if (participantEventBlocksDeletion()) {
+    return "Registrations cannot be deleted while this race is " + humanize(currentEvent.status).toLowerCase()
+      + ". Withdraw or disqualify only makes this participant ineligible to be counted as a winner.";
+  }
   const duckNumber = participantPairedDuckNumber(registration);
-  if (duckNumber !== null) {
-    return "Duck #" + duckNumber
-      + " is already sealed in a heat bag, so it stays in the race. Withdraw or disqualify only makes this"
+  const duckLabel = duckNumber === null ? "This participant's duck" : "Duck #" + duckNumber;
+  if (participantIsCurrentlyPaired(registration) && registration.heatAssignmentPending === true) {
+    return duckLabel + " is paired with this participant but has no heat yet, so there is no bag it can go"
+      + " into. Ask the race director which heat it belongs to. Withdraw or disqualify only makes this"
       + " participant ineligible to be counted as a winner; the registration cannot be deleted.";
   }
   if (participantIsCurrentlyPaired(registration)) {
-    return "This participant's duck is already sealed in a heat bag, so it stays in the race. Withdraw or"
-      + " disqualify only makes this participant ineligible to be counted as a winner; the registration"
-      + " cannot be deleted.";
+    return duckLabel + " is already sealed in a heat bag, so it stays in the race. Withdraw or disqualify"
+      + " only makes this participant ineligible to be counted as a winner; the registration cannot be"
+      + " deleted.";
   }
   return "This participant has already been in the race — their duck went into a heat bag, or they hold a"
     + " place on a heat roster — so the registration cannot be deleted. Withdraw or disqualify only makes"
@@ -5341,17 +5442,25 @@ const renderParticipantDetail = (registration) => {
       location.assign("/staff/inventory?raceEntry=" + encodeURIComponent(registration.raceEntryId));
     });
   }
-  // Not deletable: no Delete at all, and one plain sentence saying which of the
-  // two reasons applies. This is deletable, never the assignment, so a
-  // participant whose duck was unassigned is not offered a doomed button.
-  if (!participantIsDeletable(registration)) {
+  // The deletable projection decides one thing only: whether Delete exists.
+  // The two halves below are exhaustive and mutually exclusive, and Delete
+  // appears in exactly one of them, so nobody who has been in the race can ever
+  // be offered it.
+  const deletable = participantIsDeletable(registration);
+  // --- Not deletable: no Delete, and one plain sentence saying why not. ---
+  if (!deletable) {
     const note = text("p", participantUndeletableReason(registration), "muted participant-action-note");
     note.dataset.participantActionNote = "";
     participantActions.append(note);
-    if (["SUBMITTED", "ACTIVE"].includes(registration.status)) {
-      addParticipantAction("Withdraw", "button danger small", (event) => changeParticipantStatus("withdraw", "Withdraw participant", true, event.currentTarget));
-      if (canDirectRace) addParticipantAction("Disqualify", "button danger small", (event) => changeParticipantStatus("disqualify", "Disqualify participant", true, event.currentTarget));
-    }
+  }
+  // Leaving the race is a different question from deleting the registration,
+  // and it is asked of everyone the server accepts it for. A never-paired
+  // no-show is withdrawn like anyone else; offering them only Delete would make
+  // destroying the registration the sole way to record that they did not turn
+  // up, and would lose the person who registered.
+  if (["SUBMITTED", "ACTIVE"].includes(registration.status)) {
+    addParticipantAction("Withdraw", "button danger small", (event) => changeParticipantStatus("withdraw", "Withdraw participant", true, event.currentTarget));
+    if (canDirectRace) addParticipantAction("Disqualify", "button danger small", (event) => changeParticipantStatus("disqualify", "Disqualify participant", true, event.currentTarget));
   }
   if (canDirectRace && ["WITHDRAWN", "DISQUALIFIED"].includes(registration.status)) {
     addParticipantAction("Reactivate", "button small", async (event) => {
@@ -5368,9 +5477,9 @@ const renderParticipantDetail = (registration) => {
       });
     });
   }
-  // Deletable: the server would accept a delete right now, and removing the
-  // registration outright is the only destructive action that makes sense.
-  if (participantIsDeletable(registration)) {
+  // --- Deletable: the server would accept a delete right now, and this is the
+  // only branch that renders it. ---
+  if (deletable) {
     addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));
   }
 };
@@ -5559,9 +5668,28 @@ const heatResetAllowed = (heat) => Boolean(canDirectRace)
   && ["READY", "CALLING", "RUNNING", "AWAITING_RESULT"].includes(heat.status)
   && heat.rosterLocked && heat.rosterSize > 0 && heat.publishedResultCount === 0;
 
+// The one place the console names a winner, used for the FINAL finalize, the
+// FINAL correction, and the ROUND_ONE correction alike.
+//
+// Only the racers who can still take a place are selectable, and the podium is
+// only as deep as there are of them, because that is exactly what the server's
+// result validation requires. Offering the whole roster contradicts the heat
+// roster directly above — which now marks the same racers "Cannot win" — and
+// hands the race director a 422 on race day. The roster list itself is
+// unchanged: staff still see every entry, marked, because the ducks are all
+// still in the bag.
 const resultForm = (body, mode) => {
   const form = text("form", "", "operation-card");
   form.append(text("h3", mode === "finalize" ? "Finalize result" : "Correct published result"));
+  const eligibleRoster = rosterEligibleEntries(body.roster);
+  // No eligible racer at all: there is no result to publish and no honest form
+  // to render, so the card says so rather than showing empty, unsubmittable
+  // selects the server would refuse.
+  if (eligibleRoster.length === 0) {
+    form.append(empty("Every racer in this heat is withdrawn or disqualified, so no result can be recorded."
+      + " Reactivate the racer who should hold the place, then publish the result."));
+    return form;
+  }
   if (mode === "correct") {
     const reasonLabel = text("label", "Correction reason");
     const reason = document.createElement("input");
@@ -5574,21 +5702,27 @@ const resultForm = (body, mode) => {
   }
   const places = body.heat.round === "ROUND_ONE"
     ? [1]
-    : Array.from({ length: Math.min(3, body.roster.length) }, (_, index) => index + 1);
+    : Array.from({ length: Math.min(3, eligibleRoster.length) }, (_, index) => index + 1);
   const selects = [];
   for (const place of places) {
     const label = text("label", place === 1 ? "First place" : place === 2 ? "Second place" : "Third place");
     const select = document.createElement("select");
     select.required = true;
     select.append(new Option("Choose roster entry", ""));
-    for (const entry of body.roster) {
+    for (const entry of eligibleRoster) {
       select.append(new Option(
         entry.participant.firstName + " " + entry.participant.lastName + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : ""),
         entry.raceEntryId,
       ));
     }
+    // A published place whose racer has since left is deliberately not
+    // preselected: that name is no longer on offer, so preselecting it would
+    // either silently fall back to nothing or, worse, look chosen. The director
+    // is made to name someone the server will actually accept.
     const published = body.results.find((result) => result.place === place);
-    if (published) select.value = published.raceEntryId;
+    if (published && eligibleRoster.some((entry) => entry.raceEntryId === published.raceEntryId)) {
+      select.value = published.raceEntryId;
+    }
     label.append(select);
     form.append(label);
     selects.push([place, select]);

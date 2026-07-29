@@ -370,11 +370,33 @@ export interface WinnerByTagCandidate {
  */
 export const FINISH_DUCK_INELIGIBLE_REASON = "DUCK_NOT_ELIGIBLE";
 
-const registrationStatusLabel = (status: string): string => status === "WITHDRAWN"
-  ? "Withdrawn"
-  : status === "DISQUALIFIED"
-    ? "Disqualified"
-    : status.replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+/**
+ * The only two registration statuses that mean "this racer left the race", and
+ * therefore the only two this reason may ever name out loud.
+ *
+ * Every other non-`ACTIVE` status is a different fact about the same racer.
+ * `SUBMITTED`, in particular, means "registered and waiting for a duck" — a
+ * racer whose duck was deleted mid-race sits there until they are paired again.
+ * Telling a staffer at the finish line that a duck cannot win because its racer
+ * is "Submitted" is a sentence they cannot act on, and it is not what happened.
+ * So the status word is produced only for the two statuses it is true for, and
+ * anything else falls back to a claim that is true for every one of them.
+ */
+const INELIGIBLE_REGISTRATION_STATUS_LABELS: Record<string, string> = {
+  WITHDRAWN: "Withdrawn",
+  DISQUALIFIED: "Disqualified",
+};
+
+// One fixed internal enum builds both the SQL predicate and the spoken word, so
+// the rows a station is told about and the reason it is given can never drift.
+const INELIGIBLE_REGISTRATION_STATUS_SQL = `r.status IN (${
+  Object.keys(INELIGIBLE_REGISTRATION_STATUS_LABELS).map((status) => `'${status}'`).join(", ")
+})`;
+
+const registrationStatusLabel = (status: string): string | null =>
+  Object.prototype.hasOwnProperty.call(INELIGIBLE_REGISTRATION_STATUS_LABELS, status)
+    ? INELIGIBLE_REGISTRATION_STATUS_LABELS[status] as string
+    : null;
 
 export interface IneligibleFinishDuck {
   raceEntryId: string;
@@ -386,18 +408,26 @@ export interface IneligibleFinishDuck {
 // The projection deliberately stays inside what the finish-line scan already
 // returns for an eligible duck: the policy-filtered public display name and the
 // visible duck number. No contact detail, lookup code, or tag token is added.
-const ineligibleFinishResponse = (duck: IneligibleFinishDuck): Response => json({
-  error: `Duck #${duck.visibleNumber} · ${duck.participantDisplayName} is `
-    + `${registrationStatusLabel(duck.registrationStatus)} and cannot be recorded as the winner. `
+//
+// The sentence names the real status word only when there is one to name. Any
+// other status that reaches here still cannot be recorded as a winner — every
+// result path requires `ACTIVE` — so the refusal and the next instruction are
+// identical; only the claim about why is dropped rather than invented.
+const ineligibleFinishResponse = (duck: IneligibleFinishDuck): Response => {
+  const label = registrationStatusLabel(duck.registrationStatus);
+  return json({
+    error: `Duck #${duck.visibleNumber} · ${duck.participantDisplayName} `
+    + `${label === null ? "is not an active racer" : `is ${label}`} and cannot be recorded as the winner. `
     + "Leave this duck where it is and scan the next duck to pass the finish line.",
-  reason: FINISH_DUCK_INELIGIBLE_REASON,
-  ineligible: {
-    raceEntryId: duck.raceEntryId,
-    participantDisplayName: duck.participantDisplayName,
-    visibleNumber: duck.visibleNumber,
-    registrationStatus: duck.registrationStatus,
-  },
-}, 422);
+    reason: FINISH_DUCK_INELIGIBLE_REASON,
+    ineligible: {
+      raceEntryId: duck.raceEntryId,
+      participantDisplayName: duck.participantDisplayName,
+      visibleNumber: duck.visibleNumber,
+      registrationStatus: duck.registrationStatus,
+    },
+  }, 422);
+};
 
 export interface WinnerByTagIneligible extends IneligibleFinishDuck {
   eventId: string;
@@ -409,10 +439,20 @@ export interface WinnerByTagIneligible extends IneligibleFinishDuck {
 
 // The mirror image of `winnerByTagCandidate`: the same tag, the same sole
 // awaiting round-one heat, the same current assignment and roster place — but a
-// racer who is no longer ACTIVE. It exists so the scan station can say
-// "Withdrawn, scan the next duck" instead of falling through to a bare "not the
-// current winner candidate" refusal. It is a read; nothing about the heat, its
-// entries, or their slot numbers is touched.
+// racer who left the race. It exists so the scan station can say "Withdrawn,
+// scan the next duck" instead of falling through to a bare "not the current
+// winner candidate" refusal. It is a read; nothing about the heat, its entries,
+// or their slot numbers is touched.
+//
+// It matches only `WITHDRAWN` and `DISQUALIFIED`, deliberately narrower than
+// the `ACTIVE`-only guard it mirrors. The two are not complements and must not
+// be: `winnerByTagCandidate` answers "may this duck be recorded as the winner",
+// which only `ACTIVE` may, while this one answers the strictly smaller question
+// "did this racer leave the race", which is the only claim the reason sentence
+// makes. A racer who is merely `SUBMITTED` — registered, waiting for a duck
+// after theirs was deleted mid-race — is refused by the candidate guard but was
+// never withdrawn, so they fall through to the generic refusal instead of being
+// announced to the finish line under a status word that is not theirs.
 export const winnerByTagIneligible = async (
   env: Env,
   token: string,
@@ -434,7 +474,8 @@ export const winnerByTagIneligible = async (
        JOIN events e
          ON e.id = h.event_id AND e.status = 'ROUND_ONE'
        JOIN race_entries re ON re.id = he.race_entry_id
-       JOIN registrations r ON r.id = re.registration_id AND r.status <> 'ACTIVE'
+       JOIN registrations r
+         ON r.id = re.registration_id AND ${INELIGIBLE_REGISTRATION_STATUS_SQL}
       WHERE dt.token = ? AND dt.status = 'ACTIVE'
         AND (SELECT COUNT(*) FROM heats awaiting
               WHERE awaiting.event_id = e.id

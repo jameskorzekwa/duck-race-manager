@@ -155,7 +155,7 @@ test.describe("staff roles and the Admin views", () => {
     expect(errors).toEqual([]);
   });
 
-  test("delete is offered only to a deletable participant, withdraw or disqualify to everyone else", async ({ page }) => {
+  test("delete is offered only to a deletable participant, and never instead of withdrawal", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     const seeded = await seedState("registration");
     const admin = seeded.accounts.find((account) => account.isSystemAdmin);
@@ -168,12 +168,16 @@ test.describe("staff roles and the Admin views", () => {
     await expect(page.locator("[data-participant-list] button").first()).toBeVisible();
 
     // Deletable — never paired, no heat place, an event that still allows it —
-    // so removing the registration is the only destructive action offered.
+    // so Delete is offered. It is offered *as well as* withdrawal, not instead
+    // of it: a never-paired no-show is exactly who a desk needs to withdraw, and
+    // the endpoint accepts it, so hiding Withdraw here would leave destroying
+    // the registration as the only way to record that they did not turn up.
     await participantRow(page, `${unpaired.firstName} ${unpaired.lastName}`).click();
     await expect(page.locator("[data-participant-detail]")).toBeVisible();
     await expect.poll(() => actionLabels(page)).toContain("Delete registration");
-    expect(await actionLabels(page)).not.toContain("Withdraw");
-    expect(await actionLabels(page)).not.toContain("Disqualify");
+    expect(await actionLabels(page)).toContain("Withdraw");
+    expect(await actionLabels(page)).toContain("Disqualify");
+    // Nothing is in the water, so there is nothing to explain.
     await expect(page.locator("[data-participant-action-note]")).toHaveCount(0);
 
     // Paired: the duck is sealed in a heat bag, so it stays in the race and only
@@ -195,8 +199,16 @@ test.describe("staff roles and the Admin views", () => {
     expect(await actionLabels(page)).not.toContain("Delete registration");
     await expect(page.locator("[data-participant-action-note]")).toBeVisible();
 
-    // Deleting the unpaired registration really removes it from the list.
+    // Withdrawing the never-paired racer keeps the registration and leaves
+    // Delete standing, because the server would still accept it.
     await participantRow(page, `${unpaired.firstName} ${unpaired.lastName}`).click();
+    await page.getByRole("button", { name: "Withdraw", exact: true }).click();
+    await confirmAction(page);
+    await expect.poll(() => actionLabels(page)).toContain("Reactivate");
+    expect(await actionLabels(page)).toContain("Delete registration");
+    await expect(page.locator("[data-participant-action-note]")).toHaveCount(0);
+
+    // Deleting the unpaired registration really removes it from the list.
     await page.getByRole("button", { name: "Delete registration", exact: true }).click();
     await confirmAction(page);
     await expect(
