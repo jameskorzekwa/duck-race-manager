@@ -51,6 +51,7 @@ not authorized.
 | Event readiness, heat list/detail/announcer-roster, result, and finalist reads | `ANNOUNCER`, `HEAT_RUNNER`, `RESULT_TAKER`, or `RACE_DIRECTOR` | Yes |
 | Lock, ready, call, and start heat | `HEAT_RUNNER` or `RACE_DIRECTOR` | Yes |
 | Finish heat and finalize required result/podium | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
+| Record or clear a scanned final podium place | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/start-line` | `HEAT_RUNNER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/announcer` (read-only) | `ANNOUNCER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/finish-line` and resolve a roster duck by tag URL/number | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
@@ -217,7 +218,8 @@ The supported complete sequence is:
    one winner per heat.
 10. Race readers verify automatic finalist promotion and the race director
     starts the final.
-11. Heat runners run the final and a result taker publishes the complete podium.
+11. Heat runners run the final and a result taker scans each finishing duck and
+    chooses the place it took; the last place publishes the complete podium.
 12. The race director completes the event. Results stay publicly visible.
 13. When the race is finished with, a system administrator deletes the event,
     which permanently removes the whole race dataset.
@@ -2303,16 +2305,27 @@ may be. When that count is zero:
 Reactivation is the remedy on both, it is available to a race director at any
 point, and it restores the winner action on the very next scan.
 
-The final keeps the complete-podium station flow. It requires distinct places 1
-through `min(3, eligible final roster size)` — the same count the server's result
-validation requires, so a podium reduced by a withdrawal can actually be
-published. Every selection displays place,
-policy-filtered participant name, and visible duck number before one **Submit
-official podium** confirmation. Only one tag or number lookup can run at a time;
-the station discards a response if event, heat, revision, or intended place
-changed. The role-guarded result endpoint revalidates each selected registration
-and current duck assignment. The station offers no result correction or
-automatic retry/offline queue.
+**The final is published by scanning too, one duck and one place at a time.**
+Round one awards a single place, so its scan publishes a winner outright. The
+final awards up to three, so the scanned duck's inspection page asks which place
+it took and offers only the places that are still open. See Final Results.
+
+The finish-line station keeps its complete-podium form as the way to assemble a
+final podium by duck number when nothing has been scanned into it. It requires
+distinct places 1 through `min(3, eligible final roster size)` — the same count
+the server's result validation requires, so a podium reduced by a withdrawal can
+actually be published. Every selection displays place, policy-filtered
+participant name, and visible duck number before one **Submit official podium**
+confirmation. Only one tag or number lookup can run at a time; the station
+discards a response if event, heat, revision, or intended place changed. The
+role-guarded result endpoint revalidates each selected registration and current
+duck assignment. The station offers no result correction or automatic
+retry/offline queue.
+
+The moment one place is scanned, that form is replaced by the scanned podium
+itself, with a **Clear** control for each recorded place. Two half-built podiums
+on two screens, only one of which the server would accept, is the ambiguity this
+swap prevents; clearing every scanned place hands the form back.
 
 Only one heat in an event may be `RUNNING`, and no heat may start while any other
 heat in that event is `AWAITING_RESULT`. Preparing, locking, readying, and
@@ -2354,6 +2367,55 @@ places 1 through `min(3, eligible final roster size)`, using distinct finalists
 who are still `ACTIVE`. All required places are written in one atomic command and
 the final becomes `FINALIZED`.
 
+### Scanning the podium
+
+The normal way to record the final is the same physical action round one uses:
+scan the finishing duck's permanent NFC or QR tag, which opens its staff
+inspection page. Because the final awards more than one place, the page asks
+which place that duck took instead of offering a single winner button.
+
+- It offers **only the places that are still open**, read from the server rather
+  than derived on the page, so a place another station filled a second ago is
+  never offered.
+- A duck that already stands on the podium is offered no second place. It is
+  shown the place it holds and a **Clear** control instead, which is the way back
+  from the mistake this flow actually produces — a mis-tap between three
+  near-identical buttons. The same control is on the finish-line station, which
+  is where a wrong podium is easiest to read back.
+- Ducks may be scanned in **any order**. Staff scan the ducks they can reach.
+- Each recorded place is provisional. It lives in `final_podium_selections`, not
+  in `heat_results`, so no reader anywhere has to filter a half-finished podium
+  out of a result set and no partial podium can reach the public board.
+- **The scan that fills the last required place publishes the whole podium** in
+  one atomic command, writing every `heat_results` row, clearing the provisional
+  rows, and finalizing the heat. There is no separate submit to remember on the
+  one result everybody is waiting for.
+
+Recording a place moves the heat revision, so a station holding a stale page is
+refused and reloads rather than landing on a podium that moved. Each scan carries
+an RFC 4122 v4 command identifier: a matching retry replays, and reuse for
+different material returns `409`. The guarded command row re-checks the tag, the
+current duck assignment, the roster place, `ACTIVE` registration, the podium
+depth, and that the place is still free, because the read that painted the
+buttons cannot hold a lock.
+
+Withdrawal and disqualification are handled exactly as they are in round one. A
+scanned duck whose racer left is refused with `DUCK_NOT_ELIGIBLE` and the page
+says so plainly instead of failing. A recorded place whose racer leaves
+afterwards stops holding that place and it reopens, because the batch that would
+publish it refuses to write them.
+
+**A withdrawal can also complete a podium nobody finished scanning.** If enough
+places are already recorded when the podium shrinks, the scan that would have
+published it is never coming — every duck still unscanned belongs to a racer the
+result paths refuse. The finish-line station therefore reports the podium as
+complete and offers **Publish official podium** for exactly the places already
+standing on it, rather than leaving a finished race that cannot be recorded.
+
+A heat reset throws the recorded places away with the finish they described, and
+publishing through the console or station form clears them too, so a podium
+published by hand can never be contradicted by a leftover scan.
+
 **A withdrawal shrinks the podium, and every surface counts it the same way.**
 The finish-line station and the console result form both derive the number of
 places from `eligible`, treating a projection that predates the field as
@@ -2377,8 +2439,8 @@ finish-line station says the same thing rather than arming a submit for zero
 places.
 
 The event remains `FINAL` until a race director or administrator runs `Complete event`.
-There is no staged first-place, second-place, then third-place scan workflow;
-the current form submits the complete podium together.
+The places may be scanned in any order, but they are never published in stages:
+whichever surface publishes, every place is written in one atomic command.
 
 ## Result Corrections
 
