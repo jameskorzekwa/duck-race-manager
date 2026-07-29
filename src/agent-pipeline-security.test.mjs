@@ -128,6 +128,57 @@ test("local model agents deny unspecified and executable tools", async () => {
   assert.equal(config.plugin, undefined);
 });
 
+test("failed hosted verification feeds bounded untrusted evidence back to the next attempt", async () => {
+  const workflow = await read(".github/workflows/agent-task.yml");
+  const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));
+  const verify = workflow.slice(workflow.indexOf("  verify:"), workflow.indexOf("  publish:"));
+  const publish = workflow.slice(workflow.indexOf("  publish:"));
+
+  assert.match(verify, /tee "\$RUNNER_TEMP\/agent-verify\/gate\.log"/);
+  assert.match(verify, /cp scripts\/summarize-verification-failure\.mjs scripts\/e2e-redaction\.mjs "\$RUNNER_TEMP\/"/);
+  assert.ok(
+    verify.indexOf("cp scripts/summarize-verification-failure.mjs") < verify.indexOf("git apply --index task-artifact"),
+    "the summarizer must be copied before the candidate patch is applied",
+  );
+  assert.match(verify, /node "\$RUNNER_TEMP\/summarize-verification-failure\.mjs"/);
+  assert.match(verify, /name: agent-verify-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.doesNotMatch(verify, /issues: write|pull-requests: write|contents: write/);
+
+  assert.match(publish, /Download verification failure evidence/);
+  assert.match(publish, /verify-artifact\/verification-failure\.txt/);
+  assert.match(publish, /<!-- agent-pipeline verification-failed=\$\{context\.runId\} -->/);
+  assert.match(publish, /verification\.slice\(0, 30000\)/);
+  assert.doesNotMatch(publish, /npm test|npm run test:e2e|opencode run/);
+
+  assert.match(implement, /untrustedVerificationEvidence/);
+  assert.match(implement, /includes\("<!-- agent-pipeline verification-failed="\)/);
+
+  const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
+  assert.match(orchestrator, /untrustedVerificationEvidence/);
+  assert.match(orchestrator, /"scripts\/summarize-verification-failure\.mjs": deny/);
+});
+
+test("pipeline comments hyperlink workflow runs instead of pasting bare URLs", async () => {
+  const task = await read(".github/workflows/agent-task.yml");
+  const taskLinks = task.split("\n").filter((line) => line.includes("actions/runs/${context.runId}")
+    && !line.includes("details_url"));
+  assert.ok(taskLinks.length > 0, "agent-task.yml posts no run links");
+  for (const line of taskLinks) {
+    assert.match(line, /\]\([^)]*\)/, `bare run URL in agent-task.yml: ${line.trim()}`);
+  }
+
+  const review = await read(".github/workflows/agent-review.yml");
+  const reviewLinks = review.split("\n").filter((line) => line.includes("${runUrl}"));
+  assert.ok(reviewLinks.length > 0, "agent-review.yml posts no run links");
+  for (const line of reviewLinks) {
+    assert.match(line, /\]\(\$\{runUrl\}\)/, `bare run URL in agent-review.yml: ${line.trim()}`);
+  }
+
+  assert.match(task, /\[Agent Task run\]\(\$\{context\.serverUrl\}\/\$\{owner\}\/\$\{repo\}\/actions\/runs\/\$\{context\.runId\}\)/);
+  assert.match(task, /\[Agent Task failed\]\(\$\{context\.serverUrl\}\/\$\{owner\}\/\$\{repo\}\/actions\/runs\/\$\{context\.runId\}\)/);
+  assert.doesNotMatch(task, /Agent Task (?:run|failed): \$\{context\.serverUrl\}/);
+});
+
 test("reconciliation is deterministic and model-free", async () => {
   const workflow = await read(".github/workflows/agent-reconcile.yml");
   const implementation = await read("scripts/agent-pipeline.mjs");

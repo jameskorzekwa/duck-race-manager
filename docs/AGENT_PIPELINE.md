@@ -182,6 +182,14 @@ does not call a model. It:
 An interrupted model turn is restarted from issue, branch, PR, and check state;
 it is never resumed as if a provider call were exactly-once.
 
+When hosted verification rejects a patch, the unprivileged gate captures its own
+output, and the model-free publisher posts a bounded, credential-redacted
+excerpt under a `verification-failed` marker. The next attempt receives it as
+`untrustedVerificationEvidence`, so a retry repairs the named failure instead of
+reimplementing blind. The excerpt is data, never instructions: pipeline markers
+inside it are neutralized before it is posted, so candidate output cannot forge
+durable state.
+
 The runner records each active model directory outside the Actions workspace.
 Every later model job checks that record and fails closed while any prior
 OpenChamber parent or child session remains busy. Workspaces are unique per run
@@ -212,6 +220,7 @@ opencode.json
 .github/workflows/agent-reconcile.yml
 scripts/agent-pipeline.mjs
 scripts/cleanup-model-workspace.mjs
+scripts/summarize-verification-failure.mjs
 scripts/validate-agent-patch.mjs
 scripts/wait-for-openchamber-session.mjs
 ```
