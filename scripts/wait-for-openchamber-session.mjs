@@ -1,12 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_IDLE_GRACE_MS = 30_000;
-const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
-const MAX_CONSECUTIVE_FAILURES = 3;
+const DEFAULT_DISCOVERY_MS = 180_000;
+const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
+const MAX_CONSECUTIVE_FAILURES = 5;
 
 const delay = (duration) => new Promise((resolve) => setTimeout(resolve, duration));
 
@@ -28,8 +29,32 @@ function runOpenChamber(args) {
   }
 }
 
+function listSessions(run, directory) {
+  const status = run([
+    "session", "list",
+    "--dir", directory,
+    "--with-status",
+    "--all",
+    "--limit", "1000",
+    "--json",
+  ]);
+  return Array.isArray(status?.sessions) ? status.sessions : [];
+}
+
+// The OpenChamber CLI aborts non-blocking control calls after a fixed short
+// HTTP timeout, so `session create` can report failure while the server keeps
+// the dispatched session running. The per-run model directory is unique, so the
+// parent session in that directory is the authoritative dispatch record.
+export function resolveParentSession(sessions) {
+  const parents = sessions.filter((session) => !session?.parentID);
+  if (parents.length > 1) {
+    throw new Error(`The model directory holds ${parents.length} parent sessions; refusing to guess.`);
+  }
+  return parents[0] ?? null;
+}
+
 export async function waitForOpenChamberSession({
-  dispatch,
+  directory,
   timeoutSeconds,
   markerPrefix,
   run = runOpenChamber,
@@ -37,12 +62,11 @@ export async function waitForOpenChamberSession({
   now = Date.now,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   idleGraceMs = DEFAULT_IDLE_GRACE_MS,
+  discoveryMs = DEFAULT_DISCOVERY_MS,
+  onSessionResolved,
 }) {
-  const sessionId = String(dispatch?.sessionId ?? "").trim();
-  const directory = String(dispatch?.directory ?? "").trim();
-  if (!sessionId || !directory || dispatch?.promptDispatched !== true) {
-    throw new Error("OpenChamber did not confirm a dispatched session.");
-  }
+  const modelDirectory = String(directory ?? "").trim();
+  if (!modelDirectory) throw new Error("A model directory is required.");
   if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1) {
     throw new Error("Polling timeout must be a positive integer number of seconds.");
   }
@@ -50,31 +74,26 @@ export async function waitForOpenChamberSession({
     throw new Error("A terminal marker prefix is required.");
   }
 
-  const deadline = now() + timeoutSeconds * 1_000;
+  const started = now();
+  const deadline = started + timeoutSeconds * 1_000;
+  let sessionId = null;
   let idleSince = null;
-  let missingSince = null;
   let consecutiveFailures = 0;
 
   while (now() < deadline) {
     try {
-      const status = run([
-        "session", "list",
-        "--dir", directory,
-        "--with-status",
-        "--all",
-        "--limit", "1000",
-        "--json",
-      ]);
-      const sessions = Array.isArray(status?.sessions) ? status.sessions : [];
-      const parent = sessions.find((session) => session?.id === sessionId);
+      const sessions = listSessions(run, modelDirectory);
+      const parent = resolveParentSession(sessions);
+
       if (!parent) {
-        missingSince ??= now();
-        if (now() - missingSince >= idleGraceMs) {
-          throw new Error(`OpenChamber did not report dispatched session ${sessionId}.`);
+        if (now() - started >= discoveryMs) {
+          throw new Error(`OpenChamber never reported a dispatched session in ${modelDirectory}.`);
         }
-        idleSince = null;
       } else {
-        missingSince = null;
+        if (parent.id !== sessionId) {
+          sessionId = parent.id;
+          onSessionResolved?.(sessionId);
+        }
         const active = sessions.filter((session) => session?.status?.type !== "idle");
         if (active.length > 0) {
           idleSince = null;
@@ -83,13 +102,13 @@ export async function waitForOpenChamberSession({
           const response = run([
             "session", "messages",
             "--session", sessionId,
-            "--dir", directory,
+            "--dir", modelDirectory,
             "--last-assistant",
             "--json",
           ]);
           const message = Array.isArray(response?.messages) ? response.messages.at(-1) : null;
           if (message?.completedAt != null && finalLine(message).startsWith(markerPrefix)) {
-            return { ...dispatch, sessionStatus: parent.status, lastAssistantMessage: message };
+            return { sessionId, directory: modelDirectory, sessionStatus: parent.status, lastAssistantMessage: message };
           }
           if (now() - idleSince >= idleGraceMs) {
             const suffix = finalLine(message);
@@ -107,7 +126,7 @@ export async function waitForOpenChamberSession({
     if (remaining > 0) await sleep(Math.min(pollIntervalMs, remaining));
   }
 
-  throw new Error(`Session ${sessionId} did not complete within ${timeoutSeconds} seconds.`);
+  throw new Error(`Session ${sessionId ?? "dispatch"} did not complete within ${timeoutSeconds} seconds.`);
 }
 
 function parseArguments(args) {
@@ -123,14 +142,18 @@ function parseArguments(args) {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = parseArguments(process.argv.slice(2));
-  if (!args.dispatch || !args.result || !args.timeout || !args["marker-prefix"]) {
-    throw new Error("Usage: wait-for-openchamber-session.mjs --dispatch <path> --result <path> --timeout <seconds> --marker-prefix <prefix>");
+  if (!args.dir || !args.result || !args.timeout || !args["marker-prefix"]) {
+    throw new Error("Usage: wait-for-openchamber-session.mjs --dir <path> --result <path> --timeout <seconds> --marker-prefix <prefix> [--state <path>]");
   }
-  const dispatch = JSON.parse(readFileSync(args.dispatch, "utf8"));
   const result = await waitForOpenChamberSession({
-    dispatch,
+    directory: args.dir,
     timeoutSeconds: Number(args.timeout),
     markerPrefix: args["marker-prefix"],
+    onSessionResolved: (sessionId) => {
+      if (!args.state || !existsSync(args.state)) return;
+      const state = JSON.parse(readFileSync(args.state, "utf8"));
+      writeFileSync(args.state, JSON.stringify({ ...state, sessionId }));
+    },
   });
   writeFileSync(args.result, JSON.stringify(result, null, 2));
 }

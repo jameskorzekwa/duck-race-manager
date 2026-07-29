@@ -249,9 +249,16 @@ not copy `auth.json`, `OPENCODE_AUTH_CONTENT`, access tokens, or refresh tokens 
 GitHub. Verify the local OpenChamber model list before enabling intake. The
 self-hosted job should dispatch with `openchamber session create` and then poll
 authoritative directory-scoped session status with a bounded trusted helper.
-Require the exact parent, every child session to be idle, and a completed
-terminal marker before handling model output. Avoid one long `--wait` HTTP
-request because intermediaries can end it while the OpenCode session continues.
+Require every session in the unique per-run directory to be idle and the parent
+session to end on a completed terminal marker before handling model output.
+
+Treat the dispatch call's own exit status as advisory. A long `--wait` request
+can be ended by an intermediary while the session keeps running, and the CLI
+aborts non-blocking control calls after a fixed short HTTP timeout even though
+the server still creates the session and runs the model. Because the model
+directory is unique per run, the parent session inside it is the authoritative
+dispatch record; discover it by polling instead of trusting the response.
+
 The job must not load provider credentials into the Actions process.
 
 Grant `contents: write`, `pull-requests: write`, and `actions: write` only to a

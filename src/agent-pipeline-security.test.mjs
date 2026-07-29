@@ -29,6 +29,8 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.match(implement, /cleanup-model-workspace\.mjs/);
   assert.match(implement, /wait-for-openchamber-session\.mjs/);
   assert.doesNotMatch(implement, /openchamber session create[\s\S]*?--wait/);
+  assert.match(implement, /session-dispatch\.json" 2>&1 \|\| true/);
+  assert.match(implement, /--dir "\$PIPELINE_MODEL_DIR" \\\n\s+--result/);
   assert.doesNotMatch(implement, /rm -rf "\$RUNNER_TEMP\/agent-task"/);
   assert.match(implement, /scripts\/validate-agent-patch\.mjs/);
   assert.match(implement, /session list --dir "\$PIPELINE_MODEL_DIR" --with-status/);
@@ -61,6 +63,7 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   assert.match(review, /anthropic\/claude-opus-4-8/);
   assert.match(review, /wait-for-openchamber-session\.mjs/);
   assert.doesNotMatch(review, /openchamber session create[\s\S]*?--wait/);
+  assert.match(review, /session-dispatch\.json" 2>&1 \|\| true/);
   assert.doesNotMatch(review, /quickducks-local-oauth-model/);
   assert.doesNotMatch(review, /REVIEW_CANDIDATE_PATH|--dir "\$GITHUB_WORKSPACE\/trusted"/);
   assert.match(review, /\.pipeline\/candidate\.patch/);
