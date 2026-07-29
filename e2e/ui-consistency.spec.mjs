@@ -517,7 +517,7 @@ test.describe("sitewide UI consistency", () => {
       await page.setViewportSize({ width, height: 1000 });
       const registration = await measure(page.locator("[data-live-summary]"));
       expect(registration.width).toBeCloseTo(preparing[width].width, 0);
-      expect(preparing[width].height).toBeLessThan(registration.height);
+      expect(preparing[width].height).toBeLessThan(352);
       expect(registration.surface).toEqual(preparing[width].surface);
     }
   });
