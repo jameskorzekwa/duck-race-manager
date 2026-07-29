@@ -280,6 +280,14 @@ test("the how-it-works cards describe the race without linking anywhere", () => 
   // The class survives only because the My Ducks private-status link still uses it.
   assert.match(style, /\.card-link \{/);
   assert.match(participantScript, /participantText\("a", "Open private status", "card-link"\)/);
+
+  // The hero button that jumped here is gone, so nothing on the page links to
+  // the id any more. It is kept on purpose: /#how-it-works is a stable public
+  // deep link that can already have been shared or printed, and an anchor with
+  // no in-page link is not a defect. Pinned in both directions so a later tidy-up
+  // has to change this test rather than quietly break the link.
+  assert.doesNotMatch(home, /href="#how-it-works"|How it works/);
+  assert.match(home, /<section id="how-it-works" class="cards"/);
 });
 
 test("the home hero is copy and artwork only, with the CTA in the race-named section", () => {
@@ -781,6 +789,19 @@ test("an account with no operational roles gets a real page rather than an empty
   assert.doesNotMatch(page, /data-console-view=|data-console-message|data-operations-root/);
   assert.doesNotMatch(page, /src="\/assets\/staff-home\.js"/);
   assert.match(page, /<meta name="robots" content="noindex,nofollow">/);
+
+  // It carries no live surface either. The shared shell loads `live-ui.js` on
+  // every page, but the hub starts nothing without a subscriber and this page
+  // registers none, so it holds no socket — which is exactly what the renderer's
+  // own comment claims. The `data-live-staff` marker contradicted that: it is
+  // the hook the hub looks for to decide a page has a staff surface to
+  // revalidate, so the first script anyone added here would silently have made
+  // this page live. It is gone, and no page-level client is loaded.
+  assert.doesNotMatch(page, /data-live-staff/);
+  assert.doesNotMatch(page, /data-live-nav|data-live-board|data-live-summary|data-live-personal/);
+  for (const client of ["staff-home.js", "staff-access.js", "staff-duck.js", "staff-inventory.js", "live.js"]) {
+    assert.ok(!page.includes(`/assets/${client}"`), client);
+  }
 
   // The console renderer answers the same way for the same account, so there is
   // one no-roles experience rather than two.

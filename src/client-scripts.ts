@@ -2610,12 +2610,31 @@ const finishAddFact = (label, value) => {
 // whole roster instead demands a place no duck may ever fill: the third duck
 // answers every scan with DUCK_NOT_ELIGIBLE, Submit never enables, the final
 // can never be published, and the event is stranded with no way out.
+// Round one is counted the same way as the final, one place deep instead of
+// three. Hard-coding it to 1 made the count a claim about the round rather than
+// about the racers, so a round-one heat everybody left still reported one
+// fillable place: the zero guard below could never fire for it, and the station
+// sent the staffer to scan a bag in which every single duck answers
+// DUCK_NOT_ELIGIBLE, with nothing on screen saying why or how to get out.
 const finishEligibleEntries = () => rosterEligibleEntries(finishRosterEntries);
-const finishRequiredPlaces = () => !finishHeat ? 0 : finishHeat.round === "ROUND_ONE" ? 1 : Math.min(3, finishEligibleEntries().length);
+const finishRequiredPlaces = () => !finishHeat
+  ? 0
+  : Math.min(finishHeat.round === "ROUND_ONE" ? 1 : 3, finishEligibleEntries().length);
 // Zero required places means every racer in this heat left, so there is no
 // result to submit at all. That is deliberately not the same as "the selections
 // happen to match", which is why it is tested for on its own rather than being
 // left to a 0 === 0 comparison that would arm an empty, always-refused submit.
+//
+// One sentence, said identically wherever the station has to say it, because a
+// staffer who reads it at the scan field and again on the message line must not
+// have to work out whether they are two different problems. It leads with the
+// fact, states that the ducks do not move, and names the only remedy there is:
+// only a race director can reactivate a racer, and nothing the finish line can
+// do will make this heat publishable until one does.
+const FINISH_NO_ELIGIBLE_MESSAGE = "Nobody in this heat can win:"
+  + " every racer in it is withdrawn or disqualified, so no result can be recorded."
+  + " Every duck stays in its bag."
+  + " Ask the race director to reactivate a racer, then this station can take the result.";
 const finishSubmitBlocked = (busy) => {
   const required = finishRequiredPlaces();
   return busy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT"
@@ -2714,8 +2733,7 @@ const finishSelectValue = async (value) => {
     return;
   }
   if (finishRequiredPlaces() === 0) {
-    finishMessage.textContent = "Every racer in this heat is withdrawn or disqualified, so no result can be recorded."
-      + " Ask the race director to reactivate the racer who should hold the place.";
+    finishMessage.textContent = FINISH_NO_ELIGIBLE_MESSAGE;
     return;
   }
   if (finishSelected.length >= finishRequiredPlaces()) {
@@ -2769,7 +2787,12 @@ const finishRender = (event, detail) => {
   finishHeatTitle.textContent = (finishHeat.round === "FINAL" ? "Final" : "Round one") + " · Heat " + finishHeat.number;
   finishFacts.replaceChildren();
   finishAddFact("Heat status", finishHumanize(finishHeat.status));
-  finishAddFact("Required result", finishHeat.round === "ROUND_ONE" ? "One winner" : finishRequiredPlaces() + " podium places");
+  // The fact line reports the same count the submit path enforces. A round-one
+  // heat nobody can win is not "one winner" waiting to be scanned, and saying so
+  // is what stops a staffer working through the whole bag to find it.
+  finishAddFact("Required result", finishRequiredPlaces() === 0
+    ? (finishHeat.round === "ROUND_ONE" ? "No racer can win" : "0 podium places")
+    : finishHeat.round === "ROUND_ONE" ? "One winner" : finishRequiredPlaces() + " podium places");
   finishRoster.replaceChildren();
   for (const entry of finishRosterEntries) {
     const item = finishText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
@@ -2800,9 +2823,15 @@ const finishRender = (event, detail) => {
           body: JSON.stringify({ commandId: crypto.randomUUID(), revision: finishHeat.revision }),
         });
         await finishLoad();
-        finishMessage.textContent = finishHeat.round === "ROUND_ONE"
-          ? "Heat finished. Scan the winning duck's permanent NFC or QR tag to open its inspection page."
-          : "Heat finished. Select every required place, review it, then submit once.";
+        // The repaint just decided what this heat can produce, so the
+        // confirmation must not talk over it: telling somebody to go and scan
+        // the winning duck of a heat that has no eligible racer is exactly the
+        // dead end this station is meant to close.
+        finishMessage.textContent = finishRequiredPlaces() === 0
+          ? FINISH_NO_ELIGIBLE_MESSAGE
+          : finishHeat.round === "ROUND_ONE"
+            ? "Heat finished. Scan the winning duck's permanent NFC or QR tag to open its inspection page."
+            : "Heat finished. Select every required place, review it, then submit once.";
       } catch (error) {
         if (error.message !== "signed-out") finishMessage.textContent = error.message;
         button.disabled = false;
@@ -2814,14 +2843,26 @@ const finishRender = (event, detail) => {
     });
     finishAction.append(button);
     if (restoreActionFocus) button.focus();
-    finishMessage.textContent = "When the race physically finishes, press the one finish button.";
+    // The finish button stays: those ducks are physically on the water and the
+    // heat still has to be marked finished. What changes is that the staffer is
+    // told now, rather than after they have finished the heat and started
+    // scanning, that this heat has no winner to find.
+    finishMessage.textContent = finishRequiredPlaces() === 0
+      ? "When the race physically finishes, press the one finish button. " + FINISH_NO_ELIGIBLE_MESSAGE
+      : "When the race physically finishes, press the one finish button.";
+  } else if (finishRequiredPlaces() === 0) {
+    // Every racer in this heat left. There is no winner and no podium to take,
+    // so say that instead of asking for zero ducks and leaving a dead Submit on
+    // screen — and, in round one, instead of sending the staffer to scan a bag
+    // in which every duck is refused.
+    //
+    // This is checked before the round, not after it: round one publishes
+    // through the tag-scan flow rather than through this form, so a round-one
+    // branch above this one hides the only sentence that explains the dead end
+    // from the only staffer standing in it.
+    finishMessage.textContent = FINISH_NO_ELIGIBLE_MESSAGE;
   } else if (finishHeat.round === "ROUND_ONE") {
     finishMessage.textContent = "Scan the winning duck's permanent NFC or QR tag. Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner.";
-  } else if (finishRequiredPlaces() === 0) {
-    // Every racer in this heat left. There is no podium to take, so say that
-    // instead of asking for zero ducks and leaving a dead Submit on screen.
-    finishMessage.textContent = "Every racer in this heat is withdrawn or disqualified, so no result can be recorded."
-      + " Ask the race director to reactivate the racer who should hold the place.";
   } else {
     finishMessage.textContent = "Select " + finishRequiredPlaces() + " distinct duck"
       + (finishRequiredPlaces() === 1 ? "" : "s") + ", then review every place before submitting.";
@@ -4766,12 +4807,21 @@ const bagMoveNote = document.querySelector("[data-bag-move-note]");
 const bagMoveDismiss = document.querySelector("[data-bag-move-dismiss]");
 const bagMoveStorageKey = "quickducks.bag-moves";
 
+// The queue is read back out of localStorage, which anything on this origin can
+// have written, so every field the copy interpolates is checked here rather than
+// trusted. The duck numbers are checked element by element: they are printed
+// straight into the instruction, and an object or a null there would put
+// "Duck #[object Object]" in front of a staffer looking for a physical duck.
+// Nothing here is a safety boundary — every field is written with textContent —
+// it is simply the difference between a followable instruction and a nonsense
+// one.
 const bagMoveValid = (move) => Boolean(move)
   && typeof move.id === "string"
   && (move.action === "MERGE" || move.action === "SPLIT")
   && Number.isInteger(move.fromHeatNumber)
   && Number.isInteger(move.intoHeatNumber)
-  && Array.isArray(move.duckNumbers);
+  && Array.isArray(move.duckNumbers)
+  && move.duckNumbers.every((number) => Number.isInteger(number));
 
 // Storage can be unavailable or hold something else entirely, and neither may
 // take the console down; an unreadable queue is simply an empty one.
@@ -4791,12 +4841,32 @@ const bagMoveWrite = (moves) => {
   } catch {}
 };
 
-const bagMoveDuckList = (move) => {
-  const count = Number.isInteger(move.movedEntryCount) ? move.movedEntryCount : move.duckNumbers.length;
-  const counted = count === 1 ? "1 duck" : count + " ducks";
-  return move.duckNumbers.length === 0
-    ? counted
-    : counted + ": " + move.duckNumbers.map((number) => "Duck #" + number).join(", ");
+const bagMoveCounted = (count, noun) => count + " " + noun + (count === 1 ? "" : "s");
+
+// A staffer stands at the bags and counts what this line tells them to count, so
+// the number and the list beside it must be the same thing. They are two
+// different facts on the server: movedEntryCount counts roster places, while
+// duckNumbers names the ducks that are physically in the bag, and a place
+// whose duck assignment has ended is a racer with no duck to carry. Counting the
+// places and then listing fewer ducks reads as "Move 2 ducks: Duck #5" and sends
+// somebody hunting the bank for a duck that does not exist.
+//
+// So the instruction always counts exactly what it lists, and the roster
+// difference is reported as the separate fact it is rather than folded into a
+// number of ducks. Neither statement invents anything: both are read straight
+// off the transition response.
+const bagMoveDuckList = (move) => move.duckNumbers.length === 0
+  ? "No ducks to carry"
+  : bagMoveCounted(move.duckNumbers.length, "duck") + ": "
+    + move.duckNumbers.map((number) => "Duck #" + number).join(", ");
+
+const bagMoveEntryGap = (move) => {
+  const entries = Number.isInteger(move.movedEntryCount) ? move.movedEntryCount : move.duckNumbers.length;
+  const withoutDuck = Math.max(0, entries - move.duckNumbers.length);
+  return withoutDuck === 0
+    ? ""
+    : " " + bagMoveCounted(withoutDuck, "racer") + " in this move " + (withoutDuck === 1 ? "has" : "have")
+      + " no duck assigned right now, so there is nothing to carry for them.";
 };
 
 // Plain physical sentences. A merge pours one whole bag into another and needs
@@ -4815,17 +4885,21 @@ const bagMoveCopy = (move) => {
         + move.intoHeatNumber + ", because heat " + move.fromHeatNumber
         + " had too few ducks to race. Empty the whole " + from + " bag into the " + into
         + " bag and put the empty bag away. No other bag changes, and no duck changes"
-        + " position inside the " + into + " bag.",
+        + " position inside the " + into + " bag." + bagMoveEntryGap(move),
     };
   }
   return {
-    instruction: "Move " + bagMoveDuckList(move) + " from the " + from + " bag into a new " + into + " bag",
+    instruction: move.duckNumbers.length === 0
+      ? "No duck moves out of the " + from + " bag"
+      : "Move " + bagMoveDuckList(move) + " from the " + from + " bag into a new " + into + " bag",
     number: arrow,
     ducks: bagMoveDuckList(move),
     note: "Reopening registration split heat " + move.intoHeatNumber + " back out of heat "
-      + move.fromHeatNumber + ". Take exactly those ducks out of the " + from
-      + " bag, put them in a bag labelled " + into
-      + ", and leave every other duck exactly where it is.",
+      + move.fromHeatNumber + ". " + (move.duckNumbers.length === 0
+        ? "No duck in the " + from + " bag moves, and every bag stays exactly as it is."
+        : "Take exactly those ducks out of the " + from
+          + " bag, put them in a bag labelled " + into
+          + ", and leave every other duck exactly where it is.") + bagMoveEntryGap(move),
   };
 };
 
@@ -6124,8 +6198,24 @@ if (isSystemAdmin) {
   document.querySelector("[data-refresh-audit]")?.addEventListener("click", () => loadAudit().catch((error) => setMessage(error.message, true)));
 }
 
+// This client runs on the Admin console and on the registration desk, and the
+// desk renders the participants surface and nothing else. RaceUpdates admits a
+// bounded number of connections and fans every signal out to every matching
+// subscriber, so a page must ask only for the domains it can actually repaint:
+// subscribing a registration device to "heats" or "support" woke a refresh whose
+// heat and support loaders each returned on their first line, once per device,
+// for every heat transition of the race.
+//
+// Each domain is therefore gated on the markup and the role that would consume
+// it, exactly as loadEvent gates the loaders themselves. The "event" domain is
+// unconditional because both pages resolve and render a working event.
+const staffLiveDomains = ["event", "staff"];
+if (canRegistration && participantList) staffLiveDomains.push("participants", "ducks");
+if (canRaceRead && (heatList || finalistCard)) staffLiveDomains.push("heats");
+if (isSystemAdmin && (supportSummary || notificationList || auditList)) staffLiveDomains.push("support");
+
 staffLiveSubscription = globalThis.quickDucksLive.subscribe({
-  domains: ["event", "participants", "ducks", "heats", "staff", "support"],
+  domains: staffLiveDomains,
   root: operationsRoot,
   refresh: () => loadEvents(currentEvent?.id),
   isBlocked: () => staffCommandCount > 0,
@@ -6501,6 +6591,10 @@ const heatBagCallout = (heat, duckNumber, heatAssignmentPending, eventStatus) =>
 export const staffDuckScript = participantQrHelpersScript
   + participantQrDecoderScript
   + heatBagHelpersScript
+  // This page is the round-one result surface, so it asks the same eligibility
+  // question the finish line asks, through the same shared helper rather than a
+  // second copy of "can this racer still win".
+  + rosterEligibilityHelpersScript
   + String.raw`
 const root = document.querySelector("[data-staff-duck]");
 const token = root.dataset.token;
@@ -6588,7 +6682,31 @@ if (heatBag) {
   });
 }
 
-const renderWinnerAction = (data) => {
+// "Scan the next duck" is the right answer for one refused duck and the wrong
+// answer for a heat in which every duck will be refused: it sends a result taker
+// through the whole bag, one DUCK_NOT_ELIGIBLE at a time, with nothing on any
+// screen saying the heat has no winner in it or that only a race director can
+// change that.
+//
+// Round one publishes here rather than through the finish-line form, so this
+// page has to answer it too. The question is asked only when the server has
+// already refused this duck, and it is asked of the heat the server itself
+// named, using the same roster projection and the same eligibility helper the
+// finish line uses. A failed or unauthorized read simply answers "no", leaving
+// the statement exactly as it was rather than inventing a claim about the heat.
+const winnerHeatHasNoEligibleRacer = async (data) => {
+  const ineligible = data && !data.winnerAction ? data.winnerIneligible : null;
+  if (!ineligible || typeof ineligible.eventId !== "string" || typeof ineligible.heatId !== "string") return false;
+  try {
+    const body = await fetchJson("/api/v1/staff/events/" + encodeURIComponent(ineligible.eventId)
+      + "/heats/" + encodeURIComponent(ineligible.heatId));
+    return Array.isArray(body.roster) && rosterEligibleEntries(body.roster).length === 0;
+  } catch {
+    return false;
+  }
+};
+
+const renderWinnerAction = (data, heatHasNoEligibleRacer = false) => {
   winnerAction.replaceChildren();
   winnerAction.classList.remove("ineligible");
   if (winnerSuccess !== null) {
@@ -6614,8 +6732,21 @@ const renderWinnerAction = (data) => {
       text("strong", "Duck #" + data.duck.visibleNumber + " is " + ineligibleStatusLabel(ineligible.registrationStatus)),
       text("p", ineligible.participantDisplayName + " cannot be recorded as the Heat "
         + ineligible.heatNumber + " winner, and this duck stays in its heat."),
-      text("p", "Scan the next duck to pass the finish line."),
     );
+    // The whole heat is out, so there is no next duck worth scanning and the
+    // remedy is the only thing left to say.
+    if (heatHasNoEligibleRacer) {
+      winnerAction.append(
+        text("strong", "Nobody in Heat " + ineligible.heatNumber + " can win"),
+        text("p", "Every racer in Heat " + ineligible.heatNumber + " is withdrawn or disqualified, so every duck in that"
+          + " bag will be refused and no result can be recorded. Every duck stays in its bag."),
+        text("p", "Ask the race director to reactivate a racer, then scan that duck's tag again."),
+      );
+      message.textContent = "Nobody in Heat " + ineligible.heatNumber + " can win."
+        + " Ask the race director to reactivate a racer, then scan that duck's tag again.";
+      return;
+    }
+    winnerAction.append(text("p", "Scan the next duck to pass the finish line."));
     message.textContent = "This duck cannot win. Scan the next duck to pass the finish line.";
     return;
   }
@@ -7127,13 +7258,18 @@ const load = async () => {
     // A refresh already in flight when scanning starts must not repaint the
     // pairing area and release the newly acquired camera.
     if (qrStarting || qrScanning) return;
+    // Resolved before anything is painted, so the statement about this duck and
+    // the statement about its heat land together rather than one appearing
+    // under the staffer a moment later.
+    const heatHasNoEligibleRacer = await winnerHeatHasNoEligibleRacer(duck);
+    if (qrStarting || qrScanning) return;
     currentEvent = eventResponse.event;
     summary.replaceChildren();
     qrStop(false);
     if (workArea) workArea.hidden = true;
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
-    renderWinnerAction(duck);
+    renderWinnerAction(duck, heatHasNoEligibleRacer);
   } catch (error) {
     if (qrStarting || qrScanning) return;
     if (error.message !== "signed-out") {
