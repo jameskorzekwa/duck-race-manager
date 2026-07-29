@@ -1,0 +1,42 @@
+name: OpenCode App OIDC Smoke
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  exchange:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Exchange OIDC for an App installation token
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const oidcToken = await core.getIDToken("opencode-github-action");
+            const payload = JSON.parse(Buffer.from(oidcToken.split(".")[1], "base64url").toString("utf8"));
+            core.info(JSON.stringify({
+              actor: payload.actor,
+              audience: payload.aud,
+              issuer: payload.iss,
+              jobWorkflowRef: payload.job_workflow_ref,
+              ref: payload.ref,
+              repository: payload.repository,
+              subject: payload.sub,
+            }));
+            const response = await fetch("https://api.opencode.ai/exchange_github_app_token", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${oidcToken}` },
+            });
+            let body = {};
+            try { body = await response.json(); } catch {}
+            if (!response.ok) {
+              throw new Error(`OpenCode App token exchange failed: ${response.status} ${body.error ?? response.statusText}`);
+            }
+            if (!body.token) throw new Error("OpenCode App token exchange returned no token.");
+            core.setSecret(body.token);
+            core.info("OpenCode App installation token exchange succeeded.");
