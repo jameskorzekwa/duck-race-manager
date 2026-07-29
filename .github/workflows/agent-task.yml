@@ -415,7 +415,8 @@ jobs:
             node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
               "$state_root/active.json" "$state_root/workspaces" "$PIPELINE_MODEL_DIR"
           fi
-          rm -rf "$RUNNER_TEMP/agent-task"
+          node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
+            "$state_root/active.json" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-task"
 
   verify:
     needs: [prepare, implement]

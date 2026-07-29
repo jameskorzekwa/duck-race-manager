@@ -414,7 +414,8 @@ jobs:
             node "$GITHUB_WORKSPACE/trusted/scripts/cleanup-model-workspace.mjs" \
               "$state_root/active.json" "$state_root/workspaces" "$PIPELINE_MODEL_DIR"
           fi
-          rm -rf "$RUNNER_TEMP/agent-review"
+          node "$GITHUB_WORKSPACE/trusted/scripts/cleanup-model-workspace.mjs" \
+            "$state_root/active.json" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-review"
 
   gate:
     name: Gate
