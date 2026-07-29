@@ -20,6 +20,7 @@ const migrationNames = [
   "0014_simplified_lifecycle_schema.sql",
   "0015_participant_duck_names.sql",
   "0016_locked_final_winner_correction.sql",
+  "0017_final_podium_selections.sql",
 ];
 
 const lifecycleStatuses = [
@@ -268,6 +269,122 @@ test("0015 adds an optional bounded duck name that older writes keep working wit
     database.prepare("SELECT COUNT(*) AS count FROM race_entries WHERE duck_name = 'Bubbles'").get().count,
     2,
   );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+// A provisional podium place is the only row in the schema that is deliberately
+// not a fact yet, so the constraints that keep it honest are the whole point of
+// the table: one duck per place, one place per duck, and no such row at all
+// unless a final is actually waiting for its result.
+test("0017 keeps a scanned podium exclusive, bounded, and attached to a waiting final", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0017_final_podium_selections.sql"));
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email, display_name, is_system_admin, is_active)
+    VALUES ('staff', 'staff-sub', 'staff@example.com', 'Race Staff', 0, 1);
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event', 'test-race', 'Test Race', 'America/Denver', 'FINAL');
+    INSERT INTO race_commands (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('11111111-1111-4111-8111-111111111111', 'event', 'RECORD_FINAL_PODIUM_PLACE', 'final',
+            '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'),
+           ('22222222-2222-4222-8222-222222222222', 'event', 'PAIR_DUCK', 'assignment-1',
+            '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z'),
+           ('33333333-3333-4333-8333-333333333333', 'event', 'PAIR_DUCK', 'assignment-2',
+            '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck-1', 1, 'IN_USE', '2026-07-26T00:00:00Z'),
+           ('duck-2', 2, 'IN_USE', '2026-07-26T00:00:00Z');
+    INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck-1', 'event', 'duck-1', '2026-07-26T00:00:00Z', 'staff'),
+           ('event-duck-2', 'event', 'duck-2', '2026-07-26T00:00:00Z', 'staff');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash, submitted_at, status_changed_at)
+    VALUES ('registration-1', 'event', 'Daisy', 'Duck', 'ACTIVE', 'DAASY234', 'hash-1',
+            '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z'),
+           ('registration-2', 'event', 'Donald', 'Mallard', 'ACTIVE', 'DNNALD23', 'hash-2',
+            '2026-07-25T00:00:00Z', '2026-07-25T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-1', 'event', 'registration-1'), ('entry-2', 'event', 'registration-2');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from, assigned_by_staff_profile_id,
+       source_command_id)
+    VALUES ('assignment-1', 'event', 'entry-1', 'event-duck-1', 'duck-1', '2026-07-26T00:00:00Z', 'staff',
+            '22222222-2222-4222-8222-222222222222'),
+           ('assignment-2', 'event', 'entry-2', 'event-duck-2', 'duck-2', '2026-07-26T00:00:00Z', 'staff',
+            '33333333-3333-4333-8333-333333333333');
+    INSERT INTO heats (id, event_id, round, heat_number, status)
+    VALUES ('final', 'event', 'FINAL', 1, 'PLANNED');
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('final-1', 'event', 'final', 'entry-1', 'FINAL', 1, 'WINNER_PROMOTION', '2026-07-26T00:00:00Z'),
+           ('final-2', 'event', 'final', 'entry-2', 'FINAL', 2, 'WINNER_PROMOTION', '2026-07-26T00:00:00Z');
+  `);
+
+  applyMigrations(database, ["0017_final_podium_selections.sql"]);
+
+  const record = (id, raceEntryId, assignmentId, place) => database.prepare(
+    `INSERT INTO final_podium_selections
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, recorded_at,
+       recorded_by_staff_profile_id, source_command_id)
+     VALUES (?, 'event', 'final', ?, ?, ?, '2026-07-26T01:00:00Z', 'staff',
+             '11111111-1111-4111-8111-111111111111')`,
+  ).run(id, raceEntryId, assignmentId, place);
+
+  // A final that has not finished yet has no places to record.
+  assert.throws(
+    () => record("place-early", "entry-1", "assignment-1", 1),
+    /final podium places may be recorded only while the final awaits its result/,
+  );
+  database.exec("UPDATE heats SET status = 'AWAITING_RESULT' WHERE id = 'final'");
+  record("place-1", "entry-1", "assignment-1", 1);
+
+  // One duck per place, and one place per duck.
+  assert.throws(() => record("place-clash", "entry-2", "assignment-2", 1), /UNIQUE constraint failed/);
+  assert.throws(() => record("duck-clash", "entry-1", "assignment-1", 2), /UNIQUE constraint failed/);
+  // A podium is three places deep at most, whatever a caller asks for.
+  for (const place of [0, 4, -1]) {
+    assert.throws(() => record(`place-${place}`, "entry-2", "assignment-2", place), /CHECK constraint failed/);
+  }
+  record("place-2", "entry-2", "assignment-2", 2);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    2,
+  );
+
+  // Nothing here may ever be the reason an event's own rows cannot be deleted:
+  // these are scratch state with no historical value, so every event-scoped
+  // foreign key cascades. Delete event is the only cleanup path this product
+  // has, and a RESTRICT on a row nobody thinks about is exactly how that path
+  // was broken once before. `recorded_by_staff_profile_id` is the deliberate
+  // exception and stays RESTRICT like every other "who wrote this" column;
+  // staff profiles are deactivated rather than deleted, and force delete never
+  // touches that table.
+  database.exec("DELETE FROM duck_assignments WHERE id = 'assignment-2'");
+  assert.deepEqual(
+    database.prepare("SELECT id FROM final_podium_selections ORDER BY place").all().map((row) => row.id),
+    ["place-1"],
+  );
+  database.exec("DELETE FROM race_commands WHERE id = '11111111-1111-4111-8111-111111111111'");
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    0,
+  );
+  // The one deliberate RESTRICT, asserted so the exception stays a decision
+  // rather than becoming a surprise. Its command row survived the delete above.
+  database.exec(`
+    INSERT INTO final_podium_selections
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, recorded_at,
+       recorded_by_staff_profile_id, source_command_id)
+    VALUES ('place-again', 'event', 'final', 'entry-1', 'assignment-1', 1,
+            '2026-07-26T01:00:00Z', 'staff', '22222222-2222-4222-8222-222222222222');
+  `);
+  assert.throws(
+    () => database.exec("DELETE FROM staff_profiles WHERE id = 'staff'"),
+    /FOREIGN KEY constraint failed/,
+  );
+  database.exec("DELETE FROM final_podium_selections");
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

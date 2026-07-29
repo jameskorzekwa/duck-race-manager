@@ -28,6 +28,19 @@
 - `0014`: simplified six-status lifecycle rebuild.
 - `0015`: participant-chosen duck names.
 - `0016`: narrow locked-final-entry update for winner correction while loading.
+- `0017`: provisional final podium places recorded by tag scan.
+
+`0017` adds `final_podium_selections`, the one table that deliberately holds
+something that is not yet a fact. A row is a podium place a staffer scanned into
+a final that is waiting for its result; it becomes a `heat_results` row only in
+the batch that records the last required place, which publishes every place and
+finalizes the heat at once. Keeping them apart is what lets `heat_results` stay
+published-only, so nothing has to filter a half-finished podium out of a result
+set. `UNIQUE (heat_id, place)` and `UNIQUE (heat_id, race_entry_id)` make one
+duck per place authoritative rather than merely preflighted, a trigger refuses
+any row that is not attached to an `AWAITING_RESULT` `FINAL` heat, and every
+foreign key cascades so scratch state can never block force delete. The
+previously deployed Worker never reads or writes the table.
 
 `0016` replaces `heat_entries_update_unlocked` but preserves its default locked-
 roster refusal. Its only exception requires the exact superseded round-one

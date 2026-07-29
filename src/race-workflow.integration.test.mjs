@@ -330,6 +330,471 @@ const raceToAwaitingFinal = async (
   };
 };
 
+// ---------------------------------------------------------------------------
+// Scanned final podium
+//
+// The final is published the same way round one is: staff scan each finishing
+// duck's permanent tag and the duck's own inspection page offers the places that
+// are still open. Round one has one place, so its scan publishes a winner; the
+// final has up to three, so the staffer says which one this duck took and the
+// scan that fills the last place publishes the whole podium in one command.
+//
+// These tests drive the real Worker handlers against a migrated database, from a
+// race that reached AWAITING_FINAL through the same endpoints the console calls.
+// ---------------------------------------------------------------------------
+
+// The scan a staffer's phone performs: open the tag, read what the duck's
+// inspection page would offer, and press one of its place buttons.
+const podiumScan = (api, post) => ({
+  inspect: async (participant) => jsonBody(
+    await api(`/api/v1/staff/ducks/${participant.tagToken}`, { token: staffToken }),
+    200,
+    `inspect duck ${participant.visibleNumber}`,
+  ),
+  record: (participant, context, place, options = {}) => post(
+    `/api/v1/staff/ducks/${participant.tagToken}/heat-winner`,
+    {
+      commandId: options.commandId ?? crypto.randomUUID(),
+      eventId: context.eventId,
+      heatId: context.heatId,
+      raceEntryId: context.raceEntryId,
+      revision: options.revision ?? context.revision,
+      place,
+    },
+    options.token ?? staffToken,
+  ),
+});
+
+// The scanned context a duck's inspection page hands to its place buttons.
+const winnerContext = async (scan, participant) => {
+  const inspection = await scan.inspect(participant);
+  assert.ok(inspection.winnerAction, `duck ${participant.visibleNumber} offers a result action`);
+  return inspection;
+};
+
+test("a final podium is built one scanned duck at a time and published by the last place", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const { api, post, eventId, finalists, finalHeat } = await raceToAwaitingFinal(database, {
+    name: "Scanned Podium Race",
+    slug: "scanned-podium-race",
+    racerCount: 9,
+    heatCapacity: 3,
+  });
+  const scan = podiumScan(api, post);
+  const [first, second, third] = finalists;
+
+  // Every place is open, and the page says so rather than assuming the duck in
+  // hand is the winner. Places are deliberately taken out of order: staff scan
+  // the ducks they can reach, not the ducks in finishing order.
+  const thirdScan = await winnerContext(scan, third);
+  assert.equal(thirdScan.winnerAction.round, "FINAL");
+  assert.equal(thirdScan.winnerAction.heatId, finalHeat.id);
+  assert.deepEqual(thirdScan.winnerAction.podium.availablePlaces, [1, 2, 3]);
+  assert.equal(thirdScan.winnerAction.podium.requiredPlaces, 3);
+  assert.deepEqual(thirdScan.winnerAction.podium.placements, []);
+  assert.equal(thirdScan.winnerAction.podium.selectedPlace, null);
+  assert.equal(thirdScan.winnerAction.podium.complete, false);
+
+  const recordedThird = await jsonBody(
+    await scan.record(third, thirdScan.winnerAction, 3),
+    201,
+    "record third place",
+  );
+  // Recording a place is not a result. The heat is still waiting, nothing is
+  // published, and the public board still shows no podium.
+  assert.equal(recordedThird.heat.status, "AWAITING_RESULT");
+  assert.deepEqual(recordedThird.results, []);
+  assert.deepEqual(recordedThird.podium.placements.map((placement) => placement.place), [3]);
+  assert.equal(recordedThird.podium.placements[0].visibleNumber, third.visibleNumber);
+  assert.equal(recordedThird.podium.complete, false);
+  assert.deepEqual(
+    (await jsonBody(await api("/api/v1/race-board"), 200, "board mid-podium")).event.podium,
+    [],
+  );
+
+  // The next duck is offered only what is left, and the place already taken is
+  // reported so the staffer can see who is standing where.
+  const firstScan = await winnerContext(scan, first);
+  assert.deepEqual(firstScan.winnerAction.podium.availablePlaces, [1, 2]);
+  assert.deepEqual(firstScan.winnerAction.podium.placements.map((placement) => placement.place), [3]);
+  await jsonBody(await scan.record(first, firstScan.winnerAction, 1), 201, "record first place");
+
+  const secondScan = await winnerContext(scan, second);
+  assert.deepEqual(secondScan.winnerAction.podium.availablePlaces, [2]);
+  const published = await jsonBody(
+    await scan.record(second, secondScan.winnerAction, 2),
+    201,
+    "record second place and publish",
+  );
+  // The last place publishes the whole podium in the same command.
+  assert.equal(published.heat.status, "FINALIZED");
+  assert.deepEqual(published.results.map((result) => result.place), [1, 2, 3]);
+  assert.deepEqual(published.results.map((result) => result.duck.visibleNumber), [
+    first.visibleNumber,
+    second.visibleNumber,
+    third.visibleNumber,
+  ]);
+  // Provisional places do not outlive the result they became, and a published
+  // final reports no podium to take rather than an empty one that reads as
+  // three places still waiting to be scanned.
+  assert.equal(published.podium, null);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    0,
+  );
+
+  const board = await jsonBody(await api("/api/v1/race-board"), 200, "published podium board");
+  assert.deepEqual(board.event.podium.map((entry) => entry.duckNumber), [
+    first.visibleNumber,
+    second.visibleNumber,
+    third.visibleNumber,
+  ]);
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete event");
+  assert.equal(completed.event.status, "COMPLETED");
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("a scanned podium place is idempotent, exclusive, and undoable", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const { api, post, eventId, finalists, finalHeat } = await raceToAwaitingFinal(database, {
+    name: "Podium Retry Race",
+    slug: "podium-retry-race",
+    racerCount: 9,
+    heatCapacity: 3,
+  });
+  const scan = podiumScan(api, post);
+  const [first, second, third] = finalists;
+
+  const firstScan = await winnerContext(scan, first);
+  const commandId = crypto.randomUUID();
+  const recorded = await jsonBody(
+    await scan.record(first, firstScan.winnerAction, 1, { commandId }),
+    201,
+    "record first place",
+  );
+  assert.equal(recorded.replayed, false);
+
+  // A retry of the same scan replays rather than recording a second place or
+  // being read as a new command.
+  const replay = await jsonBody(
+    await scan.record(first, firstScan.winnerAction, 1, { commandId, revision: firstScan.winnerAction.revision }),
+    200,
+    "replay the same scan",
+  );
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.podium.placements.map((placement) => placement.place), [1]);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    1,
+  );
+
+  // The same identifier for a different duck or a different place is a
+  // different operation and is refused.
+  const secondScan = await winnerContext(scan, second);
+  assert.equal((await scan.record(second, secondScan.winnerAction, 2, { commandId })).status, 409);
+
+  // First place is taken, so nobody else may stand in it.
+  const takenPlace = await scan.record(second, secondScan.winnerAction, 1);
+  assert.equal(takenPlace.status, 409);
+  assert.match((await takenPlace.json()).error, /already taken by another duck/);
+
+  // A duck already on the podium is offered no second place, and asking for one
+  // is refused with the way out.
+  const standing = await winnerContext(scan, first);
+  assert.equal(standing.winnerAction.podium.selectedPlace, 1);
+  assert.deepEqual(standing.winnerAction.podium.availablePlaces, []);
+  const secondPlaceForFirst = await scan.record(first, standing.winnerAction, 2);
+  assert.equal(secondPlaceForFirst.status, 409);
+  assert.match((await secondPlaceForFirst.json()).error, /already holds 1st place/);
+
+  // A stale revision — another station recorded a place since this page painted
+  // — is refused rather than silently landing on a podium that moved.
+  const stale = await scan.record(second, secondScan.winnerAction, 2, {
+    revision: secondScan.winnerAction.revision - 1,
+  });
+  assert.equal(stale.status, 409);
+
+  // Clearing a place hands it back, and the duck that actually finished there
+  // can be scanned into it.
+  const cleared = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/podium-place/clear`,
+    { commandId: crypto.randomUUID(), raceEntryId: first.raceEntryId, place: 1 },
+  ), 201, "clear first place");
+  assert.deepEqual(cleared.podium.placements, []);
+  assert.deepEqual(cleared.podium.availablePlaces, [1, 2, 3]);
+  const reopened = await winnerContext(scan, second);
+  await jsonBody(await scan.record(second, reopened.winnerAction, 1), 201, "rescan first place");
+
+  // Clearing a place nobody is standing in changes nothing and says so.
+  const emptyClear = await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/podium-place/clear`,
+    { commandId: crypto.randomUUID(), raceEntryId: third.raceEntryId, place: 3 },
+  );
+  assert.equal(emptyClear.status, 409);
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("a scanned final podium refuses racers who left and never strands the final", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const { api, post, eventId, finalists, finalHeat, leaveRace } = await raceToAwaitingFinal(database, {
+    name: "Podium Withdrawal Race",
+    slug: "podium-withdrawal-race",
+    racerCount: 9,
+    heatCapacity: 3,
+  });
+  const scan = podiumScan(api, post);
+  const [first, second, third] = finalists;
+
+  const firstScan = await winnerContext(scan, first);
+  await jsonBody(await scan.record(first, firstScan.winnerAction, 1), 201, "record first place");
+  const secondScan = await winnerContext(scan, second);
+  await jsonBody(await scan.record(second, secondScan.winnerAction, 2), 201, "record second place");
+
+  // The last finalist leaves the race with two places already recorded. Their
+  // duck is still in the water and still scannable, so the page has to say
+  // plainly that it cannot take a place — the same expected outcome the finish
+  // line reports, not a failure.
+  await leaveRace(third, "withdraw");
+  const refusedScan = await scan.inspect(third);
+  assert.equal(refusedScan.winnerAction, null);
+  assert.equal(refusedScan.winnerIneligible.round, "FINAL");
+  assert.equal(refusedScan.winnerIneligible.reason, "DUCK_NOT_ELIGIBLE");
+  assert.equal(refusedScan.winnerIneligible.heatId, finalHeat.id);
+  // A stale page that fires the command anyway reports the same expected
+  // outcome the scan already showed, rather than a bare refusal.
+  const currentRevision = (await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final revision before the refused scan")).heat.revision;
+  const refused = await post(`/api/v1/staff/ducks/${third.tagToken}/heat-winner`, {
+    commandId: crypto.randomUUID(),
+    eventId,
+    heatId: finalHeat.id,
+    raceEntryId: third.raceEntryId,
+    revision: currentRevision,
+    place: 3,
+  });
+  assert.equal(refused.status, 422);
+  assert.equal((await refused.json()).reason, "DUCK_NOT_ELIGIBLE");
+
+  // The withdrawal shrank the podium to the two places already standing on it,
+  // so no further scan is coming and nothing would ever publish. The finish line
+  // is told the podium is complete and given the command that publishes it,
+  // rather than being left holding a finished race it cannot record.
+  const detail = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final detail after the withdrawal");
+  assert.equal(detail.podium.requiredPlaces, 2);
+  assert.equal(detail.podium.complete, true);
+  assert.deepEqual(detail.podium.placements.map((placement) => placement.place), [1, 2]);
+
+  const publishedPodium = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: detail.heat.revision,
+      results: detail.podium.placements.map((placement) => ({
+        raceEntryId: placement.raceEntryId,
+        place: placement.place,
+      })),
+    },
+  ), 201, "publish the completed scanned podium");
+  assert.deepEqual(publishedPodium.results.map((result) => result.place), [1, 2]);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    0,
+    "publishing consumes the provisional places",
+  );
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete the event on the reduced podium");
+  assert.equal(completed.event.status, "COMPLETED");
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+// The regression: a recorded place can fall outside the podium without its
+// racer going anywhere, because a withdrawal somewhere else on the roster
+// shrinks the depth underneath it. That row is invisible to every projection, so
+// if the authoritative guard still reads it as "this duck is standing
+// somewhere", the duck is offered the open places and refused on every one of
+// them, forever, with no control anywhere that can clear it.
+test("a recorded place the shrinking podium hides never locks its own duck out", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const { api, post, eventId, finalists, finalHeat, leaveRace } = await raceToAwaitingFinal(database, {
+    name: "Podium Shrink Race",
+    slug: "podium-shrink-race",
+    racerCount: 9,
+    heatCapacity: 3,
+  });
+  const scan = podiumScan(api, post);
+  const [first, second, third] = finalists;
+
+  const thirdScan = await winnerContext(scan, third);
+  await jsonBody(await scan.record(third, thirdScan.winnerAction, 3), 201, "record third place");
+
+  // A finalist nobody has scanned leaves. Third place stops existing, so the
+  // place recorded in it stops existing too — but its duck is still racing and
+  // still has to be able to take one of the places that remain.
+  await leaveRace(first, "withdraw");
+  const shrunk = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final detail after the podium shrank");
+  assert.equal(shrunk.podium.requiredPlaces, 2);
+  assert.deepEqual(shrunk.podium.placements, []);
+  assert.deepEqual(shrunk.podium.availablePlaces, [1, 2]);
+  assert.equal(shrunk.podium.complete, false);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    1,
+    "the hidden row is still in the table",
+  );
+
+  // The duck that held the vanished place is offered the places that are left,
+  // and taking one actually works.
+  const rescan = await winnerContext(scan, third);
+  assert.equal(rescan.winnerAction.podium.selectedPlace, null);
+  assert.deepEqual(rescan.winnerAction.podium.availablePlaces, [1, 2]);
+  const recorded = await jsonBody(
+    await scan.record(third, rescan.winnerAction, 2),
+    201,
+    "the duck whose place vanished takes one that is left",
+  );
+  assert.deepEqual(recorded.podium.placements.map((placement) => placement.place), [2]);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    1,
+    "the hidden row is swept, never left standing beside the new one",
+  );
+
+  // The reduced podium still publishes, and the event still completes.
+  const lastScan = await winnerContext(scan, second);
+  const published = await jsonBody(
+    await scan.record(second, lastScan.winnerAction, 1),
+    201,
+    "the last remaining place publishes the reduced podium",
+  );
+  assert.equal(published.heat.status, "FINALIZED");
+  assert.deepEqual(published.results.map((result) => result.place), [1, 2]);
+  assert.deepEqual(published.results.map((result) => result.duck.visibleNumber), [
+    second.visibleNumber,
+    third.visibleNumber,
+  ]);
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete the event on the reduced podium");
+  assert.equal(completed.event.status, "COMPLETED");
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("scanned podium places are least-privileged, validated, and cleared by a reset", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const { api, post, eventId, finalists, finalHeat } = await raceToAwaitingFinal(database, {
+    name: "Podium Authorization Race",
+    slug: "podium-authorization-race",
+    racerCount: 9,
+    heatCapacity: 3,
+  });
+  const scan = podiumScan(api, post);
+  const [first, second] = finalists;
+
+  // One place is recorded first, so the denials below are measured against a
+  // podium that actually has something in it: a refusal that must neither add a
+  // place nor remove the one standing there.
+  const allowed = await winnerContext(scan, first);
+  await jsonBody(await scan.record(first, allowed.winnerAction, 1), 201, "record with the result role");
+  const recordedPlaces = () => database.prepare(
+    "SELECT race_entry_id, place FROM final_podium_selections ORDER BY place",
+  ).all().map((row) => ({ ...row }));
+  const podiumBefore = recordedPlaces();
+  assert.deepEqual(podiumBefore, [{ race_entry_id: first.raceEntryId, place: 1 }]);
+
+  // Recording and clearing a podium place are result operations, so they are
+  // held to exactly the roles publishing a result is held to.
+  database.exec("DELETE FROM staff_role_assignments WHERE staff_profile_id = 'staff' AND role = 'RESULT_TAKER'");
+  database.exec("DELETE FROM staff_role_assignments WHERE staff_profile_id = 'staff' AND role = 'RACE_DIRECTOR'");
+  const secondScan = await jsonBody(
+    await api(`/api/v1/staff/ducks/${second.tagToken}`, { token: staffToken }),
+    200,
+    "inspect without result roles",
+  );
+  // A heat runner sees no result action at all, in either round.
+  assert.equal(secondScan.winnerAction, null);
+  const deniedRecord = await post(`/api/v1/staff/ducks/${second.tagToken}/heat-winner`, {
+    commandId: crypto.randomUUID(),
+    eventId,
+    heatId: finalHeat.id,
+    raceEntryId: second.raceEntryId,
+    revision: allowed.winnerAction.revision + 1,
+    place: 2,
+  });
+  assert.equal(deniedRecord.status, 403);
+  const deniedClear = await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/podium-place/clear`,
+    { commandId: crypto.randomUUID(), raceEntryId: first.raceEntryId, place: 1 },
+  );
+  assert.equal(deniedClear.status, 403);
+  assert.deepEqual(
+    recordedPlaces(),
+    podiumBefore,
+    "a denied scan adds no place and removes none",
+  );
+
+  database.exec(
+    "INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)"
+    + " VALUES ('staff-results-again', 'staff', 'RESULT_TAKER', '2026-07-26T00:00:00Z')",
+  );
+
+  // A malformed place is refused before any database access, and records
+  // nothing.
+  for (const place of [0, 4, 1.5, "1", null]) {
+    const malformed = await post(`/api/v1/staff/ducks/${second.tagToken}/heat-winner`, {
+      commandId: crypto.randomUUID(),
+      eventId,
+      heatId: finalHeat.id,
+      raceEntryId: second.raceEntryId,
+      revision: allowed.winnerAction.revision,
+      place,
+    });
+    assert.equal(malformed.status, 400, `place ${JSON.stringify(place)} is refused`);
+  }
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    1,
+    "a malformed place writes nothing",
+  );
+
+  // Resetting the heat says the finish did not happen the way it was recorded,
+  // so the places its scans collected go with it.
+  database.exec(
+    "INSERT INTO staff_role_assignments (id, staff_profile_id, role, assigned_at)"
+    + " VALUES ('staff-director-again', 'staff', 'RACE_DIRECTOR', '2026-07-26T00:00:00Z')",
+  );
+  const beforeReset = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final before reset");
+  assert.equal(beforeReset.podium.placements.length, 1);
+  await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/reset`,
+    { commandId: crypto.randomUUID(), revision: beforeReset.heat.revision },
+  ), 201, "reset the final");
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
+    0,
+    "a reset throws away the finish its scans described",
+  );
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
 // The blocker this covers: the final podium is sized by the finalists who can
 // still take a place, so a withdrawal reduces it. If any surface keeps demanding
 // three places, the third one can never be filled — its duck answers every scan
@@ -989,6 +1454,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0014_simplified_lifecycle_schema.sql",
     "0015_participant_duck_names.sql",
     "0016_locked_final_winner_correction.sql",
+    "0017_final_podium_selections.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -1607,6 +2073,9 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       heatNumber: heat.number,
       round: "ROUND_ONE",
       participantDisplayName: `${winningParticipant.firstName} ${winningParticipant.lastName[0]}.`,
+      // Round one awards one place, so this scan publishes a winner outright
+      // and has no podium to choose from. The final's scan does.
+      podium: null,
     });
     if (heat === roundOneHeats[0]) {
       const forged = await post(`/api/v1/staff/ducks/${winningParticipant.tagToken}/heat-winner`, {

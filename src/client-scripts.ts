@@ -1656,6 +1656,29 @@ const rosterEligibilityKey = (roster) => (Array.isArray(roster) ? roster : [])
   .join(",");
 `;
 
+// The final's podium is built by scanning one duck at a time and choosing where
+// it finished, so two separate surfaces name the same three places: the duck
+// inspection page, which is where a place is actually chosen, and the
+// finish-line station, which shows the podium filling up. They share these words
+// so a staffer reading "2nd place" on one screen and "2nd place" on the other is
+// certainly reading about the same place.
+export const podiumPlaceHelpersScript = String.raw`
+const PODIUM_PLACE_LABELS = { 1: "1st place", 2: "2nd place", 3: "3rd place" };
+const podiumPlaceLabel = (place) => Object.prototype.hasOwnProperty.call(PODIUM_PLACE_LABELS, place)
+  ? PODIUM_PLACE_LABELS[place]
+  : "Place " + place;
+// Only ever what the server said is open. The list is deliberately not derived
+// from "1 to requiredPlaces minus the ones I can see": a place another station
+// took a second ago is not on screen yet, and offering it would send a staffer
+// into a refusal instead of to the next duck.
+const podiumOpenPlaces = (podium) => !podium || !Array.isArray(podium.availablePlaces)
+  ? []
+  : podium.availablePlaces.filter((place) => Number.isSafeInteger(place) && place >= 1 && place <= 3);
+const podiumTakenPlacements = (podium) => !podium || !Array.isArray(podium.placements)
+  ? []
+  : podium.placements.slice().sort((left, right) => left.place - right.place);
+`;
+
 export const stationStateHelpersScript = String.raw`
 const startPickHeat = (heats, round) => {
   const active = heats.filter((heat) => heat.round === round && heat.status !== "FINALIZED" && heat.status !== "CANCELLED");
@@ -2526,6 +2549,7 @@ const finishCreateNfcScanner = ({ createReader, createController, decode, onValu
 `;
 
 export const finishLineScript = rosterEligibilityHelpersScript + stationStateHelpersScript
+  + podiumPlaceHelpersScript
   + finishSelectionValidationScript + finishScanSerializationScript
   + finishNfcHelpersScript + String.raw`
 const finishRoot = document.querySelector("[data-finish-line]");
@@ -2544,6 +2568,11 @@ let finishEvent = null;
 let finishHeat = null;
 let finishRosterEntries = [];
 let finishSelected = [];
+// The podium the server is holding for this final, built by staff scanning each
+// finishing duck's tag and choosing its place on the duck's own inspection page.
+// It is authoritative and shared; the finishSelected list above is this one
+// station's unsubmitted working list and is not.
+let finishPodium = null;
 let finishRenderKey = null;
 let finishScanBusy = false;
 let finishScanEndBusy = null;
@@ -2557,7 +2586,16 @@ const finishText = (tag, value, className) => {
   return element;
 };
 const finishHumanize = (value) => String(value || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
-const finishPlaceLabel = (place) => place === 1 ? "1st place" : place === 2 ? "2nd place" : "3rd place";
+// One set of words for the three podium places, shared with the duck inspection
+// page where a place is actually chosen.
+const finishPlaceLabel = (place) => podiumPlaceLabel(place);
+// A final whose podium is being built by tag scans. The moment one place has
+// been scanned, this station stops offering its own way to assemble a podium:
+// two half-built podiums on two screens, only one of which the server would
+// accept, is the ambiguity this flag exists to prevent. Clearing every scanned
+// place hands the station back its form.
+const finishPodiumScanned = () => finishHeat !== null && finishHeat.round === "FINAL"
+  && podiumTakenPlacements(finishPodium).length > 0;
 const finishApi = async (url, options) => {
   const response = await fetch(url, options);
   if (response.status === 401) {
@@ -2638,7 +2676,11 @@ const FINISH_NO_ELIGIBLE_MESSAGE = "Nobody in this heat can win:"
 const finishSubmitBlocked = (busy) => {
   const required = finishRequiredPlaces();
   return busy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT"
-    || required === 0 || finishSelected.length !== required;
+    || required === 0 || finishSelected.length !== required
+    // A podium is being built by scans, so this station's own submit is not the
+    // thing that publishes it. Hidden already; disabled as well, because hidden
+    // is a paint and this is the guard.
+    || finishPodiumScanned();
 };
 const finishSetScanBusy = (busy) => {
   finishScanBusy = busy;
@@ -2653,11 +2695,130 @@ const finishSetScanBusy = (busy) => {
   for (const control of finishSelections.querySelectorAll("button")) control.disabled = busy;
   finishSubmit.disabled = finishSubmitBlocked(busy);
 };
+// Take one scanned duck back off the podium. The place reopens immediately and
+// the next scan of the duck that actually finished there can take it.
+const finishClearPodiumPlace = async (placement, button) => {
+  if (!finishEvent || !finishHeat) return;
+  const label = finishPlaceLabel(placement.place);
+  if (!await appConfirm(
+    "Clear " + label + " from Duck #" + placement.visibleNumber + "? That place goes back to being open"
+      + " for the next duck scanned.",
+    { danger: true, confirmLabel: "Clear " + label },
+  )) return;
+  button.disabled = true;
+  finishCommandBusy = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  finishMessage.textContent = "Clearing " + label + "…";
+  try {
+    await finishApi("/api/v1/staff/events/" + encodeURIComponent(finishEvent.id)
+      + "/heats/" + encodeURIComponent(finishHeat.id) + "/podium-place/clear", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        raceEntryId: placement.raceEntryId,
+        place: placement.place,
+      }),
+    });
+    await finishLoad();
+    finishMessage.textContent = label + " is open again. Scan the duck that finished there.";
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      button.disabled = false;
+      finishMessage.textContent = error.message;
+    }
+  } finally {
+    finishCommandBusy = false;
+    endBusy();
+    finishSubscription?.resume();
+  }
+};
+
+// The podium the scans have built, with the way back off each place. Removing is
+// here rather than only on the duck page because this is the screen where the
+// mistake is visible: the staffer reads the three places back and sees that two
+// of them are swapped, without the ducks in their hands.
+// Publish a podium that is already as deep as the final requires but was never
+// finished by a scan. Only reachable when a finalist left after enough places
+// were recorded, which shrank the podium underneath them; the scan that would
+// normally publish is never coming, because every duck still unscanned belongs
+// to a racer the result paths refuse.
+const finishPublishScannedPodium = async (button) => {
+  const placements = podiumTakenPlacements(finishPodium);
+  const readback = placements.map((placement) => finishPlaceLabel(placement.place) + ": Duck #"
+    + placement.visibleNumber).join(", ");
+  if (!await appConfirm(
+    "Publish this podium now? Read back: " + readback + ". This publishes immediately.",
+    { danger: true, confirmLabel: "Publish podium" },
+  )) return;
+  button.disabled = true;
+  finishCommandBusy = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  finishMessage.textContent = "Publishing the official podium…";
+  try {
+    await finishApi("/api/v1/staff/events/" + encodeURIComponent(finishEvent.id)
+      + "/heats/" + encodeURIComponent(finishHeat.id) + "/results/finalize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        revision: finishHeat.revision,
+        results: placements.map((placement) => ({ raceEntryId: placement.raceEntryId, place: placement.place })),
+      }),
+    });
+    await finishLoad();
+    finishMessage.textContent = "Official podium saved. Live race screens have been notified.";
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      button.disabled = false;
+      finishMessage.textContent = error.message;
+    }
+  } finally {
+    finishCommandBusy = false;
+    endBusy();
+    finishSubscription?.resume();
+  }
+};
+
+const finishRenderScannedPodium = (focusedRaceEntry) => {
+  const placements = podiumTakenPlacements(finishPodium);
+  const required = finishRequiredPlaces();
+  finishSelections.append(finishText("p", "Scanned podium · " + placements.length + " of " + required
+    + " place" + (required === 1 ? "" : "s") + " recorded", "muted"));
+  for (const placement of placements) {
+    const card = finishText("article", "", "station-selection");
+    card.append(
+      finishText("strong", finishPlaceLabel(placement.place)),
+      finishText("p", placement.participantDisplayName + " · Duck #" + placement.visibleNumber),
+    );
+    const remove = finishText("button", "Clear " + finishPlaceLabel(placement.place), "button secondary small");
+    remove.type = "button";
+    remove.dataset.raceEntryId = placement.raceEntryId;
+    remove.dataset.podiumClear = String(placement.place);
+    remove.disabled = finishScanBusy || finishCommandBusy;
+    remove.addEventListener("click", () => finishClearPodiumPlace(placement, remove));
+    card.append(remove);
+    finishSelections.append(card);
+    if (focusedRaceEntry === placement.raceEntryId) remove.focus();
+  }
+  if (finishPodium && finishPodium.complete === true && finishHeat && finishHeat.status === "AWAITING_RESULT") {
+    const publish = finishText("button", "Publish official podium", "button station-control");
+    publish.type = "button";
+    publish.dataset.publishPodium = "true";
+    publish.disabled = finishScanBusy || finishCommandBusy;
+    publish.addEventListener("click", () => finishPublishScannedPodium(publish));
+    finishSelections.append(publish);
+  }
+};
 const finishRenderSelections = () => {
   const focusedRaceEntry = finishSelections.contains(document.activeElement)
     ? document.activeElement.dataset.raceEntryId
     : null;
   finishSelections.replaceChildren();
+  if (finishPodiumScanned()) {
+    finishRenderScannedPodium(focusedRaceEntry);
+    return;
+  }
   for (const selection of finishSelected) {
     const card = finishText("article", "", "station-selection");
     card.append(
@@ -2760,7 +2921,14 @@ const finishRender = (event, detail) => {
   // yet it changes both the marker this roster must show and how many places
   // this station requires. Without it the repaint is discarded and the station
   // keeps asking for a place that can never be filled.
-  const renderKey = stationHeatRenderKey(event, detail) + "|" + rosterEligibilityKey(detail.roster);
+  //
+  // The scanned podium joins the key for the same reason. Every recorded place
+  // does move the heat revision, so this is belt-and-braces there, but a station
+  // that showed a stale podium would offer a Clear button for a place another
+  // staffer already cleared, which is the one control here that must never be
+  // wrong about what it is undoing.
+  const renderKey = stationHeatRenderKey(event, detail) + "|" + rosterEligibilityKey(detail.roster)
+    + "|" + podiumTakenPlacements(detail.podium).map((placement) => placement.place + ":" + placement.raceEntryId).join(",");
   if (renderKey === finishRenderKey) return;
   const changedHeatContext = !finishHeat
     || finishHeat.id !== detail.heat.id
@@ -2771,6 +2939,7 @@ const finishRender = (event, detail) => {
   finishEvent = event;
   finishHeat = detail.heat;
   finishRosterEntries = detail.roster;
+  finishPodium = detail.podium || null;
   if (changedHeatContext) {
     finishSelected = [];
     finishClearIneligible();
@@ -2805,9 +2974,16 @@ const finishRender = (event, detail) => {
   }
   finishAction.replaceChildren();
   const finalPodiumFlow = finishHeat.round === "FINAL";
-  finishScanForm.hidden = finishHeat.status !== "AWAITING_RESULT" || !finalPodiumFlow;
-  finishSelections.hidden = finishHeat.status !== "AWAITING_RESULT" || !finalPodiumFlow;
-  finishSubmit.hidden = finishHeat.status !== "AWAITING_RESULT" || !finalPodiumFlow;
+  // Once a place has been scanned, the podium belongs to the scans. This
+  // station keeps showing it and keeps the way to undo a place, but it stops
+  // offering a second, unsubmitted podium of its own that the server would only
+  // reject.
+  const scannedPodium = finishPodiumScanned();
+  const awaiting = finishHeat.status === "AWAITING_RESULT";
+  finishScanForm.hidden = !awaiting || !finalPodiumFlow || scannedPodium;
+  finishSelections.hidden = !awaiting || !finalPodiumFlow;
+  finishSubmit.hidden = !awaiting || !finalPodiumFlow || scannedPodium;
+  if (scannedPodium) finishSelected = [];
   if (finishHeat.status === "RUNNING") {
     const button = finishText("button", "Mark heat finished", "button station-control");
     button.type = "button";
@@ -2831,7 +3007,8 @@ const finishRender = (event, detail) => {
           ? FINISH_NO_ELIGIBLE_MESSAGE
           : finishHeat.round === "ROUND_ONE"
             ? "Heat finished. Scan the winning duck's permanent NFC or QR tag to open its inspection page."
-            : "Heat finished. Select every required place, review it, then submit once.";
+            : "Heat finished. Scan each finishing duck's tag and choose its place, or select every place here"
+              + " and submit once.";
       } catch (error) {
         if (error.message !== "signed-out") finishMessage.textContent = error.message;
         button.disabled = false;
@@ -2863,9 +3040,16 @@ const finishRender = (event, detail) => {
     finishMessage.textContent = FINISH_NO_ELIGIBLE_MESSAGE;
   } else if (finishHeat.round === "ROUND_ONE") {
     finishMessage.textContent = "Scan the winning duck's permanent NFC or QR tag. Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner.";
+  } else if (scannedPodium) {
+    const remaining = finishRequiredPlaces() - podiumTakenPlacements(finishPodium).length;
+    finishMessage.textContent = remaining <= 0
+      ? "Every place this final needs is recorded. Publish the podium to make it official."
+      : "Scan the next finishing duck's tag and choose its place. " + remaining + " place"
+        + (remaining === 1 ? "" : "s") + " still to record.";
   } else {
-    finishMessage.textContent = "Select " + finishRequiredPlaces() + " distinct duck"
-      + (finishRequiredPlaces() === 1 ? "" : "s") + ", then review every place before submitting.";
+    finishMessage.textContent = "Scan each finishing duck's permanent NFC or QR tag and choose its place on the"
+      + " duck's page, or select " + finishRequiredPlaces() + " distinct duck"
+      + (finishRequiredPlaces() === 1 ? "" : "s") + " here and review every place before submitting.";
   }
   finishRenderSelections();
 };
@@ -2877,6 +3061,7 @@ const finishEmpty = (message) => {
   finishHeat = null;
   finishRosterEntries = [];
   finishSelected = [];
+  finishPodium = null;
   finishEventLabel.textContent = message;
   finishHeatTitle.textContent = "No heat needs the finish line";
   finishFacts.replaceChildren();
@@ -6601,10 +6786,11 @@ const heatBagCallout = (heat, duckNumber, heatAssignmentPending, eventStatus) =>
 export const staffDuckScript = participantQrHelpersScript
   + participantQrDecoderScript
   + heatBagHelpersScript
-  // This page is the round-one result surface, so it asks the same eligibility
-  // question the finish line asks, through the same shared helper rather than a
-  // second copy of "can this racer still win".
+  // This page is the result surface for both racing rounds, so it asks the same
+  // eligibility question the finish line asks, through the same shared helper
+  // rather than a second copy of "can this racer still win".
   + rosterEligibilityHelpersScript
+  + podiumPlaceHelpersScript
   + String.raw`
 const root = document.querySelector("[data-staff-duck]");
 const token = root.dataset.token;
@@ -6716,6 +6902,177 @@ const winnerHeatHasNoEligibleRacer = async (data) => {
   }
 };
 
+// One scan of a final's duck: publish the place the staffer chose, and let the
+// server decide whether that place was the last one the podium needed. The
+// station is never asked to know which scan finishes the race — it scans the
+// ducks that finished, in whatever order they are picked out of the water.
+const submitPodiumPlace = async (data, candidate, place, button) => {
+  const duckLabel = "Duck #" + data.duck.visibleNumber;
+  const lastPlace = candidate.podium.availablePlaces.length === 1;
+  if (!await appConfirm(
+    "Record " + duckLabel + " as " + podiumPlaceLabel(place) + " in the final?"
+      + (lastPlace
+        ? " That is the last place, so this publishes the official podium immediately."
+        : " You can clear this place by scanning this duck again."),
+    { danger: true, confirmLabel: "Record " + podiumPlaceLabel(place) },
+  )) return;
+  button.disabled = true;
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  message.textContent = "Recording " + duckLabel + " as " + podiumPlaceLabel(place) + "…";
+  try {
+    const body = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/heat-winner", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: candidate.eventId,
+        heatId: candidate.heatId,
+        raceEntryId: candidate.raceEntryId,
+        revision: candidate.revision,
+        place,
+      }),
+    });
+    // The response, not the count the button was painted from, decides what this
+    // says: another station may have filled a place between the paint and the
+    // press, so the scan that publishes is not always the one that looked like it
+    // would. A replayed command can also come back to a podium that has moved on
+    // since — the place may have been cleared — so the banner claims a saved
+    // place only while the response still shows this duck standing in it.
+    const published = body.heat && body.heat.status === "FINALIZED";
+    const standing = published || podiumTakenPlacements(body.podium)
+      .some((placement) => placement.place === place && placement.raceEntryId === candidate.raceEntryId);
+    winnerSuccess = published
+      ? {
+        title: "Official podium saved",
+        detail: duckLabel + " took " + podiumPlaceLabel(place) + ". The final podium is now official.",
+      }
+      : standing
+        ? {
+          title: podiumPlaceLabel(place) + " saved",
+          detail: duckLabel + " is recorded as " + podiumPlaceLabel(place) + " in the final.",
+        }
+        : {
+          title: podiumPlaceLabel(place) + " is not recorded",
+          detail: duckLabel + " is not standing in " + podiumPlaceLabel(place)
+            + " any more. Check the podium below and scan again if it should be.",
+        };
+    await load();
+    if (standing) pageTitle.textContent = duckLabel + " took " + podiumPlaceLabel(place);
+    message.textContent = published
+      ? "Official podium saved. Live race screens have been notified."
+      : standing
+        ? "Saved. Scan the next duck to pass the finish line."
+        : "That place is not recorded any more. Check the podium and scan again if it should be.";
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      button.disabled = false;
+      message.textContent = error.message;
+    }
+  } finally {
+    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
+    endBusy();
+    staffDuckSubscription?.resume();
+  }
+};
+
+const clearPodiumPlace = async (data, candidate, button) => {
+  const place = candidate.podium.selectedPlace;
+  const duckLabel = "Duck #" + data.duck.visibleNumber;
+  if (!await appConfirm(
+    "Clear " + duckLabel + " from " + podiumPlaceLabel(place) + " in the final?"
+      + " That place goes back to being open for the next duck scanned.",
+    { danger: true, confirmLabel: "Clear " + podiumPlaceLabel(place) },
+  )) return;
+  button.disabled = true;
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  message.textContent = "Clearing " + podiumPlaceLabel(place) + "…";
+  try {
+    await fetchJson("/api/v1/staff/events/" + encodeURIComponent(candidate.eventId)
+      + "/heats/" + encodeURIComponent(candidate.heatId) + "/podium-place/clear", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        raceEntryId: candidate.raceEntryId,
+        place,
+      }),
+    });
+    winnerSuccess = {
+      title: podiumPlaceLabel(place) + " cleared",
+      detail: podiumPlaceLabel(place) + " is open again. Scan the duck that finished there.",
+    };
+    await load();
+    message.textContent = podiumPlaceLabel(place) + " is open again. Scan the duck that finished there.";
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      button.disabled = false;
+      message.textContent = error.message;
+    }
+  } finally {
+    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
+    endBusy();
+    staffDuckSubscription?.resume();
+  }
+};
+
+// The final's version of the winner action. Round one has one place, so it has
+// one button; the final has up to three, so the staffer says which one this duck
+// took. Only the places the server reports open are offered, and a duck that is
+// already standing on the podium is offered the way back off it instead.
+const renderPodiumAction = (data, candidate) => {
+  const podium = candidate.podium;
+  const duckLabel = "Duck #" + data.duck.visibleNumber;
+  const taken = podiumTakenPlacements(podium);
+  if (podium.selectedPlace !== null) {
+    winnerAction.append(
+      text("strong", duckLabel + " is " + podiumPlaceLabel(podium.selectedPlace)),
+      text("p", candidate.participantDisplayName + " is recorded as " + podiumPlaceLabel(podium.selectedPlace)
+        + " in the final. The podium is published once every place is scanned."),
+    );
+    const clear = text("button", "Clear " + podiumPlaceLabel(podium.selectedPlace), "button secondary station-control");
+    clear.type = "button";
+    clear.dataset.podiumClear = String(podium.selectedPlace);
+    clear.addEventListener("click", () => clearPodiumPlace(data, candidate, clear));
+    winnerAction.append(clear);
+    message.textContent = duckLabel + " is already " + podiumPlaceLabel(podium.selectedPlace)
+      + ". Scan the next duck to pass the finish line.";
+    return;
+  }
+  const open = podiumOpenPlaces(podium);
+  if (open.length === 0) {
+    // Every place this final has is held by a duck that is not this one. There
+    // is nothing to press, so say what is true rather than leaving the panel
+    // looking broken.
+    winnerAction.append(
+      text("strong", "Every podium place is taken"),
+      text("p", "The final's " + podium.requiredPlaces + " podium place"
+        + (podium.requiredPlaces === 1 ? " is" : "s are") + " already recorded, so " + duckLabel
+        + " cannot be added. Clear a place from the finish-line station if one is wrong."),
+    );
+    message.textContent = "Every podium place is already recorded.";
+    return;
+  }
+  winnerAction.append(
+    text("strong", "Which place did " + duckLabel + " take?"),
+    text("p", candidate.participantDisplayName + " and " + duckLabel + " are on the official final roster."),
+  );
+  if (taken.length > 0) {
+    for (const placement of taken) {
+      winnerAction.append(text("p", podiumPlaceLabel(placement.place) + " is already recorded: "
+        + placement.participantDisplayName + " · Duck #" + placement.visibleNumber));
+    }
+  }
+  for (const place of open) {
+    const button = text("button", "Mark Duck as " + podiumPlaceLabel(place), "button station-control");
+    button.type = "button";
+    button.dataset.podiumPlace = String(place);
+    button.addEventListener("click", () => submitPodiumPlace(data, candidate, place, button));
+    winnerAction.append(button);
+  }
+};
+
 const renderWinnerAction = (data, heatHasNoEligibleRacer = false) => {
   winnerAction.replaceChildren();
   winnerAction.classList.remove("ineligible");
@@ -6723,10 +7080,7 @@ const renderWinnerAction = (data, heatHasNoEligibleRacer = false) => {
     const success = winnerSuccess;
     winnerSuccess = null;
     winnerAction.hidden = false;
-    winnerAction.append(
-      text("strong", "Official winner saved"),
-      text("p", "Duck #" + success.duckNumber + " is the official Heat " + success.heatNumber + " winner."),
-    );
+    winnerAction.append(text("strong", success.title), text("p", success.detail));
     return;
   }
   const candidate = data.winnerAction;
@@ -6736,23 +7090,29 @@ const renderWinnerAction = (data, heatHasNoEligibleRacer = false) => {
   // status, and send the staffer straight back to the finish line.
   const ineligible = data.winnerIneligible;
   if (!candidate && ineligible) {
+    // Whichever round it is, the heat this duck is in is the heat it cannot be
+    // recorded for. The final is named as "the final" because that is what staff
+    // call it; there is only ever one, and "Heat 1" for it reads like a
+    // round-one heat.
+    const heatLabel = ineligible.round === "FINAL" ? "the final" : "Heat " + ineligible.heatNumber;
     winnerAction.hidden = false;
     winnerAction.classList.add("ineligible");
     winnerAction.append(
       text("strong", "Duck #" + data.duck.visibleNumber + " is " + ineligibleStatusLabel(ineligible.registrationStatus)),
-      text("p", ineligible.participantDisplayName + " cannot be recorded as the Heat "
-        + ineligible.heatNumber + " winner, and this duck stays in its heat."),
+      text("p", ineligible.participantDisplayName + " cannot be recorded as "
+        + (ineligible.round === "FINAL" ? "a podium place in the final" : "the " + heatLabel + " winner")
+        + ", and this duck stays in its heat."),
     );
     // The whole heat is out, so there is no next duck worth scanning and the
     // remedy is the only thing left to say.
     if (heatHasNoEligibleRacer) {
       winnerAction.append(
-        text("strong", "Nobody in Heat " + ineligible.heatNumber + " can win"),
-        text("p", "Every racer in Heat " + ineligible.heatNumber + " is withdrawn or disqualified, so every duck in that"
+        text("strong", "Nobody in " + heatLabel + " can win"),
+        text("p", "Every racer in " + heatLabel + " is withdrawn or disqualified, so every duck in that"
           + " bag will be refused and no result can be recorded. Every duck stays in its bag."),
         text("p", "Ask the race director to reactivate a racer, then scan that duck's tag again."),
       );
-      message.textContent = "Nobody in Heat " + ineligible.heatNumber + " can win."
+      message.textContent = "Nobody in " + heatLabel + " can win."
         + " Ask the race director to reactivate a racer, then scan that duck's tag again.";
       return;
     }
@@ -6765,6 +7125,13 @@ const renderWinnerAction = (data, heatHasNoEligibleRacer = false) => {
     return;
   }
   winnerAction.hidden = false;
+  // The final awards places rather than a single winner, so the same scan asks a
+  // different question. Everything before this point — the refusals, the
+  // withdrawn-racer statement, the saved banner — is identical in both rounds.
+  if (candidate.round === "FINAL" && candidate.podium) {
+    renderPodiumAction(data, candidate);
+    return;
+  }
   winnerAction.append(
     text("strong", "Result waiting"),
     text("p", candidate.participantDisplayName + " and Duck #" + data.duck.visibleNumber + " are on the official Heat " + candidate.heatNumber + " roster."),
@@ -6792,7 +7159,10 @@ const renderWinnerAction = (data, heatHasNoEligibleRacer = false) => {
           revision: candidate.revision,
         }),
       });
-      winnerSuccess = { duckNumber: data.duck.visibleNumber, heatNumber: candidate.heatNumber };
+      winnerSuccess = {
+        title: "Official winner saved",
+        detail: "Duck #" + data.duck.visibleNumber + " is the official Heat " + candidate.heatNumber + " winner.",
+      };
       await load();
       pageTitle.textContent = "Duck #" + data.duck.visibleNumber + " won Heat " + candidate.heatNumber;
       message.textContent = "Official winner saved. Live race screens have been notified.";

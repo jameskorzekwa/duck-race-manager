@@ -242,14 +242,64 @@ test.describe("complete race journey", () => {
       const finalHeat = (await client.get(`/api/v1/staff/events/${event.id}/heats`)).body.heats
         .find((heat) => heat.round === "FINAL");
       finalDetail = (await client.get(`/api/v1/staff/events/${event.id}/heats/${finalHeat.id}`)).body;
-      for (const entry of finalDetail.roster.slice(0, 3)) {
-        await page.getByLabel("Tag URL or duck number").fill(String(entry.duck.visibleNumber));
-        await page.getByRole("button", { name: "Add this duck" }).click();
+
+      // The final is published the way round one is: scan each finishing duck's
+      // permanent tag and say which place it took. The places are taken out of
+      // finishing order on purpose — staff scan the ducks they can reach, and
+      // the flow must not quietly depend on 1st being scanned first.
+      const finalists = finalDetail.roster.slice(0, 3).map((entry) =>
+        ducks.find((duck) => duck.visibleNumber === entry.duck.visibleNumber));
+      expect(finalists.every(Boolean)).toBe(true);
+      const scannedPodium = [
+        { duck: finalists[2], place: "3rd place" },
+        { duck: finalists[0], place: "1st place" },
+        { duck: finalists[1], place: "2nd place" },
+      ];
+
+      // A mis-tap is the mistake this flow actually produces, so the way back
+      // off a place is part of the journey rather than an afterthought.
+      await page.goto(`/staff/ducks/${finalists[0].tagToken}`);
+      await page.getByRole("button", { name: "Mark Duck as 2nd place" }).click();
+      await confirmAction(page, "Record 2nd place");
+      // The standing state, not the transient saved banner: a live refresh
+      // repaints this panel as soon as the recorded place lands.
+      await expect(page.locator("[data-winner-action]")).toContainText(
+        "is recorded as 2nd place in the final",
+      );
+      await page.goto("/staff/finish-line");
+      await expect(page.locator("[data-finish-selections]")).toContainText("1 of 3 places recorded");
+      await page.getByRole("button", { name: "Clear 2nd place" }).click();
+      await confirmAction(page, "Clear 2nd place");
+      await expect(page.locator("[data-station-message]")).toContainText("2nd place is open again");
+
+      for (const [index, { duck, place }] of scannedPodium.entries()) {
+        await page.goto(`/staff/ducks/${duck.tagToken}`);
+        const button = page.getByRole("button", { name: `Mark Duck as ${place}` });
+        await expect(button).toBeVisible();
+        // A place another duck already took is never offered again.
+        for (const taken of scannedPodium.slice(0, index)) {
+          await expect(page.getByRole("button", { name: `Mark Duck as ${taken.place}` })).toHaveCount(0);
+        }
+        await button.click();
+        await confirmAction(page, `Record ${place}`);
+        if (index < scannedPodium.length - 1) {
+          await expect(page.locator("[data-winner-action]")).toContainText(
+            `is recorded as ${place} in the final`,
+          );
+        }
       }
-      await expect(page.getByRole("button", { name: "Submit official podium" })).toBeEnabled();
-      await page.getByRole("button", { name: "Submit official podium" }).click();
-      await confirmAction(page);
-      await expect(page.locator("[data-station-message]")).toContainText("Official result saved");
+
+      // The last place published the whole podium in the same command, without
+      // anybody pressing a separate submit.
+      await expect.poll(async () => (await client.get(
+        `/api/v1/staff/events/${event.id}/heats/${finalHeat.id}`,
+      )).body.heat.status).toBe("FINALIZED");
+      const publishedFinal = (await client.get(
+        `/api/v1/staff/events/${event.id}/heats/${finalHeat.id}`,
+      )).body;
+      expect(publishedFinal.results.map((result) => result.duck.visibleNumber)).toEqual(
+        [finalists[0], finalists[1], finalists[2]].map((duck) => duck.visibleNumber),
+      );
     });
 
     await test.step("complete the event and verify public results", async () => {
