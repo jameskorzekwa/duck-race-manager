@@ -620,7 +620,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
           git commit -m "Implement issue #${ISSUE_NUMBER}"
-          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64)"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
           cleanup_orphan_branch() {
             if [[ "$published_pr" == "false" ]]; then
               if existing_pr="$(gh pr list --head "$branch" --state all --json number --jq '.[0].number // empty')"; then
