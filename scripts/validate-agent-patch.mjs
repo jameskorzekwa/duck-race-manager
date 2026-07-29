@@ -13,6 +13,8 @@ const protectedPaths = [
   /^opencode\.json$/i,
   /^scripts\/agent-pipeline\.mjs$/i,
   /^scripts\/cleanup-model-workspace\.mjs$/i,
+  /^scripts\/e2e-redaction\.mjs$/i,
+  /^scripts\/summarize-verification-failure\.mjs$/i,
   /^scripts\/validate-agent-patch\.mjs$/i,
   /^scripts\/wait-for-openchamber-session\.mjs$/i,
 ];
