@@ -88,9 +88,7 @@ test("local model agents deny unspecified and executable tools", async () => {
     assert.doesNotMatch(agent, /bash:\n|pty_|webfetch: allow|websearch: allow|lsp: allow/);
   }
   const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
-  assert.match(orchestrator, /"\.\*": deny/);
-  assert.match(orchestrator, /"\*\*\/\.\*": deny/);
-  for (const protectedPath of [".github/**", ".opencode/**", "opencode.json", "**/AGENTS.md"]) {
+  for (const protectedPath of ["**/.git/**", "**/.github/**", "**/.opencode/**", "**/.pipeline/**", "**/opencode.json", "**/AGENTS.md"]) {
     assert.match(orchestrator, new RegExp(`"${protectedPath.replaceAll("*", "\\*")}": deny`));
   }
   const config = JSON.parse(await read("opencode.json"));

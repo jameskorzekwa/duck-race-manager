@@ -8,26 +8,36 @@ permission:
   "*": deny
   edit:
     "*": allow
-    ".*": deny
-    ".*/**": deny
-    "**/.*": deny
-    "**/.*/**": deny
     ".gitattributes": deny
+    "**/.gitattributes": deny
     ".git": deny
     ".git/**": deny
+    "**/.git": deny
+    "**/.git/**": deny
     ".github": deny
     ".github/**": deny
+    "**/.github": deny
+    "**/.github/**": deny
     ".gitmodules": deny
+    "**/.gitmodules": deny
     ".opencode": deny
     ".opencode/**": deny
+    "**/.opencode": deny
+    "**/.opencode/**": deny
     ".pipeline": deny
     ".pipeline/**": deny
+    "**/.pipeline": deny
+    "**/.pipeline/**": deny
     "AGENTS.md": deny
     "**/AGENTS.md": deny
     "opencode.json": deny
+    "**/opencode.json": deny
     "scripts/agent-pipeline.mjs": deny
+    "**/scripts/agent-pipeline.mjs": deny
     "scripts/cleanup-model-workspace.mjs": deny
+    "**/scripts/cleanup-model-workspace.mjs": deny
     "scripts/validate-agent-patch.mjs": deny
+    "**/scripts/validate-agent-patch.mjs": deny
   read:
     "*": allow
     "*.env": deny
