@@ -670,10 +670,10 @@ jobs:
             });
             await github.rest.pulls.update({ owner, repo, pull_number: prNumber, state: "closed" });
 
-            const comments = await github.paginate(github.rest.issues.listComments, {
+            const issueComments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: issueNumber, per_page: 100,
             });
-            const retryCount = comments.filter(({ body }) => body?.includes("<!-- agent-pipeline review-retry=")).length;
+            const retryCount = issueComments.filter(({ body }) => body?.includes("<!-- agent-pipeline review-retry=")).length;
             if (retryCount < 3) {
               await github.rest.issues.createComment({
                 owner, repo, issue_number: issueNumber,

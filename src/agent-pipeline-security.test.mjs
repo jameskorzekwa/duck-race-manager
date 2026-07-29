@@ -74,6 +74,18 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   assert.doesNotMatch(review, /id-token: write|issues: write|pull-requests: write/);
   assert.match(gate, /Agent Review \/ Exact SHA/);
   assert.doesNotMatch(gate, /actions\/checkout|npm test|opencode run/);
+  const decisionStepIndex = gate.indexOf("      - name: Record exact-head decision");
+  assert.notEqual(decisionStepIndex, -1);
+  const decisionStep = gate.slice(decisionStepIndex);
+  const scriptMarker = "          script: |\n";
+  const scriptIndex = decisionStep.indexOf(scriptMarker);
+  assert.notEqual(scriptIndex, -1);
+  const script = decisionStep.slice(scriptIndex + scriptMarker.length)
+    .split("\n")
+    .map((line) => line.startsWith("            ") ? line.slice(12) : line)
+    .join("\n");
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  assert.doesNotThrow(() => new AsyncFunction("github", "context", "core", script));
 
   const revocation = await read(".github/workflows/agent-review-revoke.yml");
   assert.match(revocation, /types: \[dismissed\]/);
