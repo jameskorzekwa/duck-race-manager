@@ -27,6 +27,8 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.ok(implement.indexOf(".opencode/node_modules") < implement.indexOf("validate-agent-patch.mjs\" --source"));
   assert.ok(implement.indexOf("validate-agent-patch.mjs\" --source") < implement.indexOf("rsync -a"));
   assert.match(implement, /cleanup-model-workspace\.mjs/);
+  assert.match(implement, /wait-for-openchamber-session\.mjs/);
+  assert.doesNotMatch(implement, /openchamber session create[\s\S]*?--wait/);
   assert.doesNotMatch(implement, /rm -rf "\$RUNNER_TEMP\/agent-task"/);
   assert.match(implement, /scripts\/validate-agent-patch\.mjs/);
   assert.match(implement, /session list --dir "\$PIPELINE_MODEL_DIR" --with-status/);
@@ -57,6 +59,8 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   assert.match(review, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
   assert.match(review, /openchamber session create/);
   assert.match(review, /anthropic\/claude-opus-4-8/);
+  assert.match(review, /wait-for-openchamber-session\.mjs/);
+  assert.doesNotMatch(review, /openchamber session create[\s\S]*?--wait/);
   assert.doesNotMatch(review, /quickducks-local-oauth-model/);
   assert.doesNotMatch(review, /REVIEW_CANDIDATE_PATH|--dir "\$GITHUB_WORKSPACE\/trusted"/);
   assert.match(review, /\.pipeline\/candidate\.patch/);
