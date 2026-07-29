@@ -209,7 +209,7 @@ jobs:
               untrustedVerificationEvidence: comments
                 .filter((comment) => automationIds.has(comment.user.id)
                   && String(comment.body ?? "").includes("<!-- agent-pipeline verification-failed="))
-                .slice(-2)
+                .slice(-4)
                 .map(({ user, body, created_at }) => ({ author: user.login, body, createdAt: created_at })),
             }, null, 2));
 

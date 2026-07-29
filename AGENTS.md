@@ -151,6 +151,11 @@ manual hold. After merging, confirm the release pipeline and production health.
 - Add a new numbered migration; never edit or renumber a migration recorded in
   production. Migrations deploy before Worker code and must be backward
   compatible with the previously deployed Worker.
+- Adding a migration file is not complete on its own. Two suites pin the ordered
+  migration list verbatim and fail until both are updated in the same change:
+  `EXPECTED_MIGRATIONS` in `src/migrations.test.mjs` and the applied-migration
+  assertion in `src/race-workflow.integration.test.mjs`. Add the new filename to
+  the end of both lists, and add coverage for the migration's own behavior.
 - `docs/WORKFLOWS.md` describes implemented behavior. Older plans are design
   history when they conflict.
 - Keep browser rendering DOM-safe: escape server HTML and use `textContent` /
