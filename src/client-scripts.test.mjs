@@ -3477,6 +3477,54 @@ test("a scanned final duck is offered only the podium places the server says are
   assert.deepEqual(openPlaces({}), []);
 });
 
+// The banner is the last thing a staffer reads before walking away from a duck,
+// so it must describe what the server came back with rather than what the button
+// they pressed was for. A replayed command can land on a podium that moved —
+// the place may have been cleared since — and a publishing scan returns no
+// podium at all.
+test("the scanned podium banner claims a place only while the response still shows it", () => {
+  const decide = new Function(
+    "body",
+    "place",
+    "candidate",
+    `${podiumPlaceHelpersScript}
+     const published = body.heat && body.heat.status === "FINALIZED";
+     const standing = published || podiumTakenPlacements(body.podium)
+       .some((placement) => placement.place === place && placement.raceEntryId === candidate.raceEntryId);
+     return { published: !!published, standing };`,
+  );
+  const candidate = { raceEntryId: "entry-1" };
+  const awaiting = (placements) => ({ heat: { status: "AWAITING_RESULT" }, podium: { placements } });
+
+  // The ordinary recorded place.
+  assert.deepEqual(
+    decide(awaiting([{ place: 2, raceEntryId: "entry-1" }]), 2, candidate),
+    { published: false, standing: true },
+  );
+  // A replay whose place was cleared in between, and one another duck now holds.
+  assert.deepEqual(decide(awaiting([]), 2, candidate), { published: false, standing: false });
+  assert.deepEqual(
+    decide(awaiting([{ place: 2, raceEntryId: "entry-9" }]), 2, candidate),
+    { published: false, standing: false },
+  );
+  // The scan that published the podium carries no podium to check, and must
+  // still report the result rather than doubting it.
+  assert.deepEqual(
+    decide({ heat: { status: "FINALIZED" }, podium: null }, 2, candidate),
+    { published: true, standing: true },
+  );
+
+  // The shipped client uses exactly that decision for the banner, the title, and
+  // the message line, with a distinct wording when the place is not standing.
+  assert.match(
+    staffDuckScript,
+    /const standing = published \|\| podiumTakenPlacements\(body\.podium\)\s*\.some\(\(placement\) => placement\.place === place && placement\.raceEntryId === candidate\.raceEntryId\);/,
+  );
+  assert.match(staffDuckScript, /title: podiumPlaceLabel\(place\) \+ " is not recorded"/);
+  assert.match(staffDuckScript, /if \(standing\) pageTitle\.textContent = /);
+  assert.match(staffDuckScript, /That place is not recorded any more\. Check the podium and scan again if it should be\./);
+});
+
 // The station and the duck page must never show two different podiums. The
 // moment a place is scanned, the station stops offering its own way to assemble
 // one and shows the scanned podium instead, with the way to undo a place.

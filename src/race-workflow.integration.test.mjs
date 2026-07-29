@@ -435,8 +435,10 @@ test("a final podium is built one scanned duck at a time and published by the la
     second.visibleNumber,
     third.visibleNumber,
   ]);
-  // Provisional places do not outlive the result they became.
-  assert.deepEqual(published.podium.placements, []);
+  // Provisional places do not outlive the result they became, and a published
+  // final reports no podium to take rather than an empty one that reads as
+  // three places still waiting to be scanned.
+  assert.equal(published.podium, null);
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
     0,

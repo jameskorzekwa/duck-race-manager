@@ -353,11 +353,14 @@ test("0017 keeps a scanned podium exclusive, bounded, and attached to a waiting 
     2,
   );
 
-  // Nothing here may ever be the reason something else cannot be deleted: these
-  // rows are scratch state with no historical value, so every foreign key
-  // cascades. Delete event is the only cleanup path this product has, and a
-  // RESTRICT on a row nobody thinks about is exactly how that path was broken
-  // once before.
+  // Nothing here may ever be the reason an event's own rows cannot be deleted:
+  // these are scratch state with no historical value, so every event-scoped
+  // foreign key cascades. Delete event is the only cleanup path this product
+  // has, and a RESTRICT on a row nobody thinks about is exactly how that path
+  // was broken once before. `recorded_by_staff_profile_id` is the deliberate
+  // exception and stays RESTRICT like every other "who wrote this" column;
+  // staff profiles are deactivated rather than deleted, and force delete never
+  // touches that table.
   database.exec("DELETE FROM duck_assignments WHERE id = 'assignment-2'");
   assert.deepEqual(
     database.prepare("SELECT id FROM final_podium_selections ORDER BY place").all().map((row) => row.id),
@@ -368,6 +371,20 @@ test("0017 keeps a scanned podium exclusive, bounded, and attached to a waiting 
     database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
     0,
   );
+  // The one deliberate RESTRICT, asserted so the exception stays a decision
+  // rather than becoming a surprise. Its command row survived the delete above.
+  database.exec(`
+    INSERT INTO final_podium_selections
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, recorded_at,
+       recorded_by_staff_profile_id, source_command_id)
+    VALUES ('place-again', 'event', 'final', 'entry-1', 'assignment-1', 1,
+            '2026-07-26T01:00:00Z', 'staff', '22222222-2222-4222-8222-222222222222');
+  `);
+  assert.throws(
+    () => database.exec("DELETE FROM staff_profiles WHERE id = 'staff'"),
+    /FOREIGN KEY constraint failed/,
+  );
+  database.exec("DELETE FROM final_podium_selections");
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

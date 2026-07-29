@@ -1926,11 +1926,17 @@ const podiumScanResponse = async (
   heatId: string,
   replayed: boolean,
 ): Promise<Response> => {
-  const [heat, results, podium] = await Promise.all([
+  const [heat, results] = await Promise.all([
     getHeatSummary(env, eventId, heatId),
     publishedResults(env, eventId, heatId),
-    finalPodiumState(env, eventId, heatId, null),
   ]);
+  // Read second, and only while there is a provisional podium to report. A
+  // published final has no places left to take, and answering "3 places
+  // required, all three still open" about a result that is already official is
+  // a sentence no caller should have to know to disbelieve.
+  const podium = heat !== null && heat.round === "FINAL" && heat.status === "AWAITING_RESULT"
+    ? await finalPodiumState(env, eventId, heatId, null)
+    : null;
   return json({
     heat: heat === null ? null : heatSummary(heat),
     results: results.results.map(resultResponseRow),
@@ -2179,10 +2185,17 @@ const recordFinalPodiumPlace = async (
     // threw or merely wrote nothing, the command row below is the only honest
     // account of what happened — and both outcomes need the same answer.
   }
-  // Every statement is gated on the command row landing, so a guarded refusal
-  // makes the whole batch a silent no-op that raises nothing by itself. Reading
-  // the command back is what stops this endpoint reporting 201 and "2nd place
-  // saved" for a scan that wrote nothing.
+  // A guarded refusal today does raise: the audit insert is an unguarded
+  // `VALUES` insert whose `command_id` foreign key points at the `race_commands`
+  // row that never landed, so the batch aborts and rolls back. That is what
+  // makes the refusal atomic, and it is why the catch above is load-bearing
+  // rather than defensive.
+  //
+  // Reading the command back is the check that does not depend on any of that.
+  // Every statement that could write is gated on the command row, so reordering
+  // the batch, making the audit write best-effort, or gating it too would turn a
+  // lost race into 201 and "2nd place saved" for a scan that wrote nothing —
+  // the worst outcome this endpoint has.
   //
   // The advice is deliberately not "retry with the same command identifier".
   // Nothing was written, so there is no command to replay; the podium moved
