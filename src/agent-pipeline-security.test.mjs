@@ -17,7 +17,8 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.match(implement, /openai\/gpt-5\.6-sol/);
   assert.doesNotMatch(implement, /quickducks-local-oauth-model/);
   assert.doesNotMatch(implement, /OPENCODE_ENSEMBLE_TIMEOUT|--dir "\$GITHUB_WORKSPACE"/);
-  assert.match(implement, /timeout-minutes: 105/);
+  assert.match(implement, /timeout-minutes: 170/);
+  assert.match(implement, /--timeout 9600/);
   assert.match(implement, /untrustedReviewEvidence/);
   assert.match(implement, /git archive "\$EXPECTED_BASE"/);
   assert.match(implement, /validate-agent-patch\.mjs" --source "\$PIPELINE_MODEL_DIR"/);
@@ -180,6 +181,29 @@ test("pipeline comments hyperlink workflow runs instead of pasting bare URLs", a
   assert.match(task, /\[Agent Task run\]\(\$\{context\.serverUrl\}\/\$\{owner\}\/\$\{repo\}\/actions\/runs\/\$\{context\.runId\}\)/);
   assert.match(task, /\[Agent Task failed\]\(\$\{context\.serverUrl\}\/\$\{owner\}\/\$\{repo\}\/actions\/runs\/\$\{context\.runId\}\)/);
   assert.doesNotMatch(task, /Agent Task (?:run|failed): \$\{context\.serverUrl\}/);
+});
+
+test("model budgets let a full feature finish inside each job timeout", async () => {
+  const task = await read(".github/workflows/agent-task.yml");
+  const implement = task.slice(task.indexOf("  implement:"), task.indexOf("  verify:"));
+  const implementMinutes = Number(implement.match(/timeout-minutes: (\d+)/)[1]);
+  const implementPoll = Number(implement.match(/--timeout (\d+)/)[1]);
+  assert.ok(implementPoll < implementMinutes * 60, "polling must fail before the runner kills the job");
+  assert.ok(
+    implementMinutes * 60 - implementPoll >= 600,
+    "leave at least ten minutes for patch extraction and transactional cleanup",
+  );
+
+  const review = await read(".github/workflows/agent-review.yml");
+  const independent = review.slice(review.indexOf("  independent-review:"), review.indexOf("  gate:"));
+  const reviewMinutes = Number(independent.match(/timeout-minutes: (\d+)/)[1]);
+  const reviewPoll = Number(independent.match(/--timeout (\d+)/)[1]);
+  assert.ok(reviewPoll < reviewMinutes * 60, "review polling must fail before the runner kills the job");
+
+  const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
+  const steps = Number(orchestrator.match(/^steps: (\d+)$/m)[1]);
+  assert.ok(steps >= 300, `the implementation lead needs room to finish a feature, got ${steps}`);
+  assert.match(orchestrator, /running out of steps discards the entire attempt/);
 });
 
 test("reconciliation is deterministic and model-free", async () => {
