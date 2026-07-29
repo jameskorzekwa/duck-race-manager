@@ -386,7 +386,11 @@ const participantSearchLead = document.querySelector("[data-search-lead]");
 let participantRegisteredId = participantRoot
   ? new URLSearchParams(location.search).get("registered")
   : null;
-let participantCurrentId = null;
+// Which registration the one-time success notice is talking about. It exists
+// only so the notice — and the private status link inside it — disappears the
+// moment that registration is deleted or leaves the collection. It never changes
+// how a card is rendered.
+let participantSuccessId = null;
 let participantPrivateStatusPath = null;
 let participantVersion = null;
 
@@ -549,8 +553,8 @@ const participantDelete = async (registration, button, feedback) => {
       feedback.hidden = false;
       return;
     }
-    if (participantCurrentId === registration.registrationId) {
-      participantCurrentId = null;
+    if (participantSuccessId === registration.registrationId) {
+      participantSuccessId = null;
       participantSuccess.hidden = true;
     }
     // The card disappears only when the authoritative collection says so, and
@@ -852,15 +856,15 @@ const participantQrFigure = (registration) => {
   return frame;
 };
 
+// Every card is rendered the same way, including the one this visitor has just
+// registered: a card that was created a second ago and the same card on the next
+// plain refresh must look identical. The one-time private status link lives in
+// the page's own success notice instead, which is where it can be read once and
+// then go away with the rest of the notice.
 const participantCard = (registration) => {
-  const current = registration.registrationId === participantCurrentId;
-  const card = participantText("article", "", "duck-card participant-card" + (current ? " is-current" : ""));
+  const card = participantText("article", "", "duck-card participant-card");
   card.dataset.registrationId = registration.registrationId;
-  if (current) {
-    card.tabIndex = -1;
-    card.setAttribute("aria-current", "true");
-    card.append(participantText("span", "Just registered", "success-tag"));
-  } else if (registration.followed) {
+  if (registration.followed) {
     card.append(participantText("span", "Following", "success-tag"));
   }
   card.append(participantText("h3", participantDisplayName(registration)));
@@ -958,7 +962,7 @@ const participantRender = (registrations) => {
     ? registrations.find((registration) => registration.registrationId === participantRegisteredId)
     : null;
   if (justRegistered) {
-    participantCurrentId = justRegistered.registrationId;
+    participantSuccessId = justRegistered.registrationId;
     if (participantPrivateStatusPath === null) {
       let handoff = null;
       try {
@@ -967,8 +971,8 @@ const participantRender = (registrations) => {
       if (handoff !== null) participantPrivateStatusPath = handoff.privateStatusPath;
     }
   }
-  if (participantCurrentId && !registrations.some((registration) => registration.registrationId === participantCurrentId)) {
-    participantCurrentId = null;
+  if (participantSuccessId && !registrations.some((registration) => registration.registrationId === participantSuccessId)) {
+    participantSuccessId = null;
     participantSuccess.hidden = true;
   }
   if (version !== participantVersion || justRegistered) {
@@ -990,9 +994,12 @@ const participantRender = (registrations) => {
   }
   if (!justRegistered) return;
 
+  // The notice is this visitor's only chance to open and bookmark the private
+  // status link, so it names the participant it belongs to. It stays an ordinary
+  // polite notice: the card itself is not marked, decorated, or focused.
   participantSuccess.replaceChildren(
     participantText("strong", "Registration saved. "),
-    participantText("span", participantDisplayName(justRegistered) + " is highlighted below."),
+    participantText("span", participantDisplayName(justRegistered) + "."),
   );
   if (participantPrivateStatusPath !== null) {
     const privateLink = participantText("a", "Open private status", "card-link");
@@ -1001,10 +1008,14 @@ const participantRender = (registrations) => {
   }
   participantSuccess.hidden = false;
   participantRegisteredId = null;
+  // Scrolling the new card into view is orientation, not emphasis: the card is
+  // in a horizontal track that may already have scrolled past it. Focus is
+  // deliberately left alone: the notice is a polite live region above the
+  // sections, so assistive technology already announces the result and the
+  // private link is the next thing in the tab order.
   const card = Array.from(document.querySelectorAll("[data-registration-id]"))
     .find((item) => item.dataset.registrationId === justRegistered.registrationId);
   if (card) requestAnimationFrame(() => {
-    card.focus({ preventScroll: true });
     card.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
     participantCleanRegisteredQuery();
   });
@@ -1587,6 +1598,64 @@ globalThis.quickDucksLive = liveCreateHub();
 globalThis.quickDucksLive.start();
 ` + sitePhaseNavScript;
 
+// Staff rosters keep a withdrawn or disqualified racer forever. Their duck was
+// sealed into the numbered heat bag when they were paired, nobody digs through a
+// bag on the bank, so it stays in its slot and still floats down the river. The
+// only thing that changed is that it can never be recorded as a winner. Staff
+// therefore see the entry — they have to reconcile what is physically in each
+// bag — with a loud marker naming the real status word. Only public surfaces
+// hide these racers.
+//
+// `eligible === false` is the single trigger, exactly as the staff projections
+// state it. A projection that does not carry the field renders precisely as it
+// did before, and nothing here can throw on a missing entry, a missing
+// participant, or an unknown status: one throw inside a render silently kills
+// every control after it.
+export const rosterEligibilityHelpersScript = String.raw`
+const rosterStatusWord = (status) => {
+  if (status === "WITHDRAWN") return "Withdrawn";
+  if (status === "DISQUALIFIED") return "Disqualified";
+  const plain = String(status == null ? "" : status).replaceAll("_", " ").trim().toLowerCase();
+  return plain === "" ? "Not eligible" : plain.replace(/^./, (character) => character.toUpperCase());
+};
+const ROSTER_INELIGIBLE_NOTE = "The duck stays in its heat bag and still races, but cannot be recorded as a winner.";
+const rosterIneligibleMarker = (entry, lead) => {
+  if (!entry || entry.eligible !== false) return null;
+  const status = rosterStatusWord(entry.registrationStatus == null && entry.participant
+    ? entry.participant.registrationStatus
+    : entry.registrationStatus);
+  return { status, flag: lead + " · " + status, note: ROSTER_INELIGIBLE_NOTE };
+};
+// Adds the marker to an already-built row or card, whatever element factory the
+// surface uses. Returns whether it marked, so a caller can assert on it.
+const rosterMarkIneligible = (container, entry, lead, text) => {
+  const marker = rosterIneligibleMarker(entry, lead);
+  if (marker === null) return false;
+  container.className = container.className ? container.className + " ineligible" : "ineligible";
+  container.append(text("strong", marker.flag, "roster-flag"), text("p", marker.note, "roster-flag-note"));
+  return true;
+};
+// "Can this entry still be recorded as a winner?" — the single question every
+// surface that counts, offers, or requires a place must ask, stated once.
+//
+// It is the exact complement of the marker above: only an explicit
+// eligible:false is ineligible. A projection served before the field existed
+// reports undefined and is treated as eligible, which keeps such a response
+// behaving exactly as it did before rather than silently shrinking a podium to
+// zero places and stranding an event that has no other way out.
+const rosterEntryEligible = (entry) => !entry || entry.eligible !== false;
+const rosterEligibleEntries = (roster) => (Array.isArray(roster) ? roster : []).filter(rosterEntryEligible);
+// A locked roster cannot gain or lose an entry, but a racer on it can withdraw
+// or be disqualified at any heat state, and that changes nothing the heat itself
+// records — not its status and not its revision. A station that keys its render
+// on the heat alone would throw the repaint away and keep showing an unmarked
+// racer whose duck can no longer win, and keep demanding a place nobody is
+// allowed to fill. Every station roster therefore folds this into its key.
+const rosterEligibilityKey = (roster) => (Array.isArray(roster) ? roster : [])
+  .map((entry) => (entry && entry.raceEntryId) + (rosterEntryEligible(entry) ? ":1" : ":0"))
+  .join(",");
+`;
+
 export const stationStateHelpersScript = String.raw`
 const startPickHeat = (heats, round) => {
   const active = heats.filter((heat) => heat.round === round && heat.status !== "FINALIZED" && heat.status !== "CANCELLED");
@@ -1958,7 +2027,7 @@ if (liveBoardRoot || liveSummaryRoot) {
 `;
 
 // `appConfirm` is defined once by `live-ui.js`, which every page loads first.
-export const startLineScript = stationStateHelpersScript + String.raw`
+export const startLineScript = rosterEligibilityHelpersScript + stationStateHelpersScript + String.raw`
 const startRoot = document.querySelector("[data-start-line]");
 const startEvent = document.querySelector("[data-station-event]");
 const startHeatTitle = document.querySelector("[data-station-heat]");
@@ -2008,8 +2077,11 @@ const startCommand = async (path, revision) => {
     startSubscription?.resume();
   }
 };
+// This station already subscribes to the "participants" domain, so it is told
+// when a racer on its locked roster leaves; the shared eligibility key is what
+// stops that repaint from being discarded as an unchanged heat.
 const startRender = (event, detail) => {
-  const renderKey = stationHeatRenderKey(event, detail);
+  const renderKey = stationHeatRenderKey(event, detail) + "|" + rosterEligibilityKey(detail.roster);
   if (renderKey === startRenderKey) return;
   startRenderKey = renderKey;
   const restoreActionFocus = startAction.contains(document.activeElement);
@@ -2020,8 +2092,11 @@ const startRender = (event, detail) => {
   startAddFact("Roster count", detail.roster.length);
   startRoster.replaceChildren();
   for (const entry of detail.roster) {
-    startRoster.append(startText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
-      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned")));
+    const item = startText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
+      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned"));
+    // The bag still holds this duck, so the row stays where it is and says so.
+    rosterMarkIneligible(item, entry, "Racer out", startText);
+    startRoster.append(item);
   }
   if (detail.roster.length === 0) startRoster.append(startText("li", "This heat has no roster entries."));
   startAction.replaceChildren();
@@ -2149,7 +2224,7 @@ const announcerFullName = (participant) => participant
 // The announcer holds a microphone, so this station is a read-only script. Every
 // request it makes is a GET and it never sends a command, a revision, or a
 // command ID: the start line and the finish line own every transition.
-export const announcerScript = stationStateHelpersScript + announcerHelpersScript + String.raw`
+export const announcerScript = rosterEligibilityHelpersScript + stationStateHelpersScript + announcerHelpersScript + String.raw`
 const announcerRoot = document.querySelector("[data-announcer]");
 const announcerEventLine = document.querySelector("[data-station-event]");
 const announcerHeatTitle = document.querySelector("[data-announcer-heat]");
@@ -2210,7 +2285,11 @@ const announcerRenderCurrent = (event, current) => {
   announcerCueLine.textContent = announcerCue(current.heat.status);
   announcerRosterList.replaceChildren();
   for (const entry of current.roster) {
-    announcerRosterList.append(announcerLine("Slot " + entry.slotNumber, entry.displayName, entry.duckNumber));
+    const item = announcerLine("Slot " + entry.slotNumber, entry.displayName, entry.duckNumber);
+    // Still on the roster because the duck is still in the bag and still races,
+    // but this name must never be called as a winner.
+    rosterMarkIneligible(item, entry, "Do not announce", announcerText);
+    announcerRosterList.append(item);
   }
   if (current.roster.length === 0) {
     announcerRosterList.append(announcerText("li", "This heat has no racers on its roster yet."));
@@ -2326,6 +2405,38 @@ const finishSelectionProblem = (selected, roster, raceEntryId) => {
   if (!roster.some((entry) => entry.raceEntryId === raceEntryId)) return "wrong-heat";
   return null;
 };
+// A withdrawn or disqualified racer's duck was already in this heat's bag when
+// they left the race, and nobody empties a bag on the bank to fish one duck out,
+// so it is still in the water and can still cross the line first. That is an
+// expected race-day outcome, not a failure: name the duck, name its real status,
+// and send the staffer straight back to scanning.
+//
+// Only the two statuses that mean "this racer left the race" are named, mirroring
+// the server. Any other status still cannot be recorded — every result path
+// requires ACTIVE — but announcing it as, say, "Submitted" would put a word in
+// front of a staffer that describes something else entirely, so the headline
+// drops the claim rather than inventing one.
+const finishIneligibleStatusLabel = (status) => status === "WITHDRAWN"
+  ? "Withdrawn"
+  : status === "DISQUALIFIED"
+    ? "Disqualified"
+    : null;
+const finishIneligibleLines = (duck) => {
+  if (!duck) {
+    return [
+      "That duck cannot be recorded",
+      "Scan the next duck to pass the finish line.",
+    ];
+  }
+  const label = finishIneligibleStatusLabel(duck.registrationStatus);
+  return [
+    label === null
+      ? "Duck #" + duck.visibleNumber + " cannot be recorded"
+      : "Duck #" + duck.visibleNumber + " is " + label,
+    duck.participantDisplayName + " cannot be recorded as a winner, and this duck stays in its heat.",
+    "Scan the next duck to pass the finish line.",
+  ];
+};
 `;
 
 export const finishScanSerializationScript = String.raw`
@@ -2414,7 +2525,7 @@ const finishCreateNfcScanner = ({ createReader, createController, decode, onValu
 };
 `;
 
-export const finishLineScript = stationStateHelpersScript
+export const finishLineScript = rosterEligibilityHelpersScript + stationStateHelpersScript
   + finishSelectionValidationScript + finishScanSerializationScript
   + finishNfcHelpersScript + String.raw`
 const finishRoot = document.querySelector("[data-finish-line]");
@@ -2428,6 +2539,7 @@ const finishSelections = document.querySelector("[data-finish-selections]");
 const finishSubmit = document.querySelector("[data-submit-result]");
 const finishMessage = document.querySelector("[data-station-message]");
 const finishNfcButton = document.querySelector("[data-start-nfc]");
+const finishIneligible = document.querySelector("[data-finish-ineligible]");
 let finishEvent = null;
 let finishHeat = null;
 let finishRosterEntries = [];
@@ -2455,15 +2567,79 @@ const finishApi = async (url, options) => {
   }
   let body = null;
   try { body = await response.json(); } catch {}
-  if (!response.ok) throw new Error(body && body.error ? body.error : "The race could not be refreshed.");
+  if (!response.ok) {
+    const failure = new Error(body && body.error ? body.error : "The race could not be refreshed.");
+    failure.status = response.status;
+    // The server distinguishes "this duck's racer is withdrawn or disqualified"
+    // from a genuine failure with one stable reason, so the station can present
+    // that as the expected race-day outcome it is rather than as an error.
+    failure.reason = body && typeof body.reason === "string" ? body.reason : null;
+    failure.ineligible = body && body.ineligible ? body.ineligible : null;
+    failure.ineligibleRaceEntryIds = body && Array.isArray(body.ineligibleRaceEntryIds)
+      ? body.ineligibleRaceEntryIds
+      : [];
+    throw failure;
+  }
   return body;
+};
+const FINISH_DUCK_NOT_ELIGIBLE = "DUCK_NOT_ELIGIBLE";
+const finishClearIneligible = () => {
+  if (!finishIneligible) return;
+  finishIneligible.replaceChildren();
+  finishIneligible.hidden = true;
+};
+// Nothing here disarms the scanner, clears the heat, or leaves a state that has
+// to be dismissed: the station is immediately ready for the next duck.
+const finishShowIneligible = (failure) => {
+  if (!finishIneligible) return;
+  const [headline, ...rest] = finishIneligibleLines(failure.ineligible);
+  // Reveal the live region before writing into it, so the announcement is a
+  // change inside a region that is already in the accessibility tree.
+  finishIneligible.hidden = false;
+  finishIneligible.replaceChildren(finishText("strong", headline));
+  for (const line of rest) finishIneligible.append(finishText("p", line));
+  finishMessage.textContent = "Scan the next duck to pass the finish line.";
 };
 const finishAddFact = (label, value) => {
   const fact = finishText("div", "", "fact");
   fact.append(finishText("dt", label), finishText("dd", value));
   finishFacts.append(fact);
 };
-const finishRequiredPlaces = () => !finishHeat ? 0 : finishHeat.round === "ROUND_ONE" ? 1 : Math.min(3, finishRosterEntries.length);
+// The podium is exactly as deep as the racers who can still take a place, which
+// is the number the server's own result validation requires. Sizing it from the
+// whole roster instead demands a place no duck may ever fill: the third duck
+// answers every scan with DUCK_NOT_ELIGIBLE, Submit never enables, the final
+// can never be published, and the event is stranded with no way out.
+// Round one is counted the same way as the final, one place deep instead of
+// three. Hard-coding it to 1 made the count a claim about the round rather than
+// about the racers, so a round-one heat everybody left still reported one
+// fillable place: the zero guard below could never fire for it, and the station
+// sent the staffer to scan a bag in which every single duck answers
+// DUCK_NOT_ELIGIBLE, with nothing on screen saying why or how to get out.
+const finishEligibleEntries = () => rosterEligibleEntries(finishRosterEntries);
+const finishRequiredPlaces = () => !finishHeat
+  ? 0
+  : Math.min(finishHeat.round === "ROUND_ONE" ? 1 : 3, finishEligibleEntries().length);
+// Zero required places means every racer in this heat left, so there is no
+// result to submit at all. That is deliberately not the same as "the selections
+// happen to match", which is why it is tested for on its own rather than being
+// left to a 0 === 0 comparison that would arm an empty, always-refused submit.
+//
+// One sentence, said identically wherever the station has to say it, because a
+// staffer who reads it at the scan field and again on the message line must not
+// have to work out whether they are two different problems. It leads with the
+// fact, states that the ducks do not move, and names the only remedy there is:
+// only a race director can reactivate a racer, and nothing the finish line can
+// do will make this heat publishable until one does.
+const FINISH_NO_ELIGIBLE_MESSAGE = "Nobody in this heat can win:"
+  + " every racer in it is withdrawn or disqualified, so no result can be recorded."
+  + " Every duck stays in its bag."
+  + " Ask the race director to reactivate a racer, then this station can take the result.";
+const finishSubmitBlocked = (busy) => {
+  const required = finishRequiredPlaces();
+  return busy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT"
+    || required === 0 || finishSelected.length !== required;
+};
 const finishSetScanBusy = (busy) => {
   finishScanBusy = busy;
   if (busy && finishScanEndBusy === null) finishScanEndBusy = globalThis.quickDucksLive.beginBusy();
@@ -2475,8 +2651,7 @@ const finishSetScanBusy = (busy) => {
   for (const control of finishScanForm.querySelectorAll("input, button")) control.disabled = busy;
   finishNfcButton.disabled = busy;
   for (const control of finishSelections.querySelectorAll("button")) control.disabled = busy;
-  const required = finishRequiredPlaces();
-  finishSubmit.disabled = busy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT" || finishSelected.length !== required;
+  finishSubmit.disabled = finishSubmitBlocked(busy);
 };
 const finishRenderSelections = () => {
   const focusedRaceEntry = finishSelections.contains(document.activeElement)
@@ -2504,8 +2679,7 @@ const finishRenderSelections = () => {
     finishSelections.append(card);
     if (focusedRaceEntry === selection.raceEntryId) remove.focus();
   }
-  const required = finishRequiredPlaces();
-  finishSubmit.disabled = finishScanBusy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT" || finishSelected.length !== required;
+  finishSubmit.disabled = finishSubmitBlocked(finishScanBusy);
   finishSubmit.textContent = finishHeat && finishHeat.round === "FINAL" ? "Submit official podium" : "Submit official winner";
 };
 const finishSelectionContext = () => {
@@ -2541,6 +2715,7 @@ const finishRunSerializedSelection = finishCreateSerializedSelector({
       return false;
     }
     finishSelected.push({ ...selection, place: captured.intendedPlace });
+    finishClearIneligible();
     finishRenderSelections();
     finishScanForm.elements.duck.value = "";
     globalThis.quickDucksLive.markClean(finishScanForm);
@@ -2557,6 +2732,10 @@ const finishSelectValue = async (value) => {
     finishMessage.textContent = "Mark the running heat finished before selecting results.";
     return;
   }
+  if (finishRequiredPlaces() === 0) {
+    finishMessage.textContent = FINISH_NO_ELIGIBLE_MESSAGE;
+    return;
+  }
   if (finishSelected.length >= finishRequiredPlaces()) {
     finishMessage.textContent = "Every required place is filled. Remove a selection to change it.";
     return;
@@ -2564,11 +2743,24 @@ const finishSelectValue = async (value) => {
   try {
     return await finishRunSerializedSelection(value);
   } catch (error) {
-    if (error.message !== "signed-out") finishMessage.textContent = error.message;
+    if (error.message === "signed-out") return;
+    // Expected outcome, not a failure: the station keeps its heat, keeps the
+    // scan form and the NFC button enabled, and is ready for the next duck the
+    // moment this returns.
+    if (error.reason === FINISH_DUCK_NOT_ELIGIBLE) {
+      finishShowIneligible(error);
+      return;
+    }
+    finishMessage.textContent = error.message;
   }
 };
 const finishRender = (event, detail) => {
-  const renderKey = stationHeatRenderKey(event, detail);
+  // Eligibility is part of the key, not just the heat: a racer who withdraws
+  // during AWAITING_RESULT changes neither the heat's status nor its revision,
+  // yet it changes both the marker this roster must show and how many places
+  // this station requires. Without it the repaint is discarded and the station
+  // keeps asking for a place that can never be filled.
+  const renderKey = stationHeatRenderKey(event, detail) + "|" + rosterEligibilityKey(detail.roster);
   if (renderKey === finishRenderKey) return;
   const changedHeatContext = !finishHeat
     || finishHeat.id !== detail.heat.id
@@ -2579,17 +2771,37 @@ const finishRender = (event, detail) => {
   finishEvent = event;
   finishHeat = detail.heat;
   finishRosterEntries = detail.roster;
-  if (changedHeatContext) finishSelected = [];
-  else finishSelected = finishSelected.filter((selection) => finishRosterEntries.some((entry) => entry.raceEntryId === selection.raceEntryId));
+  if (changedHeatContext) {
+    finishSelected = [];
+    finishClearIneligible();
+  }
+  // A reviewed selection survives a repaint only while it is still a duck this
+  // heat may award a place to. A racer who left between the scan and the submit
+  // is dropped here for the same reason the submit response drops them, and the
+  // remaining places close up rather than leaving a gap the server would refuse.
+  else finishSelected = finishSelected
+    .filter((selection) => finishRosterEntries.some((entry) => entry.raceEntryId === selection.raceEntryId
+      && rosterEntryEligible(entry)))
+    .map((selection, index) => ({ ...selection, place: index + 1 }));
   finishEventLabel.textContent = event.name + " · " + finishHumanize(event.status);
   finishHeatTitle.textContent = (finishHeat.round === "FINAL" ? "Final" : "Round one") + " · Heat " + finishHeat.number;
   finishFacts.replaceChildren();
   finishAddFact("Heat status", finishHumanize(finishHeat.status));
-  finishAddFact("Required result", finishHeat.round === "ROUND_ONE" ? "One winner" : finishRequiredPlaces() + " podium places");
+  // The fact line reports the same count the submit path enforces. A round-one
+  // heat nobody can win is not "one winner" waiting to be scanned, and saying so
+  // is what stops a staffer working through the whole bag to find it.
+  finishAddFact("Required result", finishRequiredPlaces() === 0
+    ? (finishHeat.round === "ROUND_ONE" ? "No racer can win" : "0 podium places")
+    : finishHeat.round === "ROUND_ONE" ? "One winner" : finishRequiredPlaces() + " podium places");
   finishRoster.replaceChildren();
   for (const entry of finishRosterEntries) {
-    finishRoster.append(finishText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
-      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned")));
+    const item = finishText("li", "Slot " + entry.slotNumber + " · " + entry.participant.firstName + " " + entry.participant.lastName
+      + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : " · Duck not assigned"));
+    // This is the roster a staffer reads to decide who won, so it is the last
+    // place that may leave a racer who cannot win looking like one who can. The
+    // row keeps its slot: the duck is still in the bag and still in the water.
+    rosterMarkIneligible(item, entry, "Cannot win", finishText);
+    finishRoster.append(item);
   }
   finishAction.replaceChildren();
   const finalPodiumFlow = finishHeat.round === "FINAL";
@@ -2611,9 +2823,15 @@ const finishRender = (event, detail) => {
           body: JSON.stringify({ commandId: crypto.randomUUID(), revision: finishHeat.revision }),
         });
         await finishLoad();
-        finishMessage.textContent = finishHeat.round === "ROUND_ONE"
-          ? "Heat finished. Scan the winning duck's permanent NFC or QR tag to open its inspection page."
-          : "Heat finished. Select every required place, review it, then submit once.";
+        // The repaint just decided what this heat can produce, so the
+        // confirmation must not talk over it: telling somebody to go and scan
+        // the winning duck of a heat that has no eligible racer is exactly the
+        // dead end this station is meant to close.
+        finishMessage.textContent = finishRequiredPlaces() === 0
+          ? FINISH_NO_ELIGIBLE_MESSAGE
+          : finishHeat.round === "ROUND_ONE"
+            ? "Heat finished. Scan the winning duck's permanent NFC or QR tag to open its inspection page."
+            : "Heat finished. Select every required place, review it, then submit once.";
       } catch (error) {
         if (error.message !== "signed-out") finishMessage.textContent = error.message;
         button.disabled = false;
@@ -2625,11 +2843,29 @@ const finishRender = (event, detail) => {
     });
     finishAction.append(button);
     if (restoreActionFocus) button.focus();
-    finishMessage.textContent = "When the race physically finishes, press the one finish button.";
+    // The finish button stays: those ducks are physically on the water and the
+    // heat still has to be marked finished. What changes is that the staffer is
+    // told now, rather than after they have finished the heat and started
+    // scanning, that this heat has no winner to find.
+    finishMessage.textContent = finishRequiredPlaces() === 0
+      ? "When the race physically finishes, press the one finish button. " + FINISH_NO_ELIGIBLE_MESSAGE
+      : "When the race physically finishes, press the one finish button.";
+  } else if (finishRequiredPlaces() === 0) {
+    // Every racer in this heat left. There is no winner and no podium to take,
+    // so say that instead of asking for zero ducks and leaving a dead Submit on
+    // screen — and, in round one, instead of sending the staffer to scan a bag
+    // in which every duck is refused.
+    //
+    // This is checked before the round, not after it: round one publishes
+    // through the tag-scan flow rather than through this form, so a round-one
+    // branch above this one hides the only sentence that explains the dead end
+    // from the only staffer standing in it.
+    finishMessage.textContent = FINISH_NO_ELIGIBLE_MESSAGE;
+  } else if (finishHeat.round === "ROUND_ONE") {
+    finishMessage.textContent = "Scan the winning duck's permanent NFC or QR tag. Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner.";
   } else {
-    finishMessage.textContent = finishHeat.round === "ROUND_ONE"
-      ? "Scan the winning duck's permanent NFC or QR tag. Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner."
-      : "Select " + finishRequiredPlaces() + " distinct ducks, then review every place before submitting.";
+    finishMessage.textContent = "Select " + finishRequiredPlaces() + " distinct duck"
+      + (finishRequiredPlaces() === 1 ? "" : "s") + ", then review every place before submitting.";
   }
   finishRenderSelections();
 };
@@ -2646,6 +2882,7 @@ const finishEmpty = (message) => {
   finishFacts.replaceChildren();
   finishRoster.replaceChildren(finishText("li", "A running or just-finished heat will appear here."));
   finishAction.replaceChildren();
+  finishClearIneligible();
   finishScanForm.hidden = true;
   finishSelections.hidden = true;
   finishSubmit.hidden = true;
@@ -2683,7 +2920,7 @@ finishScanForm.addEventListener("submit", async (event) => {
   await finishSelectValue(finishScanForm.elements.duck.value);
 });
 finishSubmit.addEventListener("click", async () => {
-  if (!finishEvent || !finishHeat || finishScanBusy || finishSelected.length !== finishRequiredPlaces()) return;
+  if (!finishEvent || !finishHeat || finishScanBusy || finishRequiredPlaces() === 0 || finishSelected.length !== finishRequiredPlaces()) return;
   const readback = finishSelected.map((selection) => finishPlaceLabel(selection.place) + ": "
     + selection.participantDisplayName + ", Duck #" + selection.visibleNumber).join("; ");
   if (!await appConfirm("Submit this official result now? Read back: " + readback + ". This publishes immediately.", { danger: true })) return;
@@ -2708,11 +2945,26 @@ finishSubmit.addEventListener("click", async () => {
       }),
     });
     finishSelected = [];
+    finishClearIneligible();
     await finishLoad();
     finishMessage.textContent = "Official result saved. The station has moved to the next available heat.";
   } catch (error) {
-    if (error.message !== "signed-out") finishMessage.textContent = error.message;
-    finishSubmit.disabled = false;
+    if (error.message === "signed-out") {
+      // The redirect owns this page now.
+    } else if (error.reason === FINISH_DUCK_NOT_ELIGIBLE) {
+      // Someone was withdrawn between selecting their duck and submitting.
+      // Drop exactly those selections, renumber the rest, and stay armed.
+      const dropped = error.ineligibleRaceEntryIds;
+      finishSelected = finishSelected
+        .filter((selection) => !dropped.includes(selection.raceEntryId))
+        .map((selection, index) => ({ ...selection, place: index + 1 }));
+      finishShowIneligible(error);
+    } else {
+      finishMessage.textContent = error.message;
+    }
+    // Recomputes the submit state from what is actually selected now, so a
+    // dropped selection cannot leave an armed submit behind.
+    finishRenderSelections();
   } finally {
     finishCommandBusy = false;
     endBusy();
@@ -4255,7 +4507,7 @@ loadEvents()
 // in-page navigations the actor's roles allow. The caller passes the element
 // factory and the already role-checked actions, so this helper never decides
 // permissions and never touches the network itself.
-export const heatRosterHelpersScript = String.raw`
+export const heatRosterHelpersScript = rosterEligibilityHelpersScript + String.raw`
 const heatRosterParticipantName = (entry) => entry.participant.firstName + " " + entry.participant.lastName;
 
 const heatRosterLinkButton = (text, label, action) => {
@@ -4275,6 +4527,9 @@ const createHeatRosterEntry = ({ entry, text, openParticipant, openDuck }) => {
     "roster-entry-line",
   ));
   item.append(text("p", "Race entry " + entry.raceEntryId, "roster-entry-id"));
+  // Marked, never dropped: the console is where a race director reconciles the
+  // bag, so the entry keeps its slot and states why it cannot win.
+  rosterMarkIneligible(item, entry, "Cannot win", text);
   const actions = text("div", "", "actions");
   let linkCount = 0;
   if (openParticipant) {
@@ -4311,6 +4566,10 @@ const canDirectRace = hasRole("RACE_DIRECTOR");
 const canRunHeat = hasRole("HEAT_RUNNER") || hasRole("RACE_DIRECTOR");
 const canTakeResults = hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
 const consoleMessage = document.querySelector("[data-console-message]");
+// This client runs on the Admin console and on the registration desk. Only the
+// operations root and the working-event picker are required on both — every
+// other surface below checks for its own markup before touching it, because one
+// throw here silently kills every section after it.
 const eventSelect = document.querySelector("[data-event-select]");
 let currentEvent = null;
 let currentEventDetail = null;
@@ -4423,12 +4682,58 @@ const noRaceState = document.querySelector("[data-no-race]");
 // Role gating stays authoritative on top: a section the actor may not use
 // stays hidden even once an event exists.
 const eventScopedElements = document.querySelectorAll("[data-event-scoped]");
+let consoleEventExists = false;
 const showEventScopedSections = (eventExists) => {
+  consoleEventExists = eventExists;
   for (const element of eventScopedElements) {
     element.hidden = !eventExists || element.dataset.roleAllowed === "false";
   }
   if (noRaceState) noRaceState.hidden = eventExists;
+  // The console sections are also the Admin views, so exactly one of the
+  // sections this pass just made available may actually be displayed. The
+  // switcher has the final say on their hidden state.
+  applyConsoleView(requestedConsoleView());
 };
+
+// --- Admin view switcher -----------------------------------------------------
+// The Admin console is a menu bar over separate views, not one long page. The
+// URL hash names the view, so a view is linkable, survives reload, and moves
+// with browser back and forward. A view may only ever be shown when its own
+// gating already allows it: role gating is fixed at render time and event
+// scoping follows the loaded event, so the switcher can never reveal a section
+// the actor is not allowed to see. When the requested view is unavailable it
+// falls back to the first permitted, currently-available one.
+//
+// Pages that are not the console (the registration desk) render none of this
+// markup, so every list here is simply empty and the switcher does nothing.
+const consoleViewSections = [...document.querySelectorAll("[data-console-view]")];
+const consoleViewLinks = [...document.querySelectorAll("[data-console-view-link]")];
+
+const consoleViewAvailable = (section) => section.dataset.roleAllowed !== "false"
+  && (!section.hasAttribute("data-event-scoped") || consoleEventExists);
+
+const requestedConsoleView = () => {
+  const hash = location.hash.replace(/^#/, "");
+  return hash === "" ? null : hash;
+};
+
+const applyConsoleView = (requested) => {
+  if (consoleViewSections.length === 0) return null;
+  const available = consoleViewSections.filter(consoleViewAvailable);
+  const target = available.find((section) => section.dataset.consoleView === requested)
+    || available[0]
+    || null;
+  const activeView = target === null ? null : target.dataset.consoleView;
+  for (const section of consoleViewSections) section.hidden = section !== target;
+  for (const link of consoleViewLinks) {
+    if (link.dataset.consoleViewLink === activeView) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  return activeView;
+};
+
+globalThis.addEventListener("hashchange", () => applyConsoleView(requestedConsoleView()));
+applyConsoleView(requestedConsoleView());
 const eventSummary = document.querySelector("[data-event-summary]");
 const readinessList = document.querySelector("[data-event-readiness]");
 const eventConfigCard = document.querySelector("[data-event-config-card]");
@@ -4480,6 +4785,174 @@ const updateEventSlugPreview = (form, preview, persistedEvent = null) => {
       : eventSlugFromName(name);
 };
 
+// --- Heat-bag move instructions ---------------------------------------------
+// Closing registration folds a short round-one tail heat into the heat before
+// it, and reopening splits it back out. Both move ducks that are already sealed
+// in numbered bags, and QuickDucks cannot move a bag, so the transition
+// response reports what changed and this turns it into a physical instruction.
+//
+// It behaves like a job ticket rather than like a message: it is queued in
+// localStorage, so it survives a reload, a view switch, and a live refresh, and
+// only the Done button removes one. That is deliberate — walking to the bags is
+// exactly the interval in which a page gets reloaded, and a physical task that
+// disappears when the page repaints is a task that does not get done.
+//
+// The registration desk loads this same client and renders no callout, so every
+// entry point checks the markup is present first.
+const bagMove = document.querySelector("[data-bag-move]");
+const bagMoveInstruction = document.querySelector("[data-bag-move-instruction]");
+const bagMoveNumber = document.querySelector("[data-bag-move-number]");
+const bagMoveDucks = document.querySelector("[data-bag-move-ducks]");
+const bagMoveNote = document.querySelector("[data-bag-move-note]");
+const bagMoveDismiss = document.querySelector("[data-bag-move-dismiss]");
+const bagMoveStorageKey = "quickducks.bag-moves";
+
+// The queue is read back out of localStorage, which anything on this origin can
+// have written, so every field the copy interpolates is checked here rather than
+// trusted. The duck numbers are checked element by element: they are printed
+// straight into the instruction, and an object or a null there would put
+// "Duck #[object Object]" in front of a staffer looking for a physical duck.
+// Nothing here is a safety boundary — every field is written with textContent —
+// it is simply the difference between a followable instruction and a nonsense
+// one.
+const bagMoveValid = (move) => Boolean(move)
+  && typeof move.id === "string"
+  && (move.action === "MERGE" || move.action === "SPLIT")
+  && Number.isInteger(move.fromHeatNumber)
+  && Number.isInteger(move.intoHeatNumber)
+  && Array.isArray(move.duckNumbers)
+  && move.duckNumbers.every((number) => Number.isInteger(number));
+
+// Storage can be unavailable or hold something else entirely, and neither may
+// take the console down; an unreadable queue is simply an empty one.
+const bagMoveRead = () => {
+  try {
+    const stored = JSON.parse(localStorage.getItem(bagMoveStorageKey) || "[]");
+    return Array.isArray(stored) ? stored.filter(bagMoveValid) : [];
+  } catch {
+    return [];
+  }
+};
+
+const bagMoveWrite = (moves) => {
+  try {
+    if (moves.length === 0) localStorage.removeItem(bagMoveStorageKey);
+    else localStorage.setItem(bagMoveStorageKey, JSON.stringify(moves));
+  } catch {}
+};
+
+const bagMoveCounted = (count, noun) => count + " " + noun + (count === 1 ? "" : "s");
+
+// A staffer stands at the bags and counts what this line tells them to count, so
+// the number and the list beside it must be the same thing. They are two
+// different facts on the server: movedEntryCount counts roster places, while
+// duckNumbers names the ducks that are physically in the bag, and a place
+// whose duck assignment has ended is a racer with no duck to carry. Counting the
+// places and then listing fewer ducks reads as "Move 2 ducks: Duck #5" and sends
+// somebody hunting the bank for a duck that does not exist.
+//
+// So the instruction always counts exactly what it lists, and the roster
+// difference is reported as the separate fact it is rather than folded into a
+// number of ducks. Neither statement invents anything: both are read straight
+// off the transition response.
+const bagMoveDuckList = (move) => move.duckNumbers.length === 0
+  ? "No ducks to carry"
+  : bagMoveCounted(move.duckNumbers.length, "duck") + ": "
+    + move.duckNumbers.map((number) => "Duck #" + number).join(", ");
+
+const bagMoveEntryGap = (move) => {
+  const entries = Number.isInteger(move.movedEntryCount) ? move.movedEntryCount : move.duckNumbers.length;
+  const withoutDuck = Math.max(0, entries - move.duckNumbers.length);
+  return withoutDuck === 0
+    ? ""
+    : " " + bagMoveCounted(withoutDuck, "racer") + " in this move " + (withoutDuck === 1 ? "has" : "have")
+      + " no duck assigned right now, so there is nothing to carry for them.";
+};
+
+// Plain physical sentences. A merge pours one whole bag into another and needs
+// no searching; a split takes named ducks back out of one, which is why the
+// numbers are on screen.
+const bagMoveCopy = (move) => {
+  const from = "Heat " + move.fromHeatNumber;
+  const into = "Heat " + move.intoHeatNumber;
+  const arrow = from + " → " + into;
+  if (move.action === "MERGE") {
+    return {
+      instruction: "Pour the " + from + " bag into the " + into + " bag",
+      number: arrow,
+      ducks: bagMoveDuckList(move),
+      note: "Closing registration folded heat " + move.fromHeatNumber + " into heat "
+        + move.intoHeatNumber + ", because heat " + move.fromHeatNumber
+        + " had too few ducks to race. Empty the whole " + from + " bag into the " + into
+        + " bag and put the empty bag away. No other bag changes, and no duck changes"
+        + " position inside the " + into + " bag." + bagMoveEntryGap(move),
+    };
+  }
+  return {
+    instruction: move.duckNumbers.length === 0
+      ? "No duck moves out of the " + from + " bag"
+      : "Move " + bagMoveDuckList(move) + " from the " + from + " bag into a new " + into + " bag",
+    number: arrow,
+    ducks: bagMoveDuckList(move),
+    note: "Reopening registration split heat " + move.intoHeatNumber + " back out of heat "
+      + move.fromHeatNumber + ". " + (move.duckNumbers.length === 0
+        ? "No duck in the " + from + " bag moves, and every bag stays exactly as it is."
+        : "Take exactly those ducks out of the " + from
+          + " bag, put them in a bag labelled " + into
+          + ", and leave every other duck exactly where it is.") + bagMoveEntryGap(move),
+  };
+};
+
+const renderBagMove = () => {
+  if (!bagMove) return;
+  const queued = bagMoveRead();
+  if (queued.length === 0) {
+    bagMove.hidden = true;
+    return;
+  }
+  const copy = bagMoveCopy(queued[0]);
+  // Reveal the live region before writing into it, so the announcement is a
+  // change inside a region that is already in the accessibility tree.
+  bagMove.hidden = false;
+  bagMoveInstruction.textContent = copy.instruction;
+  bagMoveNumber.textContent = copy.number;
+  bagMoveDucks.textContent = copy.ducks;
+  bagMoveNote.textContent = copy.note;
+};
+
+// The identifier is the lifecycle command that performed the move plus the
+// move's position in it, so a retried or double-rendered response can never
+// queue the same physical task twice.
+const queueBagMoves = (moves, commandId) => {
+  if (!bagMove || !Array.isArray(moves) || moves.length === 0) return;
+  const queued = bagMoveRead();
+  const known = new Set(queued.map((move) => move.id));
+  for (const [index, move] of moves.entries()) {
+    const queuedMove = { ...move, id: String(commandId) + ":" + index };
+    if (!bagMoveValid(queuedMove) || known.has(queuedMove.id)) continue;
+    known.add(queuedMove.id);
+    queued.push(queuedMove);
+  }
+  bagMoveWrite(queued);
+  renderBagMove();
+};
+
+// Deleting the event removes every heat and every roster, so the bags it named
+// mean nothing any more and the queue goes with them.
+const clearBagMoves = () => {
+  if (!bagMove) return;
+  bagMoveWrite([]);
+  renderBagMove();
+};
+
+if (bagMove && bagMoveDismiss) {
+  bagMoveDismiss.addEventListener("click", () => {
+    bagMoveWrite(bagMoveRead().slice(1));
+    renderBagMove();
+  });
+  renderBagMove();
+}
+
 const lifecycleLabels = {
   "open-registration": "Open registration",
   "close-registration": "Close registration",
@@ -4491,6 +4964,10 @@ const lifecycleLabels = {
 
 const renderReadiness = (readiness) => {
   const event = currentEvent;
+  // The registration desk loads this same client without the Event Details
+  // view, so every surface checks that its own markup is on the page first. A
+  // throw here would silently kill everything after it.
+  if (!readinessList) return;
   readinessList.replaceChildren();
   for (const [action, state] of Object.entries(readiness)) {
     const presentation = lifecycleReadinessPresentation(state, event.status);
@@ -4499,6 +4976,15 @@ const renderReadiness = (readiness) => {
     card.append(text("span", presentation.chipText, presentation.chipClass));
     if (presentation.upcoming && state.requiresAdmin) card.append(text("span", "Administrator", "status-chip"));
     if (presentation.upcoming) for (const blocker of state.blockers) card.append(text("p", blocker, "muted"));
+    // Notes are facts to know before committing, never reasons the transition is
+    // refused, so they get their own informational treatment and are shown even
+    // when the action is Ready. An older response without notes renders as it
+    // did before rather than throwing.
+    if (presentation.upcoming) {
+      for (const note of Array.isArray(state.notes) ? state.notes : []) {
+        card.append(text("p", note, "readiness-note"));
+      }
+    }
     if (presentation.upcoming && canDirectRace && (!state.requiresAdmin || isSystemAdmin)) {
       const button = text("button", lifecycleLabels[action] || humanize(action), "button small");
       button.type = "button";
@@ -4528,6 +5014,9 @@ const renderReadiness = (readiness) => {
             commandOptions("POST", { commandId }),
           );
           attempt.complete();
+          // Before anything repaints: this is a physical task and it must be on
+          // screen from the moment the transition is known to have committed.
+          queueBagMoves(result.bagMoves, commandId);
           renderLifecycleResult(result.event);
           const savedMessage = result.replayed || result.alreadyAtTarget
             ? "This transition was already saved. Current state: " + humanize(result.event.status) + "."
@@ -4569,7 +5058,7 @@ const renderEvent = (detail, readiness) => {
   if (!lifecycleShouldRenderEvent(eventSelect.value, currentEvent, detail.event)) return false;
   currentEvent = detail.event;
   currentEventDetail = detail;
-  showFacts(eventSummary, [
+  if (eventSummary) showFacts(eventSummary, [
     ["Name", currentEvent.name],
     ["Status", humanize(currentEvent.status)],
     ["Date", currentEvent.eventDate || "Not set"],
@@ -4598,6 +5087,13 @@ const renderEvent = (detail, readiness) => {
     forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;
     forceDeleteEventName.textContent = currentEvent.name;
   }
+  // QuickDucks holds one event dataset at a time, so a second create would be
+  // refused anyway. The card is removed from the page rather than dimmed, and
+  // the submit handler refuses too, so it can never be hidden but submittable.
+  if (eventCreateCard) {
+    eventCreateCard.open = false;
+    eventCreateCard.hidden = true;
+  }
   if (eventEmptyState) eventEmptyState.hidden = true;
   if (eventDetailRegion) eventDetailRegion.hidden = false;
   showEventScopedSections(true);
@@ -4607,7 +5103,12 @@ const renderEvent = (detail, readiness) => {
 const renderLifecycleResult = (event) => {
   if (currentEventDetail === null || currentEventDetail.event.id !== event.id) return false;
   const rendered = renderEvent({ ...currentEventDetail, event }, { readiness: {} });
-  if (rendered) readinessList.replaceChildren(empty("Refreshing lifecycle actions…"));
+  // Only renderReadiness can create the button that reaches here, and it
+  // returns early when this element is missing, so today the guard can never
+  // fire. It is still written, because every other surface on this client is
+  // guarded the same way and one throw inside a console render silently kills
+  // every control after it — the cost of being wrong is invisible and total.
+  if (rendered && readinessList) readinessList.replaceChildren(empty("Refreshing lifecycle actions…"));
   return rendered;
 };
 
@@ -4620,8 +5121,8 @@ const loadEvents = async (preferredId) => {
     currentEventDetail = null;
     selectedRegistration = null;
     selectedHeat = null;
-    eventSummary.replaceChildren(empty("Create a draft event to begin."));
-    readinessList.replaceChildren(empty("No lifecycle is available."));
+    if (eventSummary) eventSummary.replaceChildren(empty("Create a draft event to begin."));
+    if (readinessList) readinessList.replaceChildren(empty("No lifecycle is available."));
     for (const selector of [
       "[data-participant-list]", "[data-heat-list]",
       "[data-finalist-list]", "[data-support-summary]",
@@ -4635,7 +5136,7 @@ const loadEvents = async (preferredId) => {
       const element = document.querySelector(selector);
       if (element) element.hidden = true;
     }
-    participantEditForm.reset();
+    if (participantEditForm) participantEditForm.reset();
     if (eventConfigForm) {
       eventConfigForm.reset();
       eventConfigCard.hidden = true;
@@ -4647,8 +5148,15 @@ const loadEvents = async (preferredId) => {
     }
     if (eventDetailRegion) eventDetailRegion.hidden = true;
     if (eventEmptyState) eventEmptyState.hidden = false;
-    if (eventCreateCard) eventCreateCard.open = true;
+    // No event: creating one is the only thing to do, so the card comes back
+    // and opens itself. Deleting an event reaches this branch too, so the card
+    // reappears without a manual reload.
+    if (eventCreateCard) {
+      eventCreateCard.hidden = false;
+      eventCreateCard.open = true;
+    }
     showEventScopedSections(false);
+    clearBagMoves();
     setMessage("No event dataset exists. An administrator can create one.");
     return;
   }
@@ -4687,7 +5195,7 @@ eventSelect.addEventListener("change", () => {
     .then(() => globalThis.quickDucksLive.markClean(eventSelect))
     .catch((error) => setMessage(error.message, true));
 });
-document.querySelector("[data-refresh-event]").addEventListener("click", () => {
+document.querySelector("[data-refresh-event]")?.addEventListener("click", () => {
   if (eventSelect.value) loadEvent(eventSelect.value).catch((error) => setMessage(error.message, true));
 });
 
@@ -4708,6 +5216,12 @@ if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) =>
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const values = new FormData(form);
+  // The card is removed from the page the moment an event exists; refusing here
+  // as well means a stale or scripted submission cannot send a doomed command.
+  if (currentEvent) {
+    setMessage("An event already exists. Delete it before creating another.", true);
+    return;
+  }
   await perform(button, "Creating draft event…", async () => {
     const result = await api("/api/v1/staff/events", commandOptions("POST", {
       commandId: crypto.randomUUID(),
@@ -4718,7 +5232,10 @@ if (eventCreateForm) eventCreateForm.addEventListener("submit", async (event) =>
     }));
     form.reset();
     updateEventSlugPreview(form, eventCreateSlugPreview);
-    if (eventCreateCard) eventCreateCard.open = false;
+    if (eventCreateCard) {
+      eventCreateCard.open = false;
+      eventCreateCard.hidden = true;
+    }
     await loadEvents(result.event.id);
   });
 });
@@ -4832,6 +5349,9 @@ const participantDetail = document.querySelector("[data-participant-detail]");
 const participantFacts = document.querySelector("[data-participant-facts]");
 const participantEditForm = document.querySelector("[data-participant-edit-form]");
 const participantActions = document.querySelector("[data-participant-actions]");
+// The participants surface is rendered by both the Admin console's Participants
+// view and the registration desk, so it is always all-or-nothing on a page.
+const participantsPresent = Boolean(participantFilterForm && participantList && participantDetail);
 
 const participantQuery = () => {
   const values = new FormData(participantFilterForm);
@@ -4847,6 +5367,7 @@ const participantQuery = () => {
 // card belongs to, and so the row they press again is obviously the one they
 // are putting down.
 const markParticipantSelection = () => {
+  if (!participantsPresent) return;
   const openId = selectedRegistration === null ? null : selectedRegistration.registrationId;
   for (const button of participantList.querySelectorAll("[data-registration-id]")) {
     const isOpen = button.dataset.registrationId === openId;
@@ -4874,7 +5395,7 @@ const toggleParticipantDetail = (registrationId) => {
 // the list the operator just asked for, the detail card is stale, so it clears
 // and hides instead of describing someone the list no longer shows.
 const loadParticipants = async (pruneSelection = false) => {
-  if (!currentEvent) return;
+  if (!currentEvent || !participantsPresent) return;
   const body = await api(
     "/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/registrations?" + participantQuery(),
   );
@@ -4923,9 +5444,103 @@ const changeParticipantStatus = async (operation, label, dangerous, button) => {
   });
 };
 
-// Deletion is offered unconditionally because the server owns the race-integrity
-// rule: it refuses while a duck is assigned or a heat place exists and returns
-// the unassign-first instruction, which is more useful than a hidden button.
+// The projection answers two different questions, and the console needs both.
+//
+// deletable is the only thing that may decide whether Delete is rendered. It is
+// the exact predicate the delete endpoint re-checks inside its guarded write:
+// never paired at all — no assignment row, current or already ended — no heat
+// place, and a deletable event status. A projection served before those fields
+// existed reports undefined, and the safe reading of that is "not deletable":
+// refusing a delete that would have worked costs a page refresh, while offering
+// one the server refuses is a 409 in a staffer's face on race day.
+const participantIsDeletable = (registration) => registration.deletable === true;
+
+// currentlyPaired is the narrower, physical question — is a duck in this
+// participant's hands right now — and it is the only thing that may be used to
+// say a duck is sealed in a heat bag. It is not the same question as deletable:
+// a participant whose duck was later unassigned is not currently paired and is
+// still not deletable, because the ended assignment row proves their duck went
+// into a bag. Status does not answer either question, because a reactivated
+// participant can be SUBMITTED while still holding their duck.
+//
+// The explicit boolean wins; an older projection falls back to the assignment
+// object it is defined to be exactly equivalent to.
+const participantIsCurrentlyPaired = (registration) => registration.currentlyPaired === true
+  || (registration.currentlyPaired === undefined
+    && registration.assignment !== null && registration.assignment !== undefined);
+
+// The bagged duck's number, or null when this render cannot prove one. Rendering
+// runs inside no try block, so a projection without the nested duck must degrade
+// to slightly vaguer wording rather than throw and silently drop every control
+// after it.
+const participantPairedDuckNumber = (registration) => {
+  if (!participantIsCurrentlyPaired(registration)) return null;
+  const assignment = registration.assignment;
+  if (!assignment || !assignment.duck) return null;
+  const visibleNumber = assignment.duck.visibleNumber;
+  return typeof visibleNumber === "number" ? visibleNumber : null;
+};
+
+// The Duck fact reads through the same guard, so an assignment without a
+// readable duck number degrades to a plain word instead of throwing part-way
+// through the fact list and taking every action below it with it.
+const participantDuckFact = (registration) => {
+  const duckNumber = participantPairedDuckNumber(registration);
+  if (duckNumber !== null) return "#" + duckNumber;
+  return participantIsCurrentlyPaired(registration) ? "Paired" : "Unassigned";
+};
+
+// The event statuses the delete endpoint accepts at all, mirroring
+// DELETABLE_EVENT_STATUSES in registration.ts. Outside them nothing about the
+// participant is the reason — the race itself is — and saying anything about
+// heat bags there would be false about someone who has never held a duck.
+const PARTICIPANT_DELETABLE_EVENT_STATUSES = [
+  "REGISTRATION_OPEN", "REGISTRATION_CLOSED", "ROUND_ONE", "FINAL", "COMPLETED",
+];
+
+// True only when the console can positively see a race whose status forbids
+// deletion. An unknown or not-yet-loaded event is not evidence of anything, so
+// it falls through to the participant-shaped reasons rather than blaming a race
+// state nobody has confirmed.
+const participantEventBlocksDeletion = () => Boolean(currentEvent)
+  && typeof currentEvent.status === "string"
+  && !PARTICIPANT_DELETABLE_EVENT_STATUSES.includes(currentEvent.status);
+
+// One sentence for the one participant who is being told they cannot be deleted.
+// Each branch is a separate fact, and claiming the wrong one is a lie a staffer
+// acts on. In order of what the console can actually prove:
+//
+//   1. the race's own status forbids deleting any registration;
+//   2. this participant holds a duck that is already in a numbered heat bag;
+//   3. this participant holds a duck that has no heat, and therefore no bag,
+//      yet — the same heatAssignmentPending state the pairing callout refuses
+//      to invent a bag number for;
+//   4. this participant has been in the race before: an ended assignment or a
+//      heat place, either of which the delete endpoint refuses on.
+//
+// A duck is never described as bagged unless a heat is genuinely holding it.
+const participantUndeletableReason = (registration) => {
+  if (participantEventBlocksDeletion()) {
+    return "Registrations cannot be deleted while this race is " + humanize(currentEvent.status).toLowerCase()
+      + ". Withdraw or disqualify only makes this participant ineligible to be counted as a winner.";
+  }
+  const duckNumber = participantPairedDuckNumber(registration);
+  const duckLabel = duckNumber === null ? "This participant's duck" : "Duck #" + duckNumber;
+  if (participantIsCurrentlyPaired(registration) && registration.heatAssignmentPending === true) {
+    return duckLabel + " is paired with this participant but has no heat yet, so there is no bag it can go"
+      + " into. Ask the race director which heat it belongs to. Withdraw or disqualify only makes this"
+      + " participant ineligible to be counted as a winner; the registration cannot be deleted.";
+  }
+  if (participantIsCurrentlyPaired(registration)) {
+    return duckLabel + " is already sealed in a heat bag, so it stays in the race. Withdraw or disqualify"
+      + " only makes this participant ineligible to be counted as a winner; the registration cannot be"
+      + " deleted.";
+  }
+  return "This participant has already been in the race — their duck went into a heat bag, or they hold a"
+    + " place on a heat roster — so the registration cannot be deleted. Withdraw or disqualify only makes"
+    + " them ineligible to be counted as a winner.";
+};
+
 const clearParticipantDetail = () => {
   selectedRegistration = null;
   participantDetail.hidden = true;
@@ -5007,7 +5622,7 @@ const renderParticipantDetail = (registration) => {
     ["Email", registration.email || "Not provided"],
     ["Phone", registration.phone || "Not provided"],
     ["Created via", humanize(registration.createdVia)],
-    ["Duck", registration.assignment ? "#" + registration.assignment.duck.visibleNumber : "Unassigned"],
+    ["Duck", participantDuckFact(registration)],
     ["Duck name", participantDuckNameFact(registration)],
     ["Race entry", registration.raceEntryId],
     ["Revision", registration.revision],
@@ -5017,10 +5632,11 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.email.value = registration.email || "";
   participantEditForm.elements.phone.value = registration.phone || "";
   participantEditForm.elements.notes.value = registration.notes || "";
-  // Naming needs a duck to name, and the endpoint refuses without one, so the
-  // field appears only once this participant is paired.
+  // Naming needs a duck to name *now*, and the endpoint refuses without a
+  // current assignment, so this is the pairing question rather than the
+  // deletable one.
   if (participantDuckNameForm) {
-    participantDuckNameForm.hidden = !canRegistration || !registration.assignment;
+    participantDuckNameForm.hidden = !canRegistration || !participantIsCurrentlyPaired(registration);
     participantDuckNameForm.elements.duckName.value = registration.duckName || "";
   }
   participantActions.replaceChildren();
@@ -5039,6 +5655,22 @@ const renderParticipantDetail = (registration) => {
       location.assign("/staff/inventory?raceEntry=" + encodeURIComponent(registration.raceEntryId));
     });
   }
+  // The deletable projection decides one thing only: whether Delete exists.
+  // The two halves below are exhaustive and mutually exclusive, and Delete
+  // appears in exactly one of them, so nobody who has been in the race can ever
+  // be offered it.
+  const deletable = participantIsDeletable(registration);
+  // --- Not deletable: no Delete, and one plain sentence saying why not. ---
+  if (!deletable) {
+    const note = text("p", participantUndeletableReason(registration), "muted participant-action-note");
+    note.dataset.participantActionNote = "";
+    participantActions.append(note);
+  }
+  // Leaving the race is a different question from deleting the registration,
+  // and it is asked of everyone the server accepts it for. A never-paired
+  // no-show is withdrawn like anyone else; offering them only Delete would make
+  // destroying the registration the sole way to record that they did not turn
+  // up, and would lose the person who registered.
   if (["SUBMITTED", "ACTIVE"].includes(registration.status)) {
     addParticipantAction("Withdraw", "button danger small", (event) => changeParticipantStatus("withdraw", "Withdraw participant", true, event.currentTarget));
     if (canDirectRace) addParticipantAction("Disqualify", "button danger small", (event) => changeParticipantStatus("disqualify", "Disqualify participant", true, event.currentTarget));
@@ -5058,7 +5690,11 @@ const renderParticipantDetail = (registration) => {
       });
     });
   }
-  addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));
+  // --- Deletable: the server would accept a delete right now, and this is the
+  // only branch that renders it. ---
+  if (deletable) {
+    addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));
+  }
 };
 
 const loadParticipantDetail = async (registrationId) => {
@@ -5066,14 +5702,14 @@ const loadParticipantDetail = async (registrationId) => {
   renderParticipantDetail(body.registration);
 };
 
-participantFilterForm.addEventListener("submit", (event) => {
+participantFilterForm?.addEventListener("submit", (event) => {
   event.preventDefault();
   loadParticipants(true)
     .then(() => globalThis.quickDucksLive.markClean(participantFilterForm))
     .catch((error) => setMessage(error.message, true));
 });
 
-document.querySelector("[data-walkup-form]").addEventListener("submit", async (event) => {
+document.querySelector("[data-walkup-form]")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector("button");
@@ -5106,7 +5742,7 @@ document.querySelector("[data-walkup-form]").addEventListener("submit", async (e
   });
 });
 
-participantEditForm.addEventListener("submit", async (event) => {
+participantEditForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector("button");
@@ -5149,17 +5785,21 @@ const historyCard = (title, detail) => {
   return card;
 };
 
-// The console is one page of anchored sections, so a participant deep link is
-// an in-page navigation: bring the target section into view, then run the same
-// selection code path the section's own list buttons run.
-const revealConsoleSection = (selector) => {
-  const section = document.querySelector(selector);
+// A participant deep link from the heat roster switches the Admin view, so it
+// goes through the hash exactly like the menu bar does. That keeps one code
+// path for switching and leaves the jump in browser history.
+const revealConsoleSection = (view) => {
+  const section = document.getElementById(view);
+  if (consoleViewSections.some((candidate) => candidate.dataset.consoleView === view)) {
+    if (location.hash === "#" + view) applyConsoleView(view);
+    else location.hash = view;
+  }
   if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
   return section;
 };
 
 const openRosterParticipant = async (registrationId) => {
-  revealConsoleSection("#participants");
+  revealConsoleSection("participants");
   await loadParticipantDetail(registrationId);
   participantDetail.focus();
 };
@@ -5180,7 +5820,7 @@ const finalistList = document.querySelector("[data-finalist-list]");
 const finalistCard = document.querySelector("[data-finalist-card]");
 
 const loadHeats = async () => {
-  if (!currentEvent) return;
+  if (!currentEvent || !heatList) return;
   const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/heats");
   heatList.replaceChildren();
   if (body.heats.length === 0) {
@@ -5241,9 +5881,28 @@ const heatResetAllowed = (heat) => Boolean(canDirectRace)
   && ["READY", "CALLING", "RUNNING", "AWAITING_RESULT"].includes(heat.status)
   && heat.rosterLocked && heat.rosterSize > 0 && heat.publishedResultCount === 0;
 
+// The one place the console names a winner, used for the FINAL finalize, the
+// FINAL correction, and the ROUND_ONE correction alike.
+//
+// Only the racers who can still take a place are selectable, and the podium is
+// only as deep as there are of them, because that is exactly what the server's
+// result validation requires. Offering the whole roster contradicts the heat
+// roster directly above — which now marks the same racers "Cannot win" — and
+// hands the race director a 422 on race day. The roster list itself is
+// unchanged: staff still see every entry, marked, because the ducks are all
+// still in the bag.
 const resultForm = (body, mode) => {
   const form = text("form", "", "operation-card");
   form.append(text("h3", mode === "finalize" ? "Finalize result" : "Correct published result"));
+  const eligibleRoster = rosterEligibleEntries(body.roster);
+  // No eligible racer at all: there is no result to publish and no honest form
+  // to render, so the card says so rather than showing empty, unsubmittable
+  // selects the server would refuse.
+  if (eligibleRoster.length === 0) {
+    form.append(empty("Every racer in this heat is withdrawn or disqualified, so no result can be recorded."
+      + " Reactivate the racer who should hold the place, then publish the result."));
+    return form;
+  }
   if (mode === "correct") {
     const reasonLabel = text("label", "Correction reason");
     const reason = document.createElement("input");
@@ -5256,21 +5915,27 @@ const resultForm = (body, mode) => {
   }
   const places = body.heat.round === "ROUND_ONE"
     ? [1]
-    : Array.from({ length: Math.min(3, body.roster.length) }, (_, index) => index + 1);
+    : Array.from({ length: Math.min(3, eligibleRoster.length) }, (_, index) => index + 1);
   const selects = [];
   for (const place of places) {
     const label = text("label", place === 1 ? "First place" : place === 2 ? "Second place" : "Third place");
     const select = document.createElement("select");
     select.required = true;
     select.append(new Option("Choose roster entry", ""));
-    for (const entry of body.roster) {
+    for (const entry of eligibleRoster) {
       select.append(new Option(
         entry.participant.firstName + " " + entry.participant.lastName + (entry.duck ? " · Duck #" + entry.duck.visibleNumber : ""),
         entry.raceEntryId,
       ));
     }
+    // A published place whose racer has since left is deliberately not
+    // preselected: that name is no longer on offer, so preselecting it would
+    // either silently fall back to nothing or, worse, look chosen. The director
+    // is made to name someone the server will actually accept.
     const published = body.results.find((result) => result.place === place);
-    if (published) select.value = published.raceEntryId;
+    if (published && eligibleRoster.some((entry) => entry.raceEntryId === published.raceEntryId)) {
+      select.value = published.raceEntryId;
+    }
     label.append(select);
     form.append(label);
     selects.push([place, select]);
@@ -5405,17 +6070,23 @@ const loadHeatDetail = async (heatId) => {
   }
   if (body.roster.length === 0) heatRoster.append(empty("This heat has no roster entries."));
   heatResults.replaceChildren();
-  for (const result of body.results) heatResults.append(historyCard("Place " + result.place + " · Duck #" + result.duck.visibleNumber, result.participant.firstName + " " + result.participant.lastName));
+  // A published place whose racer has since left stays published — nothing is
+  // reordered — but the card says plainly that it can no longer stand as a win.
+  for (const result of body.results) {
+    const card = historyCard("Place " + result.place + " · Duck #" + result.duck.visibleNumber, result.participant.firstName + " " + result.participant.lastName);
+    rosterMarkIneligible(card, result, "Cannot win", text);
+    heatResults.append(card);
+  }
   if (body.results.length === 0) heatResults.append(empty("No result has been published."));
   renderHeatControls(body);
 };
 
-document.querySelector("[data-refresh-heats]").addEventListener("click", () => loadHeats().catch((error) => setMessage(error.message, true)));
+document.querySelector("[data-refresh-heats]")?.addEventListener("click", () => loadHeats().catch((error) => setMessage(error.message, true)));
 
 const finalistsExist = () => ["ROUND_ONE", "FINAL", "COMPLETED"].includes(currentEvent?.status);
 
 const loadFinalists = async () => {
-  if (!currentEvent) return;
+  if (!currentEvent || !finalistCard || !finalistList) return;
   finalistCard.hidden = !finalistsExist();
   if (finalistCard.hidden) {
     finalistList.replaceChildren();
@@ -5423,7 +6094,13 @@ const loadFinalists = async () => {
   }
   const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/finalists");
   finalistList.replaceChildren();
-  for (const finalist of body.finalists) finalistList.append(historyCard("Slot " + finalist.slotNumber + " · Duck #" + finalist.duck.visibleNumber, finalist.participant.firstName + " " + finalist.participant.lastName + " · won Heat " + finalist.qualifiedFrom.heatNumber + (finalist.podiumPlace ? " · podium " + finalist.podiumPlace : "")));
+  for (const finalist of body.finalists) {
+    const card = historyCard("Slot " + finalist.slotNumber + " · Duck #" + finalist.duck.visibleNumber, finalist.participant.firstName + " " + finalist.participant.lastName + " · won Heat " + finalist.qualifiedFrom.heatNumber + (finalist.podiumPlace ? " · podium " + finalist.podiumPlace : ""));
+    // A finalist who has since left keeps their slot in the final — the duck is
+    // in that heat's bag — and is marked so nobody reads them out as a winner.
+    rosterMarkIneligible(card, finalist, "Cannot win", text);
+    finalistList.append(card);
+  }
   if (body.finalists.length === 0) finalistList.append(empty("No round-one winner has been recorded yet."));
 };
 
@@ -5433,7 +6110,7 @@ const notificationAttempts = document.querySelector("[data-notification-attempts
 const auditList = document.querySelector("[data-audit-list]");
 
 const loadSupportSummary = async () => {
-  if (!isSystemAdmin || !currentEvent) return;
+  if (!isSystemAdmin || !currentEvent || !supportSummary) return;
   const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEvent.id) + "/summary");
   showFacts(supportSummary, [
     ["Total blockers", body.blockerCount], ["Registration", body.areas.registration.blockerCount],
@@ -5464,8 +6141,8 @@ const loadNotificationAttempts = async (notificationId) => {
 };
 
 const loadNotifications = async () => {
-  if (!isSystemAdmin || !currentEvent) return;
   const form = document.querySelector("[data-notification-filter-form]");
+  if (!isSystemAdmin || !currentEvent || !form || !notificationList) return;
   const status = String(new FormData(form).get("status") || "");
   const parameters = new URLSearchParams({ limit: "100" });
   if (status) parameters.set("status", status);
@@ -5503,7 +6180,7 @@ const loadNotifications = async () => {
 };
 
 const loadAudit = async () => {
-  if (!isSystemAdmin || !currentEvent) return;
+  if (!isSystemAdmin || !currentEvent || !auditList) return;
   const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEvent.id) + "/audit?limit=200");
   auditList.replaceChildren();
   for (const item of body.events) auditList.append(historyCard(humanize(item.action), item.occurredAt + " · " + (item.actorDisplayName || humanize(item.actorType)) + (item.code ? " · " + item.code : "")));
@@ -5511,18 +6188,44 @@ const loadAudit = async () => {
 };
 
 if (isSystemAdmin) {
-  document.querySelector("[data-refresh-support]").addEventListener("click", () => loadSupportSummary().catch((error) => setMessage(error.message, true)));
-  document.querySelector("[data-notification-filter-form]").addEventListener("submit", (event) => {
+  document.querySelector("[data-refresh-support]")?.addEventListener("click", () => loadSupportSummary().catch((error) => setMessage(error.message, true)));
+  document.querySelector("[data-notification-filter-form]")?.addEventListener("submit", (event) => {
     event.preventDefault();
     loadNotifications()
       .then(() => globalThis.quickDucksLive.markClean(event.currentTarget))
       .catch((error) => setMessage(error.message, true));
   });
-  document.querySelector("[data-refresh-audit]").addEventListener("click", () => loadAudit().catch((error) => setMessage(error.message, true)));
+  document.querySelector("[data-refresh-audit]")?.addEventListener("click", () => loadAudit().catch((error) => setMessage(error.message, true)));
 }
 
+// This client runs on the Admin console and on the registration desk, and the
+// desk renders the participants surface and nothing else. RaceUpdates admits a
+// bounded number of connections and fans every signal out to every matching
+// subscriber, so a page must ask only for the domains it can actually repaint:
+// subscribing a registration device to "heats" or "support" woke a refresh whose
+// heat and support loaders each returned on their first line, once per device,
+// for every heat transition of the race.
+//
+// Each domain is therefore gated on the markup and the role that would consume
+// it, exactly as loadEvent gates the loaders themselves. The "event" domain is
+// unconditional because both pages resolve and render a working event.
+// "ducks" is deliberately not gated on the participant list alone. loadEvent
+// renders the readiness panel for canRaceRead, and readiness reports duck facts
+// — unpaired active participants and pending NFC stickers — while duck
+// provisioning publishes only ("ducks", "support"). A console that can read the
+// race but not the registration desk would therefore hold a stale readiness
+// panel until something else woke it. Unreachable today, because
+// canOpenAdminConsole admits only administrators and RACE_DIRECTOR and
+// canRegistration already includes RACE_DIRECTOR; gated correctly anyway,
+// because the role shape is one grant away.
+const staffLiveDomains = ["event", "staff"];
+if (canRegistration && participantList) staffLiveDomains.push("participants");
+if ((canRegistration && participantList) || canRaceRead) staffLiveDomains.push("ducks");
+if (canRaceRead && (heatList || finalistCard)) staffLiveDomains.push("heats");
+if (isSystemAdmin && (supportSummary || notificationList || auditList)) staffLiveDomains.push("support");
+
 staffLiveSubscription = globalThis.quickDucksLive.subscribe({
-  domains: ["event", "participants", "ducks", "heats", "staff", "support"],
+  domains: staffLiveDomains,
   root: operationsRoot,
   refresh: () => loadEvents(currentEvent?.id),
   isBlocked: () => staffCommandCount > 0,
@@ -5833,8 +6536,75 @@ const qrLoadDecoder = (documentRef, scope) => {
 };
 `;
 
+// Pairing puts a physical duck into a physical heat bag, and nobody empties a
+// bag on the bank to find one duck: heat entries are never reordered, because
+// the ducks inside a bag are indistinguishable without scanning every one of
+// them.
+//
+// So the bag number is the loudest thing on the pairing screen, and it is ALWAYS
+// the heat the server's pairing command actually committed. This helper is a
+// pure function of that response on purpose: it takes the heat the server
+// returned and never counts entries, increments a previous number, or otherwise
+// derives one. A guessed number here puts a real duck in the wrong real bag.
+//
+// The note is the one thing that is not fixed, and it is a promise, so it has to
+// be true. There is exactly one operation that can still move an already-paired
+// duck's entry: closing registration folds a round-one tail heat that is too
+// short to race into the heat before it, and reopening splits it back out. That
+// can only happen while the event is REGISTRATION_OPEN and only to a round-one
+// heat, so:
+//
+//   - While registration is open the note says the bag is this duck's bag and
+//     that a fold is announced in the console if the tail heat turns out to be
+//     too short. It does not claim the bag is final, because it is not.
+//   - Once registration has closed, or for a final-heat repair pairing, no fold
+//     can reach this entry any more and the note says so absolutely.
+//
+// `eventStatus` is the status of the event the pairing command was run against,
+// straight from `GET /api/v1/events/current`; an unknown status falls back to
+// the cautious wording rather than the absolute one.
+export const heatBagHelpersScript = String.raw`
+const heatBagCallout = (heat, duckNumber, heatAssignmentPending, eventStatus) => {
+  const duckLabel = "Duck #" + duckNumber;
+  // Say so plainly rather than printing a blank or an invented bag number.
+  if (!heat || heatAssignmentPending === true || typeof heat.number !== "number") {
+    return {
+      pending: true,
+      instruction: "Do not bag this duck yet",
+      number: "No heat assigned",
+      duck: duckLabel + " is paired",
+      note: "QuickDucks did not return a heat for this pairing, so there is no bag to put "
+        + duckLabel + " in. Keep it aside and ask the race director which heat it belongs to"
+        + " before it goes into any bag.",
+    };
+  }
+  // The round comes from the server too. A repair pairing during racing can land
+  // in the final, and that is a different bag from round-one heat 1.
+  const bag = heat.round === "FINAL" ? "FINAL heat " + heat.number : "HEAT " + heat.number;
+  const settled = heat.round === "FINAL"
+    || ["REGISTRATION_CLOSED", "ROUND_ONE", "FINAL", "COMPLETED"].includes(eventStatus);
+  return {
+    pending: false,
+    instruction: "Put this duck in " + bag + " bag",
+    number: (heat.round === "FINAL" ? "Final · Heat " : "Heat ") + heat.number,
+    duck: duckLabel,
+    note: "Walk " + duckLabel + " to the " + bag.toLowerCase() + " bag now. " + (settled
+      ? "It stays in that bag, in that position, for the rest of the race."
+      : "While registration is open this whole bag can still be folded into the heat before it, "
+        + "if the heat is too short to race when registration closes. QuickDucks then tells the "
+        + "race director to pour one whole bag into another, and the Admin console names both "
+        + "bags. Nothing else ever moves this duck."),
+  };
+};
+`;
+
 export const staffDuckScript = participantQrHelpersScript
   + participantQrDecoderScript
+  + heatBagHelpersScript
+  // This page is the round-one result surface, so it asks the same eligibility
+  // question the finish line asks, through the same shared helper rather than a
+  // second copy of "can this racer still win".
+  + rosterEligibilityHelpersScript
   + String.raw`
 const root = document.querySelector("[data-staff-duck]");
 const token = root.dataset.token;
@@ -5843,6 +6613,11 @@ const summary = document.querySelector("[data-duck-summary]");
 const workArea = document.querySelector("[data-pairing-work]");
 const winnerAction = document.querySelector("[data-winner-action]");
 const message = document.querySelector("[data-staff-message]");
+const heatBag = document.querySelector("[data-heat-bag]");
+const heatBagInstruction = document.querySelector("[data-heat-bag-instruction]");
+const heatBagNumber = document.querySelector("[data-heat-bag-number]");
+const heatBagDuck = document.querySelector("[data-heat-bag-duck]");
+const heatBagNote = document.querySelector("[data-heat-bag-note]");
 let currentEvent = null;
 let selectedRegistration = null;
 let staffDuckBusy = 0;
@@ -5879,8 +6654,71 @@ const addFact = (label, value) => {
   summary.append(fact);
 };
 
-const renderWinnerAction = (data) => {
+// The real registration status, in plain race-day words.
+const ineligibleStatusLabel = (status) => status === "WITHDRAWN"
+  ? "Withdrawn"
+  : status === "DISQUALIFIED"
+    ? "Disqualified"
+    : String(status || "").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
+
+// The bag panel is painted straight from the pairing response the server
+// returned, through the pure helper above. Nothing here decides a heat number.
+const showHeatBag = (result) => {
+  if (!heatBag) return;
+  const callout = heatBagCallout(
+    result.heat,
+    result.duck.visibleNumber,
+    result.heatAssignmentPending,
+    currentEvent ? currentEvent.status : null,
+  );
+  heatBag.classList.toggle("pending", callout.pending);
+  // Reveal the live region before writing into it, so the announcement is a
+  // change inside a region that is already in the accessibility tree.
+  heatBag.hidden = false;
+  heatBagInstruction.textContent = callout.instruction;
+  heatBagNumber.textContent = callout.number;
+  heatBagDuck.textContent = callout.duck;
+  heatBagNote.textContent = callout.note;
+  heatBag.scrollIntoView({ block: "start" });
+};
+
+if (heatBag) {
+  // It stays up until the staffer says the duck is physically in the bag, or
+  // until they scan the next duck, which loads a different page entirely. A
+  // live refresh must never take it off the screen while they walk to the bags.
+  heatBag.querySelector("[data-heat-bag-dismiss]").addEventListener("click", () => {
+    heatBag.hidden = true;
+    message.textContent = "Scan the next duck to pair it.";
+  });
+}
+
+// "Scan the next duck" is the right answer for one refused duck and the wrong
+// answer for a heat in which every duck will be refused: it sends a result taker
+// through the whole bag, one DUCK_NOT_ELIGIBLE at a time, with nothing on any
+// screen saying the heat has no winner in it or that only a race director can
+// change that.
+//
+// Round one publishes here rather than through the finish-line form, so this
+// page has to answer it too. The question is asked only when the server has
+// already refused this duck, and it is asked of the heat the server itself
+// named, using the same roster projection and the same eligibility helper the
+// finish line uses. A failed or unauthorized read simply answers "no", leaving
+// the statement exactly as it was rather than inventing a claim about the heat.
+const winnerHeatHasNoEligibleRacer = async (data) => {
+  const ineligible = data && !data.winnerAction ? data.winnerIneligible : null;
+  if (!ineligible || typeof ineligible.eventId !== "string" || typeof ineligible.heatId !== "string") return false;
+  try {
+    const body = await fetchJson("/api/v1/staff/events/" + encodeURIComponent(ineligible.eventId)
+      + "/heats/" + encodeURIComponent(ineligible.heatId));
+    return Array.isArray(body.roster) && rosterEligibleEntries(body.roster).length === 0;
+  } catch {
+    return false;
+  }
+};
+
+const renderWinnerAction = (data, heatHasNoEligibleRacer = false) => {
   winnerAction.replaceChildren();
+  winnerAction.classList.remove("ineligible");
   if (winnerSuccess !== null) {
     const success = winnerSuccess;
     winnerSuccess = null;
@@ -5892,6 +6730,36 @@ const renderWinnerAction = (data) => {
     return;
   }
   const candidate = data.winnerAction;
+  // The finish line scanned a duck whose racer is withdrawn or disqualified.
+  // That duck was bagged before the withdrawal and is still in the water, so
+  // this is a normal race-day outcome, not an error: name the duck, name the
+  // status, and send the staffer straight back to the finish line.
+  const ineligible = data.winnerIneligible;
+  if (!candidate && ineligible) {
+    winnerAction.hidden = false;
+    winnerAction.classList.add("ineligible");
+    winnerAction.append(
+      text("strong", "Duck #" + data.duck.visibleNumber + " is " + ineligibleStatusLabel(ineligible.registrationStatus)),
+      text("p", ineligible.participantDisplayName + " cannot be recorded as the Heat "
+        + ineligible.heatNumber + " winner, and this duck stays in its heat."),
+    );
+    // The whole heat is out, so there is no next duck worth scanning and the
+    // remedy is the only thing left to say.
+    if (heatHasNoEligibleRacer) {
+      winnerAction.append(
+        text("strong", "Nobody in Heat " + ineligible.heatNumber + " can win"),
+        text("p", "Every racer in Heat " + ineligible.heatNumber + " is withdrawn or disqualified, so every duck in that"
+          + " bag will be refused and no result can be recorded. Every duck stays in its bag."),
+        text("p", "Ask the race director to reactivate a racer, then scan that duck's tag again."),
+      );
+      message.textContent = "Nobody in Heat " + ineligible.heatNumber + " can win."
+        + " Ask the race director to reactivate a racer, then scan that duck's tag again.";
+      return;
+    }
+    winnerAction.append(text("p", "Scan the next duck to pass the finish line."));
+    message.textContent = "This duck cannot win. Scan the next duck to pass the finish line.";
+    return;
+  }
   if (!candidate) {
     winnerAction.hidden = true;
     return;
@@ -6050,7 +6918,12 @@ const pairWithLookupCode = async (lookupCode) => {
     summary.replaceChildren();
     addFact("Duck", "#" + result.duck.visibleNumber);
     addFact("Participant", result.participant.firstName + " " + result.participant.lastName);
-    addFact("Heat", result.heat ? "Round one · Heat " + result.heat.number : "Assignment pending");
+    // Both facts read the server's own heat. The round comes from the response
+    // too, because a repair pairing can land in the final.
+    addFact("Heat bag", result.heat
+      ? (result.heat.round === "FINAL" ? "Final" : "Round one") + " · Heat " + result.heat.number
+      : "Not assigned yet");
+    showHeatBag(result);
     pageTitle.textContent = "Duck #" + result.duck.visibleNumber + " paired";
     message.textContent = result.replayed ? "This pairing was already saved." : "Duck paired successfully.";
     selectedRegistration = null;
@@ -6395,13 +7268,18 @@ const load = async () => {
     // A refresh already in flight when scanning starts must not repaint the
     // pairing area and release the newly acquired camera.
     if (qrStarting || qrScanning) return;
+    // Resolved before anything is painted, so the statement about this duck and
+    // the statement about its heat land together rather than one appearing
+    // under the staffer a moment later.
+    const heatHasNoEligibleRacer = await winnerHeatHasNoEligibleRacer(duck);
+    if (qrStarting || qrScanning) return;
     currentEvent = eventResponse.event;
     summary.replaceChildren();
     qrStop(false);
     if (workArea) workArea.hidden = true;
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
-    renderWinnerAction(duck);
+    renderWinnerAction(duck, heatHasNoEligibleRacer);
   } catch (error) {
     if (qrStarting || qrScanning) return;
     if (error.message !== "signed-out") {

@@ -414,3 +414,73 @@ test("a rate-limited follow writes nothing", async (context) => {
     0,
   );
 });
+
+// A followed card is a public view of somebody else's participant, so it obeys
+// the public rule: while they are withdrawn or disqualified they are not racing
+// and the card is simply absent. The link row survives untouched, so the card
+// comes back by itself the moment a race director reactivates them. The
+// browser's own registrations are never affected either way.
+for (const leftStatus of ["WITHDRAWN", "DISQUALIFIED"]) {
+  test(`a followed card disappears while ${leftStatus} and returns on reactivation`, async (context) => {
+    const { api, database } = harness(context);
+    seedEvent(database);
+    const owner = await registerDaisy(api, context);
+
+    // The follower's browser also registers somebody of its own, so the test
+    // proves the exclusion is scoped to followed links alone.
+    const ownRegistration = await register(api, context, "Donald", "Mallard");
+    const followerCookie = ownRegistration.cookie;
+    const result = await followDaisy(api, followerCookie);
+    await jsonBody(
+      await api("/api/v1/registrations/mine/follow", {
+        method: "POST",
+        cookie: followerCookie,
+        headers: { origin: "https://quickducks.com" },
+        body: { followId: result.followId },
+      }),
+      200,
+      "follow",
+    );
+
+    const names = async () => (await jsonBody(
+      await api("/api/v1/registrations/mine", { cookie: followerCookie }),
+      200,
+      "follower collection",
+    )).registrations.map((item) => item.displayName);
+    assert.deepEqual(await names(), ["Donald Mallard", "Daisy D."]);
+
+    database.prepare("UPDATE registrations SET status = ? WHERE id = ?")
+      .run(leftStatus, owner.registrationId);
+    assert.deepEqual(await names(), ["Donald Mallard"]);
+    // The search that produced the follow no longer returns them either.
+    assert.deepEqual(
+      (await jsonBody(
+        await api("/api/v1/race-status/search?eventId=event-follow&name=Daisy"),
+        200,
+        "search while away",
+      )).results,
+      [],
+    );
+    // The link itself is untouched, so nothing had to be re-followed.
+    assert.equal(
+      database.prepare(
+        "SELECT COUNT(*) AS count FROM browser_collection_registrations WHERE registration_id = ? AND added_via = 'FOLLOWED'",
+      ).get(owner.registrationId).count,
+      1,
+    );
+
+    database.prepare("UPDATE registrations SET status = 'ACTIVE' WHERE id = ?")
+      .run(owner.registrationId);
+    assert.deepEqual(await names(), ["Donald Mallard", "Daisy D."]);
+
+    // The owner's own browser saw their card the entire time.
+    const ownerCards = await jsonBody(
+      await api("/api/v1/registrations/mine", { cookie: owner.cookie }),
+      200,
+      "owner collection",
+    );
+    assert.equal(ownerCards.registrations.length, 1);
+    assert.equal(ownerCards.registrations[0].lookupCode, owner.lookupCode);
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  });
+}

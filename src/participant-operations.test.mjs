@@ -423,73 +423,177 @@ test("withdraw, reactivate, and disqualify are authorized idempotent status comm
   database.close();
 });
 
-test("eligibility changes stop at heat lock and remain atomically blocked", async (context) => {
+// Withdrawal and disqualification are the only exit a paired participant has,
+// so they must be pure bookkeeping. The duck is already sealed in a heat bag and
+// nothing on race day may move it, renumber a slot, or resort a heat.
+test("a status change writes only the command, the registration, and the audit", async (context) => {
   const { database, env, DB } = makeContext();
   context.after(() => database.close());
   database.exec(`
     INSERT INTO heats
       (id, event_id, round, heat_number, status, target_size)
-    VALUES ('heat-one', 'event-open', 'ROUND_ONE', 1, 'PLANNED', 1);
+    VALUES ('heat-one', 'event-open', 'ROUND_ONE', 1, 'PLANNED', 2);
     INSERT INTO heat_entries
       (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
     VALUES ('heat-entry-one', 'event-open', 'heat-one', 'entry-one', 'ROUND_ONE', 1,
+            'BALANCED_DRAW', '2026-07-25T01:00:00Z'),
+           ('heat-entry-two', 'event-open', 'heat-one', 'entry-two', 'ROUND_ONE', 2,
             'BALANCED_DRAW', '2026-07-25T01:00:00Z');
   `);
 
-  const allowed = await handleParticipantOperations(
-    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one/withdraw", "POST", {
-      commandId: crypto.randomUUID(),
-      expectedRevision: 0,
-    }),
-    env,
-    staffActor,
-  );
-  assert.equal(allowed.status, 201);
-  const reactivated = await handleParticipantOperations(
-    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one/reactivate", "POST", {
-      commandId: crypto.randomUUID(),
-      expectedRevision: 1,
-    }),
-    env,
-    adminActor,
-  );
-  assert.equal(reactivated.status, 201);
+  for (const [operation, actor, revision] of [
+    ["withdraw", staffActor, 0],
+    ["reactivate", adminActor, 1],
+    ["disqualify", adminActor, 2],
+  ]) {
+    const before = DB.statements.length;
+    const response = await handleParticipantOperations(
+      jsonRequest(`https://quickducks.com/api/v1/staff/registrations/registration-one/${operation}`, "POST", {
+        commandId: crypto.randomUUID(),
+        expectedRevision: revision,
+      }),
+      env,
+      actor,
+    );
+    assert.equal(response.status, 201, operation);
 
-  for (const status of ["LOADING", "RUNNING", "AWAITING_RESULT", "FINALIZED"]) {
-    database.prepare(`
-      UPDATE heats
-         SET status = ?, roster_locked_at = '2026-07-25T01:05:00Z',
-             finalized_at = CASE WHEN ? = 'FINALIZED' THEN '2026-07-25T01:10:00Z' ELSE NULL END
-       WHERE id = 'heat-one'
-    `).run(status, status);
-    for (const [operation, currentActor] of [["withdraw", staffActor], ["disqualify", adminActor]]) {
-      const response = await handleParticipantOperations(
-        jsonRequest(`https://quickducks.com/api/v1/staff/registrations/registration-one/${operation}`, "POST", {
-          commandId: crypto.randomUUID(),
-          expectedRevision: 2,
-        }),
-        env,
-        currentActor,
+    // No statement this operation prepared writes to any table that carries the
+    // physical race: assignments, heats, heat entries, or results.
+    const writes = DB.statements.slice(before)
+      .map((statement) => statement.sql)
+      .filter((sql) => /^\s*(INSERT|UPDATE|DELETE)/i.test(sql));
+    for (const sql of writes) {
+      assert.doesNotMatch(
+        sql,
+        /(INSERT INTO|UPDATE|DELETE FROM)\s+(duck_assignments|heats|heat_entries|heat_results)\b/i,
+        `${operation} must not write race data: ${sql}`,
       );
-      assert.equal(response.status, 409, `${operation} at ${status}`);
-      assert.match((await response.json()).error, /Keep them ACTIVE.*race director/i);
-      assert.equal(database.prepare("SELECT status FROM registrations WHERE id = 'registration-one'").get().status, "ACTIVE");
     }
+    assert.deepEqual(
+      writes.map((sql) => sql.match(/(?:INSERT INTO|UPDATE)\s+(\w+)/i)[1]),
+      ["race_commands", "registrations", "audit_events"],
+      operation,
+    );
   }
 
-  database.exec("UPDATE heats SET status = 'PLANNED', roster_locked_at = NULL, finalized_at = NULL WHERE id = 'heat-one'");
-  DB.beforeBatch = () => {
-    database.exec("UPDATE heats SET status = 'LOADING', roster_locked_at = '2026-07-25T01:15:00Z' WHERE id = 'heat-one'");
-  };
-  const racedLock = await handleParticipantOperations(
-    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one/withdraw", "POST", {
-      commandId: crypto.randomUUID(),
-      expectedRevision: 2,
-    }),
-    env,
-    staffActor,
+  // And the stored race data is provably identical afterwards, including the
+  // slot order of the racer who never left.
+  assert.equal(database.prepare("SELECT valid_to FROM duck_assignments WHERE id = 'assignment-one'").get().valid_to, null);
+  assert.deepEqual(
+    database.prepare("SELECT id, heat_id, race_entry_id, slot_number FROM heat_entries ORDER BY slot_number")
+      .all().map((row) => ({ ...row })),
+    [
+      { id: "heat-entry-one", heat_id: "heat-one", race_entry_id: "entry-one", slot_number: 1 },
+      { id: "heat-entry-two", heat_id: "heat-one", race_entry_id: "entry-two", slot_number: 2 },
+    ],
   );
-  assert.equal(racedLock.status, 409);
-  assert.equal(database.prepare("SELECT status FROM registrations WHERE id = 'registration-one'").get().status, "ACTIVE");
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'WITHDRAW_REGISTRATION'").get().count, 1);
+  assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-one'").get().status, "PLANNED");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The rule this replaces refused withdrawal once the participant's heat was
+// locked or beyond, which is the old model where a withdrawn racer came off the
+// roster. Under the current model there is nothing to come off: the duck is
+// sealed in a numbered bag, the entry never moves, and the racer is simply
+// ineligible. So the heat's state is no longer a reason to refuse, and a heat
+// that has already been raced and published is no different from a planned one.
+test("withdrawal and disqualification are allowed at every heat state and move nothing", async (context) => {
+  const { database, env } = makeContext();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO heats
+      (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-one', 'event-open', 'ROUND_ONE', 1, 'PLANNED', 2);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry-one', 'event-open', 'heat-one', 'entry-one', 'ROUND_ONE', 1,
+            'BALANCED_DRAW', '2026-07-25T01:00:00Z'),
+           ('heat-entry-two', 'event-open', 'heat-one', 'entry-two', 'ROUND_ONE', 2,
+            'BALANCED_DRAW', '2026-07-25T01:00:00Z');
+  `);
+
+  const raceSnapshot = () => ({
+    heats: database.prepare("SELECT id, status, heat_number, roster_locked_at, target_size FROM heats ORDER BY id")
+      .all().map((row) => ({ ...row })),
+    entries: database.prepare(
+      "SELECT id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at FROM heat_entries ORDER BY id",
+    ).all().map((row) => ({ ...row })),
+    assignments: database.prepare(
+      "SELECT id, race_entry_id, duck_id, valid_from, valid_to FROM duck_assignments ORDER BY id",
+    ).all().map((row) => ({ ...row })),
+    results: database.prepare(
+      "SELECT id, heat_id, race_entry_id, place, status, revision FROM heat_results ORDER BY id",
+    ).all().map((row) => ({ ...row })),
+  });
+
+  const revisionOf = () => database.prepare(
+    "SELECT revision FROM registrations WHERE id = 'registration-one'",
+  ).get().revision;
+  const statusOf = () => database.prepare(
+    "SELECT status FROM registrations WHERE id = 'registration-one'",
+  ).get().status;
+  const call = async (operation, currentActor) => {
+    const response = await handleParticipantOperations(
+      jsonRequest(`https://quickducks.com/api/v1/staff/registrations/registration-one/${operation}`, "POST", {
+        commandId: crypto.randomUUID(),
+        expectedRevision: revisionOf(),
+      }),
+      env,
+      currentActor,
+    );
+    return response;
+  };
+
+  // Every heat state the entry can be in, including the locked, raced, and
+  // published ones the old rule refused. `FINALIZED` additionally carries a
+  // published result for the *other* racer in the heat, which must survive too.
+  const heatStates = [
+    ["PLANNED", null],
+    ["LOADING", "2026-07-25T01:05:00Z"],
+    ["READY", "2026-07-25T01:05:00Z"],
+    ["CALLING", "2026-07-25T01:05:00Z"],
+    ["RUNNING", "2026-07-25T01:05:00Z"],
+    ["AWAITING_RESULT", "2026-07-25T01:05:00Z"],
+    ["FINALIZED", "2026-07-25T01:05:00Z"],
+  ];
+  for (const [status, lockedAt] of heatStates) {
+    database.prepare(`
+      UPDATE heats
+         SET status = ?, roster_locked_at = ?,
+             finalized_at = CASE WHEN ? = 'FINALIZED' THEN '2026-07-25T01:10:00Z' ELSE NULL END
+       WHERE id = 'heat-one'
+    `).run(status, lockedAt, status);
+    if (status === "FINALIZED") {
+      database.exec(`
+        INSERT INTO race_commands (id, event_id, command_type, result_id, requested_at, completed_at)
+        VALUES ('publish-command', 'event-open', 'FINALIZE_HEAT_RESULT', 'heat-one',
+                '2026-07-25T01:10:00Z', '2026-07-25T01:10:00Z');
+        INSERT INTO heat_results
+          (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, status, revision,
+           finalized_at, recorded_by_staff_profile_id, source_command_id)
+        VALUES ('published-result', 'event-open', 'heat-one', 'entry-one', 'assignment-one', 1,
+                'FINALIZED', 1, '2026-07-25T01:10:00Z', 'staff', 'publish-command');
+      `);
+    }
+    const before = raceSnapshot();
+
+    const withdrawn = await call("withdraw", staffActor);
+    assert.equal(withdrawn.status, 201, `withdraw at ${status}`);
+    assert.equal((await withdrawn.json()).registration.status, "WITHDRAWN", `withdraw at ${status}`);
+    assert.equal(statusOf(), "WITHDRAWN", status);
+
+    assert.equal((await call("reactivate", adminActor)).status, 201, `reactivate at ${status}`);
+    // The duck assignment survived, so reactivation restores ACTIVE.
+    assert.equal(statusOf(), "ACTIVE", status);
+
+    const disqualified = await call("disqualify", adminActor);
+    assert.equal(disqualified.status, 201, `disqualify at ${status}`);
+    assert.equal(statusOf(), "DISQUALIFIED", status);
+    assert.equal((await call("reactivate", adminActor)).status, 201, `reactivate at ${status}`);
+
+    // Nothing physical moved: not the heat, not an entry identifier or slot
+    // number, not a duck assignment, not a published result.
+    assert.deepEqual(raceSnapshot(), before, `race data unchanged at ${status}`);
+  }
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });

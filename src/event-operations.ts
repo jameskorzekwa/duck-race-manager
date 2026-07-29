@@ -1,5 +1,6 @@
 import type { StaffActor } from "./auth.ts";
 import { operationalRoles, requireAnyRole } from "./authorization.ts";
+import { eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -227,20 +228,78 @@ const canonicalFingerprint = (value: Record<string, unknown>): string => JSON.st
 // Worker still running when it lands.
 const MINIMUM_HEAT_SIZE = 3;
 
-// A roster is only a racing roster while every registration on it is ACTIVE.
-// Withdrawal and disqualification leave the `heat_entries` row in place and are
-// permitted while a heat is still an unlocked plan, so this predicate is what
-// keeps a withdrawn participant from being locked onto a racing roster and read
-// out by the announcer. The identical predicate appears in the readiness
-// blocker, in the guarded start command, and in the automatic roster lock, so
-// the preflight, the transition, and the lock can never disagree. The only
-// interpolation is a fixed internal column name; every value stays bound.
-const inactiveRosterEntryExists = (heatColumn: string): string => `EXISTS (
-    SELECT 1 FROM heat_entries he
-      JOIN race_entries re ON re.id = he.race_entry_id
-      JOIN registrations r ON r.id = re.registration_id
-     WHERE he.heat_id = ${heatColumn} AND r.status != 'ACTIVE'
-  )`;
+// A heat that holds no `ACTIVE` racer at all.
+//
+// This replaces the retired "every registration on this roster must be ACTIVE"
+// predicate, whose intent no longer holds. Withdrawal and disqualification leave
+// the `heat_entries` row, its slot number, and its duck assignment exactly where
+// they are, because the duck was sealed into a numbered heat bag at pairing and
+// the bags are never re-sorted — the only way to identify a duck is to scan it.
+// So a non-`ACTIVE` roster entry is a normal, expected state: that duck rides
+// along and simply cannot be recorded as a winner. Blocking on it made the whole
+// rule unreachable, because a racer who left before the lock stopped the race
+// from starting at all.
+//
+// What genuinely still blocks is a heat where *nobody* can win. Round one needs
+// one first place and the final needs a podium, both guarded on `ACTIVE`, so
+// such a heat would run and then be impossible to publish, stranding the round.
+// The remedy — reactivation — stays available to a race director at any point.
+//
+// It is the negation of `eligibleRacerExists`, imported from `heat-operations.ts`
+// rather than restated, so the readiness blocker, the guarded round-one/final
+// start command, the automatic roster lock, and the heat station's own lock and
+// start guards are all literally the same SQL and cannot drift apart.
+const heatWithoutEligibleRacerExists = (heatColumn: string): string =>
+  `NOT ${eligibleRacerExists(heatColumn)}`;
+
+// Roster entries whose racer left. Reported so an operator can see who is riding
+// in the bag without being able to win; never a blocker.
+const inactiveRosterEntryCount = (round: string): string => `(SELECT COUNT(*)
+          FROM heat_entries he
+          JOIN heats h ON h.id = he.heat_id
+          JOIN race_entries re ON re.id = he.race_entry_id
+          JOIN registrations r ON r.id = re.registration_id
+         WHERE he.event_id = e.id AND h.round = '${round}' AND r.status != 'ACTIVE')`;
+
+// A heat's podium is only as deep as the racers who can take a place, so the
+// completion check counts eligible entries exactly as `validateResultSet` does.
+// Counting every entry would demand a place a withdrawn finalist is forbidden to
+// hold and leave the event permanently incompletable.
+const eligibleEntryCountSql = (eventColumn: string, heatColumn: string): string => `(
+              SELECT COUNT(*) FROM heat_entries he
+                JOIN race_entries re ON re.id = he.race_entry_id
+                JOIN registrations r ON r.id = re.registration_id
+               WHERE he.event_id = ${eventColumn} AND he.heat_id = ${heatColumn}
+                 AND r.status = 'ACTIVE'
+            )`;
+
+// "This final published fewer podium places than its eligible finalists can
+// fill." The comparison is deliberately `<` and never `!=`.
+//
+// The published place count is immutable once the podium is finalized; the
+// eligible entry count is not, because withdrawal and disqualification are
+// allowed at any heat state including `FINALIZED`. Demanding equality compared
+// a frozen number against a moving one, so disqualifying a winner after the
+// podium was published retroactively judged a correct podium "incomplete" and
+// stranded the event: `complete` was refused, the final result could not be
+// corrected while the event was still `FINAL`, and `Reset heat` refuses a
+// published result. The only exit was undoing the disqualification, which is
+// exactly the record a director must be able to keep.
+//
+// `<` makes the requirement monotone in the only direction a withdrawal moves
+// it: leaving the race can shrink `MIN(3, eligible)` but can never invalidate a
+// podium that is already at least that deep. A podium with more places than the
+// current requirement is the expected, correct state after somebody leaves —
+// the historical places stay exactly as they were raced.
+//
+// The readiness computation and the guarded `COMPLETE_EVENT` command both
+// interpolate this one string, so a preflight that says "allowed" and a batch
+// that commits can never disagree about the podium.
+const podiumShorterThanEligibleDepthSql = (eventColumn: string, heatColumn: string): string => `(
+               SELECT COUNT(*) FROM heat_results hr
+                WHERE hr.event_id = ${eventColumn} AND hr.heat_id = ${heatColumn}
+                  AND hr.status = 'FINALIZED'
+             ) < MIN(3, ${eligibleEntryCountSql(eventColumn, heatColumn)})`;
 
 const normalizedHeatCapacity = (value: unknown, minimum: number): number | null =>
   Number.isInteger(value) && (value as number) >= minimum && (value as number) <= 10_000
@@ -657,8 +716,10 @@ interface ReadinessStats {
   pending_provisioning_count: number;
   round_one_heat_count: number;
   round_one_undersized_heat_count: number;
-  round_one_inactive_roster_heat_count: number;
-  final_inactive_roster_heat_count: number;
+  round_one_ineligible_heat_count: number;
+  final_ineligible_heat_count: number;
+  round_one_inactive_roster_entry_count: number;
+  final_inactive_roster_entry_count: number;
   locked_heat_count: number;
   round_one_unready_heat_count: number;
   round_one_unfinished_heat_count: number;
@@ -714,10 +775,12 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
                   WHERE he.heat_id = h.id) < ${MINIMUM_HEAT_SIZE}) AS round_one_undersized_heat_count,
         (SELECT COUNT(*) FROM heats h
           WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
-            AND ${inactiveRosterEntryExists("h.id")}) AS round_one_inactive_roster_heat_count,
+            AND ${heatWithoutEligibleRacerExists("h.id")}) AS round_one_ineligible_heat_count,
         (SELECT COUNT(*) FROM heats h
           WHERE h.event_id = e.id AND h.round = 'FINAL'
-            AND ${inactiveRosterEntryExists("h.id")}) AS final_inactive_roster_heat_count,
+            AND ${heatWithoutEligibleRacerExists("h.id")}) AS final_ineligible_heat_count,
+        ${inactiveRosterEntryCount("ROUND_ONE")} AS round_one_inactive_roster_entry_count,
+        ${inactiveRosterEntryCount("FINAL")} AS final_inactive_roster_entry_count,
         (SELECT COUNT(*) FROM heats h
           WHERE h.event_id = e.id
             AND (h.status != 'PLANNED' OR h.roster_locked_at IS NOT NULL)) AS locked_heat_count,
@@ -752,13 +815,7 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
            AND h.status = 'FINALIZED') AS final_finalized_heat_count,
         (SELECT COUNT(*) FROM heats h
           WHERE h.event_id = e.id AND h.round = 'FINAL' AND h.status = 'FINALIZED'
-            AND (
-              SELECT COUNT(*) FROM heat_results hr
-               WHERE hr.event_id = e.id AND hr.heat_id = h.id AND hr.status = 'FINALIZED'
-            ) != MIN(3, (
-              SELECT COUNT(*) FROM heat_entries he
-               WHERE he.event_id = e.id AND he.heat_id = h.id
-            ))) AS final_missing_result_count
+            AND ${podiumShorterThanEligibleDepthSql("e.id", "h.id")}) AS final_missing_result_count
      FROM events e
      WHERE e.id = ?`,
   ).bind(eventId).first<ReadinessStats>();
@@ -901,7 +958,7 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
         AND NOT EXISTS (
           SELECT 1 FROM heats h
            WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
-             AND ${inactiveRosterEntryExists("h.id")}
+             AND ${heatWithoutEligibleRacerExists("h.id")}
         )`,
     updateSql: `UPDATE events SET status = 'ROUND_ONE', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'REGISTRATION_CLOSED'
@@ -941,7 +998,7 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
         AND NOT EXISTS (
           SELECT 1 FROM heats h
            WHERE h.event_id = e.id AND h.round = 'FINAL'
-             AND ${inactiveRosterEntryExists("h.id")}
+             AND ${heatWithoutEligibleRacerExists("h.id")}
         )`,
     updateSql: `UPDATE events SET status = 'FINAL', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'ROUND_ONE'
@@ -967,13 +1024,7 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
         AND NOT EXISTS (
           SELECT 1 FROM heats h
            WHERE h.event_id = e.id AND h.round = 'FINAL' AND h.status = 'FINALIZED'
-             AND (
-               SELECT COUNT(*) FROM heat_results hr
-                WHERE hr.event_id = e.id AND hr.heat_id = h.id AND hr.status = 'FINALIZED'
-             ) != MIN(3, (
-               SELECT COUNT(*) FROM heat_entries he
-                WHERE he.event_id = e.id AND he.heat_id = h.id
-             ))
+             AND ${podiumShorterThanEligibleDepthSql("e.id", "h.id")}
         )`,
     updateSql: `UPDATE events SET status = 'COMPLETED', revision = revision + 1, updated_at = ?
       WHERE id = ? AND status = 'FINAL'
@@ -1009,17 +1060,45 @@ const hasCompletedLifecycleTransition = async (
   return command !== null;
 };
 
+// A physical instruction the staff must carry out because this transition moved
+// ducks between sealed heat bags. `MERGE` is the fold closing registration
+// performs on a short tail heat, `SPLIT` is the reverse a reopen performs.
+//
+// It exists because the pairing screen promises a bag by name, and the fold
+// would otherwise silently break that promise: a participant told "HEAT 5 bag"
+// would find their duck's entry in heat 4 with nobody told to move the bag. The
+// application never claims to know the bags were moved — it has no field for
+// that and no way to check — so this is reported to the console, which shows it
+// until a person acknowledges it.
+//
+// `duckNumbers` are the numbers printed on the ducks that changed heat. A merge
+// pours a whole bag and needs no search, but a split takes specific ducks back
+// out of one, so naming them is what makes the instruction followable. A place
+// whose duck assignment has ended contributes no number.
+interface BagMove {
+  action: "MERGE" | "SPLIT";
+  fromHeatNumber: number;
+  intoHeatNumber: number;
+  duckNumbers: number[];
+  movedEntryCount: number;
+}
+
 const lifecycleResponse = (
   event: EventRow,
   definition: LifecycleDefinition,
   replayed: boolean,
   transitioned: boolean,
   status = 200,
+  bagMoves: readonly BagMove[] = [],
 ): Response => json({
   event: eventResponse(event),
   replayed,
   transitioned,
   alreadyAtTarget: !transitioned && event.status === definition.to,
+  // Always present, so a client never has to distinguish "no moves" from "an
+  // older Worker". A replay reports none: the moves happened once, and the
+  // console that ran the original transition already queued the instruction.
+  bagMoves,
 }, status);
 
 const resolveLifecycleRace = async (
@@ -1069,14 +1148,31 @@ const safelyResolveLifecycleRace = async (
   }
 };
 
-// Names the remedy an operator can actually reach: while the round has not
-// started, its heats are still unlocked plans and `PUT /heats/:id/roster`
-// accepts a replacement roster, so the fix is to rewrite the affected roster
-// without the withdrawn racer.
-const inactiveRosterBlocker = (heatCount: number, round: string): string =>
-  `${heatCount === 1 ? "A heat" : `${heatCount} heats`} in ${round} still `
-  + `${heatCount === 1 ? "has" : "have"} a withdrawn or disqualified racer on the roster. `
-  + "Replace that roster before starting, so no inactive racer is locked in or announced.";
+// Names the remedy an operator can actually reach. Replacing the roster is no
+// longer it: the withdrawn racer's duck is already sealed in this heat's bag and
+// stays there, and rewriting the roster would renumber slots the bags cannot
+// follow. Reactivation is the only thing that puts an eligible racer back into
+// an otherwise-empty heat, and it is available to a race director at any point.
+const noEligibleRacerBlocker = (heatCount: number, round: string): string =>
+  `${heatCount === 1 ? "A heat" : `${heatCount} heats`} in ${round} `
+  + `${heatCount === 1 ? "has" : "have"} no racer left who can win: every racer on `
+  + `${heatCount === 1 ? "that roster" : "those rosters"} is withdrawn or disqualified, `
+  + "so the heat could not produce a result. Reactivate a racer before starting. "
+  + "The roster, the slot numbers, and the ducks in the bag stay exactly as they are.";
+
+// Purely informational. A withdrawn or disqualified racer on a roster is a
+// normal race-day state: their duck is in the bag, it goes in the water, and it
+// cannot win. Readiness reports it so an operator is not surprised at the
+// finish line, and never blocks on it.
+const inactiveRosterNote = (
+  entryCount: number,
+  singularRoster: string,
+  pluralRoster: string,
+): string => (entryCount === 1
+  ? `1 racer on ${singularRoster} is withdrawn or disqualified. That duck stays in its heat bag `
+    + "and races as normal, but cannot be recorded as a winner."
+  : `${entryCount} racers on ${pluralRoster} are withdrawn or disqualified. Those ducks stay in `
+    + "their heat bags and race as normal, but cannot be recorded as winners.");
 
 const readinessFor = (
   event: EventRow,
@@ -1084,6 +1180,7 @@ const readinessFor = (
   definition: LifecycleDefinition,
 ): Record<string, unknown> => {
   const blockers: string[] = [];
+  const notes: string[] = [];
   if (event.status !== definition.from) blockers.push(`Event status must be ${definition.from}.`);
   switch (definition.action) {
     case "open-registration":
@@ -1120,8 +1217,15 @@ const readinessFor = (
       if (stats.round_one_heat_count > event.final_heat_capacity) {
         blockers.push("Round-one heat count cannot exceed final capacity.");
       }
-      if (stats.round_one_inactive_roster_heat_count > 0) {
-        blockers.push(inactiveRosterBlocker(stats.round_one_inactive_roster_heat_count, "round one"));
+      if (stats.round_one_ineligible_heat_count > 0) {
+        blockers.push(noEligibleRacerBlocker(stats.round_one_ineligible_heat_count, "round one"));
+      }
+      if (stats.round_one_inactive_roster_entry_count > 0) {
+        notes.push(inactiveRosterNote(
+          stats.round_one_inactive_roster_entry_count,
+          "a round-one roster",
+          "round-one rosters",
+        ));
       }
       if (stats.round_one_unready_heat_count > 0) blockers.push("Round-one heats must not have started.");
       break;
@@ -1130,15 +1234,31 @@ const readinessFor = (
       if (stats.round_one_unfinished_heat_count > 0) blockers.push("Every round-one heat must be finalized or cancelled.");
       if (stats.round_one_missing_result_count > 0) blockers.push("Every finalized round-one heat needs a winning result.");
       if (stats.final_heat_count === 0 || stats.final_entry_count === 0) blockers.push("Create the final and promote finalists first.");
-      if (stats.final_inactive_roster_heat_count > 0) {
-        blockers.push(inactiveRosterBlocker(stats.final_inactive_roster_heat_count, "the final"));
+      if (stats.final_ineligible_heat_count > 0) {
+        blockers.push(noEligibleRacerBlocker(stats.final_ineligible_heat_count, "the final"));
+      }
+      if (stats.final_inactive_roster_entry_count > 0) {
+        notes.push(inactiveRosterNote(
+          stats.final_inactive_roster_entry_count,
+          "the final roster",
+          "the final roster",
+        ));
       }
       if (stats.final_unready_heat_count > 0) blockers.push("Final heats must not have started.");
       break;
     case "complete":
       if (stats.final_finalized_heat_count === 0) blockers.push("At least one final heat must be finalized.");
       if (stats.final_unfinished_heat_count > 0) blockers.push("Every final heat must be finalized or cancelled.");
-      if (stats.final_missing_result_count > 0) blockers.push("Every finalized final heat needs a complete podium result.");
+      // Names which side is short, because only one direction is a problem. A
+      // podium holding *more* places than the current requirement is the normal
+      // state after a finalist leaves and is never reported here at all — the
+      // old wording claimed a place was missing in exactly that case.
+      if (stats.final_missing_result_count > 0) {
+        blockers.push(
+          "A finalized final published fewer podium places than its eligible finalists can fill."
+          + " Correct or reopen that final result and publish the full podium.",
+        );
+      }
       break;
     case "close-registration":
       break;
@@ -1150,6 +1270,11 @@ const readinessFor = (
     requiresAdmin: definition.requiresAdmin,
     allowed: blockers.length === 0,
     blockers,
+    // Facts an operator should see before committing, which deliberately do not
+    // affect `allowed`. Keeping them out of `blockers` is the whole point: a
+    // withdrawn racer on a roster is normal now, and reporting it as a blocker
+    // is exactly what made the race unstartable.
+    notes,
   };
 };
 
@@ -1244,13 +1369,23 @@ interface HeatLayoutRow {
 interface LayoutEntryRow {
   id: string;
   heat_id: string;
+  duck_number: number | null;
+}
+
+// One roster place, plus the number printed on the duck sitting in that heat's
+// bag for it. The number is what makes a split instruction actionable: pouring
+// a whole bag needs no search, but taking two ducks back out of one does.
+// It is nullable because a heat place can outlive its duck assignment.
+interface LayoutEntry {
+  id: string;
+  duckNumber: number | null;
 }
 
 interface PlannedHeat {
   id: string;
   heatNumber: number;
   targetSize: number | null;
-  entryIds: string[];
+  entries: LayoutEntry[];
 }
 
 interface MergePlan {
@@ -1259,7 +1394,7 @@ interface MergePlan {
   targetEntryCount: number;
   tailHeatId: string;
   tailHeatNumber: number;
-  entryIds: string[];
+  entries: LayoutEntry[];
 }
 
 // One read of every unlocked round-one heat with its roster in slot order. The
@@ -1276,29 +1411,37 @@ const readRoundOneLayout = async (eventId: string, env: Env): Promise<PlannedHea
       ORDER BY h.heat_number`,
   ).bind(eventId).all<HeatLayoutRow>();
   const entries = await env.DB.prepare(
-    `SELECT he.id, he.heat_id FROM heat_entries he
+    `SELECT he.id, he.heat_id, d.visible_number AS duck_number
+       FROM heat_entries he
        JOIN heats h ON h.id = he.heat_id
+       LEFT JOIN duck_assignments da
+         ON da.race_entry_id = he.race_entry_id AND da.valid_to IS NULL
+       LEFT JOIN ducks d ON d.id = da.duck_id
       WHERE he.event_id = ? AND he.round = 'ROUND_ONE'
         AND h.status = 'PLANNED' AND h.roster_locked_at IS NULL
       ORDER BY h.heat_number, he.slot_number`,
   ).bind(eventId).all<LayoutEntryRow>();
-  const rosters = new Map<string, string[]>();
+  const rosters = new Map<string, LayoutEntry[]>();
   for (const row of entries.results) {
+    const entry: LayoutEntry = {
+      id: row.id,
+      duckNumber: typeof row.duck_number === "number" ? row.duck_number : null,
+    };
     const roster = rosters.get(row.heat_id);
-    if (roster === undefined) rosters.set(row.heat_id, [row.id]);
-    else roster.push(row.id);
+    if (roster === undefined) rosters.set(row.heat_id, [entry]);
+    else roster.push(entry);
   }
   const layout = heats.results.map((heat) => ({
     id: heat.id,
     heatNumber: heat.heat_number,
     targetSize: heat.target_size,
-    entryIds: rosters.get(heat.id) ?? [],
+    entries: rosters.get(heat.id) ?? [],
   }));
   // The two reads are not one snapshot. A disagreement means a concurrent
   // write landed between them, so no rebalance is planned at all and the
   // lifecycle transition proceeds untouched; readiness still refuses to start
   // an unrunnable layout, and the next close rebalances it.
-  return layout.every((heat, index) => heat.entryIds.length === heats.results[index].entry_count)
+  return layout.every((heat, index) => heat.entries.length === heats.results[index].entry_count)
     ? layout
     : null;
 };
@@ -1307,26 +1450,26 @@ const planTailMerges = async (eventId: string, env: Env): Promise<MergePlan[]> =
   const layout = await readRoundOneLayout(eventId, env);
   if (layout === null) return [];
   const plans: MergePlan[] = [];
-  const state = layout.map((heat) => ({ ...heat, entryIds: [...heat.entryIds] }));
-  while (state.length > 1 && state.some((heat) => heat.entryIds.length < MINIMUM_HEAT_SIZE)) {
+  const state = layout.map((heat) => ({ ...heat, entries: [...heat.entries] }));
+  while (state.length > 1 && state.some((heat) => heat.entries.length < MINIMUM_HEAT_SIZE)) {
     const tail = state[state.length - 1];
     const target = state[state.length - 2];
     // An empty heat holds no roster to fold, so there is nothing to move and
     // nothing this loop can improve. Stopping also keeps the loop finite when
     // an empty heat is the permanently short one.
-    if (tail.entryIds.length === 0) break;
+    if (tail.entries.length === 0) break;
     plans.push({
       targetHeatId: target.id,
       targetHeatNumber: target.heatNumber,
-      targetEntryCount: target.entryIds.length,
+      targetEntryCount: target.entries.length,
       tailHeatId: tail.id,
       tailHeatNumber: tail.heatNumber,
-      entryIds: tail.entryIds,
+      entries: tail.entries,
     });
     // The next pass sees the rosters this pass will have written: the folded
     // entries keep their order behind the target's own, which is exactly the
     // slot order `mergeStatements` binds.
-    target.entryIds = [...target.entryIds, ...tail.entryIds];
+    target.entries = [...target.entries, ...tail.entries];
     state.pop();
   }
   return plans;
@@ -1377,7 +1520,7 @@ const mergeStatements = (
   // heat, which pairing keeps at or under capacity, so the row count per pass is
   // bounded by `round_one_heat_capacity` and is one or two in every layout
   // pairing produces.
-  for (const [index, entryId] of plan.entryIds.entries()) {
+  for (const [index, entry] of plan.entries.entries()) {
     statements.push(env.DB.prepare(
       `UPDATE heat_entries
           SET heat_id = ?, slot_number = ?, source_command_id = ?
@@ -1388,7 +1531,7 @@ const mergeStatements = (
       plan.targetHeatId,
       plan.targetEntryCount + index + 1,
       commandId,
-      entryId,
+      entry.id,
       eventId,
       plan.tailHeatId,
       plan.targetHeatId,
@@ -1416,11 +1559,12 @@ interface HeatCapacityRow {
 
 interface SplitPlan {
   sourceHeatId: string;
+  sourceHeatNumber: number;
   sourceTargetSize: number;
   newHeatId: string;
   newHeatNumber: number;
   capacity: number;
-  entryIds: string[];
+  entries: LayoutEntry[];
 }
 
 const planTailSplits = async (eventId: string, env: Env): Promise<SplitPlan[]> => {
@@ -1432,7 +1576,7 @@ const planTailSplits = async (eventId: string, env: Env): Promise<SplitPlan[]> =
   if (layout === null) return [];
 
   const plans: SplitPlan[] = [];
-  const state = layout.map((heat) => ({ ...heat, entryIds: [...heat.entryIds] }));
+  const state = layout.map((heat) => ({ ...heat, entries: [...heat.entries] }));
   let nextHeatNumber = state.reduce((highest, heat) => Math.max(highest, heat.heatNumber), 0) + 1;
   for (;;) {
     // Round-one heats can never outnumber what the final can hold, so a split
@@ -1441,30 +1585,31 @@ const planTailSplits = async (eventId: string, env: Env): Promise<SplitPlan[]> =
     // borrowed slots in place keeps the reopen available as an escape hatch,
     // and the next close folds the layout back together.
     if (state.length >= capacities.final_heat_capacity) break;
-    const source = state.find((heat) => heat.targetSize !== null && heat.entryIds.length > heat.targetSize);
+    const source = state.find((heat) => heat.targetSize !== null && heat.entries.length > heat.targetSize);
     if (source === undefined) break;
     const targetSize = source.targetSize as number;
-    const moved = source.entryIds.slice(targetSize);
+    const moved = source.entries.slice(targetSize);
     const plan = {
       sourceHeatId: source.id,
+      sourceHeatNumber: source.heatNumber,
       sourceTargetSize: targetSize,
       newHeatId: crypto.randomUUID(),
       newHeatNumber: nextHeatNumber,
       capacity: capacities.round_one_heat_capacity,
-      entryIds: moved,
+      entries: moved,
     };
     plans.push(plan);
     nextHeatNumber += 1;
     // The source keeps the slots it owned and gets a full capacity of slots
     // back, exactly as `splitStatements` writes it, and the replacement heat
     // owns a capacity of slots too. Both are what the next pass measures.
-    source.entryIds = source.entryIds.slice(0, targetSize);
+    source.entries = source.entries.slice(0, targetSize);
     source.targetSize = capacities.round_one_heat_capacity;
     state.push({
       id: plan.newHeatId,
       heatNumber: plan.newHeatNumber,
       targetSize: capacities.round_one_heat_capacity,
-      entryIds: moved,
+      entries: moved,
     });
   }
   return plans;
@@ -1517,7 +1662,7 @@ const splitStatements = (
       eventId,
       plan.sourceHeatId,
       plan.sourceTargetSize,
-      plan.entryIds.length,
+      plan.entries.length,
       plan.sourceHeatId,
     ),
     // Restore the slots the merge borrowed. Pairing reads the event capacity
@@ -1539,7 +1684,7 @@ const splitStatements = (
       eventId,
     ),
   ];
-  for (const [index, entryId] of plan.entryIds.entries()) {
+  for (const [index, entry] of plan.entries.entries()) {
     statements.push(env.DB.prepare(
       `UPDATE heat_entries
           SET heat_id = ?, slot_number = ?, source_command_id = ?
@@ -1549,7 +1694,7 @@ const splitStatements = (
       plan.newHeatId,
       index + 1,
       commandId,
-      entryId,
+      entry.id,
       eventId,
       plan.sourceHeatId,
       commandId,
@@ -1562,10 +1707,12 @@ const splitStatements = (
 // Starting a round takes its rosters out of the operators' hands: every planned
 // heat is locked and advanced to LOADING in the same guarded batch as the event
 // transition, which is what replaces the retired manual lock-roster control.
-// The retired manual lock refused a roster holding a non-ACTIVE registration,
-// so this keeps that refusal: a heat with a withdrawn racer on it is never
-// locked, which makes the whole transition fail rather than silently locking a
-// stale roster, because the start command below carries the same predicate.
+// A roster holding withdrawn or disqualified racers locks normally: they stay on
+// it with their slots and their ducks untouched, and are simply ineligible to
+// win. The one roster that is never locked is one with no `ACTIVE` racer left at
+// all, because it could not produce a result afterwards. The start command above
+// carries the identical predicate, so such a heat fails the whole transition
+// rather than being silently left unlocked while the round starts around it.
 const lockRoundStatement = (
   round: "ROUND_ONE" | "FINAL",
   commandType: string,
@@ -1581,7 +1728,7 @@ const lockRoundStatement = (
     WHERE heats.event_id = ? AND heats.round = ? AND heats.status = 'PLANNED'
       AND heats.roster_locked_at IS NULL
       AND EXISTS (SELECT 1 FROM heat_entries he WHERE he.heat_id = heats.id)
-      AND NOT ${inactiveRosterEntryExists("heats.id")}
+      AND ${eligibleRacerExists("heats.id")}
       AND EXISTS (
         SELECT 1 FROM race_commands rc
          WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = ?
@@ -1591,7 +1738,12 @@ const lockRoundStatement = (
 interface LifecycleSideEffects {
   statements: D1PreparedStatement[];
   audits: Record<string, unknown>[];
+  bagMoves: BagMove[];
 }
+
+// Duck numbers, in the order the entries move, with unassigned places dropped.
+const movedDuckNumbers = (entries: readonly LayoutEntry[]): number[] =>
+  entries.map((entry) => entry.duckNumber).filter((number): number is number => number !== null);
 
 const lifecycleSideEffects = async (
   definition: LifecycleDefinition,
@@ -1609,8 +1761,15 @@ const lifecycleSideEffects = async (
         action: "ROUND_ONE_TAIL_MERGED",
         merged_heat_number: plan.tailHeatNumber,
         into_heat_number: plan.targetHeatNumber,
-        moved_entry_count: plan.entryIds.length,
-        resulting_roster_size: plan.targetEntryCount + plan.entryIds.length,
+        moved_entry_count: plan.entries.length,
+        resulting_roster_size: plan.targetEntryCount + plan.entries.length,
+      })),
+      bagMoves: plans.map((plan) => ({
+        action: "MERGE" as const,
+        fromHeatNumber: plan.tailHeatNumber,
+        intoHeatNumber: plan.targetHeatNumber,
+        duckNumbers: movedDuckNumbers(plan.entries),
+        movedEntryCount: plan.entries.length,
       })),
     };
   }
@@ -1621,7 +1780,14 @@ const lifecycleSideEffects = async (
       audits: plans.map((plan) => ({
         action: "ROUND_ONE_TAIL_SPLIT",
         restored_heat_number: plan.newHeatNumber,
-        moved_entry_count: plan.entryIds.length,
+        moved_entry_count: plan.entries.length,
+      })),
+      bagMoves: plans.map((plan) => ({
+        action: "SPLIT" as const,
+        fromHeatNumber: plan.sourceHeatNumber,
+        intoHeatNumber: plan.newHeatNumber,
+        duckNumbers: movedDuckNumbers(plan.entries),
+        movedEntryCount: plan.entries.length,
       })),
     };
   }
@@ -1632,9 +1798,10 @@ const lifecycleSideEffects = async (
         lockRoundStatement(round, definition.commandType, eventId, commandId, actor.id, now, env),
       ],
       audits: [{ action: "HEAT_ROSTERS_LOCKED", round }],
+      bagMoves: [],
     };
   }
-  return { statements: [], audits: [] };
+  return { statements: [], audits: [], bagMoves: [] };
 };
 
 const sideEffectAuditStatement = (
@@ -1775,7 +1942,12 @@ const runLifecycleCommand = async (
     revision: event.revision + 1,
     updated_at: now,
   };
-  return lifecycleResponse(transitioned, definition, false, true, 201);
+  // The moves are reported with the transition that made them, and only when
+  // that transition genuinely committed. Every rebalance statement shares the
+  // command-committed guard of `updateSql`, and the two `meta.changes` checks
+  // above already refused the whole batch otherwise, so a reported move is
+  // always a move the database actually performed.
+  return lifecycleResponse(transitioned, definition, false, true, 201, sideEffects.bagMoves);
 };
 
 // Force delete removes the complete event dataset in any status. It is the one

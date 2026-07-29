@@ -8,6 +8,7 @@ import {
   staffHomeScript,
   staffInventoryScript,
 } from "./client-scripts.ts";
+import { DELETABLE_EVENT_STATUSES } from "./registration.ts";
 import { renderStaffHome, renderStaffInventory } from "./site.ts";
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,7 @@ class FakeElement {
     this.parentNode = null;
     this.focusCount = 0;
     this.scrollCalls = [];
+    this.value = "";
   }
 
   append(...children) {
@@ -127,6 +129,10 @@ class FakeDocument {
   querySelector(selector) {
     return this.hooks.get(selector) ?? null;
   }
+
+  getElementById(id) {
+    return this.hooks.get(`#${id}`) ?? null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -169,15 +175,24 @@ const consoleParts = {
   text: fromConsole(/const text = \(tag, value, className\) => \{[\s\S]*?\n\};/),
   humanize: fromConsole(/const humanize = \(value\) => [^;]+;/),
   empty: fromConsole(/const empty = \(message\) => .*;/),
+  historyCard: fromConsole(/const historyCard = \(title, detail\) => \{[\s\S]*?\n\};/),
   inventoryCard: fromInventory(/const inventoryCard = \(duck\) => \{[\s\S]*?\n\};/),
   inventoryGroupSection: fromInventory(/const inventoryGroupSection = \(group\) => \{[\s\S]*?\n\};/),
   loadInventory: fromInventory(/const loadInventory = async \(\) => \{[\s\S]*?\n\};/),
   loadDuckDetail: fromInventory(/const loadDuckDetail = async \(duckId, trigger = null, focusDetail = false\) => \{[\s\S]*?\n\};/),
   loadParticipantDetail: fromConsole(/const loadParticipantDetail = async \(registrationId\) => \{[\s\S]*?\n\};/),
-  revealConsoleSection: fromConsole(/const revealConsoleSection = \(selector\) => \{[\s\S]*?\n\};/),
+  revealConsoleSection: fromConsole(/const revealConsoleSection = \(view\) => \{[\s\S]*?\n\};/),
+  participantIsDeletable: fromConsole(/const participantIsDeletable = \(registration\) => .*;\n/),
+  participantIsCurrentlyPaired: fromConsole(/const participantIsCurrentlyPaired = \(registration\) =>[\s\S]*?;\n/),
+  participantPairedDuckNumber: fromConsole(/const participantPairedDuckNumber = \(registration\) => \{[\s\S]*?\n\};/),
+  participantDuckFact: fromConsole(/const participantDuckFact = \(registration\) => \{[\s\S]*?\n\};/),
+  participantUndeletableReason: fromConsole(/const participantUndeletableReason = \(registration\) => \{[\s\S]*?\n\};/),
+  PARTICIPANT_DELETABLE_EVENT_STATUSES: fromConsole(/const PARTICIPANT_DELETABLE_EVENT_STATUSES = \[[\s\S]*?\n\];/),
+  participantEventBlocksDeletion: fromConsole(/const participantEventBlocksDeletion = \(\) => [\s\S]*?;\n/),
   openRosterParticipant: fromConsole(/const openRosterParticipant = async \(registrationId\) => \{[\s\S]*?\n\};/),
   openRosterDuck: fromConsole(/const openRosterDuck = \(duckId\) => \{[\s\S]*?\n\};/),
   loadHeatDetail: fromConsole(/const loadHeatDetail = async \(heatId\) => \{[\s\S]*?\n\};/),
+  resultForm: fromConsole(/const resultForm = \(body, mode\) => \{[\s\S]*?\n\};/),
   commandOptions: fromConsole(/const commandOptions = \(method, payload\) => \(\{[\s\S]*?\n\}\);/),
   addParticipantAction: fromConsole(/const addParticipantAction = \(label, className, action\) => \{[\s\S]*?\n\};/),
   participantDuckNameFact: fromConsole(/const participantDuckNameFact = \(registration\) => \{[\s\S]*?\n\};/),
@@ -532,7 +547,7 @@ const rosterEntry = (overrides = {}) => ({
   ...overrides,
 });
 
-const heatHarness = ({ roster, canRegistration = true, canInventory = true }) => {
+const heatHarness = ({ roster, results = [], canRegistration = true, canInventory = true }) => {
   const document = new FakeDocument();
   const heatDetail = document.hook("[data-heat-detail]");
   const heatRoster = document.hook("[data-heat-roster]", "ul");
@@ -543,6 +558,8 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
   const participantDetail = document.hook("[data-participant-detail]", "article");
   const opened = [];
   const navigations = [];
+  const appliedViews = [];
+  const location = { hash: "", assign: (url) => navigations.push(url) };
   const runtime = build(
     [
       heatRosterHelpersScript,
@@ -553,12 +570,20 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
       "openRosterParticipant",
       "openRosterDuck",
       "loadParticipantDetail",
+      // The real card builder, so a published-result row is asserted as it
+      // actually ships rather than through a stub.
+      "historyCard",
       "loadHeatDetail",
     ],
     {
       document,
       canRegistration,
       canInventory,
+      // The Admin view switcher: the roster deep link goes through the same
+      // hash path the menu bar uses, so it is injected rather than stubbed out.
+      consoleViewSections: [Object.assign(participants, { dataset: { consoleView: "participants" } })],
+      applyConsoleView: (view) => appliedViews.push(view),
+      location,
       heatDetail,
       heatRoster,
       heatFacts,
@@ -567,27 +592,28 @@ const heatHarness = ({ roster, canRegistration = true, canInventory = true }) =>
       selectedHeat: null,
       currentEventId: () => "event",
       showFacts: () => {},
-      historyCard: () => document.createElement("div"),
       renderHeatControls: () => {},
       renderParticipantDetail: (registration) => {
         participantDetail.hidden = false;
         opened.push(["participant-rendered", registration.registrationId]);
       },
-      location: { assign: (url) => navigations.push(url) },
       setMessage: (message, isError) => opened.push(["message", message, Boolean(isError)]),
       api: async (url) => {
         opened.push(["api", url]);
         if (url.includes("/registrations/")) {
           return { registration: { registrationId: decodeURIComponent(url.split("/").pop()) } };
         }
-        return { heat: { id: "heat-1", round: "ROUND_ONE", number: 1, status: "PLANNED", rosterSize: roster.length, publishedResultCount: 0, revision: 0 }, roster, results: [] };
+        return { heat: { id: "heat-1", round: "ROUND_ONE", number: 1, status: "PLANNED", rosterSize: roster.length, publishedResultCount: results.length, revision: 0 }, roster, results };
       },
     },
     ["loadHeatDetail"],
   );
   return {
     document,
+    heatResults,
     heatRoster,
+    appliedViews,
+    location,
     navigations,
     opened,
     participantDetail,
@@ -665,6 +691,283 @@ test("the roster entry builder itself refuses a duck link for an unassigned entr
   assert.equal(linked.querySelectorAll("[data-roster-duck-link]").length, 1);
 });
 
+// A withdrawn or disqualified racer stays on the console roster forever: their
+// duck is sealed in this heat's bag and still races. The console is where a race
+// director reconciles a bag, so the entry is marked, never dropped.
+const INELIGIBLE_NOTE =
+  "The duck stays in its heat bag and still races, but cannot be recorded as a winner.";
+
+const markerOf = (container) => {
+  const flag = container.children.find((child) => child.className === "roster-flag");
+  const note = container.children.find((child) => child.className === "roster-flag-note");
+  return flag === undefined ? null : { flag: flag.textContent, note: note?.textContent ?? null };
+};
+
+test("a console roster entry marks a racer who can no longer win", async () => {
+  const harness = heatHarness({
+    roster: [
+      rosterEntry({ eligible: true }),
+      rosterEntry({
+        raceEntryId: "entry-2",
+        slotNumber: 2,
+        eligible: false,
+        participant: { registrationId: "registration-2", firstName: "Grace", lastName: "Hopper", registrationStatus: "WITHDRAWN" },
+        duck: { id: "duck-13", visibleNumber: 13 },
+      }),
+      // A projection without the field renders exactly as it did before.
+      rosterEntry({ raceEntryId: "entry-3", slotNumber: 3, duck: { id: "duck-14", visibleNumber: 14 } }),
+    ],
+  });
+  await harness.loadHeatDetail("heat-1");
+
+  const [active, withdrawn, legacy] = harness.entries();
+  assert.equal(harness.entries().length, 3, "no entry is dropped from a staff roster");
+  assert.equal(active.className, "roster-entry");
+  assert.equal(markerOf(active), null);
+  assert.equal(legacy.className, "roster-entry");
+  assert.equal(markerOf(legacy), null);
+
+  assert.equal(withdrawn.className, "roster-entry ineligible");
+  assert.equal(withdrawn.children[0].textContent, "Slot 2 · Grace Hopper · Duck #13");
+  assert.deepEqual(markerOf(withdrawn), { flag: "Cannot win · Withdrawn", note: INELIGIBLE_NOTE });
+  // The marker sits above the deep links, so it is read before either is taken.
+  assert.equal(withdrawn.children[2].className, "roster-flag");
+  assert.equal(withdrawn.children.at(-1).className, "actions");
+  // Marking a racer removes nothing: both deep links are still offered.
+  assert.equal(harness.links("participant").length, 3);
+  assert.equal(harness.links("duck").length, 3);
+});
+
+test("a published result whose racer has since left is marked, not reordered", async () => {
+  const result = (place, lastName, visibleNumber, extra = {}) => ({
+    id: `result-${place}`,
+    raceEntryId: `entry-${place}`,
+    place,
+    revision: 0,
+    finalizedAt: "2026-07-26T12:00:00Z",
+    participant: { firstName: "Racer", lastName, registrationStatus: "ACTIVE" },
+    duck: { visibleNumber },
+    ...extra,
+  });
+  const harness = heatHarness({
+    roster: [rosterEntry()],
+    results: [
+      result(1, "Winner", 12, { eligible: true }),
+      result(2, "Gone", 13, {
+        eligible: false,
+        participant: { firstName: "Racer", lastName: "Gone", registrationStatus: "DISQUALIFIED" },
+      }),
+      result(3, "Legacy", 14),
+    ],
+  });
+  await harness.loadHeatDetail("heat-1");
+
+  const cards = harness.heatResults.children;
+  assert.equal(cards.length, 3);
+  assert.deepEqual(cards.map((card) => card.children[0].textContent), [
+    "Place 1 · Duck #12",
+    "Place 2 · Duck #13",
+    "Place 3 · Duck #14",
+  ]);
+  assert.equal(cards[0].className, "data-card");
+  assert.equal(markerOf(cards[0]), null);
+  assert.equal(cards[1].className, "data-card ineligible");
+  assert.deepEqual(markerOf(cards[1]), { flag: "Cannot win · Disqualified", note: INELIGIBLE_NOTE });
+  assert.equal(cards[2].className, "data-card");
+  assert.equal(markerOf(cards[2]), null);
+});
+
+// ---------------------------------------------------------------------------
+// Naming a winner from the console
+//
+// The console result form is the fallback for the finish-line station and the
+// only way to correct a published result. It offers a race director a name and
+// then posts it, so anything it offers that the server refuses is a 422 in
+// their face on race day — with a heat roster immediately above the form that
+// already says, in words, that this racer cannot win.
+// ---------------------------------------------------------------------------
+
+const resultFormHarness = ({ roster, results = [], heat, mode }) => {
+  const document = new FakeDocument();
+  const requests = [];
+  const confirmations = [];
+  // `new Option(label, value)` is the browser constructor the console uses; a
+  // constructor returning an object hands back exactly that object.
+  const Option = function Option(label, value) {
+    const option = document.createElement("option");
+    option.textContent = label;
+    option.value = value;
+    return option;
+  };
+  const runtime = build(
+    [heatRosterHelpersScript, "text", "empty", "commandOptions", "resultForm"],
+    {
+      document,
+      Option,
+      selectedHeat: { id: heat.id, revision: heat.revision },
+      currentEvent: { id: "event" },
+      currentEventId: () => "event",
+      appConfirm: async (message, options) => {
+        confirmations.push([message, options]);
+        return true;
+      },
+      perform: async (_button, _message, operation) => operation(),
+      api: async (url, options) => {
+        requests.push([url, JSON.parse(options.body)]);
+        return {};
+      },
+      loadEvents: async () => {},
+      loadFinalists: async () => {},
+      crypto: { randomUUID: () => "11111111-1111-4111-8111-111111111111" },
+    },
+    ["resultForm"],
+  );
+  const form = runtime.resultForm({ heat, roster, results }, mode);
+  const selects = form.querySelectorAll("select");
+  return {
+    form,
+    requests,
+    confirmations,
+    selects,
+    // Every name the form is willing to publish, place by place, with the
+    // placeholder dropped.
+    offered: () => selects.map((select) => select.children.slice(1).map((option) => option.textContent)),
+    placeLabels: () => form.children
+      .filter((child) => child.tagName === "LABEL" && child.querySelector("select") !== null)
+      .map((child) => child.textContent),
+    emptyState: () => form.children.find((child) => child.className === "empty-state") ?? null,
+    submit: async (chosen) => {
+      for (const [index, select] of selects.entries()) {
+        select.value = chosen[index];
+        select.selectedOptions = [select.children.find((option) => option.value === chosen[index])];
+      }
+      if (mode === "correct") form.elements = { reason: { value: "Playwright-free correction reason." } };
+      await form.dispatch("submit");
+    },
+  };
+};
+
+const podiumRoster = (overrides = []) => [1, 2, 3].map((slot) => ({
+  raceEntryId: `entry-${slot}`,
+  slotNumber: slot,
+  assignmentSource: "PROMOTION",
+  eligible: true,
+  participant: {
+    registrationId: `registration-${slot}`,
+    firstName: "Racer",
+    lastName: `Slot${slot}`,
+    registrationStatus: "ACTIVE",
+  },
+  duck: { id: `duck-${100 + slot}`, visibleNumber: 100 + slot },
+  ...overrides[slot - 1],
+}));
+
+const leftTheRace = (status) => ({
+  eligible: false,
+  participant: { registrationId: "registration-2", firstName: "Racer", lastName: "Slot2", registrationStatus: status },
+});
+
+test("the console final result form offers only racers the server would accept", async () => {
+  const harness = resultFormHarness({
+    mode: "finalize",
+    heat: { id: "final-heat", round: "FINAL", status: "AWAITING_RESULT", revision: 4 },
+    roster: podiumRoster([undefined, leftTheRace("WITHDRAWN")]),
+  });
+
+  // Two eligible finalists means a two-place podium, exactly what the server's
+  // result validation requires. Sizing it from the whole roster demands a third
+  // place that no duck may ever fill, so the form can only ever collect a 422.
+  assert.deepEqual(harness.placeLabels(), ["First place", "Second place"]);
+  for (const options of harness.offered()) {
+    assert.deepEqual(options, ["Racer Slot1 · Duck #101", "Racer Slot3 · Duck #103"]);
+  }
+
+  await harness.submit(["entry-1", "entry-3"]);
+  assert.equal(harness.requests.length, 1);
+  const [url, payload] = harness.requests[0];
+  assert.equal(url, "/api/v1/staff/events/event/heats/final-heat/results/finalize");
+  assert.deepEqual(payload.results, [
+    { raceEntryId: "entry-1", place: 1 },
+    { raceEntryId: "entry-3", place: 2 },
+  ]);
+});
+
+test("both correction forms narrow to eligible racers too", async () => {
+  // FINAL correction: three published places, one racer since disqualified.
+  const finalCorrection = resultFormHarness({
+    mode: "correct",
+    heat: { id: "final-heat", round: "FINAL", status: "FINALIZED", revision: 9 },
+    roster: podiumRoster([undefined, leftTheRace("DISQUALIFIED")]),
+    results: [
+      { place: 1, raceEntryId: "entry-1" },
+      { place: 2, raceEntryId: "entry-2" },
+      { place: 3, raceEntryId: "entry-3" },
+    ],
+  });
+  assert.deepEqual(finalCorrection.placeLabels(), ["First place", "Second place"]);
+  for (const options of finalCorrection.offered()) {
+    assert.deepEqual(options, ["Racer Slot1 · Duck #101", "Racer Slot3 · Duck #103"]);
+  }
+  // The published second place belongs to the disqualified racer, so it cannot
+  // be preselected — the director has to name someone the server will accept.
+  assert.equal(finalCorrection.selects[1].value, "");
+  assert.equal(finalCorrection.selects[0].value, "entry-1");
+
+  // ROUND_ONE correction: one place, and the racer who left is not on offer.
+  const roundOne = resultFormHarness({
+    mode: "correct",
+    heat: { id: "heat-1", round: "ROUND_ONE", status: "FINALIZED", revision: 3 },
+    roster: podiumRoster([undefined, leftTheRace("WITHDRAWN")]),
+    results: [{ place: 1, raceEntryId: "entry-2" }],
+  });
+  assert.deepEqual(roundOne.placeLabels(), ["First place"]);
+  assert.deepEqual(roundOne.offered(), [["Racer Slot1 · Duck #101", "Racer Slot3 · Duck #103"]]);
+  assert.equal(roundOne.selects[0].value, "");
+
+  await roundOne.submit(["entry-3"]);
+  const [url, payload] = roundOne.requests[0];
+  assert.equal(url, "/api/v1/staff/events/event/heats/heat-1/results/correct");
+  assert.deepEqual(payload.results, [{ raceEntryId: "entry-3", place: 1 }]);
+});
+
+test("a heat with no eligible racer says so instead of rendering a doomed form", () => {
+  for (const round of ["FINAL", "ROUND_ONE"]) {
+    const harness = resultFormHarness({
+      mode: "finalize",
+      heat: { id: "heat-1", round, status: "AWAITING_RESULT", revision: 1 },
+      roster: podiumRoster().map((entry) => ({
+        ...entry,
+        eligible: false,
+        participant: { ...entry.participant, registrationStatus: "WITHDRAWN" },
+      })),
+    });
+    assert.deepEqual(harness.placeLabels(), [], round);
+    assert.equal(harness.selects.length, 0, `${round}: no empty, unsubmittable select is rendered`);
+    const message = harness.emptyState();
+    assert.ok(message, `${round}: the card explains itself`);
+    assert.match(
+      message.textContent,
+      /^Every racer in this heat is withdrawn or disqualified, so no result can be recorded\./,
+      round,
+    );
+    assert.match(message.textContent, /Reactivate the racer who should hold the place/, round);
+  }
+});
+
+test("a projection without the eligibility field keeps every racer selectable", () => {
+  const harness = resultFormHarness({
+    mode: "finalize",
+    heat: { id: "final-heat", round: "FINAL", status: "AWAITING_RESULT", revision: 1 },
+    roster: podiumRoster().map(({ eligible, ...entry }) => entry),
+  });
+  assert.deepEqual(harness.placeLabels(), ["First place", "Second place", "Third place"]);
+  assert.deepEqual(harness.offered()[0], [
+    "Racer Slot1 · Duck #101",
+    "Racer Slot2 · Duck #102",
+    "Racer Slot3 · Duck #103",
+  ]);
+});
+
 test("roster deep links follow the actor's console roles", async () => {
   const registrationOnly = heatHarness({ roster: [rosterEntry()], canInventory: false });
   await registrationOnly.loadHeatDetail("heat-1");
@@ -694,6 +997,8 @@ test("the participant link reveals the participants section and loads that parti
 
   await participantLink.dispatch("click");
 
+  // The deep link switches the Admin view through the hash, then scrolls.
+  assert.equal(harness.location.hash, "participants");
   assert.deepEqual(harness.participants.scrollCalls, [{ behavior: "smooth", block: "start" }]);
   assert.ok(harness.opened.some(([kind, value]) => kind === "api" && value === "/api/v1/staff/registrations/registration-1"));
   assert.ok(harness.opened.some(([kind, value]) => kind === "participant-rendered" && value === "registration-1"));
@@ -756,25 +1061,43 @@ test("an inventory selection overtaken by the panel closing never renders into i
 // Moderating a participant-chosen duck name
 // ---------------------------------------------------------------------------
 
-const registrationDetail = (overrides = {}) => ({
-  registrationId: "registration-1",
-  raceEntryId: "entry-1",
-  firstName: "Ada",
-  lastName: "Lovelace",
-  email: "ada@example.com",
-  phone: "555-0100",
-  status: "ACTIVE",
-  lookupCode: "ADAA2345",
-  createdVia: "PUBLIC",
-  notes: null,
-  revision: 3,
-  assignment: { id: "assignment-1", duck: { id: "duck-12", visibleNumber: 12 } },
-  duckName: null,
-  duckNamePubliclyHidden: false,
-  ...overrides,
-});
+// The shape `GET /api/v1/staff/registrations/<id>` returns. The two booleans are
+// derived here exactly as the server derives them, so a fixture cannot express a
+// state D1 could not produce; a test that wants the interesting mismatch — an
+// unassigned duck, so not currently paired but still not deletable — says so
+// explicitly.
+const registrationDetail = (overrides = {}) => {
+  const merged = {
+    registrationId: "registration-1",
+    raceEntryId: "entry-1",
+    firstName: "Ada",
+    lastName: "Lovelace",
+    email: "ada@example.com",
+    phone: "555-0100",
+    status: "ACTIVE",
+    lookupCode: "ADAA2345",
+    createdVia: "PUBLIC",
+    notes: null,
+    revision: 3,
+    assignment: { id: "assignment-1", duck: { id: "duck-12", visibleNumber: 12 } },
+    duckName: null,
+    duckNamePubliclyHidden: false,
+    ...overrides,
+  };
+  const paired = merged.assignment !== null && merged.assignment !== undefined;
+  // Pairing puts the duck straight into the next open heat bag, so a paired
+  // fixture has a heat and an unpaired one does not. The one interesting
+  // mismatch — paired with no heat yet — is stated explicitly by the test that
+  // wants it, exactly like the deletable/currentlyPaired mismatch above.
+  return { currentlyPaired: paired, deletable: !paired, heatAssignmentPending: !paired, ...merged };
+};
 
-const participantDetailHarness = ({ canRegistration = true, clearResponse = null } = {}) => {
+const participantDetailHarness = ({
+  canRegistration = true,
+  canDirectRace = false,
+  clearResponse = null,
+  eventStatus = "REGISTRATION_OPEN",
+} = {}) => {
   const document = new FakeDocument();
   const participantDetail = document.hook("[data-participant-detail]", "article");
   const participantFacts = document.hook("[data-participant-facts]", "dl");
@@ -805,13 +1128,21 @@ const participantDetailHarness = ({ canRegistration = true, clearResponse = null
       "addParticipantAction",
       "participantDuckNameFact",
       "clearParticipantDuckName",
+      "participantIsDeletable",
+      "participantIsCurrentlyPaired",
+      "participantPairedDuckNumber",
+      "participantDuckFact",
+      "PARTICIPANT_DELETABLE_EVENT_STATUSES",
+      "participantEventBlocksDeletion",
+      "participantUndeletableReason",
       "renderParticipantDetail",
     ],
     {
       document,
       canRegistration,
       canInventory: false,
-      canDirectRace: false,
+      canDirectRace,
+      currentEvent: eventStatus === null ? null : { id: "event", name: "Annual Duck Race", status: eventStatus },
       participantDetail,
       participantFacts,
       participantActions,
@@ -844,8 +1175,232 @@ const participantDetailHarness = ({ canRegistration = true, clearResponse = null
     participantDuckNameForm,
     setConfirmAnswer: (value) => { confirmAnswer = value; },
     action: (label) => participantActions.children.find((child) => child.textContent === label) ?? null,
+    actionLabels: () => participantActions.children
+      .filter((child) => child.tagName === "BUTTON")
+      .map((child) => child.textContent),
+    note: () => participantActions.children
+      .find((child) => child.dataset.participantActionNote !== undefined) ?? null,
   };
 };
+
+// `deletable` decides one thing: whether Delete exists. It is the exact
+// predicate the delete endpoint re-checks inside its guarded write, so a
+// rendered Delete button is a button the server accepts.
+//
+// It deliberately does not decide whether a participant may leave the race. A
+// SUBMITTED, never-paired no-show is exactly who a registration desk needs to
+// withdraw, and the withdraw endpoint accepts them; hiding Withdraw behind
+// undeletability left destroying the registration as the only way to record
+// that they did not turn up.
+test("a deletable participant is offered Delete and Withdraw, not one instead of the other", () => {
+  for (const status of ["SUBMITTED", "ACTIVE"]) {
+    const harness = participantDetailHarness({ canDirectRace: true });
+    harness.renderParticipantDetail(registrationDetail({ assignment: null, status }));
+    assert.deepEqual(
+      harness.actionLabels(),
+      ["Withdraw", "Disqualify", "Delete registration"],
+      `${status}: leaving the race and deleting the registration are both offered`,
+    );
+    // Nothing is in the water, so there is nothing to explain.
+    assert.equal(harness.note(), null, status);
+  }
+
+  // Withdrawal is a registration-desk action; disqualification is not.
+  const desk = participantDetailHarness();
+  desk.renderParticipantDetail(registrationDetail({ assignment: null, status: "SUBMITTED" }));
+  assert.deepEqual(desk.actionLabels(), ["Withdraw", "Delete registration"]);
+
+  // Already out of the race: nothing left to withdraw, and Delete still stands
+  // because the server would still accept it.
+  const withdrawn = participantDetailHarness({ canDirectRace: true });
+  withdrawn.renderParticipantDetail(registrationDetail({ assignment: null, status: "WITHDRAWN" }));
+  assert.deepEqual(withdrawn.actionLabels(), ["Reactivate", "Delete registration"]);
+  assert.equal(withdrawn.note(), null);
+});
+
+test("a currently paired participant offers Withdraw and Disqualify, never Delete, and names the bag", () => {
+  const harness = participantDetailHarness({ canDirectRace: true });
+  harness.renderParticipantDetail(registrationDetail({ status: "ACTIVE" }));
+  const labels = harness.actionLabels();
+  assert.deepEqual(labels, ["Withdraw", "Disqualify"]);
+  assert.equal(labels.includes("Delete registration"), false);
+
+  // One short sentence beside the actions, naming the duck and the reason.
+  const note = harness.note();
+  assert.ok(note, "a paired participant is told why delete is unavailable");
+  assert.equal(note.tagName, "P");
+  assert.equal(note.className, "muted participant-action-note");
+  assert.match(note.textContent, /Duck #12 is already sealed in a heat bag/);
+  assert.match(note.textContent, /ineligible to be counted as a winner/);
+  assert.match(note.textContent, /cannot be deleted/);
+
+  // Disqualification stays a race-director action; withdrawal does not.
+  const desk = participantDetailHarness();
+  desk.renderParticipantDetail(registrationDetail({ status: "ACTIVE" }));
+  assert.deepEqual(desk.actionLabels(), ["Withdraw"]);
+
+  // SUBMITTED versus ACTIVE is not the question: a reactivated participant can
+  // be SUBMITTED while still holding the duck, and is still undeletable.
+  const reactivated = participantDetailHarness({ canDirectRace: true });
+  reactivated.renderParticipantDetail(registrationDetail({ status: "SUBMITTED" }));
+  assert.equal(reactivated.actionLabels().includes("Delete registration"), false);
+  assert.deepEqual(reactivated.actionLabels(), ["Withdraw", "Disqualify"]);
+
+  // Already out of the race: no status change is offered, and still no delete.
+  const disqualified = participantDetailHarness({ canDirectRace: true });
+  disqualified.renderParticipantDetail(registrationDetail({ status: "DISQUALIFIED" }));
+  assert.deepEqual(disqualified.actionLabels(), ["Reactivate"]);
+  assert.ok(disqualified.note(), "the explanation stays while the duck is still paired");
+});
+
+// The defect this replaces: the panel read `assignment`, so a participant whose
+// duck had been unassigned was offered Delete and collected a 409 from the
+// server, which re-checks the ended assignment row the projection already knew
+// about. `currentlyPaired` and `deletable` are different questions and the panel
+// must ask each one where it belongs.
+//
+// The whole matrix runs here, controls and sentence together, because the
+// sentence is the only thing a staffer has to act on and every one of these
+// states can produce a different true reason. A branch that states the wrong
+// one is a lie: a duck that has no heat has no bag, and a race whose status
+// forbids deletion has nothing to do with the participant at all.
+test("every undeletable state gets the controls it allows and a sentence that is true", () => {
+  const matrix = [
+    {
+      label: "paired now, duck already in a numbered bag",
+      registration: { currentlyPaired: true, deletable: false, heatAssignmentPending: false },
+      actions: ["Withdraw", "Disqualify"],
+      note: /^Duck #12 is already sealed in a heat bag/,
+      forbidden: [/no heat yet/, /while this race is/],
+    },
+    {
+      // Paired, but QuickDucks assigned no heat, so there is no numbered bag in
+      // existence for this duck. The pairing callout refuses to invent a bag
+      // number here; the console must refuse to claim one is already sealed.
+      label: "paired but no heat assigned yet",
+      registration: { currentlyPaired: true, deletable: false, heatAssignmentPending: true },
+      actions: ["Withdraw", "Disqualify"],
+      note: /^Duck #12 is paired with this participant but has no heat yet, so there is no bag it can go into\./,
+      forbidden: [/sealed in a heat bag/, /while this race is/],
+    },
+    {
+      label: "duck later unassigned",
+      // No current assignment, so `assignment` is null and `currentlyPaired` is
+      // false — but the ended assignment row means the delete endpoint refuses.
+      registration: {
+        assignment: null,
+        currentlyPaired: false,
+        deletable: false,
+        heatAssignmentPending: false,
+      },
+      actions: ["Withdraw", "Disqualify"],
+      note: /already been in the race/,
+      forbidden: [/sealed in a heat bag/, /while this race is/],
+    },
+    {
+      label: "never paired",
+      registration: { assignment: null, currentlyPaired: false, deletable: true },
+      actions: ["Withdraw", "Disqualify", "Delete registration"],
+      note: null,
+      forbidden: [],
+    },
+  ];
+
+  for (const { label, registration, actions, note, forbidden } of matrix) {
+    const harness = participantDetailHarness({ canDirectRace: true });
+    harness.renderParticipantDetail(registrationDetail({ status: "ACTIVE", ...registration }));
+    assert.deepEqual(harness.actionLabels(), actions, label);
+    if (note === null) {
+      assert.equal(harness.note(), null, label);
+      continue;
+    }
+    assert.match(harness.note().textContent, note, label);
+    for (const claim of forbidden) {
+      assert.equal(claim.test(harness.note().textContent), false, `${label}: ${claim}`);
+    }
+  }
+});
+
+// DRAFT is the one event status the delete endpoint refuses outright. Nothing
+// about the participant is the reason there, so a sentence about heat bags or
+// about having "already been in the race" would be false about someone who has
+// never held a duck and never been on a roster.
+// The console mirrors the server's list rather than restating it loosely. If
+// the two drift, the console blames the race for a refusal the race did not
+// cause, or stays silent about one it did.
+test("the console's deletable event statuses match the endpoint's own list", () => {
+  const [statuses] = new Function(
+    `${lift("PARTICIPANT_DELETABLE_EVENT_STATUSES", consoleParts.PARTICIPANT_DELETABLE_EVENT_STATUSES)}`
+    + "\nreturn [PARTICIPANT_DELETABLE_EVENT_STATUSES];",
+  )();
+  assert.deepEqual(statuses, [...DELETABLE_EVENT_STATUSES]);
+});
+
+test("a race whose status forbids deletion says so instead of blaming the participant", () => {
+  const harness = participantDetailHarness({ canDirectRace: true, eventStatus: "DRAFT" });
+  harness.renderParticipantDetail(registrationDetail({
+    status: "SUBMITTED",
+    assignment: null,
+    currentlyPaired: false,
+    deletable: false,
+    heatAssignmentPending: true,
+  }));
+  assert.deepEqual(harness.actionLabels(), ["Withdraw", "Disqualify"]);
+  const note = harness.note().textContent;
+  assert.match(note, /^Registrations cannot be deleted while this race is draft\./);
+  assert.equal(/heat bag/.test(note), false);
+  assert.equal(/already been in the race/.test(note), false);
+
+  // Every status the endpoint does accept keeps the participant-shaped reasons,
+  // so this branch can never swallow the real one.
+  for (const status of ["REGISTRATION_OPEN", "REGISTRATION_CLOSED", "ROUND_ONE", "FINAL", "COMPLETED"]) {
+    const open = participantDetailHarness({ canDirectRace: true, eventStatus: status });
+    open.renderParticipantDetail(registrationDetail({ status: "ACTIVE" }));
+    assert.match(open.note().textContent, /^Duck #12 is already sealed in a heat bag/, status);
+  }
+
+  // No loaded event is not evidence of a race state, so it blames nothing.
+  const unknown = participantDetailHarness({ canDirectRace: true, eventStatus: null });
+  unknown.renderParticipantDetail(registrationDetail({ status: "ACTIVE" }));
+  assert.match(unknown.note().textContent, /^Duck #12 is already sealed in a heat bag/);
+});
+
+// A staff console render runs inside no try block, so one thrown property read
+// silently drops every control after it. A projection served by an older Worker
+// carries neither boolean; the safe reading is "not deletable", because refusing
+// a delete that would have worked costs a refresh while offering a doomed one
+// costs a 409 in front of a participant.
+test("a projection without the new booleans renders the safe side of both questions", () => {
+  const legacyPaired = participantDetailHarness({ canDirectRace: true });
+  legacyPaired.renderParticipantDetail({
+    ...registrationDetail({ status: "ACTIVE" }),
+    currentlyPaired: undefined,
+    deletable: undefined,
+  });
+  assert.deepEqual(legacyPaired.actionLabels(), ["Withdraw", "Disqualify"]);
+  // `currentlyPaired` falls back to the assignment it is defined to equal, so
+  // the bag sentence is still exactly right.
+  assert.match(legacyPaired.note().textContent, /Duck #12 is already sealed in a heat bag/);
+
+  const legacyUnpaired = participantDetailHarness({ canDirectRace: true });
+  legacyUnpaired.renderParticipantDetail({
+    ...registrationDetail({ status: "ACTIVE", assignment: null }),
+    currentlyPaired: undefined,
+    deletable: undefined,
+  });
+  assert.deepEqual(legacyUnpaired.actionLabels(), ["Withdraw", "Disqualify"]);
+  assert.match(legacyUnpaired.note().textContent, /already been in the race/);
+
+  // A malformed assignment must not throw either: the panel keeps its controls
+  // and drops only the duck number from the sentence.
+  const malformed = participantDetailHarness({ canDirectRace: true });
+  malformed.renderParticipantDetail(registrationDetail({ status: "ACTIVE", assignment: { id: "assignment-1" } }));
+  assert.deepEqual(malformed.actionLabels(), ["Withdraw", "Disqualify"]);
+  assert.match(malformed.note().textContent, /^This participant's duck is already sealed in a heat bag/);
+  // The Duck fact degrades with it rather than throwing and dropping the rest
+  // of the panel, and it never claims the duck was handed back.
+  assert.deepEqual(malformed.facts.find(([label]) => label === "Duck"), ["Duck", "Paired"]);
+});
 
 test("the participant panel shows the stored duck name and whether it is already hidden", () => {
   const named = participantDetailHarness();
@@ -1056,6 +1611,9 @@ const participantListHarness = () => {
       participantDetail,
       participantFacts,
       participantActions,
+      // This client also runs on `/staff/registration`, so the participants
+      // code paths first check that their own markup is on the page.
+      participantsPresent: true,
       rendered,
       currentEvent: { id: "event" },
       participantQuery: () => new URLSearchParams({ limit: "200" }),

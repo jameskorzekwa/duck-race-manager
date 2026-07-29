@@ -8,10 +8,10 @@ import {
   phaseShowsMyDucks,
   phaseShowsRaceStatusNav,
   phaseShowsRegisterNav,
-  racePreparingMessage,
   registrationClosedMessage,
   registrationPreparingMessage,
   type PublicPhase,
+  type PublicPhaseCta,
 } from "./public-phase.ts";
 import {
   publicHeatStatusLabel,
@@ -120,7 +120,6 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .participant-track { position:relative; display:flex; gap:1rem; padding:.25rem .25rem 1rem; overflow-x:auto; overscroll-behavior-inline:contain; scroll-padding-inline:.25rem; scroll-snap-type:x mandatory; scrollbar-color:var(--water-dark) #dce9e9; }
 .participant-track:focus-visible { border-radius:.8rem; outline:4px solid #83d8ec; outline-offset:2px; }
 .participant-card { flex:0 0 min(30rem,calc(100% - 3rem)); min-width:0; scroll-snap-align:start; scroll-snap-stop:always; }
-.participant-card.is-current { border-color:var(--orange); background:#fff8c5; box-shadow:4px 4px 0 var(--ink); }
 .participant-card:focus-visible { outline:4px solid #83d8ec; outline-offset:2px; }
 .success-tag { display:inline-block; margin-bottom:.65rem; padding:.3rem .55rem; border:2px solid var(--ink); border-radius:999px; background:var(--yellow); font-size:.75rem; font-weight:950; letter-spacing:.06em; text-transform:uppercase; }
 .search-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.75rem; align-items:end; margin-top:1rem; }
@@ -273,6 +272,10 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .console-nav { position:sticky; z-index:5; top:.5rem; display:flex; gap:.45rem; margin:1.3rem 0; padding:.65rem; overflow-x:auto; border:2px solid var(--ink); border-radius:.9rem; background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
 .console-nav a { flex:none; padding:.55rem .7rem; border-radius:.55rem; font-size:.85rem; font-weight:900; text-decoration:none; }
 .console-nav a:hover,.console-nav a:focus-visible { background:var(--yellow); outline:2px solid var(--ink); }
+.console-nav a[aria-current="page"] { background:var(--yellow); box-shadow:2px 2px 0 var(--ink); }
+.staff-steps { display:grid; gap:.55rem; margin:0; padding-left:1.35rem; line-height:1.5; }
+.staff-steps li { min-width:0; font-weight:750; overflow-wrap:anywhere; }
+.participant-action-note { flex:1 1 100%; min-width:0; margin:0; line-height:1.5; }
 .staff-nav { display:flex; flex-wrap:wrap; gap:.45rem; max-width:100%; margin:0 0 1.2rem; padding:.55rem; border:2px solid var(--ink); border-radius:.9rem; background:var(--cream); box-shadow:3px 3px 0 var(--ink); }
 .staff-nav a { display:inline-flex; min-width:0; max-width:100%; min-height:2.75rem; align-items:center; padding:.5rem .7rem; border-radius:.55rem; font-size:.85rem; font-weight:900; overflow-wrap:anywhere; text-decoration:none; }
 .staff-nav a:hover,.staff-nav a:focus-visible { background:var(--yellow); outline:2px solid var(--ink); }
@@ -363,6 +366,25 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .winner-action > * { margin-bottom:0; }
 .winner-action > * + * { margin-top:.75rem; }
 .winner-action .button { width:100%; min-height:4rem; }
+.winner-action.ineligible { border-color:#9f261c; background:#ffd8d2; }
+.winner-action.ineligible strong { display:block; font-size:clamp(1.35rem,6vw,2.1rem); line-height:1.08; overflow-wrap:anywhere; }
+.heat-bag { margin:0 0 1.4rem; padding:clamp(1rem,4vw,1.7rem); border:6px solid var(--ink); border-radius:1rem; background:var(--yellow); box-shadow:8px 8px 0 var(--ink); text-align:center; }
+.heat-bag > * { margin-bottom:0; }
+.heat-bag > * + * { margin-top:.6rem; }
+.heat-bag-instruction { font-size:clamp(1.35rem,6vw,2.4rem); font-weight:950; line-height:1.05; letter-spacing:-.02em; text-transform:uppercase; overflow-wrap:anywhere; }
+.heat-bag-number { font-size:clamp(3rem,17vw,7rem); font-weight:950; line-height:.95; letter-spacing:-.04em; overflow-wrap:anywhere; }
+.heat-bag-duck { font-size:clamp(1.05rem,4vw,1.5rem); font-weight:900; overflow-wrap:anywhere; }
+.heat-bag-note { font-size:clamp(.95rem,3.2vw,1.1rem); font-weight:800; line-height:1.45; overflow-wrap:anywhere; }
+.heat-bag .actions { justify-content:center; margin-top:1rem; }
+.heat-bag .button { width:100%; }
+.heat-bag.pending { border-color:#9f261c; background:#ffd8d2; }
+.heat-bag.pending .heat-bag-number { font-size:clamp(1.5rem,7vw,2.6rem); line-height:1.1; }
+.heat-bag.bag-move .heat-bag-number { font-size:clamp(1.8rem,9vw,3.6rem); line-height:1.05; letter-spacing:-.02em; }
+.station-ineligible { margin:1.2rem 0; padding:clamp(1rem,3.5vw,1.5rem); border:5px solid #9f261c; border-radius:.9rem; background:#ffd8d2; box-shadow:6px 6px 0 var(--ink); }
+.station-ineligible > * { margin-bottom:0; }
+.station-ineligible > * + * { margin-top:.5rem; }
+.station-ineligible strong { display:block; font-size:clamp(1.35rem,6vw,2.1rem); line-height:1.08; overflow-wrap:anywhere; }
+.station-ineligible p { font-size:clamp(1rem,3.6vw,1.25rem); font-weight:850; overflow-wrap:anywhere; }
 .podium { display:grid; gap:.65rem; margin:1rem 0; }
 .podium-place { padding:.8rem 1rem; border:3px solid var(--ink); border-radius:.75rem; background:var(--yellow); font-size:1.1rem; font-weight:950; }
 .station-panel h1 { max-width:none; }
@@ -405,6 +427,11 @@ details.operation-card[open] > summary { margin-bottom:0; }
 [data-event-readiness] .data-card > h3,[data-event-readiness] .data-card > p { flex-basis:100%; }
 [data-event-readiness] .status-chip { margin:0; }
 [data-event-readiness] .button { margin-top:var(--space-xs); }
+[data-event-readiness] .data-card > .readiness-note { flex-basis:100%; }
+.readiness-note { padding:.5rem .7rem; border-left:.4rem solid var(--water-dark); border-radius:.25rem; background:#eaf7fa; color:var(--ink); font-size:.92rem; font-weight:850; line-height:1.4; overflow-wrap:anywhere; }
+.roster-flag { display:block; min-width:0; padding:.4rem .6rem; border:3px solid #9f261c; border-radius:.5rem; background:#ffd8d2; box-shadow:3px 3px 0 var(--ink); color:#6d160f; font-size:clamp(.95rem,3.6vw,1.2rem); font-weight:950; letter-spacing:.03em; line-height:1.2; text-transform:uppercase; overflow-wrap:anywhere; }
+.roster-flag-note { min-width:0; font-size:clamp(.85rem,3vw,1.02rem); font-weight:850; line-height:1.35; overflow-wrap:anywhere; }
+li.ineligible,.data-card.ineligible { border-color:#9f261c; background:#fff3f1; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,minmax(0,1fr)); } .field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .inventory-layout { grid-template-columns:minmax(0,1.15fr) minmax(20rem,.85fr); } .inventory-detail-panel { position:sticky; top:5.75rem; max-height:calc(100vh - 6.75rem); overflow:auto; } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 15.5rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck-scene { --duck-center:50%; right:50%; bottom:4rem; width:13.5rem; } .hero-duck { --duck-lift:-.75rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
@@ -485,26 +512,39 @@ const liveBoard = (): string => `
 
 // The compact home summary. It carries the stage chip and a single current-heat
 // line and sends anyone who wants detail to `/race`; the full board lives there.
-const happeningNow = (): string => `
+//
+// This section is also where the phase call to action lives. `live.js` replaces
+// the title with the event's own name, so this is the block a visitor reads as
+// "this race", and the action for that race belongs beside it rather than in the
+// decorative hero. The section renders only when there is a call to action, so
+// the two are always present together.
+const happeningNow = (cta: PublicPhaseCta): string => `
   <section class="status-section" data-live-summary aria-labelledby="happening-now-title">
     <p class="eyebrow">Happening now</p>
     <p class="status-chip live-board-stage" data-live-summary-stage aria-live="polite">Loading race stage…</p>
     <h2 class="live-board-title" id="happening-now-title" data-live-summary-title>Checking the race…</h2>
     <p class="lede" data-live-summary-line>Loading the latest official race information.</p>
     <p class="message-line muted" data-live-summary-error role="alert" hidden></p>
-    <div class="actions"><a class="button secondary" href="/race">Open the full race board</a></div>
+    <div class="actions"><a class="button" href="${escapeHtml(cta.href)}" data-home-cta>${escapeHtml(cta.label)}</a><a class="button secondary" href="/race">Open the full race board</a></div>
   </section>`;
 
 // Preparing is deliberately terminal and bare: no form, no privacy block, no
 // notice, and no multi-registration hint, only the one approved sentence for
-// that page. `/register` and `/race` pass different sentences because only
-// `/register` may tell a visitor to come back and register.
+// that page. `/register` is the only caller: it is the one page that may tell a
+// visitor to come back and register. `/race` has no preparing panel because the
+// route redirects home while a race is being prepared.
 const preparingPanel = (marker: string, message: string): string => `
     <section class="page-panel" ${marker}>
       ${duck()}
       <h1 class="page-title message-title">${escapeHtml(message)}</h1>
     </section>`;
 
+// The hero's "How it works" button was removed, so nothing on this page links to
+// `#how-it-works` any more. The id on the cards section stays: `/#how-it-works`
+// is a stable public deep link that can already have been shared or printed, an
+// id costs nothing to keep, and dropping it would break those links purely to
+// tidy markup no visitor sees. `public-race-flow.test.mjs` pins both halves — no
+// button, and the anchor still there — so this decision cannot drift silently.
 export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
   const cta = homePhaseCta[phase];
   return page({
@@ -516,10 +556,9 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">Race-day, simplified</p>
-        <h1>Find your duck. Follow the race.</h1>
-        <p class="lede">A fast, friendly home for community duck races. Register, keep your private code, and follow your duck from check-in to finish.</p>
+        <h1>Find your duck. Cheer it home.</h1>
+        <p class="lede">A friendly home for the small races that bring a whole town down to the water. Built for the volunteers, families, and rubber ducks that make race day happen.</p>
         ${cta === null ? '<p class="lede" data-home-preparing>The next race is being prepared. Check back soon for the next QuickDucks race.</p>' : ""}
-        <div class="actions">${cta === null ? "" : `<a class="button" href="${cta.href}" data-home-cta>${escapeHtml(cta.label)}</a>`}<a class="button secondary" href="#how-it-works">How it works</a></div>
       </div>
       <div class="hero-water" aria-hidden="true"></div>
       <div class="hero-duck-scene">
@@ -527,8 +566,8 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
         <span class="hero-duck-slit" aria-hidden="true"></span>
       </div>
     </section>
-    <div class="ticker" aria-label="QuickDucks features"><span>Tap the tag</span><span>Find your heat</span><span>Cheer loudly</span></div>
-    ${cta === null ? "" : happeningNow()}
+    <div class="ticker" aria-label="QuickDucks features"><span>Pick your duck</span><span>Find your heat</span><span>Cheer loudly</span></div>
+    ${cta === null ? "" : happeningNow(cta)}
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p></article>
       <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p></article>
@@ -537,20 +576,17 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
   });
 };
 
-// The full live board. It is public for the five post-DRAFT statuses and falls
-// back to its own preparing message before that: this is a race-status page, so
-// it says what will appear here and never repeats the `/register` call to action.
+// The full live board. It is public for the five post-DRAFT statuses, and it has
+// no Preparing variant: `index.ts` redirects `/race` home while the phase is
+// Preparing, so there is exactly one thing this page can be. The phase is still
+// passed in because the shared navigation is phase-driven.
 export const renderRace = (phase: PublicPhase = "PREPARING"): string => page({
   title: "Race status",
-  description: phase === "PREPARING"
-    ? "Live QuickDucks race status will appear here once the next race begins."
-    : "Live QuickDucks race status: stage, heats, the current heat, and official results.",
+  description: "Live QuickDucks race status: stage, heats, the current heat, and official results.",
   robots: "noindex,nofollow",
   phase,
   liveNav: true,
-  content: phase === "PREPARING"
-    ? preparingPanel("data-race-preparing", racePreparingMessage)
-    : `
+  content: `
     <section class="page-panel">
       ${duck()}
       <p class="eyebrow">Live race status</p>
@@ -964,27 +1000,70 @@ const staffLogoutForm = (): string =>
 const staffFooter = (displayName: string): string =>
   `<footer class="staff-bar"><p><strong>${escapeHtml(displayName)}</strong></p>${staffLogoutForm()}</footer>`;
 
-// Persistent staff navigation. It lists only the pages this actor may open, so a
-// missing link is a convenience filter; every page and API repeats the check.
-// `anyStaff` is open to every signed-in staff member, an empty `anyOf` is
-// administrator-only, and an administrator implicitly passes every entry.
+// Who may open the `/staff` Admin view. `is_system_admin` is an account type,
+// not a race-day role, and the race-day role for changing the state of the
+// overall race — open/close registration, start the rounds, manage heats,
+// complete the event — is `RACE_DIRECTOR`. Both therefore open the Admin view,
+// and the per-view gating inside it still decides what each of them sees:
+// `#support`, `/staff/access`, Create event, Configure draft, and Delete event
+// remain administrator-only.
+//
+// `index.ts` imports this rather than restating it, so the route that serves
+// `/staff` and the nav link that offers it can never disagree.
+export const canOpenAdminConsole = (
+  isSystemAdmin: boolean,
+  roles: readonly OperationalRole[],
+): boolean => isSystemAdmin || roles.includes("RACE_DIRECTOR");
+
+// Persistent staff navigation. It is organised by the job a staffer is doing,
+// not by the shape of the application: Admin, Registration, and the three
+// race-day stations. It lists only the pages this actor may open, so a missing
+// link is a convenience filter; every page and API repeats the check.
+//
+// `anyOf` names the operational roles that may open the page and an
+// administrator implicitly passes it. `viaAdminMenu` marks the one link that is
+// not a plain role check. Inventory has its own item in the Admin menu bar, so
+// anyone who can open the Admin view already has a route to it and a second
+// top-level link would only duplicate that. A duck manager who is neither an
+// administrator nor a race director has no Admin menu bar at all and would
+// otherwise be left with no link to `/staff/inventory`, so the link is rendered
+// for exactly that case.
 interface StaffNavLink {
   href: string;
   label: string;
-  access: "anyStaff" | { anyOf: readonly OperationalRole[] };
+  access: {
+    anyOf: readonly OperationalRole[];
+    viaAdminMenu?: true;
+  };
 }
 
-// Order is race-day reading order: the console first, then the three stations in
-// the order the announcer reports on them — Announcer, Start line, Finish line —
-// then Inventory, and administrator Access last.
+// Order is race-day reading order: the administrator console first, then the
+// registration desk that runs before the race, then the three stations in the
+// order the announcer reports on them — Announcer, Start line, Finish line —
+// and finally the Inventory link a non-administrator duck manager needs.
 const staffNavLinks: readonly StaffNavLink[] = [
-  { href: "/staff", label: "Console", access: "anyStaff" },
+  { href: "/staff", label: "Admin", access: { anyOf: ["RACE_DIRECTOR"] } },
+  { href: "/staff/registration", label: "Registration", access: { anyOf: ["REGISTRATION", "RACE_DIRECTOR"] } },
   { href: "/staff/announcer", label: "Announcer", access: { anyOf: ["ANNOUNCER", "RACE_DIRECTOR"] } },
   { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
   { href: "/staff/finish-line", label: "Finish line", access: { anyOf: ["RESULT_TAKER", "RACE_DIRECTOR"] } },
-  { href: "/staff/inventory", label: "Inventory", access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"] } },
-  { href: "/staff/access", label: "Access", access: { anyOf: [] } },
+  {
+    href: "/staff/inventory",
+    label: "Inventory",
+    access: { anyOf: ["DUCK_MANAGER", "RACE_DIRECTOR"], viaAdminMenu: true },
+  },
 ];
+
+const staffNavLinkVisible = (
+  { access }: StaffNavLink,
+  isSystemAdmin: boolean,
+  roles: readonly OperationalRole[],
+): boolean => {
+  const holdsRole = access.anyOf.some((role) => roles.includes(role));
+  return access.viaAdminMenu === true
+    ? !canOpenAdminConsole(isSystemAdmin, roles) && holdsRole
+    : isSystemAdmin || holdsRole;
+};
 
 const staffNav = (
   isSystemAdmin: boolean,
@@ -992,22 +1071,189 @@ const staffNav = (
   current?: string,
 ): string => {
   const links = staffNavLinks
-    .filter(({ access }) =>
-      access === "anyStaff" || isSystemAdmin || access.anyOf.some((role) => roles.includes(role)))
+    .filter((link) => staffNavLinkVisible(link, isSystemAdmin, roles))
     .map(({ href, label }) =>
       `<a href="${href}"${href === current ? ' aria-current="page"' : ""}>${label}</a>`)
     .join("");
   return `<nav class="staff-nav" aria-label="Staff pages">${links}</nav>`;
 };
 
+// The Admin console's own menu bar. Four items are separate views inside
+// `/staff` that switch through the URL hash, so a view is linkable and works
+// with browser back and forward; Inventory and Access are whole pages of their
+// own, and they render this same bar so an administrator can navigate back.
+//
+// Each item carries exactly the gating of the surface it opens, so the bar can
+// never offer a view the actor is not allowed to see. The three event-scoped
+// items ship hidden for the same reason their sections do: nothing flashes and
+// then vanishes while the first event query is still in flight.
+interface AdminMenuItem {
+  href: string;
+  label: string;
+  view?: "event" | "heats" | "participants" | "support";
+  eventScoped?: true;
+}
+
+const adminMenuItems: readonly AdminMenuItem[] = [
+  { href: "#event", label: "Event Details", view: "event" },
+  { href: "#heats", label: "Heats", view: "heats", eventScoped: true },
+  { href: "#participants", label: "Participants", view: "participants", eventScoped: true },
+  { href: "/staff/inventory", label: "Inventory" },
+  { href: "#support", label: "Support", view: "support", eventScoped: true },
+  { href: "/staff/access", label: "Access" },
+];
+
+// `current` is the in-page hash on `/staff` and the page path on the two pages
+// the bar links out to. Event Details is the default view, so it carries
+// `aria-current` in the served markup and the view switcher moves it from there.
+//
+// Only the console's own bar is event-scoped: `/staff/inventory` and
+// `/staff/access` run no console client, so hiding their hash links would strand
+// them hidden forever. There the bar is a plain set of links back into `/staff`,
+// each of which lands on that view or falls back to Event Details.
+const adminMenu = (
+  isSystemAdmin: boolean,
+  roles: readonly OperationalRole[],
+  current = "#event",
+): string => {
+  const inConsole = current.startsWith("#");
+  const hasRole = (role: OperationalRole): boolean => isSystemAdmin || roles.includes(role);
+  // Anyone with a console at all can see the event it is about. The rest stays
+  // exactly as role-gated as the surface it opens, so admitting race directors
+  // to the Admin view widens nothing else: Support and Access are still
+  // administrator-only items and are simply absent from a race director's bar.
+  const allowed: Record<string, boolean> = {
+    "#event": isSystemAdmin || roles.length > 0,
+    "#heats": hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER") || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR"),
+    "#participants": hasRole("REGISTRATION") || hasRole("RACE_DIRECTOR"),
+    "/staff/inventory": hasRole("DUCK_MANAGER") || hasRole("RACE_DIRECTOR"),
+    "#support": isSystemAdmin,
+    "/staff/access": isSystemAdmin,
+  };
+  const links = adminMenuItems
+    .filter(({ href }) => allowed[href] === true)
+    .map(({ href, label, view, eventScoped }) => {
+      const target = inConsole || !href.startsWith("#") ? href : `/staff${href}`;
+      const hooks = inConsole && view !== undefined ? ` data-console-view-link="${view}"` : "";
+      const scoped = inConsole && eventScoped === true ? " data-event-scoped hidden" : "";
+      return `<a href="${target}"${hooks}${scoped}${href === current ? ' aria-current="page"' : ""}>${label}</a>`;
+    })
+    .join("");
+  return `<nav class="console-nav" aria-label="Admin views">${links}</nav>`;
+};
+
+// Closing registration folds a short tail heat into the heat before it, and
+// reopening splits it back out. Both move ducks that are already sealed in
+// numbered bags, so neither may ever happen silently: the bags on the table
+// would stop matching the rosters QuickDucks prints and the finish line reads.
+//
+// This is the console's half of that promise. It is deliberately the same loud
+// visual language as the pairing page's own bag callout — the staffer who is
+// told "Put this duck in HEAT 5 bag" is the staffer who must later be told
+// "Pour the Heat 5 bag into the Heat 4 bag", and a physical instruction should
+// not look different from a physical instruction. It sits above everything
+// else, outside every console view so switching views cannot hide it, and it
+// survives a reload because the console re-reads its queue from the browser.
+// Only pressing Done clears one, because only a person can know a bag moved.
+//
+// The server never paints a heat number here: the numbers come from the
+// lifecycle response the transition itself returned.
+const bagMoveCallout = (): string => `<section class="heat-bag bag-move" data-bag-move hidden aria-live="assertive" aria-label="Move ducks between heat bags">
+        <p class="heat-bag-instruction" data-bag-move-instruction></p>
+        <p class="heat-bag-number" data-bag-move-number></p>
+        <p class="heat-bag-duck" data-bag-move-ducks></p>
+        <p class="heat-bag-note" data-bag-move-note></p>
+        <div class="actions"><button class="button secondary station-control" type="button" data-bag-move-dismiss>Done — the bags match the heats</button></div>
+      </section>`;
+
+// The page for a signed-in staff account that holds no operational role at all.
+//
+// `/staff` is the return target of staff sign-in, so it can never refuse this
+// account, and there is no station to send it to either. It used to be handed
+// the Admin console shell: an empty menu bar, no displayed view, and a message
+// line nothing would ever resolve. This is a real page instead. It says exactly
+// what is missing, who grants it, and offers the two things that do work — the
+// public site and signing out. It carries no console client and no live
+// surface, so it holds no socket either.
+//
+// It therefore carries no `data-live-staff` marker. That marker is what the live
+// hub looks for to decide a page has a staff surface worth revalidating, and it
+// was here only because this panel was copied from the console shell. It changed
+// nothing while the page loads no script, but a marker that contradicts the
+// sentence above is a trap for the first person who adds one.
+export const renderStaffNoAccess = (
+  displayName: string,
+  phase: PublicPhase = "PREPARING",
+): string => page({
+  title: "Staff access",
+  description: "Protected QuickDucks staff account without operational roles.",
+  robots: "noindex,nofollow",
+  phase,
+  content: `
+    <section class="page-panel operations-panel staff-panel" data-staff-no-access data-system-admin="false" data-roles="">
+      ${duck()}
+      <p class="eyebrow">Staff account</p>
+      <h1 class="page-title operations-title">No operational roles assigned.</h1>
+      <p class="lede">You are signed in, but this account holds no race-day role yet, so there is no station for it to open.</p>
+      <div class="notice"><strong>Ask a system administrator to assign the station roles this account needs.</strong> Registration, duck manager, announcer, heat runner, result taker, and race director each open their own page, and signing in again picks the first one up as soon as one is granted.</div>
+      <div class="actions"><a class="button secondary" href="/">Back to public site</a></div>
+      ${staffFooter(displayName)}
+    </section>`,
+});
+
+// The one copy of the participants surface: the filter form, the walk-up card,
+// the participant list, and the detail card with its edit form, duck-name form
+// and action row. The Admin console's Participants view and `/staff/registration`
+// both render exactly this, so the console client binds identical hooks on
+// either page and the registration desk can never drift from the console.
+const participantsSurface = (): string => `
+        <form class="operation-card" data-participant-filter-form>
+          <div class="field-grid"><label>Search<input name="q" maxlength="80" placeholder="Name, code, email, or phone"></label><label>Status<select name="status"><option value="">All statuses</option><option value="SUBMITTED">Submitted</option><option value="ACTIVE">Active</option><option value="WITHDRAWN">Withdrawn</option><option value="DISQUALIFIED">Disqualified</option></select></label></div>
+          <div class="field-grid"><label>Created via<select name="createdVia"><option value="">Public and staff</option><option value="PUBLIC">Public</option><option value="STAFF">Staff walk-up</option></select></label><label>Assignment<select name="assignment"><option value="">Assigned and unassigned</option><option value="ASSIGNED">Assigned</option><option value="UNASSIGNED">Unassigned</option></select></label></div>
+          <button class="button secondary" type="submit">List participants</button>
+        </form>
+        <div class="console-grid wide">
+          <div><details class="operation-card"><summary>Add walk-up participant</summary>
+            <form data-walkup-form>
+              <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
+              <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
+              <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
+              <button class="button" type="submit">Create walk-up</button>
+            </form><p class="private-result muted" data-walkup-result aria-live="polite"></p>
+          </details><div class="data-list" data-participant-list></div></div>
+          <article class="operation-card" tabindex="-1" data-participant-detail hidden>
+            <h3 data-participant-name>Participant detail</h3><dl class="facts compact-facts" data-participant-facts></dl>
+            <form data-participant-duck-name-form hidden><label>Duck name<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Shown publicly beside the duck’s number. Staff names go through the same wordlist as a participant’s own.</span></label><button class="button secondary" type="submit">Save duck name</button></form>
+            <form data-participant-edit-form>
+              <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
+              <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
+              <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
+              <button class="button secondary" type="submit">Save participant details</button>
+            </form>
+            <div class="actions" data-participant-actions></div>
+          </article>
+        </div>`;
+
+// The Admin view. Its menu bar switches between four separate views —
+// Event Details, Heats, Participants, Support — and links out to the Inventory
+// and Access pages. Exactly one view is displayed at a time; the sections keep
+// their existing event-scope and role gating, and the switcher only ever chooses
+// among the sections that gating already permits.
+//
+// `/staff` serves it to exactly the actors `canOpenAdminConsole` admits: system
+// administrators and race directors. An account with no operational role at all
+// has no console to render — an empty menu bar over no displayed view, with a
+// message line nothing would ever resolve — so it is handed the one real page
+// for that state instead. That is a single answer rather than two, which is why
+// the delegation lives here as well as in the route.
 export const renderStaffHome = (
   displayName: string,
   isSystemAdmin: boolean,
   roles: readonly OperationalRole[],
   phase: PublicPhase = "PREPARING",
 ): string => {
+  if (!isSystemAdmin && roles.length === 0) return renderStaffNoAccess(displayName, phase);
   const hasRole = (role: OperationalRole): boolean => isSystemAdmin || roles.includes(role);
-  const canUseConsole = isSystemAdmin || roles.length > 0;
   const canRegistration = hasRole("REGISTRATION") || hasRole("RACE_DIRECTOR");
   const canRaceRead = hasRole("ANNOUNCER") || hasRole("HEAT_RUNNER")
     || hasRole("RESULT_TAKER") || hasRole("RACE_DIRECTOR");
@@ -1019,18 +1265,19 @@ export const renderStaffHome = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff")}
+      ${bagMoveCallout()}
       ${duck()}
       <p class="eyebrow">Staff operations</p>
       <h1 class="page-title operations-title">Race control, in one place.</h1>
       <p class="lede">Open the duck’s NFC or QR tag. QuickDucks will take you to pairing when it is available, or inspection when it is already assigned.</p>
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
-      <nav class="console-nav" aria-label="Staff operations">${canUseConsole ? '<a href="#events">Event</a>' : ""}${canRegistration ? '<a href="#participants" data-event-scoped hidden>Participants</a>' : ""}${canRaceRead ? '<a href="#heats" data-event-scoped hidden>Heats</a>' : ""}${isSystemAdmin ? '<a href="#support" data-event-scoped hidden>Support</a>' : ""}</nav>
+      ${adminMenu(isSystemAdmin, roles)}
       <p class="message-line muted" data-console-message aria-live="polite">Loading operations…</p>
 
-      <section class="console-section" id="events" aria-labelledby="events-title"${canUseConsole ? "" : " hidden"}>
-        <p class="eyebrow">Event control</p><h2 id="events-title">Event</h2>
-        <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>Create the race event to open participants, inventory, heats, and support. Until then this is the only section with anything to do.</span></div>
-        ${isSystemAdmin ? `<details class="operation-card event-create-card" data-event-create-card><summary>Create event</summary>
+      <section class="console-section" id="event" aria-labelledby="event-title" data-console-view="event" data-role-allowed="true">
+        <p class="eyebrow">Event control</p><h2 id="event-title">Event Details</h2>
+        <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>Create the race event to open participants, inventory, heats, and support. Until then this is the only view with anything to do.</span></div>
+        ${isSystemAdmin ? `<details class="operation-card event-create-card" data-event-create-card hidden><summary>Create event</summary>
           <form data-event-create-form>
             <label>Event name<input name="name" maxlength="120" required placeholder="Annual Duck Race"></label>
             <label>URL slug preview<input data-event-create-slug-preview maxlength="80" readonly placeholder="Generated from event name"><span>Generated automatically when the event is saved.</span></label>
@@ -1078,37 +1325,11 @@ export const renderStaffHome = (
         </div>
       </section>
 
-      <section class="console-section" id="participants" aria-labelledby="participants-title" data-event-scoped data-role-allowed="${canRegistration ? "true" : "false"}" hidden>
-        <p class="eyebrow">Registration desk</p><h2 id="participants-title">Participants</h2>
-        <form class="operation-card" data-participant-filter-form>
-          <div class="field-grid"><label>Search<input name="q" maxlength="80" placeholder="Name, code, email, or phone"></label><label>Status<select name="status"><option value="">All statuses</option><option value="SUBMITTED">Submitted</option><option value="ACTIVE">Active</option><option value="WITHDRAWN">Withdrawn</option><option value="DISQUALIFIED">Disqualified</option></select></label></div>
-          <div class="field-grid"><label>Created via<select name="createdVia"><option value="">Public and staff</option><option value="PUBLIC">Public</option><option value="STAFF">Staff walk-up</option></select></label><label>Assignment<select name="assignment"><option value="">Assigned and unassigned</option><option value="ASSIGNED">Assigned</option><option value="UNASSIGNED">Unassigned</option></select></label></div>
-          <button class="button secondary" type="submit">List participants</button>
-        </form>
-        <div class="console-grid wide">
-          <div><details class="operation-card"><summary>Add walk-up participant</summary>
-            <form data-walkup-form>
-              <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
-              <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
-              <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
-              <button class="button" type="submit">Create walk-up</button>
-            </form><p class="private-result muted" data-walkup-result aria-live="polite"></p>
-          </details><div class="data-list" data-participant-list></div></div>
-          <article class="operation-card" tabindex="-1" data-participant-detail hidden>
-            <h3 data-participant-name>Participant detail</h3><dl class="facts compact-facts" data-participant-facts></dl>
-            <form data-participant-duck-name-form hidden><label>Duck name<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Shown publicly beside the duck’s number. Staff names go through the same wordlist as a participant’s own.</span></label><button class="button secondary" type="submit">Save duck name</button></form>
-            <form data-participant-edit-form>
-              <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
-              <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
-              <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
-              <button class="button secondary" type="submit">Save participant details</button>
-            </form>
-            <div class="actions" data-participant-actions></div>
-          </article>
-        </div>
+      <section class="console-section" id="participants" aria-labelledby="participants-title" data-console-view="participants" data-event-scoped data-role-allowed="${canRegistration ? "true" : "false"}" hidden>
+        <p class="eyebrow">Registration desk</p><h2 id="participants-title">Participants</h2>${participantsSurface()}
       </section>
 
-      <section class="console-section" id="heats" aria-labelledby="heats-title" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
+      <section class="console-section" id="heats" aria-labelledby="heats-title" data-console-view="heats" data-event-scoped data-role-allowed="${canRaceRead ? "true" : "false"}" hidden>
         <p class="eyebrow">Race control</p><h2 id="heats-title">Heats and results</h2>
         <div class="console-grid" data-finalist-card hidden>
           <article class="operation-card"><h3>Finalists</h3><p class="muted">The current round-one winners promoted into the final.</p><div class="data-list" data-finalist-list></div></article>
@@ -1117,16 +1338,86 @@ export const renderStaffHome = (
         <div class="console-grid wide"><div class="data-list" data-heat-list></div><article class="operation-card" data-heat-detail hidden><h3 data-heat-name>Heat detail</h3><dl class="facts compact-facts" data-heat-facts></dl><div data-heat-controls></div><h3>Roster</h3><ul class="roster-list" data-heat-roster></ul><h3>Published results</h3><div class="data-list" data-heat-results></div></article></div>
       </section>
 
-      ${isSystemAdmin ? `<section class="console-section" id="support" aria-labelledby="support-title" data-support data-event-scoped data-role-allowed="true" hidden>
+      ${isSystemAdmin ? `<section class="console-section" id="support" aria-labelledby="support-title" data-support data-console-view="support" data-event-scoped data-role-allowed="true" hidden>
         <p class="eyebrow">Administrator support</p><h2 id="support-title">Support</h2>
-        <div class="privacy"><strong>Administrator-only diagnostics.</strong><span>Notification actions and audit records are intentionally explicit. Clearing a race is done with Delete event in the Event section.</span></div>
+        <div class="privacy"><strong>Administrator-only diagnostics.</strong><span>Notification actions and audit records are intentionally explicit. Clearing a race is done with Delete event in the Event Details view.</span></div>
         <div class="console-grid"><article class="operation-card"><h3>Operational summary</h3><button class="button secondary small" type="button" data-refresh-support>Refresh summary</button><dl class="facts compact-facts" data-support-summary></dl></article></div>
         <details class="operation-card"><summary>Notification operations</summary><form class="section-tools" data-notification-filter-form><label>Status<select name="status"><option value="">All statuses</option><option value="WAITING_FOR_SYNC">Waiting for sync</option><option value="PENDING">Pending</option><option value="QUEUED">Queued</option><option value="SENDING">Sending</option><option value="SENT">Sent</option><option value="RETRY_PENDING">Retry pending</option><option value="DELIVERED">Delivered</option><option value="FAILED">Failed</option><option value="BOUNCED">Bounced</option><option value="COMPLAINED">Complained</option><option value="SUPPRESSED">Suppressed</option><option value="CANCELLED">Cancelled</option></select></label><button class="button secondary small" type="submit">Load notifications</button></form><div class="console-grid wide"><div class="data-list" data-notification-list></div><div class="data-list" data-notification-attempts></div></div></details>
         <details class="operation-card"><summary>Redacted audit timeline</summary><button class="button secondary small" type="button" data-refresh-audit>Load audit</button><div class="data-list" data-audit-list></div></details>
       </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/app-date-picker.js" defer></script>
-      ${canUseConsole ? '<script src="/assets/staff-home.js" defer></script>' : '<div class="notice"><strong>No operational roles assigned.</strong> Ask a system administrator to assign the station roles needed for this account.</div>'}
+      <script src="/assets/staff-home.js" defer></script>
+      ${staffFooter(displayName)}
+    </section>`,
+  });
+};
+
+// The registration desk. It is the page a registration staffer lands on, so it
+// leads with how to register somebody in race-day language and then carries the
+// same participants surface the Admin console's Participants view renders.
+//
+// It runs the console client (`staff-home.js`), which is why the working-event
+// picker is here: participants belong to an event, so the client has to resolve
+// one before it can list anybody. Every section of that client initialises
+// defensively, so the heats, support, and event-detail code it also contains
+// simply finds nothing to bind to here.
+export const renderStaffRegistration = (
+  displayName: string,
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
+): string => {
+  const canRegistration = isSystemAdmin
+    || roles.includes("REGISTRATION") || roles.includes("RACE_DIRECTOR");
+  return page({
+    title: "Registration",
+    description: "Protected QuickDucks registration desk.",
+    robots: "noindex,nofollow",
+    phase,
+    content: `
+    <section class="page-panel operations-panel staff-panel" data-staff-registration data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
+      ${staffNav(isSystemAdmin, roles, "/staff/registration")}
+      <p class="eyebrow">Registration desk</p>
+      <h1 class="page-title operations-title">Get people into the race.</h1>
+      <p class="lede">There are two jobs here. Register someone who walks up without a registration, and hand a registered participant the duck they picked.</p>
+      <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
+      <div class="console-grid">
+        <article class="operation-card">
+          <h2>Someone walked up</h2>
+          <p class="muted">They have not registered on their phone. Register them here, then pair them with a duck.</p>
+          <ol class="staff-steps">
+            <li>Open <strong>Add walk-up participant</strong> below.</li>
+            <li>Type their first and last name. Email and phone are optional.</li>
+            <li>Press <strong>Create walk-up</strong>.</li>
+            <li>Read them the short lookup code QuickDucks shows, or hand them the private status link.</li>
+            <li>Now pair them with a duck, exactly as below.</li>
+          </ol>
+        </article>
+        <article class="operation-card">
+          <h2>Give them their duck</h2>
+          <p class="muted">Never pick the duck for them, and never pair before the duck is in their hands.</p>
+          <ol class="staff-steps">
+            <li>Let the participant choose the physical duck they want.</li>
+            <li>Scan that duck’s NFC tag or QR tag with this device.</li>
+            <li>QuickDucks opens the duck. Find the participant by their short lookup code or their name.</li>
+            <li>Check the participant and the duck number together on screen.</li>
+            <li>Press <strong>Confirm duck pairing</strong>. The duck now goes in the heat bag.</li>
+          </ol>
+        </article>
+      </div>
+      <div class="section-tools">
+        <label>Working event<select data-event-select aria-label="Working event"><option value="">Loading events…</option></select></label>
+        <button class="button secondary small" type="button" data-refresh-event>Refresh event</button>
+      </div>
+      <p class="message-line muted" data-console-message aria-live="polite">Loading participants…</p>
+      <div class="notice" data-no-race hidden><strong>No race yet.</strong> <span>An administrator creates the race event from the Admin console. Registrations belong to an event, so nothing can be registered until one exists.</span></div>
+
+      <section class="console-section" id="participants" aria-labelledby="registration-participants-title" data-event-scoped data-role-allowed="${canRegistration ? "true" : "false"}" hidden>
+        <p class="eyebrow">Everyone in this race</p><h2 id="registration-participants-title">Participants</h2>${participantsSurface()}
+      </section>
+      <script src="/assets/app-select.js" defer></script>
+      <script src="/assets/staff-home.js" defer></script>
       ${staffFooter(displayName)}
     </section>`,
   });
@@ -1150,6 +1441,7 @@ export const renderStaffAccess = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-access data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff/access")}
+      ${isSystemAdmin ? adminMenu(isSystemAdmin, roles, "/staff/access") : ""}
       ${duck()}
       <p class="eyebrow">Administrator</p>
       <h1 class="page-title operations-title">Staff access</h1>
@@ -1250,6 +1542,7 @@ export const renderFinishLine = (
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
     <h3>Authoritative roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
     <div class="station-action" data-finish-action></div>
+    <section class="station-ineligible" data-finish-ineligible hidden aria-live="assertive" aria-label="Duck that cannot be recorded"></section>
     <form data-finish-scan-form hidden>
       <label>Tag URL or duck number<input class="station-control" name="duck" autocomplete="off" inputmode="url" maxlength="512" required placeholder="https://quickducks.com/t/… or 128"><span>Scan or paste the complete QuickDucks tag URL, or enter the number printed on the duck.</span></label>
       <div class="actions"><button class="button secondary station-control" type="submit">Add this duck</button><button class="button secondary station-control" type="button" data-start-nfc hidden>Scan NFC tag</button></div>
@@ -1285,6 +1578,7 @@ export const renderStaffInventory = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-inventory data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
       ${staffNav(isSystemAdmin, roles, "/staff/inventory")}
+      ${canOpenAdminConsole(isSystemAdmin, roles) ? adminMenu(isSystemAdmin, roles, "/staff/inventory") : ""}
       <p class="eyebrow">Physical ducks</p>
       <h1 class="page-title operations-title">Inventory</h1>
       <p class="lede">Every duck QuickDucks knows about. Scan a blank sticker to add one; scan a duck already in inventory and it opens here.</p>
@@ -1374,6 +1668,13 @@ export const renderStaffDuck = (
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
       ${staffNav(isSystemAdmin, roles)}
+      ${canPair ? `<section class="heat-bag" data-heat-bag hidden aria-live="assertive" aria-label="Which heat bag this duck goes into">
+        <p class="heat-bag-instruction" data-heat-bag-instruction></p>
+        <p class="heat-bag-number" data-heat-bag-number></p>
+        <p class="heat-bag-duck" data-heat-bag-duck></p>
+        <p class="heat-bag-note" data-heat-bag-note></p>
+        <div class="actions"><button class="button secondary station-control" type="button" data-heat-bag-dismiss>Done — this duck is in the bag</button></div>
+      </section>` : ""}
       <section class="winner-action" data-winner-action hidden aria-live="polite"></section>
       <p class="eyebrow">Protected duck record</p>
       <h1 class="page-title" data-staff-title>Checking this duck…</h1>

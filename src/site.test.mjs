@@ -16,7 +16,9 @@ import {
   renderStaffDuck,
   renderStaffHome,
   renderStaffLogin,
+  renderStaffNoAccess,
   renderStaffPairing,
+  renderStaffRegistration,
   renderStartLine,
   renderStatus,
   searchScript,
@@ -39,6 +41,7 @@ const renderedPages = [
   renderStaffLogin(),
   renderStaffHome("Administrator", true, []),
   renderStaffAccess("Administrator"),
+  renderStaffRegistration("Registration staff", false, ["REGISTRATION"]),
   renderStartLine("Start staff", false),
   renderFinishLine("Finish staff", false),
   renderStaffInventory("Inventory staff", "https://quickducks.com"),
@@ -202,7 +205,10 @@ test("every rendered form class remains covered by the shared form constraints",
   // renders six of its own (intake, duck name, assign, unpair, release,
   // delete). The unsupported-device page, which had none, is gone. Retiring
   // the duplicate empty-draft deletion path removed one more console form.
-  assert.equal(openingForms, 27);
+  //
+  // The registration desk then added five: the shared participants surface's
+  // filter, walk-up, duck-name, and edit forms, plus its own sign-out form.
+  assert.equal(openingForms, 32);
   assert.equal(closingForms, openingForms);
   // "danger-zone" left the form vocabulary with the two purge forms; it now
   // styles only the <details>/<article> wrappers around destructive actions.
@@ -274,6 +280,42 @@ test("the how-it-works cards describe the race without linking anywhere", () => 
   // The class survives only because the My Ducks private-status link still uses it.
   assert.match(style, /\.card-link \{/);
   assert.match(participantScript, /participantText\("a", "Open private status", "card-link"\)/);
+
+  // The hero button that jumped here is gone, so nothing on the page links to
+  // the id any more. It is kept on purpose: /#how-it-works is a stable public
+  // deep link that can already have been shared or printed, and an anchor with
+  // no in-page link is not a defect. Pinned in both directions so a later tidy-up
+  // has to change this test rather than quietly break the link.
+  assert.doesNotMatch(home, /href="#how-it-works"|How it works/);
+  assert.match(home, /<section id="how-it-works" class="cards"/);
+});
+
+test("the home hero is copy and artwork only, with the CTA in the race-named section", () => {
+  const home = renderHome("REGISTRATION");
+  const hero = home.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
+  const summary = home.match(/<section class="status-section" data-live-summary[\s\S]*?<\/section>/)?.[0];
+
+  assert.ok(hero);
+  assert.ok(summary);
+  assert.match(hero, /<h1>Find your duck\. Cheer it home\.<\/h1>/);
+  assert.doesNotMatch(hero, /class="actions"|<a\b|data-home-cta/);
+  assert.match(summary, /<a class="button" href="\/register" data-home-cta>Register<\/a>/);
+  // Preparing has no CTA, so it has no happening-now section, and the hero keeps
+  // its own empty-state sentence.
+  const preparing = renderHome("PREPARING");
+  assert.match(preparing, /data-home-preparing>The next race is being prepared\./);
+  assert.doesNotMatch(preparing, /data-live-summary|data-home-cta|class="actions"/);
+});
+
+test("no public card is singled out with the retired just-registered highlight", () => {
+  // The just-registered card is rendered exactly like every other card, so the
+  // highlight rule has no remaining consumer anywhere in the shared stylesheet.
+  assert.doesNotMatch(style, /\.participant-card\.is-current/);
+  assert.doesNotMatch(style, /#fff8c5/);
+  assert.doesNotMatch(participantScript, /is-current|Just registered/);
+  // The Following pill and its shared tag styling stay.
+  assert.match(participantScript, /participantText\("span", "Following", "success-tag"\)/);
+  assert.match(style, /\.success-tag \{/);
 });
 
 test("My Ducks keeps the registration action while sections stay gated until data loads", () => {
@@ -645,4 +687,190 @@ test("the tag token pattern still accepts exactly what the server accepts", () =
   assert.equal(field.test("has.dot"), false);
   assert.equal(field.test("has/slash"), false);
   assert.equal(field.test(""), false);
+});
+
+// Pairing puts a physical duck into a physical heat bag it never comes out of,
+// so the pairing screen has to shout which bag before the staffer walks away.
+test("the pairing page carries an unmissable heat-bag callout above everything else", () => {
+  const page = renderStaffDuck("a".repeat(32), "Registration staff");
+
+  assert.match(
+    page,
+    /<section class="heat-bag" data-heat-bag hidden aria-live="assertive" aria-label="Which heat bag this duck goes into">/,
+  );
+  for (const hook of [
+    "data-heat-bag-instruction",
+    "data-heat-bag-number",
+    "data-heat-bag-duck",
+    "data-heat-bag-note",
+    "data-heat-bag-dismiss",
+  ]) assert.ok(page.includes(hook), hook);
+  // It stays until the staffer says the duck is in the bag; nothing else clears it.
+  assert.match(page, /data-heat-bag-dismiss>Done — this duck is in the bag</);
+  // It is the first thing in the panel, above the duck record and the pairing work area.
+  assert.ok(page.indexOf("data-heat-bag") < page.indexOf("data-duck-summary"));
+  assert.ok(page.indexOf("data-heat-bag") < page.indexOf("data-pairing-work"));
+  // The server never paints a heat number into the markup; the client renders
+  // the authoritative one from the pairing response.
+  const callout = page.match(/<section class="heat-bag"[\s\S]*?<\/section>/)[0];
+  assert.doesNotMatch(callout, /Heat \d|heat \d/);
+
+  // A role that cannot pair is offered no bag panel at all.
+  assert.doesNotMatch(renderStaffDuck("a".repeat(32), "Result staff", false, ["RESULT_TAKER"]), /data-heat-bag/);
+});
+
+// Closing registration folds a short tail heat into the heat before it, which
+// moves ducks that are already sealed in numbered bags. That is a physical task
+// for a person, so the console states it in exactly the same loud language the
+// pairing page used to put the duck in the bag in the first place.
+test("the Admin console carries a bag-move callout above everything, in the pairing callout's language", () => {
+  for (const [label, markup] of [
+    ["administrator", renderStaffHome("Administrator", true, [])],
+    ["race director", renderStaffHome("Race Director", false, ["RACE_DIRECTOR"])],
+  ]) {
+    assert.match(
+      markup,
+      /<section class="heat-bag bag-move" data-bag-move hidden aria-live="assertive" aria-label="Move ducks between heat bags">/,
+      label,
+    );
+    for (const hook of [
+      "data-bag-move-instruction",
+      "data-bag-move-number",
+      "data-bag-move-ducks",
+      "data-bag-move-note",
+      "data-bag-move-dismiss",
+    ]) assert.ok(markup.includes(hook), `${label}: ${hook}`);
+    // Only a person can know a bag was moved, so only a person clears it.
+    assert.match(markup, /data-bag-move-dismiss>Done — the bags match the heats</, label);
+
+    // It sits above the whole console, and outside every view, so switching
+    // views cannot hide a physical instruction.
+    assert.ok(markup.indexOf("data-bag-move") < markup.indexOf('class="console-nav"'), label);
+    assert.ok(markup.indexOf("data-bag-move") < markup.indexOf('id="event"'), label);
+    const callout = markup.match(/<section class="heat-bag bag-move"[\s\S]*?<\/section>/)[0];
+    assert.doesNotMatch(callout, /data-console-view|data-event-scoped/, label);
+    // The server paints no heat number: the numbers come from the lifecycle
+    // response the transition itself returned.
+    assert.doesNotMatch(callout, /Heat \d|heat \d/, label);
+  }
+
+  // The registration desk runs no lifecycle transition, so it gets no callout.
+  assert.doesNotMatch(renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]), /data-bag-move/);
+});
+
+test("the bag-move callout reuses the pairing callout's loud styling with a readable heat pair", () => {
+  // Same box: the border, the paper colour, and the shadow are the heat-bag
+  // rule, so a physical instruction always looks like a physical instruction.
+  const callout = renderStaffHome("Administrator", true, [])
+    .match(/<section class="heat-bag bag-move"[\s\S]*?<\/section>/)[0];
+  assert.match(callout, /class="heat-bag bag-move"/);
+  assert.match(callout, /class="heat-bag-instruction"/);
+  assert.match(callout, /class="heat-bag-number"/);
+  assert.match(callout, /class="heat-bag-note"/);
+  // "Heat 5 → Heat 4" is two numbers and an arrow rather than one digit, so it
+  // is sized down from the pairing page's single display number and still wraps.
+  assert.match(style, /\.heat-bag\.bag-move \.heat-bag-number \{ font-size:clamp\(1\.8rem,9vw,3\.6rem\)/);
+});
+
+// A signed-in account with no operational role has no station and no console.
+// `/staff` is the return target of sign-in, so it can never refuse them: they
+// get a page that says what is missing and who grants it.
+test("an account with no operational roles gets a real page rather than an empty console", () => {
+  const page = renderStaffNoAccess("Sam Staffer");
+
+  assert.match(page, /No operational roles assigned/);
+  assert.match(page, /Ask a system administrator to assign the station roles this account needs/);
+  assert.match(page, /Sam Staffer/);
+  // It offers the two things that do work.
+  assert.match(page, /<a class="button secondary" href="\/">Back to public site<\/a>/);
+  assert.match(page, /<form class="staff-logout" method="post" action="\/staff\/logout">/);
+  // And none of the console shell it used to be handed.
+  assert.doesNotMatch(page, /<nav class="console-nav"|<nav class="staff-nav"/);
+  assert.doesNotMatch(page, /data-console-view=|data-console-message|data-operations-root/);
+  assert.doesNotMatch(page, /src="\/assets\/staff-home\.js"/);
+  assert.match(page, /<meta name="robots" content="noindex,nofollow">/);
+
+  // It carries no live surface either. The shared shell loads `live-ui.js` on
+  // every page, but the hub starts nothing without a subscriber and this page
+  // registers none, so it holds no socket — which is exactly what the renderer's
+  // own comment claims. The `data-live-staff` marker contradicted that: it is
+  // the hook the hub looks for to decide a page has a staff surface to
+  // revalidate, so the first script anyone added here would silently have made
+  // this page live. It is gone, and no page-level client is loaded.
+  assert.doesNotMatch(page, /data-live-staff/);
+  assert.doesNotMatch(page, /data-live-nav|data-live-board|data-live-summary|data-live-personal/);
+  for (const client of ["staff-home.js", "staff-access.js", "staff-duck.js", "staff-inventory.js", "live.js"]) {
+    assert.ok(!page.includes(`/assets/${client}"`), client);
+  }
+
+  // The console renderer answers the same way for the same account, so there is
+  // one no-roles experience rather than two.
+  assert.equal(renderStaffHome("Sam Staffer", false, []), page);
+});
+
+test("the heat-bag callout is styled loud, high contrast, and safe at 320px", () => {
+  assert.match(style, /\.heat-bag \{[^}]*border:6px solid var\(--ink\)/);
+  assert.match(style, /\.heat-bag \{[^}]*background:var\(--yellow\)/);
+  assert.match(style, /\.heat-bag \{[^}]*box-shadow:8px 8px 0 var\(--ink\)/);
+  // The bag number is display sized; the instruction is large but secondary.
+  assert.match(style, /\.heat-bag-number \{ font-size:clamp\(3rem,17vw,7rem\)/);
+  assert.match(style, /\.heat-bag-instruction \{ font-size:clamp\(1\.35rem,6vw,2\.4rem\)/);
+  // Every line wraps rather than pushing a narrow phone sideways, and the
+  // pending state shrinks its wordy headline so it still fits.
+  for (const rule of ["instruction", "number", "duck", "note"]) {
+    assert.match(style, new RegExp(`\\.heat-bag-${rule} \\{[^}]*overflow-wrap:anywhere`));
+  }
+  assert.match(style, /\.heat-bag\.pending \{[^}]*background:#ffd8d2/);
+  assert.match(style, /\.heat-bag\.pending \.heat-bag-number \{ font-size:clamp\(1\.5rem,7vw,2\.6rem\)/);
+  assert.match(style, /\.heat-bag \.button \{ width:100%; \}/);
+});
+
+// Scanning a withdrawn or disqualified duck at the finish line is a normal
+// outcome, so it gets its own calm region rather than the error message line.
+test("the finish line has a dedicated region for a duck that cannot be recorded", () => {
+  const page = renderFinishLine("Finish staff", false);
+
+  assert.match(
+    page,
+    /<section class="station-ineligible" data-finish-ineligible hidden aria-live="assertive" aria-label="Duck that cannot be recorded"><\/section>/,
+  );
+  // It sits above the scan form so it is read before the next scan is typed.
+  assert.ok(page.indexOf("data-finish-ineligible") < page.indexOf("data-finish-scan-form"));
+  // The station keeps its ordinary message line and its scan controls.
+  assert.match(page, /class="message-line muted" data-station-message aria-live="polite"/);
+  assert.match(page, /data-start-nfc/);
+
+  assert.match(style, /\.station-ineligible \{[^}]*border:5px solid #9f261c/);
+  assert.match(style, /\.station-ineligible \{[^}]*background:#ffd8d2/);
+  assert.match(style, /\.station-ineligible strong \{[^}]*overflow-wrap:anywhere/);
+  assert.match(style, /\.station-ineligible p \{[^}]*overflow-wrap:anywhere/);
+  // The scanned-duck page reuses the winner panel in the same refused colours.
+  assert.match(style, /\.winner-action\.ineligible \{ border-color:#9f261c; background:#ffd8d2; \}/);
+});
+
+// The staff roster marker. It has to be readable outdoors on a phone, in the
+// same visual language as the rest of the race-day surfaces, and it must not
+// widen anything at 320px — every long value wraps instead.
+test("the roster marker is loud, wraps, and reuses the refused-result colours", () => {
+  assert.match(style, /\.roster-flag \{[^}]*border:3px solid #9f261c/);
+  assert.match(style, /\.roster-flag \{[^}]*background:#ffd8d2/);
+  assert.match(style, /\.roster-flag \{[^}]*box-shadow:3px 3px 0 var\(--ink\)/);
+  assert.match(style, /\.roster-flag \{[^}]*text-transform:uppercase/);
+  assert.match(style, /\.roster-flag \{[^}]*font-size:clamp\(\.95rem,3\.6vw,1\.2rem\)/);
+  // Nothing in the marker can push a narrow layout wider than the viewport.
+  for (const rule of ["roster-flag", "roster-flag-note"]) {
+    assert.match(style, new RegExp(`\\.${rule} \\{[^}]*min-width:0`));
+    assert.match(style, new RegExp(`\\.${rule} \\{[^}]*overflow-wrap:anywhere`));
+  }
+  // The marked row itself is recoloured wherever it appears: a station roster
+  // list item, an announcer line, or a console card.
+  assert.match(style, /li\.ineligible,\.data-card\.ineligible \{ border-color:#9f261c; background:#fff3f1; \}/);
+
+  // Readiness notes are informational, so they never wear the refused colours
+  // and never look like the muted blocking reasons above them.
+  assert.match(style, /\.readiness-note \{[^}]*border-left:\.4rem solid var\(--water-dark\)/);
+  assert.match(style, /\.readiness-note \{[^}]*background:#eaf7fa/);
+  assert.match(style, /\.readiness-note \{[^}]*overflow-wrap:anywhere/);
+  assert.doesNotMatch(style, /\.readiness-note \{[^}]*#9f261c/);
+  assert.match(style, /\[data-event-readiness\] \.data-card > \.readiness-note \{ flex-basis:100%; \}/);
 });

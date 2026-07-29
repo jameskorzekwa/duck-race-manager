@@ -101,6 +101,29 @@ const displayName = (policy: string, firstName: string, lastName: string): strin
   return `${firstName} ${lastName.slice(0, 1).toUpperCase()}.`;
 };
 
+// The two registration statuses that are publicly racing.
+//
+// A `WITHDRAWN` or `DISQUALIFIED` participant keeps a true status on the two
+// owner-facing surfaces — their own private status link `/r/<token>`, and the
+// card for a registration their own device created in My Ducks — because the
+// person who left is entitled to see that they left. Everywhere else they are
+// simply absent: the anonymous tag scan, the public duck page, the public name
+// search, and the live board all behave as if the entry is not in the race.
+//
+// This is the predicate for the two lookups that are reachable with no
+// credential at all: a scanned tag token and a printed duck number. Both return
+// `null` for a participant who has left, which the existing routes already
+// render as "this duck is not currently racing": `/t/<tag>` redirects to the
+// home page and `/duck/<number>` serves the same friendly 404 an unpaired or
+// unknown number has always served. No new shape, no participant name, and no
+// follow control.
+//
+// `getPublicStatusByRaceEntry` deliberately does not carry this filter. It is
+// the owner-facing lookup, and its two public callers — the name search and the
+// followed half of the My Ducks projection — apply the exclusion themselves at
+// the point where they know whose request it is.
+const publiclyRacingRegistrationSql = `r.status IN ('SUBMITTED', 'ACTIVE')`;
+
 const getCurrentHeat = (env: Env, eventId: string): Promise<CurrentHeatRow | null> =>
   env.DB.prepare(
     `SELECT round, heat_number, status
@@ -220,6 +243,7 @@ export const getPublicStatusByTag = async (
       JOIN duck_tags dt ON dt.duck_id = d.id
      WHERE dt.token = ?
        AND dt.status = 'ACTIVE'
+       AND ${publiclyRacingRegistrationSql}
        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
      LIMIT 1`,
   ).bind(token).first<StatusRow>();
@@ -239,12 +263,18 @@ export const getPublicStatusByDuckNumber = async (
     `${statusSelect}
      WHERE re.event_id = ?
        AND d.visible_number = ?
+       AND ${publiclyRacingRegistrationSql}
        AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
      LIMIT 1`,
   ).bind(eventId, visibleNumber).first<StatusRow>();
   return row === null ? null : buildStatus(env, row);
 };
 
+// Owner-facing. This is the only lookup that still reports a `WITHDRAWN` or
+// `DISQUALIFIED` outcome, and it is reached only with a credential that proves
+// the caller is entitled to it: the private status token, or a browser
+// collection link this device holds as `REGISTRATION`. Callers that serve an
+// anonymous or followed audience exclude those statuses before calling it.
 export const getPublicStatusByRaceEntry = async (
   env: Env,
   raceEntryId: string,

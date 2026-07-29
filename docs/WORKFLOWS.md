@@ -38,13 +38,14 @@ not authorized.
 | Capability | Required regular-staff role | System administrator |
 | --- | --- | --- |
 | Participant list/detail/search, walk-up, edits, withdrawal, scan-first search and pairing | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
-| Delete an unpaired registration | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
+| Delete a never-paired registration | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Set or clear a participant's duck name | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Participant disqualification/reactivation | `RACE_DIRECTOR` | Yes |
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Duck inventory intake, deletion, assignment, unassignment, and reservation | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open a staff duck inspection | `REGISTRATION`, `DUCK_MANAGER`, `RESULT_TAKER`, or `RACE_DIRECTOR`; projection stays role-narrow | Yes |
 | Open `/staff/inventory` | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Open `/staff/registration` | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
 | Event list/detail context | Any operational role | Yes |
 | Event readiness, heat list/detail/announcer-roster, result, and finalist reads | `ANNOUNCER`, `HEAT_RUNNER`, `RESULT_TAKER`, or `RACE_DIRECTOR` | Yes |
@@ -54,10 +55,20 @@ not authorized.
 | Open `/staff/announcer` (read-only) | `ANNOUNCER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/finish-line` and resolve a roster duck by tag URL/number | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
+| Open the `/staff` Admin view | `RACE_DIRECTOR` | Yes |
 | Create/configure draft; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
-| Open `/staff/access` | None | Yes |
+| Open `/staff/access` and the console's Support view | None | Yes |
 | Delete event: the whole dataset in any state | None | Yes |
+
+`is_system_admin` is an account type, not a race-day role. The race-day role for
+changing the state of the overall race — opening and closing registration,
+starting the rounds, managing the heats, correcting a published result,
+completing the event — is `RACE_DIRECTOR`, and every control that does so lives
+inside the `/staff` Admin view. Administrators and race directors therefore both
+open that view and both see the **Admin** navigation link. What stays
+administrator-only is what is not race-day work: Create event, Configure draft,
+Delete event, the Support view, and `/staff/access`.
 
 The operational role vocabulary is `REGISTRATION`, `DUCK_MANAGER`, `ANNOUNCER`,
 `HEAT_RUNNER`, `RESULT_TAKER`, and `RACE_DIRECTOR`. Granting or assigning any
@@ -109,6 +120,65 @@ Pairing changes `SUBMITTED` to `ACTIVE`. Reactivation returns a registration to
 Withdrawal and disqualification do not themselves close an assignment or
 remove a heat entry.
 
+Pairing is also the one-way door between the two ways a participant can leave:
+
+- **Never paired:** delete the registration. It removes the row for real, and it
+  is the only removal path a participant or staff member has.
+- **Paired at any point, current or already unassigned:** delete is refused with
+  `409`. The participant is withdrawn or disqualified instead. Pairing put a
+  physical duck into a sealed heat bag, and nobody unpacks a bag on race day to
+  retrieve one duck, so the duck stays where it is and may still float past the
+  finish line.
+
+Nothing about withdrawal or disqualification touches the physical race. It
+renumbers, rebalances, reorders, and removes nothing: no heat, heat entry, slot
+number, lane order, duck assignment, or recorded result changes — resorting the
+bags would mean rescanning every duck. The participant simply disappears from
+every public surface and can never be published as a winner. See The Heat Bag
+Rule and Public Visibility of Withdrawn and Disqualified Participants.
+
+Because the write disturbs nothing physical, it is available at **every** point
+in the event lifecycle: a participant may be withdrawn or disqualified while
+their heat is `PLANNED`, `LOADING`, locked, `READY`, `CALLING`, `RUNNING`,
+`AWAITING_RESULT`, or `FINALIZED`, and the heat is left byte for byte as it was.
+A non-`ACTIVE` roster entry is therefore a normal, expected race-day state: that
+duck rides in the bag, goes down the water, and simply cannot win.
+
+### The Heat Bag Rule
+
+This is the single governing rule about the physical ducks, and every other
+statement in this document about bags, slots, and rosters is an application of
+it rather than an exception to it.
+
+> A duck goes into a numbered heat bag when it is paired, and it comes out of
+> that bag only in the water. QuickDucks never reaches into a bag, never picks a
+> duck out of one, and never reorders the ducks inside one, because the ducks in
+> a bag are indistinguishable without scanning every one of them.
+>
+> The one physical change QuickDucks may cause is moving **one whole bag into
+> another whole bag**, which needs no searching at all. That happens in exactly
+> two places, both of them before any roster is locked: closing registration
+> pours a round-one tail heat that is too short to race into the heat before it,
+> and reopening registration takes it back out again.
+>
+> Neither of those is ever silent. The transition response reports which heat
+> moved into which and the numbers on the ducks that moved, and the Admin view
+> shows it as an explicit physical instruction — *"Pour the Heat 5 bag into the
+> Heat 4 bag"* — that stays on screen until a person acknowledges it.
+
+Two consequences follow, and they are what the rest of this document relies on:
+
+- Withdrawal, disqualification, reactivation, unassignment, deleting a duck, and
+  every result correction move no duck and no heat entry at all.
+- The pairing screen names a bag at pairing time and is honest about how firm
+  that answer is: while the event is `REGISTRATION_OPEN` the whole bag can still
+  be folded, and it says so; from `REGISTRATION_CLOSED` onwards nothing can move
+  it and it says that instead. See Duck Pairing and Minimum Heat Size and Tail
+  Rebalancing.
+
+QuickDucks records no bag placement and no physical-location confirmation. It
+states the instruction; carrying it out is an operator step.
+
 ### Heat
 
 ```text
@@ -135,10 +205,13 @@ The supported complete sequence is:
    with an open slot, creating the next heat automatically when every existing
    heat is full. This is the only heat assignment model.
 6. A race director closes registration. If the last heat holds fewer than three
-   ducks, closing folds it into the heat before it, which goes over capacity.
+   ducks, closing folds it into the heat before it, which goes over capacity,
+   and the Admin view tells the staff which bag to pour into which. That
+   instruction stays up until somebody acknowledges it.
 7. Registration staff and the race director resolve every still-submitted
    participant and check readiness. An administrator may reopen registration at
-   any point before round one starts, which splits a folded tail back out.
+   any point before round one starts, which splits a folded tail back out and
+   names the ducks to take back out of that bag.
 8. The race director starts round one, which locks every round-one roster in the
    same command; heat runners run heats; result takers finish them and publish
    one winner per heat.
@@ -195,7 +268,7 @@ navigation, the home call to action, and what `/register` and `/race` render.
 
 | Phase | Event state | Navigation | Home CTA |
 | --- | --- | --- | --- |
-| Preparing | no event, or `DRAFT` | Home, Staff | none; the hero says the next race is being prepared |
+| Preparing | no event, or `DRAFT` | Home, Staff | none; the hero says the next race is being prepared, and `/race` redirects home |
 | Registration | `REGISTRATION_OPEN` | Home, Register, My Ducks, Staff | Register |
 | Locked in | `REGISTRATION_CLOSED` | Home, Race Status, My Ducks, Staff | View race status |
 | Racing | `ROUND_ONE`, `FINAL` | Home, Race Status, My Ducks, Staff | View live race |
@@ -204,8 +277,16 @@ navigation, the home call to action, and what `/register` and `/race` render.
 Register and Race Status strictly swap: the navigation offers exactly one of
 them after `DRAFT` and neither while a race is being prepared. `/race` itself
 stays reachable for all five post-`DRAFT` statuses, including while registration
-is open, even though the navigation does not advertise it then. Staff stays in
-the top navigation in every phase.
+is open, even though the navigation does not advertise it then. While the phase
+is Preparing there is no stage, heat, or result to report, so both the
+navigation and a direct `GET /race` keep the page unavailable and the direct
+request returns `303` to `/`. Staff stays in the top navigation in every phase.
+
+The home call to action is not in the hero. When a phase has one it is the
+primary action of the "happening now" section, whose title the live client
+replaces with the event's own name, so the action sits with the race it belongs
+to and the secondary "Open the full race board" link follows it. The hero
+carries copy and artwork only, plus the Preparing empty-state sentence.
 
 My Ducks appears whenever the phase is Registration or later. Before
 registration opens, both the navigation and a direct `GET /my-ducks` keep the
@@ -225,9 +306,11 @@ live need must not spend one. The server marks public content pages — the home
 page, `/race`, `/my-ducks`, `/register`, `/duck/<number>`, `/r/<token>`, and
 `/t/<token>` — with `data-live-nav` on the navigation element, and only those
 pages register the navigation subscriber. The staff sign-in page, the not-found
-page, and staff error pages carry no marker and no other live surface, so they
-open no socket and schedule no polls, and they keep the navigation exactly as the
-server painted it. Staff HTML routes still resolve the same phase for their
+page, staff error pages, and the page a staff account with no operational role
+lands on carry no marker and no other live surface, so they open no socket and
+schedule no polls, and they keep the navigation exactly as the server painted it.
+The no-roles page also carries no `data-live-staff` marker, which is the hook the
+hub reads to decide a page has a staff surface to revalidate. Staff HTML routes still resolve the same phase for their
 server-rendered primary navigation, so their Home, Register or Race Status, My
 Ducks, and Staff links match the public site on first paint without taking a
 live-navigation connection.
@@ -401,13 +484,16 @@ While registration is open, **Register another participant** sits in the
 Awaiting Participants heading row instead of below the complete page. The row
 wraps the action below the heading on narrow screens.
 
-After the registration redirect, the page highlights the matching registration.
-Only after that UUID appears in a successful full collection response does the
-page validate and consume the matching handoff. A valid handoff must contain
-exactly the matching registration UUID and a same-origin relative
-`/r/<valid-private-token>` path. Safe consumption removes it from
-`sessionStorage` and adds an accessible **Open private status** link to the
-just-registered notice so the participant can open and bookmark it. Invalid,
+After the registration redirect, the page scrolls the matching card into view.
+The card itself is rendered exactly as it is on a plain refresh: it carries no
+highlight, no "just registered" tag, and no moved focus, and it stays that way
+once staff pair it with a duck. Only after that UUID appears in a successful full
+collection response does the page validate and consume the matching handoff. A
+valid handoff must contain exactly the matching registration UUID and a
+same-origin relative `/r/<valid-private-token>` path. Safe consumption removes it
+from `sessionStorage` and adds an accessible **Open private status** link to the
+one-time "Registration saved." notice, which names the participant so the link is
+unambiguous, so the participant can open and bookmark it. Invalid,
 cross-origin, absolute, malformed, mismatched, unreadable, or non-removable
 handoffs are never exposed. Full collection and presence responses never return
 the private path or token.
@@ -768,13 +854,14 @@ that participant — whether it registered them or followed them earlier — see
 Both duck responses (`GET /api/v1/ducks/<tag-token>` and
 `GET /api/v1/ducks/number/<visible-number>`) carry the same `followId` and
 `inMyDucks` signals as a search result, and only for a participant the follow
-endpoint would actually accept: a withdrawn or disqualified registration, or one
-outside the current public event, carries neither signal and its page renders no
-control. The membership check is a read-only probe of the caller's own collection
-cookie, so a tag GET stays read-only and issues no cookie. Nothing else about
-these responses changed: they still carry no contact details, lookup code,
-private link, or staff data. They do carry the duck's filtered public
-`duckName`, always alongside its visible number.
+endpoint would actually accept. A duck whose participant is withdrawn or
+disqualified, or one outside the current public event, resolves to no public
+participant at all, so there is nothing on its page to follow. The membership
+check is a read-only probe of the caller's own collection cookie, so a tag GET
+stays read-only and issues no cookie. Nothing else about these responses changed:
+they still carry no contact details, lookup code, private link, or staff data.
+They do carry the duck's filtered public `duckName`, always alongside its visible
+number.
 
 ### Public Duck Detail View
 
@@ -796,11 +883,13 @@ notes, or audit history.
 `{ "raceStatus": ... }`. Only canonical positive integers resolve; a
 non-canonical value is rejected before any database access.
 
-Unknown numbers, ducks that exist in inventory but are not paired, and ducks
-outside the current public event are indistinguishable: all three return `404`
-from the API and one identical friendly page, sent `noindex, nofollow` like the
-other public duck and status pages. The page therefore adds no enumeration
-signal beyond the duck numbers the board already publishes.
+Unknown numbers, ducks that exist in inventory but are not paired, ducks whose
+participant is withdrawn or disqualified, and ducks outside the current public
+event are indistinguishable: all four return `404` from the API and one identical
+friendly page — "Duck #N isn't racing." — sent `noindex, nofollow` like the other
+public duck and status pages. The page therefore adds no enumeration signal
+beyond the duck numbers the board already publishes, and it is honest about a
+duck that physically exists without naming anybody.
 
 The live race board and the paired My Ducks cards link their duck numbers to
 this view as plain navigations. An entry with no duck assigned renders text and
@@ -820,10 +909,13 @@ these are true:
 
 - The token belongs to an `ACTIVE` tag.
 - The duck has a current assignment.
+- That assignment's participant is `SUBMITTED` or `ACTIVE`.
 - The event is between `REGISTRATION_OPEN` and `COMPLETED`.
 
 Otherwise the request redirects to the home page. Unknown, invalid, retired,
-unassigned, and deleted tags therefore do not expose inventory metadata. A successful status page can show the event, policy-filtered
+unassigned, and deleted tags, and tags on a duck whose participant withdrew or
+was disqualified, therefore do not expose inventory metadata or that participant.
+A successful status page can show the event, policy-filtered
 participant name, visible duck number, assigned round-one/final heat, current
 active heat, and race outcome. It never shows contact details, lookup codes,
 private links, staff history, or storage location.
@@ -934,17 +1026,37 @@ Hidden links are only a convenience; each page and every API it calls repeat
 authentication, active-profile, role, event-state, heat-state, and revision
 checks.
 
-Every staff page also renders one persistent staff navigation listing only the
-pages the signed-in actor may open: **Console** (`/staff`, any staff member),
-**Announcer** (`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Start
-line** (`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), **Finish line**
-(`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`), **Inventory**
-(`/staff/inventory`, `DUCK_MANAGER` or `RACE_DIRECTOR`), and **Access**
-(`/staff/access`, system administrator). Access is always the right-most item.
-A system administrator sees every link. The current page is marked
-`aria-current="page"`. The navigation wraps rather than scrolling, so it never
-overflows a 320px viewport. Omitting a link is convenience only; each page
-repeats its own check.
+Every staff page also renders one persistent staff navigation, organised by the
+job a staffer is doing and listing only the pages the signed-in actor may open:
+**Admin** (`/staff`, `RACE_DIRECTOR` or system administrator), **Registration**
+(`/staff/registration`, `REGISTRATION` or `RACE_DIRECTOR`), **Announcer**
+(`/staff/announcer`, `ANNOUNCER` or `RACE_DIRECTOR`), **Start line**
+(`/staff/start-line`, `HEAT_RUNNER` or `RACE_DIRECTOR`), and **Finish line**
+(`/staff/finish-line`, `RESULT_TAKER` or `RACE_DIRECTOR`).
+
+Inventory and Access are reached from the Admin view's own menu bar rather than
+from this navigation. The one exception is a `DUCK_MANAGER` who is neither an
+administrator nor a race director: they have no Admin menu bar, so they keep an
+**Inventory** (`/staff/inventory`) link here as the last item. The current page
+is marked `aria-current="page"`. The navigation wraps rather than scrolling, so
+it never overflows a 320px viewport. Omitting a link is convenience only; each
+page repeats its own check.
+
+`/staff` is the return target of staff sign-in, so it never refuses a regular
+staff member. It has exactly three outcomes:
+
+1. A system administrator or a `RACE_DIRECTOR` receives the Admin view. The URL
+   hash is never sent to the server, so a deep link such as `/staff#heats` is
+   the same request and lands on that view.
+2. Any other operational staffer receives `303` to the first page their own
+   roles open, in this order: `/staff/registration`, `/staff/start-line`,
+   `/staff/finish-line`, `/staff/announcer`, `/staff/inventory`. Each target is
+   a distinct path with its own role check and none of them redirects back to
+   `/staff` while authenticated, so the redirect cannot loop.
+3. A staff member with no operational role at all receives the **No operational
+   roles assigned** page. It names what is missing and who grants it, carries
+   the log-out control and a link to the public site, and runs no console
+   client — it is a real page rather than an empty console shell.
 
 The signed-in identity bar is the last element of each operational staff page,
 not a header. It contains only the escaped display name on the left and the
@@ -992,25 +1104,54 @@ staff console. Event readiness and heat, announcer-roster, result, and finalist
 reads are limited to announcers, heat runners, result takers, race directors,
 and system administrators.
 
+### The Admin View and Its Views
+
+`/staff` is the Admin view, opened by system administrators and race directors.
+Its menu bar lists, in this order, **Event Details**, **Heats**,
+**Participants**, **Inventory**, **Support**, and **Access**. Event Details,
+Heats, Participants, and Support are separate views inside `/staff`; Inventory
+and Access are links to `/staff/inventory` and `/staff/access`, which render the
+same menu bar so the actor can navigate back.
+
+Each menu item carries exactly the gating of the surface it opens, so a race
+director's bar reads Event Details, Heats, Participants, and Inventory: Support
+and Access are administrator-only and are absent rather than disabled. The
+administrator-only cards inside Event Details — Create event, Configure draft,
+and Delete event — are likewise not rendered for a race director.
+
+The views are not one stacked page: exactly one is displayed at a time. The URL
+hash names the displayed view — `#event`, `#heats`, `#participants`, `#support` —
+so a view is linkable, survives a reload, and moves with browser back and
+forward. The displayed item is marked `aria-current="page"`. The switcher only
+ever chooses among views the actor's role gating and the current event existence
+already permit, and falls back to the first permitted, currently-available view
+when the requested one is unavailable. Data loading is independent of display:
+hidden views stay populated, so refresh, live signals, and the readiness and
+lifecycle controls behave exactly as before.
+
 ### Console Event Existence Gating
 
-The console's **Event** section is always available. **Participants**, **Heats**,
-and **Support**, and their console navigation anchors, are event-scoped: they are
+The console's **Event Details** view is always available. **Participants**,
+**Heats**, and **Support**, and their menu-bar items, are event-scoped: they are
 hidden in the served markup and are revealed only when an event loads, so no
 section flashes and then vanishes. Role gating still applies on top of event
-existence, so an event-scoped section the actor may not use stays hidden even
-once an event exists. Inventory is its own page in the persistent staff
-navigation and is not repeated in the console's section navigation.
+existence, so an event-scoped view the actor may not use stays hidden even once
+an event exists.
 
-While no event row exists the console hides all three event-scoped sections and
-their anchors and shows the Event section with a **No race yet** state and, for a
-system administrator, the **Create event** card already open.
+While no event row exists the console hides all three event-scoped views and
+their menu items and shows Event Details with a **No race yet** state and, for a
+system administrator, the **Create event** card revealed and already open.
 
 ### Console Event Layout
 
-The console's Event section is ordered setup-first. A system administrator sees
-the collapsed **Create event** card directly under the section heading; other
-roles see no create card. The **Working event** picker and its refresh button
+The console's Event Details view is ordered setup-first. A system administrator
+sees the **Create event** card directly under the heading; other roles see no
+create card. QuickDucks holds one event dataset at a time, so that card is
+rendered hidden and is revealed only while no event exists: it disappears as
+soon as an event is created and reappears the moment the event is deleted,
+without a manual reload. It is removed with `hidden` rather than dimmed, and the
+client refuses a create submission while an event exists, so it is never hidden
+but still submittable. The **Working event** picker and its refresh button
 follow. Everything about the chosen event then appears in one labelled
 "Selected event details" region below the picker, in this order: the summary
 facts, **Configure draft**, **Readiness and lifecycle**, and **Delete event**.
@@ -1099,6 +1240,10 @@ slots closing had folded into an earlier heat, returning every heat to at most
 its capacity. See Minimum Heat Size and Tail Rebalancing for what that restores
 exactly and what it does not.
 
+Both transitions report the physical bag move they caused, and the Admin view
+states it as an instruction that stays up until it is acknowledged. See
+Reporting the Bag Move.
+
 ### Start Round One
 
 A race director or system administrator can start round one only when all server readiness
@@ -1114,24 +1259,34 @@ checks pass:
 - Every round-one heat holds at least three entries. The blocker names reopening
   registration and signing up more participants as the remedy.
 - The round-one heat count does not exceed final capacity.
-- Every racer on a round-one roster is still `ACTIVE`. Withdrawal and
-  disqualification leave the heat entry in place and are allowed while the heat
-  is an unlocked plan, so this is what keeps a withdrawn participant from being
-  locked onto a racing roster and read out by the announcer. The blocker names
-  replacing that heat's roster as the remedy, which is reachable in exactly this
-  state.
+- Every round-one heat still holds at least one `ACTIVE` racer. Withdrawn and
+  disqualified racers on a roster never block: their entries, slots, and ducks
+  stay exactly where they are and readiness reports them as an informational
+  note. What is refused is a heat where *nobody* can win, because round one needs
+  one first place and that place is `ACTIVE`-only, so such a heat would run and
+  then be impossible to publish. The blocker names reactivating a racer as the
+  remedy — not replacing the roster, which would renumber slots the sealed heat
+  bags cannot follow.
 - Every round-one heat is still `PLANNED`, `LOADING`, or `READY`.
 
 Starting round one also locks every planned round-one roster, moving it to
 `LOADING` and stamping `roster_locked_at`, in the same guarded batch as the
-event transition. The roster lock carries the same all-`ACTIVE` predicate as the
-readiness blocker and the guarded `START_ROUND_ONE` command, so a stale roster
-fails the whole transition rather than being silently locked.
+event transition. A roster holding withdrawn or disqualified racers locks
+normally. The roster lock carries the same at-least-one-`ACTIVE` predicate as the
+readiness blocker and the guarded `START_ROUND_ONE` command, so a heat nobody
+could win fails the whole transition rather than being silently left unlocked
+while the round starts around it.
+
+Readiness also reports, without blocking, how many racers on round-one rosters
+are withdrawn or disqualified. Those appear in the `notes` array beside
+`blockers`; `allowed` ignores them.
 
 **Operator step:** resolve every unpaired submission by pairing, withdrawal, or
 administrative disqualification before starting. If a heat would race with fewer
-than three ducks, reopen registration rather than trying to start. If a racer
-withdrew after being paired, replace that heat's roster without them.
+than three ducks, reopen registration rather than trying to start. A racer who
+withdrew after being paired needs no action at all: leave the roster alone, their
+duck races and cannot win. Only if every racer in one heat has left must a race
+director reactivate one of them.
 
 Registration can close while a sticker is pending, and its owning operator can
 still confirm it during `REGISTRATION_CLOSED`. Round one remains blocked until
@@ -1147,15 +1302,72 @@ sticker first.
 
 A race director or system administrator can start the final when every round-one heat is
 `FINALIZED` or `CANCELLED`, at least one is finalized, each finalized round-one
-heat has one first-place result, one final heat with entries exists, every racer
-on the final roster is still `ACTIVE`, and that final has not started. Starting
-the final locks the final roster in the same guarded batch, exactly as starting
-round one does for round one, including the same refusal for a roster holding a
-withdrawn or disqualified finalist.
+heat has one first-place result, one final heat with entries exists, the final
+roster still holds at least one `ACTIVE` racer, and that final has not started.
+Starting the final locks the final roster in the same guarded batch, exactly as
+starting round one does for round one, including the same at-least-one-`ACTIVE`
+rule. A withdrawn or disqualified finalist keeps their slot and their duck in the
+bag, is reported as a readiness note, and blocks nothing.
+
+A round-one winner who is later withdrawn or disqualified is never promoted in
+the first place: promotion happens in the same guarded batch that publishes the
+winner, and that batch requires an `ACTIVE` racer. A finalist who leaves after
+being promoted stays on the final roster and simply cannot take a place.
 
 A race director or system administrator can complete the event when the final is finalized,
-all final heats are finalized or cancelled, and each finalized final contains
-exactly places 1 through `min(3, final roster size)`.
+all final heats are finalized or cancelled, and each finalized final holds **at
+least** `min(3, eligible final roster size)` published places. The podium is only
+as deep as the racers who can hold a place, and a withdrawn finalist would
+otherwise demand a place nobody is allowed to fill.
+
+**The completion check is monotone: leaving the race can only ever lower the
+podium a published result is measured against, never invalidate one already
+published.** That is a statement about the depth expression `min(3, eligible
+final roster size)` and about completion only. It is not a claim that departures
+are harmless everywhere: if *every* finalist leaves before the podium is
+published, `validateResultSet` refuses the empty podium, the final can never
+reach `FINALIZED`, and completion stays blocked until somebody is reactivated.
+That is correct behaviour — a race with no eligible racer has no result to
+publish — and the finish-line station and the console both name reactivation as
+the remedy rather than dead-ending. What monotonicity guarantees is narrower and
+exact: a podium that was accepted at publication is never later judged
+incomplete by a departure.
+
+Publication and completion measure the same podium with two deliberately
+different comparisons:
+
+- **Exact on write.** `validateResultSet` requires a new or corrected final
+  result to contain exactly places 1 through `min(3, eligible final roster
+  size)`, so a director can neither skip a place an eligible finalist could hold
+  nor invent one nobody can.
+- **At least on read.** The completion readiness stat and the guarded
+  `COMPLETE_EVENT` command share one SQL expression that refuses only when the
+  published place count is **less than** `min(3, eligible final roster size)`.
+
+The two sides are not the same kind of number. The published place count is
+frozen the moment the podium is finalized. The eligible finalist count is not,
+because withdrawal and disqualification are allowed at any heat state including
+`FINALIZED`. Comparing them for equality meant that disqualifying a winner after
+the race retroactively judged a correct podium "incomplete" and stranded the
+event with no exit: completion refused, the same expression guarded the batch,
+and `Reset heat` refuses a published result. A podium holding *more* places than
+the current requirement is the normal, correct state after somebody leaves, and
+it completes. Nothing is renumbered and no result row is rewritten.
+
+Reactivation is the one change that moves the requirement upward, because it
+restores a racer who can hold a place. Completion then reports which side is
+short — "A finalized final published fewer podium places than its eligible
+finalists can fill. Correct or reopen that final result and publish the full
+podium." — and the remedy is reachable, because a final result can be corrected
+or reopened while the event is still `FINAL`.
+
+That remedy has one documented precondition of its own, stated in full under
+Final Correction: correction and reopen are refused when a duck assignment named
+by a result row the command would write or supersede has been released from the
+event. The stop is scoped to those rows precisely so that this blocker always
+names a reachable remedy. A duck released anywhere else in the event — a spare
+handed back at the registration desk, a broken duck deleted for a racer who
+holds no published place — does not touch it.
 
 `COMPLETED` is the final lifecycle status. There is no transition past it; the
 event stays there, with results publicly visible, until an administrator runs
@@ -1183,25 +1395,77 @@ disqualify a `SUBMITTED` or `ACTIVE` registration or reactivate a
 withdrawn/disqualified registration. These
 operations are revision-checked, idempotent, and audited.
 
-Withdrawal or disqualification is allowed while every heat containing that
-participant remains `PLANNED` and unlocked. Once any containing heat is locked,
-running, awaiting a result, or finalized, both operations are blocked in
-preflight and in the atomic write. Keep the participant `ACTIVE` and ask the
-race director to resolve the heat or official result instead.
+The participant detail pane offers **Withdraw** and **Disqualify** to every
+`SUBMITTED` or `ACTIVE` participant, which is exactly the set the endpoints
+accept. It does **not** read `deletable`: leaving the race and deleting the
+registration are different questions, and a never-paired no-show is precisely
+who a registration desk needs to withdraw. Gating withdrawal on undeletability
+left destroying the registration as the only way to record that somebody did not
+turn up. **Reactivate** is offered for a withdrawn or disqualified registration.
+No control reads pairing, because a reactivated participant can be `SUBMITTED`
+while still holding their duck.
 
-Status changes do not close a duck assignment, release an event reservation, or
-remove a still-unlocked heat entry. For a pre-race active participant who should
-leave the race, the operator should also use the duck unassignment workflow and
-replace the unlocked roster if necessary. Unassignment itself preserves an
-existing heat entry. There is no current operation to replace a roster with zero
-entries or cancel an empty heat, so operators must resolve these cases before
-locking and avoid creating a stranded empty heat.
+An undeletable participant is additionally shown one sentence beside the actions
+explaining why Delete is missing, and that sentence states the reason that
+actually applies, in this order:
 
-Because the heat entry survives, the round refuses to start while any roster
-still holds the withdrawn or disqualified racer. That is reported as a readiness
-blocker, enforced inside the guarded start command, and enforced again by the
-roster lock itself, so the race can never begin with an inactive racer on a
-locked roster or in the announcer's roster read.
+1. the event's status is outside the deletable set, in which case nothing about
+   the participant is the reason and the sentence says so;
+2. they hold a duck and a heat is holding that duck, so the named duck is
+   already sealed in a numbered bag and stays in the race;
+3. they hold a duck but the projection reports `heatAssignmentPending`, so no
+   bag exists for it yet — the same state the pairing callout refuses to invent
+   a bag number for;
+4. they hold no duck now but their entry has already been in the race.
+
+No branch claims a duck is in a bag unless a heat is genuinely holding one. The
+registration projection carries `heatAssignmentPending` alongside
+`currentlyPaired` and `deletable` for exactly this reason.
+
+**Withdrawal or disqualification is allowed at any point in the event
+lifecycle.** The heat's state is not a precondition: `PLANNED`, `LOADING`,
+locked, `READY`, `CALLING`, `RUNNING`, `AWAITING_RESULT`, and `FINALIZED` all
+accept it, and none of them is changed by it. There is no longer a heat guard in
+the preflight or in the atomic write, because there is nothing to remove — the
+duck is sealed in a numbered bag, the entry never moves, and only eligibility
+changes. Every other guard is unchanged: the event-status gate, the revision
+check, the allowed-transition check, command idempotency, and the audit write.
+
+Withdrawal and disqualification are the exit for a participant who has been
+paired, and they are deliberately bookkeeping only. Each writes exactly three
+rows — the guarded command, the registration status, and the audit event — and
+nothing else. They do not close a duck assignment, release an event reservation,
+remove a heat entry, or renumber, rebalance, or reorder any heat, slot, or lane.
+The duck is already sealed in a heat bag, and resorting the bags would mean
+physically rescanning every duck, so the bags and the rosters stay exactly as
+they are.
+
+The participant instead disappears from every public surface; see Public
+Visibility of Withdrawn and Disqualified Participants. There is no current
+operation to replace a roster with zero entries or cancel an empty heat, so
+operators must resolve these cases before locking and avoid creating a stranded
+empty heat.
+
+The heat entry survives and the round starts around it. The only roster fact
+that still refuses a lock or a start is a heat holding **no** `ACTIVE` racer at
+all, because that heat could never produce a result. That one refusal is reported
+as a readiness blocker, enforced inside the guarded start command and the heat
+lock/start transitions, and enforced again by the automatic roster lock, all with
+the same predicate so the preflight, the transition, and the lock can never
+disagree. Reactivation, which is available at any point, is its remedy.
+
+Staff rosters — heat detail, the announcer roster, the start-line roster, the
+finish-line roster, the staff finalist list, and published results — keep showing
+withdrawn and disqualified racers with `eligible: false` and their
+`registrationStatus`, and mark them. Staff must reconcile what is physically in
+the bag, and the announcer must know not to call that name. Only public surfaces
+omit them.
+
+The start-line and finish-line stations fold the roster's eligibility into their
+render key alongside the heat's id, revision, and status. A withdrawal changes
+none of those three, so without it the repaint would be discarded and the station
+would keep showing an unmarked racer — and, at the finish line, keep demanding a
+podium place that can never be filled.
 
 ### Delete Registration
 
@@ -1212,6 +1476,17 @@ mistaken entry. It is not a substitute for withdrawal or disqualification, which
 are the correct tools for someone who registered legitimately and then stopped
 racing.
 
+The pane offers **Delete registration** only while the projection reports
+`deletable`, so a participant is never shown a button whose command the server
+refuses, and it is never offered to somebody who has been in the race. It is
+offered *alongside* Withdraw and Disqualify rather than instead of them. Because
+`deletable` is the delete endpoint's own predicate rather than a restatement of
+it, the console and the guarded write cannot disagree: a participant whose duck
+was later unassigned is not `currentlyPaired`, is still not `deletable`, and is
+offered withdrawal or disqualification like any other participant who has been
+in the race. A projection that carries neither flag is treated as not
+deletable.
+
 The request follows the other staff participant mutations: an RFC 4122 v4
 `commandId`, the currently loaded `expectedRevision`, the exact application
 `Origin` for cookie-authenticated sessions, and a confirmed danger dialog in the
@@ -1219,22 +1494,35 @@ console. A matching retry returns `{ deleted: true, replayed: true }` from
 command history, because the registration no longer exists to be re-read;
 reusing the identifier for another operation is `409`.
 
-**Unassign first.** Deletion protects race integrity instead of tearing it down.
-It is refused with `409` and an actionable message when either of the two
-race-integrity relationships still exists:
+**Only while never paired.** Deletion protects race integrity instead of tearing
+it down. It is refused with `409` — a lifecycle conflict, the same code every
+other state refusal on this surface uses — when either race-integrity
+relationship exists, and the message names withdrawal or disqualification as the
+remedy rather than unassigning a duck:
 
-- The participant has any duck assignment, current or already ended. The message
-  directs staff to the existing inventory unassignment workflow. Note that
-  unassigning is not by itself enough for this path: an ended assignment row
-  still exists and still blocks deletion, because that participant genuinely was
-  paired.
-- The participant appears on any heat roster. The message directs staff to
-  unassign the duck and remove the participant from the heat first.
+- The participant has any duck assignment, current or already ended. Unassigning
+  the duck afterwards does **not** reopen deletion: the ended assignment row
+  still exists and still means that participant's duck went into a heat bag.
+- The participant appears on any heat roster.
+
+The guard is on the duck, never on the registration status. A reactivated
+participant can be `SUBMITTED` again while still holding their duck, and
+`SUBMITTED` alone never makes a registration deletable.
 
 Because a participant with any heat entry is refused outright, deletion can never
 reach the roster-lock trigger and can never remove a locked, running, or
-finalized roster row. The duck assignment and heat entry are left exactly as they
-were on a refusal.
+finalized roster row, and no heat is ever renumbered by this path. The duck
+assignment and heat entry are left exactly as they were on a refusal.
+
+The staff participant list and detail projections both carry the two booleans the
+console reads to choose between the actions:
+
+- `currentlyPaired` — a duck assignment with `valid_to IS NULL` exists. It is
+  exactly `assignment !== null` and is independent of registration status.
+- `deletable` — the exact predicate the delete endpoint re-checks inside its
+  guarded write: never paired, no heat place, and a deletable event status. Only
+  a `deletable` participant may be offered a Delete control; every other
+  participant is offered Withdraw or Disqualify instead.
 
 Deletion is also refused with `409` while the event is `DRAFT`, and `404` for an
 unknown registration.
@@ -1569,9 +1857,38 @@ the atomic command re-checks both the open slot and that capacity with guarded
 SQL. Pairing stays available through `REGISTRATION_CLOSED` so a participant
 paired after the close still lands in a heat.
 
-**Operator step:** physically place ducks in a bag labeled with
-the returned heat number. QuickDucks records no bag placement or expected
-physical location confirmation.
+**Implemented:** because that duck immediately goes into a physical heat bag, a
+successful pairing paints one large, high-contrast, full-width callout at the
+very top of the pairing page and scrolls it into view. It reads *Put this duck
+in HEAT 3 bag* with the heat number at display size and the duck number beside
+it as secondary information. It carries an assertive `aria-live` announcement
+and stays on screen until the staffer presses **Done — this duck is in the bag**
+or scans the next duck, so a live refresh cannot take it away while they walk to
+the bags.
+
+The note under it states exactly how firm that bag is, because The Heat Bag Rule
+allows one whole bag to be poured into another while registration is still open:
+
+- While the event is `REGISTRATION_OPEN` and the heat is a round-one heat, the
+  note says the duck goes to that bag now, that the whole bag can still be
+  folded into the heat before it if the heat is too short to race when
+  registration closes, and that the Admin view names both bags when that
+  happens. It does not claim the bag is final, because it is not.
+- From `REGISTRATION_CLOSED` onwards, and for a repair pairing that lands in the
+  final, nothing can move the entry any more and the note says plainly that the
+  duck stays in that bag, in that position, for the rest of the race.
+
+The wording is the only part that varies. The bag is named just as loudly in
+both cases, because naming it is the whole point of the callout.
+
+The bag is always the round and heat number the pairing command itself committed
+and returned; the browser never counts entries or derives a number. A repair
+pairing during racing can return the final, and the callout names the final heat
+rather than a round-one one. When the response reports `heatAssignmentPending`
+or no heat at all, the callout turns to its refused colours and says *Do not bag
+this duck yet* with no number, directing the staffer to ask the race director
+which heat it belongs to. QuickDucks still records no bag placement or physical
+location confirmation.
 
 ### Assignment, Reassignment, and Unassignment
 
@@ -1620,6 +1937,11 @@ computes the next slot as `COUNT(*) + 1` and `UNIQUE (heat_id, slot_number)`
 would otherwise reject a repeat. Every operation below preserves that.
 
 ### Minimum Heat Size and Tail Rebalancing
+
+This is the one place The Heat Bag Rule permits a physical change, and it is
+permitted because a fold is not a search: it pours one whole bag into another
+and leaves every duck inside untouched. It is available only before any roster
+is locked, and it is always reported. See **Reporting the Bag Move** below.
 
 A heat can only be raced with at least three ducks. That minimum is enforced in
 three places:
@@ -1697,6 +2019,60 @@ Both are guarded on their own lifecycle command row, so a transition that loses
 its race writes nothing, and a replayed command identifier returns the recorded
 result without moving anything a second time.
 
+#### Reporting the Bag Move
+
+**Implemented:** a fold and a split both move ducks that are already sealed in
+numbered bags, so neither may be silent. Every lifecycle response carries a
+`bagMoves` array. It is empty for every transition that moves nothing, and for a
+replay — the move happened once, and asking a staffer to pour an already-poured
+bag would be worse than saying nothing. A successful close or reopen reports one
+entry per pass, in the order the staff must perform them:
+
+| Field | Meaning |
+| --- | --- |
+| `action` | `MERGE` for a fold on close, `SPLIT` for the reverse on reopen |
+| `fromHeatNumber` | the heat whose ducks move |
+| `intoHeatNumber` | the heat they move into |
+| `duckNumbers` | the numbers printed on the ducks that moved, in slot order |
+| `movedEntryCount` | how many roster places moved, including any with no current duck |
+
+`duckNumbers` matters for a split: pouring a whole bag needs no search, but
+taking specific ducks back out of one does, so the instruction names them.
+
+The two counts are deliberately different facts, and the instruction never mixes
+them. `movedEntryCount` counts roster places; `duckNumbers` counts the ducks
+physically in the bag, and a place whose duck assignment has ended contributes no
+number. **The instruction always counts exactly the ducks it names**, so a
+staffer standing at the bags is never sent to find a duck that does not exist,
+and any roster place with no duck is reported as its own separate sentence.
+
+The Admin view turns each entry into one physical instruction, in the same loud
+visual language as the pairing page's own bag callout, at the very top of the
+page and outside every view so switching views cannot hide it:
+
+- A fold reads *Pour the Heat 5 bag into the Heat 4 bag*.
+- A split reads *Move 2 ducks: Duck #117, Duck #118 from the Heat 4 bag into a
+  new Heat 5 bag*.
+- A move that also carries a racer with no current duck adds *1 racer in this
+  move has no duck assigned right now, so there is nothing to carry for them.*
+- A move with no duck to carry at all says so — *No ducks to carry*, and for a
+  split *No duck moves out of the Heat 4 bag* — rather than naming a count with
+  nothing behind it.
+
+The queue is read back out of browser storage, which anything on the origin can
+have written, so every field is revalidated on the way in and on the way out and
+a malformed entry is dropped rather than rendered. Each value is written with
+`textContent`.
+
+The instruction is queued in the browser rather than merely painted, so it
+survives a reload, a view switch, and a live refresh. Only pressing **Done — the
+bags match the heats** removes one, and it removes exactly one, so a two-pass
+fold is worked through instruction by instruction. Deleting the event clears the
+queue, because the heats it named no longer exist. QuickDucks still records no
+bag placement or physical confirmation: acknowledging is an operator step, and
+the audit records only the heat numbers and counts already written by
+`ROUND_ONE_TAIL_MERGED` and `ROUND_ONE_TAIL_SPLIT`.
+
 ### Reopening Registration
 
 Registration may reopen at any point before round one actually starts. Existing
@@ -1726,10 +2102,12 @@ is revision-checked and audited, and every statement in its batch is guarded on
 the command row the batch itself inserts, so a replacement that loses its race
 writes nothing rather than emptying the heat first.
 
-This is the remedy the readiness blockers name. A withdrawn racer left on a
-roster, or a heat that fell below the minimum, is repaired here before the round
-starts. The staff console offers the replacement form for exactly these statuses,
-so it never presents a control the API would refuse.
+This repairs a heat that fell below the minimum before the round starts. It is
+**not** the remedy for a withdrawn racer: their duck is already sealed in that
+heat's bag, rewriting the roster would renumber slots the bags cannot follow, and
+they block nothing anyway. Reactivation is the only remedy the eligibility
+blocker names. The staff console offers the replacement form for exactly these
+statuses, so it never presents a control the API would refuse.
 
 ## Heat Readiness and Running
 
@@ -1742,6 +2120,12 @@ For each round-one and final heat, station staff perform:
 5. A result taker **Mark heat finished**: changes `RUNNING` to
    `AWAITING_RESULT`.
 6. A result taker enters and publishes the required result.
+
+A heat cannot lock or start while it holds no `ACTIVE` racer. `transitionHeat`
+checks it before the write and repeats it as a SQL guard inside the atomic batch
+of both transitions; the refusal is `409` and names reactivation as the remedy.
+A heat that merely *contains* withdrawn or disqualified racers locks and starts
+normally, with every entry, slot number, and duck assignment untouched.
 
 A heat cannot start while any racer on its roster holds no duck. `transitionHeat`
 checks it before the write and repeats it as a SQL guard inside the atomic batch,
@@ -1772,8 +2156,9 @@ deleted by reset.
 
 Each console roster entry shows its slot, participant name, duck number, and the
 race-entry identifier, plus up to two navigation buttons. **Participant details**
-scrolls to the Participants section, loads that registration through the existing
-participant-selection path, and moves focus into the loaded detail panel.
+switches the console to the Participants view through the same `#participants`
+hash the menu bar uses, scrolls to it, loads that registration through the
+existing participant-selection path, and moves focus into the loaded detail panel.
 **Duck # in inventory** navigates to `/staff/inventory?duck=<id>`, which opens
 that duck's detail panel on arrival. The participant panel's **Use for duck
 assignment** action navigates the same way with `?raceEntry=<id>`.
@@ -1812,10 +2197,16 @@ It shows the heat that is up now, chosen by the same priority as the start-line
 station, with a plain sentence saying what to do (read the racers, call the
 race, or hold for the official result). Its roster comes from
 `GET /api/v1/staff/events/:eventId/heats/:heatId/announcer-roster`, which
-projects exactly slot number, full participant name, and visible duck number.
-Announcers say the whole name, so this projection is deliberately the full
-registered name rather than the public name policy used on the race board; it
-carries no contact data, lookup code, or inventory detail.
+projects exactly slot number, full participant name, visible duck number, and the
+racer's `registrationStatus` with an `eligible` boolean. Announcers say the whole
+name, so this projection is deliberately the full registered name rather than the
+public name policy used on the race board; it carries no contact data, lookup
+code, or inventory detail.
+
+A withdrawn or disqualified racer stays on this roster and is marked ineligible
+rather than hidden. Their duck is sealed into the heat bag the staff are
+physically holding, so the roster has to match the bag, and the status is
+precisely what tells the announcer not to call that name.
 
 It also deliberately carries no participant-chosen duck name, even though that
 name is public everywhere else. Reading a name aloud is the one place where one
@@ -1849,8 +2240,73 @@ revision, and sole awaiting heat inside the atomic result command before it
 publishes the winner. A result taker receives no contact details, lookup code,
 pairing control, or name-moderation control on that inspection page.
 
+**A withdrawn or disqualified duck at the finish line is an expected outcome,
+not an error.** A duck that has been paired is already inside a heat bag, and
+nobody empties a bag on the bank to fish one duck out, so that duck keeps racing
+and can cross the line first. Every finish-line surface that can meet it answers
+the same way: `422` with a stable `reason` of `DUCK_NOT_ELIGIBLE` and an
+`ineligible` projection carrying the race entry, the policy-filtered display
+name, the visible duck number, and the real registration status. That covers
+resolving a roster duck by tag URL or by visible number, confirming a scanned
+round-one winner, and submitting a reviewed result whose racer was withdrawn in
+between — the last of which also names the exact `ineligibleRaceEntryIds` to
+drop. The projection adds no contact detail, lookup code, or tag token beyond
+what an eligible scan already returns.
+
+The station presents it as a plain statement — *Duck #12 is Withdrawn*, that
+this duck stays in its heat, and *Scan the next duck to pass the finish line* —
+and stays armed: the heat, the scan field, and the NFC reader are untouched and
+nothing has to be dismissed. Scanning that duck's tag instead lands on its staff
+inspection page, which shows the same statement in place of the winner action.
+Nothing is written and **no heat entry is removed, reordered, renumbered, or
+rebalanced**: the withdrawn duck keeps its heat and its slot, and so does every
+other duck, both before and after a winner is recorded around it.
+
+The statement names a status word only for `WITHDRAWN` and `DISQUALIFIED`, which
+are the only two statuses that mean "this racer left the race". The
+`winnerByTagIneligible` lookup behind the duck inspection page matches exactly
+those two. It is deliberately narrower than the `ACTIVE`-only guard it mirrors
+and the two are not complements: a racer who is `SUBMITTED` — waiting to be
+paired again after their duck was deleted mid-race — may not be recorded as a
+winner either, but they never withdrew, so they fall through to the generic
+refusal rather than being announced under a status word that is not theirs. If
+such a duck is scanned at the finish line it is still refused, with a sentence
+that makes no claim about a status.
+
+**A heat in which nobody at all can win is said plainly, on both round-one
+surfaces.** Withdrawal is allowed at every heat state and the eligible-racer
+guard protects only the lock and the start, so the last `ACTIVE` racer in a
+round-one heat can leave while that heat is already `RUNNING`. *Scan the next
+duck* is then the wrong instruction: every duck in that bag answers
+`DUCK_NOT_ELIGIBLE`, and no scan will ever produce a winner.
+
+Both stations therefore count the places a heat requires the same way — round one
+as `min(1, eligible roster size)` and the final as `min(3, eligible roster
+size)` — so a round-one heat is never reported as needing a winner that no duck
+may be. When that count is zero:
+
+- The finish-line station says *Nobody in this heat can win: every racer in it is
+  withdrawn or disqualified, so no result can be recorded. Every duck stays in
+  its bag. Ask the race director to reactivate a racer, then this station can
+  take the result.* Its **Required result** fact reads *No racer can win*. A heat
+  that is still `RUNNING` keeps its finish button, with that sentence appended,
+  because those ducks are physically on the water and the heat must still be
+  marked finished.
+- The staff duck inspection page, which is where round one actually publishes,
+  adds *Nobody in Heat N can win* to the statement about the scanned duck,
+  explains that every duck in that bag will be refused, and asks for reactivation
+  instead of the next scan. It answers that question by reading the same heat
+  roster projection the finish line reads, and only for a duck the server has
+  already refused; an unavailable read leaves the single-duck statement exactly
+  as it was rather than claiming anything about the heat.
+
+Reactivation is the remedy on both, it is available to a race director at any
+point, and it restores the winner action on the very next scan.
+
 The final keeps the complete-podium station flow. It requires distinct places 1
-through `min(3, final roster size)`. Every selection displays place,
+through `min(3, eligible final roster size)` — the same count the server's result
+validation requires, so a podium reduced by a withdrawal can actually be
+published. Every selection displays place,
 policy-filtered participant name, and visible duck number before one **Submit
 official podium** confirmation. Only one tag or number lookup can run at a time;
 the station discards a response if event, heat, revision, or intended place
@@ -1894,9 +2350,31 @@ by the authoritative lifecycle checks instead.
 
 The final follows the same lock, ready, call, start, and finish transitions.
 When it reaches `AWAITING_RESULT`, a result taker, race director, or administrator must publish exactly
-places 1 through `min(3, final roster size)`, using distinct finalists from the
-roster. All required places are written in one atomic command and the final
-becomes `FINALIZED`.
+places 1 through `min(3, eligible final roster size)`, using distinct finalists
+who are still `ACTIVE`. All required places are written in one atomic command and
+the final becomes `FINALIZED`.
+
+**A withdrawal shrinks the podium, and every surface counts it the same way.**
+The finish-line station and the console result form both derive the number of
+places from `eligible`, treating a projection that predates the field as
+eligible. If either sized the podium by the whole roster it would demand a place
+whose duck answers every scan with `DUCK_NOT_ELIGIBLE`; the final could never be
+published, `Complete event` would stay blocked, and the event would be stranded
+with no way out but reactivating the racer.
+
+**A withdrawal after the podium is published shrinks nothing.** Publication
+sizes the podium at the moment it is written; completion afterwards only ever
+requires that the published podium be *at least* as deep as the current eligible
+count, never exactly equal to it. See Start Final and Complete Event.
+
+The console result form — used for the FINAL finalize, the FINAL correction, and
+the ROUND_ONE correction — offers only eligible racers in its place selects, so
+it cannot propose a winner the server refuses, and it does not preselect a
+published place whose racer has since left. The heat roster above it is
+unchanged: every entry is still listed, marked. A heat with no eligible racer at
+all renders a plain explanation instead of an empty, unsubmittable form, and the
+finish-line station says the same thing rather than arming a submit for zero
+places.
 
 The event remains `FINAL` until a race director or administrator runs `Complete event`.
 There is no staged first-place, second-place, then third-place scan workflow;
@@ -1908,6 +2386,14 @@ All result corrections and reopens require `RACE_DIRECTOR` or a system
 administrator, a fresh heat revision, a 4-to-500-character reason, and explicit
 confirmation. Result takers may finalize new results but cannot alter published
 results.
+
+A correction writes new `heat_results` rows, so it is held to exactly the rule a
+first publication is: every racer it names must still be `ACTIVE` and must still
+hold the duck assignment the request resolved. That is checked in the preflight,
+which names which selection to drop, and repeated as a count inside the guarded
+batch, which is authoritative. A reopen writes no result rows and therefore
+carries no eligibility rule at all — removing a place never requires the racer
+who held it to still be able to hold one.
 
 ### Round-One Correction
 
@@ -1927,17 +2413,84 @@ the final roster is locked or underway.
 
 ### Final Correction
 
-Current final result correction and reopen routes are available only after the
-event has been moved to `COMPLETED`. Therefore an operator who finds a podium
-error must first complete the event, then correct or reopen it.
+A published final result can be corrected or reopened while the event is
+**`FINAL` or `COMPLETED`**. `FINAL` is the state a race director is actually in
+the moment they disqualify a winner, so it is the state the remedy has to work
+from.
+
+Requiring `COMPLETED` alone made the documented remedy circular: an event whose
+podium the completion check disagreed with could not be completed, and the
+correction that would have fixed the podium refused to run until the event was
+completed. Admitting `FINAL` breaks that loop with the state the director
+already has. It cannot corrupt anything the `COMPLETED` path protects: a
+`FINAL`-round correction computes no finalist promotion at all, because only a
+round-one winner feeds a final roster, and neither correction nor reopen writes
+the event's status forward, so an event that is already `COMPLETED` stays where
+it is.
 
 A direct final correction supersedes the old podium and publishes a new result
-revision while the event remains `COMPLETED`. Reopening supersedes and removes
-the podium, changes the heat to `AWAITING_RESULT`, and moves the event back to
-`FINAL`; staff must republish the podium and complete the event again.
+revision, leaving the event's status untouched. Reopening supersedes and removes
+the podium and changes the heat to `AWAITING_RESULT`; if the event was
+`COMPLETED` it is moved back to `FINAL`, and if it was already `FINAL` it stays
+there. Staff republish the podium and complete the event.
 
-Final correction and reopen are blocked after any event duck reservation is
-released.
+Both carry the same discipline as every other result mutation: `RACE_DIRECTOR`
+or a system administrator, the exact application `Origin` for cookie-
+authenticated sessions, the currently loaded heat revision, a 4-to-500-character
+reason, an RFC 4122 v4 `commandId` whose matching retry replays and whose reuse
+for different material is `409`, and one guarded batch that repeats every
+precondition the preflight checked.
+
+Final correction and reopen are blocked when a duck assignment named by a
+`heat_results` row **this command would write or supersede** belongs to an event
+duck reservation that has been released. A deleted or released duck means that
+particular result row's duck assignment no longer describes a duck in this race.
+The refusal says exactly that: "Final results cannot be corrected once a duck has
+been released from this event." Attempting either from any other event status
+reports the other precondition separately: "Final results can be corrected only
+while the event is FINAL or COMPLETED." Neither message refers to return
+processing, which is not a concept this product implements.
+
+**The stop is targeted, not event-wide.** It used to refuse whenever *any*
+`event_ducks` row in the event carried a `released_at`, which is a much larger
+set than the sentence describes: releasing one unneeded spare duck back to
+inventory at the registration desk, with no participant attached, permanently
+disabled every final correction and reopen for the rest of the race. Combined
+with the completion check that is a strand: `Complete event` says "correct or
+reopen that final result", both endpoints answer "not once a duck has been
+released from this event", the console offers no form because both capabilities
+project `0`, and `Reset heat` refuses a published result — leaving
+re-disqualifying the racer as the only exit, which destroys exactly the record a
+director must be able to keep. Scoping the refusal to the rows the command
+actually rewrites is what the guard always meant, and it keeps the reactivation
+remedy reachable.
+
+Both halves are enforced twice: in the preflight, which produces the readable
+message, and inside the guarded batch, which is authoritative. A correction
+additionally repeats the eligibility guard that publication uses — every racer
+the corrected podium names must still be `ACTIVE` and still hold the exact duck
+assignment the request resolved, counted inside the batch. Without that, a
+disqualification landing between the roster read and the write could be committed
+into `heat_results`: withdrawal and disqualification touch only `race_commands`,
+`registrations`, and `audit_events`, so they bump no heat revision, and they
+deliberately never close the duck assignment, so no foreign key notices either.
+The public podium would then silently hide a place it had just published.
+
+The console follows the server-projected `resultCorrectionAllowed` and
+`resultReopenAllowed` capabilities rather than re-deriving the rule, so it offers
+the forms during `FINAL` and hides them once a duck named by this result's
+published rows has been released.
+
+Those two capability booleans are visible to every role that can read a heat —
+`ANNOUNCER`, `HEAT_RUNNER`, and `RESULT_TAKER` as well as `RACE_DIRECTOR` —
+because `heatSummarySql` is one role-independent projection. That is deliberate
+and recorded rather than narrowed. They carry no duck identity, number, tag, or
+reason; they name no participant; they add no column and no role; and both
+mutations they describe remain `RACE_DIRECTOR`-only and are refused by the API,
+not by the markup. Since the stop became targeted they no longer report "some
+duck somewhere left this event" at all — only that a place this heat already
+published names a duck that is gone, which is a fact about this heat that these
+same roles can already see on its roster.
 
 Historical result revisions remain until the event is deleted.
 
@@ -1948,9 +2501,8 @@ from `REGISTRATION_OPEN` through `COMPLETED`. The prominent board appears on the
 noindex `/race` page, private status pages, and public duck-tag status pages.
 The home page instead carries a compact "happening now" summary, the stage chip
 plus one current-heat line, that links to `/race`. While there is no public
-event, `/race` shows only "The next race is being prepared. Live race status
-will appear here once the race begins." — its own wording, because a race-status
-page must not carry the `/register` call to action. The board includes:
+event, `/race` has nothing to report, so it redirects to the home page with a
+`303` rather than rendering an empty race-status page. The board includes:
 
 - Safe event lifecycle status and date. The board turns that status into a
   prominent plain-language stage chip and summary line beside the event name:
@@ -1971,7 +2523,9 @@ page must not carry the `/register` call to action. The board includes:
 Visible duck numbers come only from a current assignment with `valid_to IS
 NULL`; a historical assignment closed by pre-race unassignment is never revived
 on the board. A roster entry with no current duck number carries no duck name
-either.
+either. Racers whose registration is `WITHDRAWN` or `DISQUALIFIED` are omitted
+from every roster, finalist list, and podium without shifting anybody else; see
+Public Visibility of Withdrawn and Disqualified Participants.
 
 The board returns no event, heat, race-entry, registration, assignment, or
 result IDs; no contacts, lookup/private/tag tokens, staff data, notes, inventory,
@@ -1993,7 +2547,80 @@ tag, exact public name search, and browser collection cards. It exposes:
 
 The outcome gives withdrawal/disqualification priority, then podium, final
 completion/finalist state, round-one winner/elimination, running state, pairing,
-and heat assignment.
+and heat assignment. Only the two owner-facing surfaces named below ever render
+the withdrawn or disqualified outcome.
+
+### Public Visibility of Withdrawn and Disqualified Participants
+
+**Implemented:** a `WITHDRAWN` or `DISQUALIFIED` participant keeps their duck —
+it is sealed in a heat bag and may still float past the finish line — but
+publicly the application behaves as if they are not in the race. This is a
+projection rule everywhere and a data change nowhere: no row is deleted, no heat
+is reordered, and no recorded result is altered.
+
+Hidden from them entirely:
+
+| Surface | Behaviour |
+| --- | --- |
+| Public name search (`GET /api/v1/race-status/search`) | Not returned at all |
+| Follow (`POST /api/v1/registrations/mine/follow`) | `404`, so they cannot be followed |
+| Live race board and `/race` (`GET /api/v1/race-board`) | Omitted from every round-one and final roster |
+| Podium and finalists on that board | Omitted, so they can never be published as a winner |
+| Anonymous tag scan `/t/<tag-token>` and `GET /api/v1/ducks/<tag-token>` | Redirects home / `{ "destination": "HOME" }` |
+| Public duck page `/duck/<number>` and `GET /api/v1/ducks/number/<number>` | The shared "Duck #N isn't racing." page and `404` |
+| A **followed** card in another browser's My Ducks, and that browser's presence probe | The card is absent while they are away |
+
+Still shown, because the participant is entitled to know their own status:
+
+| Surface | Behaviour |
+| --- | --- |
+| Private status link `/r/<token>` and `GET /api/v1/registrations/<token>` | True `WITHDRAWN`/`DISQUALIFIED` status and outcome |
+| My Ducks card for a registration **this device created** (`added_via = 'REGISTRATION'`) | True status and outcome, and the device's presence probe still reports it |
+| Every staff surface | Unchanged |
+
+Omitting an entry never shifts anything else. The remaining racers keep their
+stored slot order, their printed duck numbers, and their official places: if the
+finalist who withdrew held first place, second place is **not** promoted to
+first, it is simply the only place still published. A heat whose whole roster
+withdrew is still published as a heat, with its number and status and an empty
+roster, because its bags physically still exist.
+
+#### The Public Podium Keeps Its Place Numbers
+
+**Decided:** disqualifying or withdrawing a published podium finisher leaves a
+**visible gap** in the public podium. Disqualifying the published second place
+publishes places 1 and 3, two entries with a hole between them. QuickDucks does
+not renumber, promote, or close the gap.
+
+That gap is the honest answer. The place numbers are what the race produced and
+what the official `heat_results` rows still say; an appeal is decided from those
+rows. Renumbering third place to second would publish a claim the race never
+made about who finished second, and it would disagree with the staff heat
+detail, the audit history, and the participant's own private status page, all of
+which keep reporting the place that was actually raced. A gap invites the
+question "what happened to second?", which has a real answer; a silent promotion
+answers it wrongly and unrecoverably.
+
+The gap is also self-limiting. It only appears because the podium row is
+retained while its racer is hidden, and the retention is deliberate: privacy is
+absolute, and the racer who left appears nowhere in the public payload — no
+name, no duck number, no place. A race director who wants the places closed up
+has a real remedy rather than an automatic one, and it is reachable from `FINAL`
+unless a duck named by one of this result's published rows has itself been
+released from the event: correct the final result, which supersedes the old
+podium and publishes a genuinely new one under a recorded reason. See Final
+Correction.
+
+The same rule already governs a round-one heat whose published winner leaves.
+That heat stays `FINALIZED` and publishes its surviving roster with nobody
+holding first place, rather than promoting a racer who did not win.
+
+`race-board.test.mjs` pins this behaviour, and
+`race-workflow.integration.test.mjs` proves it end to end through the real
+handlers after a real disqualification.
+
+A followed collection link is never deleted by this rule, so reactivating the
+participant restores the followed card by itself with nothing to re-follow.
 
 Every rendered application page loads one shared browser live-update hub. The
 hub connects to same-origin `/api/v1/live` lazily when its first live
@@ -2019,7 +2646,13 @@ or mutation payloads. Domain names only decide which open surfaces need an
 authoritative refetch; they are never data or proof that a command succeeded.
 
 A successful signal causes matching public, private, `My Ducks`, station,
-inventory, scan, and staff-console subscribers to refetch D1-backed APIs.
+inventory, scan, and staff-console subscribers to refetch D1-backed APIs. A page
+subscribes only to the domains it can actually repaint. The staff console client
+runs on both the Admin console and the registration desk, so it derives its
+domain list from the surfaces the page in front of it renders and the roles that
+may read them: the desk carries the participants surface only and therefore asks
+for `event`, `staff`, `participants`, and `ducks`, while the Admin console adds
+`heats` and, for an administrator, `support`.
 Reconnect uses bounded jitter and triggers an integrity refetch to close the
 missed-signal gap. While disconnected or when WebSocket is unavailable,
 subscribers poll approximately every five seconds; while connected they perform

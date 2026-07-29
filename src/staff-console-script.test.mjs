@@ -12,6 +12,7 @@ import {
   renderStaffInventory,
   renderStaffDuck,
   renderStaffHome,
+  renderStaffRegistration,
   renderStartLine,
 } from "./site.ts";
 
@@ -123,6 +124,85 @@ test("participant deletion is a confirmed danger action that clears the detail p
   assert.doesNotMatch(staffHomeScript, /Unassign the duck from inventory first/);
 });
 
+// The projection carries two booleans that answer two different questions, and
+// the shipped script has to ask each one where it belongs. Reading `assignment`
+// for the Delete control was a real defect: a participant whose duck had been
+// unassigned is not currently paired, is still not deletable, and was offered a
+// button whose command the server refuses with 409.
+test("the Delete control is gated on deletable and the bag wording on currentlyPaired", () => {
+  // `deletable` is taken exactly as sent, and an absent field is not deletable.
+  assert.ok(staffHomeScript.includes(
+    "const participantIsDeletable = (registration) => registration.deletable === true;",
+  ));
+  // The pairing question prefers the explicit boolean and falls back only to
+  // the assignment object it is defined to equal.
+  assert.match(
+    staffHomeScript,
+    /const participantIsCurrentlyPaired = \(registration\) => registration\.currentlyPaired === true\s*\|\| \(registration\.currentlyPaired === undefined/,
+  );
+
+  // The deletable predicate is read once, and the two halves it decides are
+  // written as one boolean and its negation, so no future edit can leave Delete
+  // and the explanation both showing, or both missing.
+  assert.ok(staffHomeScript.includes("const deletable = participantIsDeletable(registration);"));
+  assert.ok(staffHomeScript.includes(
+    'if (deletable) {\n    addParticipantAction("Delete registration", "button danger small", (event) => deleteParticipant(event.currentTarget));',
+  ));
+  assert.ok(staffHomeScript.includes(
+    'if (!deletable) {\n    const note = text("p", participantUndeletableReason(registration), "muted participant-action-note");',
+  ));
+
+  // Withdrawal is not inside either half. It is a question about being in the
+  // race, and the server accepts it for a never-paired no-show too, so hiding
+  // it behind undeletability left Delete as the only way to record one.
+  const render = staffHomeScript.match(/const renderParticipantDetail = \(registration\) => \{[\s\S]*?\n\};/);
+  assert.ok(render, "the console defines renderParticipantDetail");
+  const withdrawIndex = render[0].indexOf('addParticipantAction("Withdraw"');
+  const deleteHalfIndex = render[0].indexOf("if (deletable) {");
+  const noteHalfIndex = render[0].indexOf("if (!deletable) {");
+  assert.ok(withdrawIndex > 0, "the console offers Withdraw");
+  assert.ok(
+    withdrawIndex > noteHalfIndex && withdrawIndex < deleteHalfIndex,
+    "Withdraw sits between the two deletable halves rather than inside either one",
+  );
+  assert.match(
+    render[0].slice(withdrawIndex - 200, withdrawIndex),
+    /if \(\["SUBMITTED", "ACTIVE"\]\.includes\(registration\.status\)\) \{\n\s*$/,
+    "Withdraw is gated only on the statuses the endpoint accepts",
+  );
+
+  // The renderer itself no longer touches `assignment`: every read of it is
+  // inside the two small helpers that exist to guard it, so a projection with
+  // an assignment shape this console does not expect cannot throw part-way
+  // through the render and silently drop every control below it.
+  assert.doesNotMatch(render[0], /registration\.assignment/);
+
+  // The sealed-bag sentence is reachable only when this participant holds a
+  // duck AND a heat is holding it, so it can never claim a bag that does not
+  // exist. The race-status branch comes first and says nothing about ducks at
+  // all, and the history branch names no bag of its own.
+  const reason = staffHomeScript.match(/const participantUndeletableReason = \(registration\) => \{[\s\S]*?\n\};/);
+  assert.ok(reason, "the console defines participantUndeletableReason");
+  const sealedIndex = reason[0].indexOf("is already sealed in a heat bag");
+  const pendingIndex = reason[0].indexOf("has no heat yet");
+  const eventIndex = reason[0].indexOf("participantEventBlocksDeletion()");
+  assert.ok(eventIndex > 0 && eventIndex < pendingIndex && pendingIndex < sealedIndex,
+    "the race-status branch is tested first, then the no-heat case, then the sealed bag");
+  assert.match(
+    reason[0].slice(0, sealedIndex),
+    /if \(participantIsCurrentlyPaired\(registration\)\) \{\s*return duckLabel \+ " $/,
+    "the sealed-bag sentence is guarded by the pairing question",
+  );
+  assert.match(
+    reason[0].slice(0, pendingIndex),
+    /if \(participantIsCurrentlyPaired\(registration\) && registration\.heatAssignmentPending === true\) \{\s*return duckLabel \+ " is paired with this participant but $/,
+    "the no-bag sentence is guarded by the projection's own heat answer",
+  );
+  const [, historyBranch] = reason[0].split('return "This participant has already been in the race');
+  assert.ok(historyBranch !== undefined, "the history reason exists");
+  assert.doesNotMatch(historyBranch, /sealed in a heat bag/);
+});
+
 const inventoryDetailController = () => new Function(
   `${inventoryDetailHelpersScript}; return createInventoryDetailController;`,
 )();
@@ -215,8 +295,8 @@ test("inventory cards and detail panel have isolated responsive layout semantics
 });
 
 const eventSection = (markup) => {
-  const match = markup.match(/<section class="console-section" id="events"[^]*?<\/section>/);
-  assert.ok(match, "the staff console renders an event section");
+  const match = markup.match(/<section class="console-section" id="event"[^]*?<\/section>/);
+  assert.ok(match, "the staff console renders an Event Details view");
   return match[0];
 };
 
@@ -232,7 +312,7 @@ test("the event section leads with create event, then the picker, then the selec
 
   // 1. heading, 2. create event, 3. working-event picker, 4. selected-event detail region.
   const [heading, createCard, picker, refresh, emptyState, detailRegion] = orderedIndexes(adminSection, [
-    '<h2 id="events-title">Event</h2>',
+    '<h2 id="event-title">Event Details</h2>',
     "data-event-create-card",
     "data-event-select",
     "data-refresh-event",
@@ -244,10 +324,12 @@ test("the event section leads with create event, then the picker, then the selec
   assert.ok(picker < refresh && refresh < emptyState, "the picker and its refresh button follow the create card");
   assert.ok(emptyState < detailRegion, "the no-event guidance precedes the selected-event region");
 
-  // The create card stays a collapsed administrator-only <details> outside the selected-event region.
+  // The create card stays a collapsed administrator-only <details> outside the
+  // selected-event region, and it ships hidden: one event dataset exists at a
+  // time, so it is revealed only while there is no event at all.
   assert.match(
     adminSection,
-    /<details class="operation-card event-create-card" data-event-create-card><summary>Create event<\/summary>/,
+    /<details class="operation-card event-create-card" data-event-create-card hidden><summary>Create event<\/summary>/,
   );
   assert.doesNotMatch(adminSection, /data-event-create-card[^>]*\bopen\b/);
   assert.doesNotMatch(directorSection, /data-event-create-card|data-event-create-form/);
@@ -306,7 +388,7 @@ test("the console script reveals the selected-event region and restores the no-e
   const noEventsMessage = staffHomeScript.indexOf('setMessage("No event dataset exists. An administrator can create one.");');
   const hideRegion = staffHomeScript.indexOf("if (eventDetailRegion) eventDetailRegion.hidden = true;");
   const showEmptyState = staffHomeScript.indexOf("if (eventEmptyState) eventEmptyState.hidden = false;");
-  const openCreateCard = staffHomeScript.indexOf("if (eventCreateCard) eventCreateCard.open = true;");
+  const openCreateCard = staffHomeScript.indexOf("      eventCreateCard.open = true;");
   assert.ok(noEventsBranch > 0 && noEventsMessage > noEventsBranch);
   for (const index of [hideRegion, showEmptyState, openCreateCard]) {
     assert.ok(index > noEventsBranch && index < noEventsMessage, "no-event cleanup stays in the no-events branch");
@@ -316,8 +398,54 @@ test("the console script reveals the selected-event region and restores the no-e
   assert.ok(staffHomeScript.includes('readinessList.replaceChildren(empty("No lifecycle is available."));'));
   assert.ok(staffHomeScript.includes("forceDeleteCard.hidden = true;"));
   assert.ok(staffHomeScript.includes('eventConfigCard.hidden = currentEvent.status !== "DRAFT";'));
-  // Creating an event collapses the primary action again.
-  assert.ok(staffHomeScript.includes("if (eventCreateCard) eventCreateCard.open = false;"));
+  // Creating an event collapses and removes the primary action again, and the
+  // handler refuses a submission once an event exists so the card can never be
+  // hidden but still submittable.
+  assert.ok(staffHomeScript.includes("      eventCreateCard.open = false;\n      eventCreateCard.hidden = true;"));
+  assert.ok(staffHomeScript.includes('    setMessage("An event already exists. Delete it before creating another.", true);'));
+});
+
+// One event dataset exists at a time, so a second create is refused anyway. The
+// card is therefore absent from the page whenever an event exists, and comes
+// back — without a reload — the moment the event is deleted.
+test("the create-event card is revealed only while no event exists", () => {
+  const markup = renderStaffHome("Administrator", true, []);
+  assert.match(markup, /data-event-create-card hidden>/);
+
+  const sliceBetween = (start, end) => {
+    const from = staffHomeScript.indexOf(start);
+    const to = staffHomeScript.indexOf(end, from);
+    assert.ok(from >= 0 && to > from, `cannot slice generated script between ${start} and ${end}`);
+    return staffHomeScript.slice(from, to);
+  };
+
+  // renderEvent removes it, exactly like the no-race and empty-state markers.
+  const shown = { hidden: false, open: true };
+  new Function(
+    "eventCreateCard",
+    "eventDetailRegion",
+    "eventEmptyState",
+    "showEventScopedSections",
+    sliceBetween("  if (eventCreateCard) {", "return true;"),
+  )(shown, { hidden: true }, { hidden: false }, () => undefined);
+  assert.equal(shown.hidden, true, "an existing event removes the create card");
+  assert.equal(shown.open, false, "and closes it so nothing inside stays reachable");
+
+  // The no-events branch — which delete-event also reaches — brings it back.
+  const removed = { hidden: true, open: false };
+  new Function(
+    "eventCreateCard",
+    "eventDetailRegion",
+    "eventEmptyState",
+    "clearBagMoves",
+    "showEventScopedSections",
+    sliceBetween(
+      "if (eventDetailRegion) eventDetailRegion.hidden = true;",
+      'setMessage("No event dataset exists. An administrator can create one.");',
+    ),
+  )(removed, { hidden: false }, { hidden: true }, () => undefined, () => undefined);
+  assert.equal(removed.hidden, false, "deleting the event brings the create card back");
+  assert.equal(removed.open, true);
 });
 
 test("the selected-event region ships hidden and the generated script toggles it both ways", () => {
@@ -336,8 +464,9 @@ test("the selected-event region ships hidden and the generated script toggles it
   };
   const region = { hidden: true };
   const emptyState = { hidden: true };
-  const createCard = { open: false };
+  const createCard = { open: false, hidden: false };
   const scoped = [];
+  const cleared = [];
   const showEventScopedSections = (exists) => scoped.push(exists);
 
   // renderEvent's tail reveals the server-hidden region and retires the no-event guidance.
@@ -345,7 +474,7 @@ test("the selected-event region ships hidden and the generated script toggles it
     "eventDetailRegion",
     "eventEmptyState",
     "showEventScopedSections",
-    sliceBetween("if (eventEmptyState) eventEmptyState.hidden = true;", "return true;"),
+    sliceBetween("  if (eventEmptyState) eventEmptyState.hidden = true;", "return true;"),
   )(region, emptyState, showEventScopedSections);
   assert.equal(region.hidden, false);
   assert.equal(emptyState.hidden, true);
@@ -356,16 +485,20 @@ test("the selected-event region ships hidden and the generated script toggles it
     "eventDetailRegion",
     "eventEmptyState",
     "eventCreateCard",
+    "clearBagMoves",
     "showEventScopedSections",
     sliceBetween(
       "if (eventDetailRegion) eventDetailRegion.hidden = true;",
       'setMessage("No event dataset exists. An administrator can create one.");',
     ),
-  )(region, emptyState, createCard, showEventScopedSections);
+  )(region, emptyState, createCard, () => cleared.push(true), showEventScopedSections);
   assert.equal(region.hidden, true);
   assert.equal(emptyState.hidden, false);
   assert.equal(createCard.open, true);
   assert.deepEqual(scoped, [true, false], "the no-events branch hides them again");
+  // Deleting the event removes every heat, so any queued heat-bag move it named
+  // is meaningless and the queue goes with it.
+  assert.deepEqual(cleared, [true], "the no-events branch clears queued bag moves");
 });
 
 test("the reworked event layout keeps the create card intentional and the detail cards responsive", () => {
@@ -423,6 +556,98 @@ test("event rendering only reads config fields that exist so the delete card sti
   const revealIndex = staffHomeScript.indexOf("forceDeleteCard.hidden = false");
   assert.ok(populateIndex > 0 && revealIndex > populateIndex,
     "the delete-event card is revealed after the config form is populated");
+});
+
+// A stale `form.elements.X` write throws, and a throw silently kills every
+// section after it. The console client now runs on two pages, so every named
+// control it addresses has to exist on each page that actually renders that
+// form — and each form the client only conditionally binds must be genuinely
+// optional, so its absence cannot reach an `.elements` read at all.
+test("every form field the console client writes exists on every page that loads it", () => {
+  const pages = {
+    "/staff": renderStaffHome("Administrator", true, []),
+    "/staff/registration": renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]),
+  };
+  // Each console variable, the markup hook its form is found by, and whether
+  // the client guards the form's absence before reading `.elements` from it.
+  const forms = [
+    ["eventConfigForm", "data-event-config-form", true],
+    ["eventCreateForm", "data-event-create-form", true],
+    ["forceDeleteForm", "data-force-delete-form", true],
+    ["participantEditForm", "data-participant-edit-form", false],
+    ["participantDuckNameForm", "data-participant-duck-name-form", true],
+  ];
+
+  for (const [variable, hook, optional] of forms) {
+    const referenced = [...staffHomeScript.matchAll(new RegExp(`${variable}\\.elements\\.([A-Za-z_$][\\w$]*)`, "g"))]
+      .map((match) => match[1]);
+    assert.ok(referenced.length > 0, `${variable} is never read, so this list is stale`);
+    assert.ok(
+      staffHomeScript.includes(`const ${variable} = document.querySelector("[${hook}]");`),
+      `${variable} must be resolved from [${hook}]`,
+    );
+    if (optional) {
+      assert.ok(
+        staffHomeScript.includes(`if (${variable}) `) || staffHomeScript.includes(`if (!${variable})`),
+        `${variable} is not on every page, so the client must guard its absence`,
+      );
+    }
+
+    for (const [path, markup] of Object.entries(pages)) {
+      const form = markup.match(new RegExp(`<form ${hook}[^>]*>[^]*?</form>`))?.[0];
+      if (form === undefined) {
+        assert.ok(optional, `${path} must render ${hook}, which the client reads unguarded`);
+        continue;
+      }
+      const namedControls = new Set([...form.matchAll(/name="([^"]+)"/g)].map((match) => match[1]));
+      for (const name of referenced) {
+        assert.ok(
+          namedControls.has(name),
+          `${path}: ${variable}.elements.${name} has no matching named control and would throw`,
+        );
+      }
+    }
+  }
+
+  // The two pages both carry the whole participants surface, so its hooks are
+  // never partially present.
+  for (const [path, markup] of Object.entries(pages)) {
+    for (const hook of [
+      "data-operations-root",
+      "data-event-select",
+      "data-console-message",
+      "data-participant-filter-form",
+      "data-walkup-form",
+      "data-walkup-result",
+      "data-participant-list",
+      "data-participant-detail",
+      "data-participant-name",
+      "data-participant-facts",
+      "data-participant-actions",
+      "data-no-race",
+    ]) {
+      assert.ok(markup.includes(hook), `${path} must render ${hook}`);
+    }
+  }
+
+  // Every element query the client makes without an optional-chain guard has to
+  // be a heading it writes into inside a surface it has already proved is
+  // present — an optional chain cannot carry an assignment, so these two are
+  // reached only from code paths that checked their own surface first.
+  const unguarded = [...new Set(
+    [...staffHomeScript.matchAll(/document\.querySelector\("\[(data-[a-z-]+)\]"\)\.(?!\s)/g)]
+      .map((match) => match[1]),
+  )].sort();
+  assert.deepEqual(
+    unguarded,
+    ["data-heat-name", "data-participant-name"],
+    "every other direct query must be optional-chained",
+  );
+  for (const [surface, heading] of [["participantsPresent", "data-participant-name"], ["heatList", "data-heat-name"]]) {
+    const write = staffHomeScript.indexOf(`document.querySelector("[${heading}]").textContent`);
+    assert.ok(write > 0, heading);
+    assert.ok(staffHomeScript.includes(`!${surface}`) || staffHomeScript.includes(`|| !${surface}`), surface);
+  }
 });
 
 test("event creation requires a hinted ducks-per-heat field wired into the create command", () => {
@@ -589,4 +814,113 @@ test("registration desk has no advance duck disposition controls", () => {
   const markup = renderStaffHome("Registration Staff", false, ["REGISTRATION"]);
   assert.doesNotMatch(markup, /duckKeepPreference|Duck preference|Undecided/);
   assert.doesNotMatch(staffHomeScript, /duckKeepPreference|duck_keep_preference/);
+});
+
+// The live hub admits a bounded number of connections and fans every signal out
+// to every subscriber that names a matching domain, so a page that subscribes to
+// a domain it cannot repaint spends a refresh — and, per registration device, a
+// held Durable Object connection — on nothing. This one client runs on two very
+// different pages, so the domains have to be decided from what is on the page.
+test("the console subscribes only to the live domains the page it is on renders", () => {
+  const source = staffHomeScript.match(
+    /const staffLiveDomains = \["event", "staff"\];[\s\S]*?staffLiveDomains\.push\("support"\);\n/,
+  );
+  assert.ok(source, "the console script decides its live domains from the page");
+  const domainsFor = (context) => new Function(
+    ...Object.keys(context),
+    `${source[0]}\nreturn staffLiveDomains;`,
+  )(...Object.values(context));
+
+  // The Admin console renders every surface, so it keeps every domain.
+  assert.deepEqual(
+    domainsFor({
+      canRegistration: true,
+      participantList: {},
+      canRaceRead: true,
+      heatList: {},
+      finalistCard: {},
+      isSystemAdmin: true,
+      supportSummary: {},
+      notificationList: {},
+      auditList: {},
+    }),
+    ["event", "staff", "participants", "ducks", "heats", "support"],
+  );
+
+  // The registration desk renders participants and nothing else.
+  assert.deepEqual(
+    domainsFor({
+      canRegistration: true,
+      participantList: {},
+      canRaceRead: false,
+      heatList: null,
+      finalistCard: null,
+      isSystemAdmin: false,
+      supportSummary: null,
+      notificationList: null,
+      auditList: null,
+    }),
+    ["event", "staff", "participants", "ducks"],
+  );
+
+  // A race director's console has the heats but not the administrator support
+  // surfaces, and the subscription follows that exactly.
+  assert.deepEqual(
+    domainsFor({
+      canRegistration: true,
+      participantList: {},
+      canRaceRead: true,
+      heatList: {},
+      finalistCard: {},
+      isSystemAdmin: false,
+      supportSummary: null,
+      notificationList: null,
+      auditList: null,
+    }),
+    ["event", "staff", "participants", "ducks", "heats"],
+  );
+
+  // The fourth shape: race-read without the registration desk. It is
+  // unreachable today — canOpenAdminConsole admits only administrators and
+  // RACE_DIRECTOR, and canRegistration already includes RACE_DIRECTOR — but it
+  // is one role grant away, and such a console still renders the readiness
+  // panel, which reports duck facts that only the "ducks" domain wakes. It
+  // therefore keeps "ducks" and drops "participants", which it cannot repaint.
+  assert.deepEqual(
+    domainsFor({
+      canRegistration: false,
+      participantList: null,
+      canRaceRead: true,
+      heatList: {},
+      finalistCard: {},
+      isSystemAdmin: false,
+      supportSummary: null,
+      notificationList: null,
+      auditList: null,
+    }),
+    ["event", "staff", "ducks", "heats"],
+  );
+
+  // The gating is real, not theoretical: these are the hooks each page actually
+  // renders, so the registration desk genuinely has no heat or support surface a
+  // signal on those domains could repaint.
+  const desk = renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]);
+  const console_ = renderStaffHome("Administrator", true, []);
+  assert.ok(desk.includes("data-participant-list"));
+  for (const hook of [
+    "data-heat-list",
+    "data-finalist-card",
+    "data-support-summary",
+    "data-notification-list",
+    "data-audit-list",
+  ]) {
+    assert.ok(!desk.includes(hook), `the registration desk must not render ${hook}`);
+    assert.ok(console_.includes(hook), `the Admin console must render ${hook}`);
+  }
+
+  // And the subscription itself reads the computed list rather than a literal.
+  assert.match(
+    staffHomeScript,
+    /staffLiveSubscription = globalThis\.quickDucksLive\.subscribe\(\{\s*domains: staffLiveDomains,\s*root: operationsRoot,/,
+  );
 });
