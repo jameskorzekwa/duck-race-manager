@@ -531,6 +531,7 @@ jobs:
             const tag = process.env.RELEASE_TAG;
             const version = process.env.RELEASE_VERSION;
             const sha = process.env.SOURCE_SHA;
+            const automaticRelease = process.env.AUTOMATIC_RELEASE === 'true';
             if (!/^v\S+$/.test(tag)) throw new Error('Validated release tag is unavailable.');
             if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('Validated release source SHA is unavailable.');
             if (!['true', 'false'].includes(process.env.RELEASE_PRERELEASE)) {
@@ -580,16 +581,47 @@ jobs:
               throw new Error(`Tag ${tag} resolves to ${taggedCommit}, not validated source ${sha}.`);
             }
             if (taggedCommit === undefined) {
-              if (process.env.AUTOMATIC_RELEASE !== 'true') {
+              if (!automaticRelease) {
                 throw new Error(`Explicit release tag ${tag} no longer exists; refusing to recreate it.`);
+              }
+              const defaultBranch = context.payload.repository.default_branch;
+              if (!defaultBranch) throw new Error('The repository default branch is unavailable.');
+              const recordSuperseded = async (currentSha) => {
+                const message = `Release ${tag} at ${sha} was superseded by ${defaultBranch} at ${currentSha}; `
+                  + 'the newer queued release owns tag and GitHub Release publication.';
+                core.notice(message);
+                await core.summary.addHeading('Release superseded').addRaw(message).write();
+              };
+              const currentDefault = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
+              if (currentDefault.data.commit.sha !== sha) {
+                await recordSuperseded(currentDefault.data.commit.sha);
+                return;
               }
               let creationRejection;
               let created;
               try {
                 created = (await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha })).data;
               } catch (error) {
-                if (error.status !== 422) throw error;
-                creationRejection = error.message ?? 'unknown 422 rejection';
+                if (error.status === 403) {
+                  taggedCommit = await resolveTagCommit();
+                  if (taggedCommit !== undefined && taggedCommit !== sha) {
+                    throw new Error(`Tag ${tag} resolves to ${taggedCommit}, not validated source ${sha}.`);
+                  }
+                  if (taggedCommit === sha) {
+                    core.info(`Tag ${tag} appeared concurrently at the validated source.`);
+                  } else {
+                    const latestDefault = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
+                    if (latestDefault.data.commit.sha !== sha) {
+                      await recordSuperseded(latestDefault.data.commit.sha);
+                      return;
+                    }
+                    throw error;
+                  }
+                } else if (error.status === 422) {
+                  creationRejection = error.message ?? 'unknown 422 rejection';
+                } else {
+                  throw error;
+                }
               }
               if (created !== undefined) {
                 // Trust the authoritative creation response; immediate re-reads can lag replicas.
@@ -598,7 +630,7 @@ jobs:
                     + `${created.object?.sha ?? 'an unknown object'}, not validated source ${sha}.`);
                 }
                 taggedCommit = created.object.sha;
-              } else {
+              } else if (taggedCommit === undefined) {
                 // A swallowed 422 is either "already exists" (a concurrent or rerun creation)
                 // or a rule/permission rejection; distinguish by re-reading with retries.
                 for (let attempt = 0; attempt < 5 && taggedCommit === undefined; attempt += 1) {
