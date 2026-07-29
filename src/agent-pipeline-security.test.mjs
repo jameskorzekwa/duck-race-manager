@@ -38,6 +38,7 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.doesNotMatch(publish, /opencode run|npm test|npm run test:e2e/);
   assert.doesNotMatch(publish, /exchange_github_app_token|api\.opencode\.ai|id-token: write/);
   assert.match(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(publish, /base64 \| tr -d '\\n'/);
   assert.match(publish, /github-actions\[bot\]/);
   assert.match(publish, /gh workflow run ci\.yml --ref "\$branch"/);
   assert.match(publish, /gh workflow run agent-review\.yml/);
