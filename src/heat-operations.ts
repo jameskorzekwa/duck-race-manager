@@ -109,6 +109,69 @@ const heatSummary = (row: HeatSummaryRow): Record<string, unknown> => ({
   finalizedAt: row.finalized_at,
 });
 
+// A published final result may be revised while the race is still the race:
+// `FINAL` is the state a director is actually in the moment they disqualify a
+// winner, and `COMPLETED` is where they are if they notice afterwards.
+//
+// Requiring `COMPLETED` alone made the documented remedy circular. The event
+// could not be completed while its podium disagreed with the current eligible
+// count, and the correction that would fix the podium refused to run until the
+// event was completed. Admitting `FINAL` breaks that loop with the state
+// transition the director already has, and it cannot corrupt anything the
+// `COMPLETED` path protects: a `FINAL`-round correction computes no finalist
+// promotion at all (only a `ROUND_ONE` winner feeds a final roster), and neither
+// correction nor reopen writes the event's status forward, so an event that is
+// already `COMPLETED` stays exactly where it was.
+export const FINAL_RESULT_REVISABLE_EVENT_STATUSES = ["FINAL", "COMPLETED"] as const;
+
+// The same set as one SQL list, derived from the array above rather than
+// retyped. It was previously written out four separate times — once in JS and
+// three times as a literal — which is exactly the preflight/guarded-batch drift
+// the shared podium-depth expression was extracted to stop. Interpolating it is
+// permitted because it is a fixed internal enum, never external input.
+export const FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL = `(${
+  FINAL_RESULT_REVISABLE_EVENT_STATUSES.map((status) => `'${status}'`).join(", ")
+})`;
+
+// The narrow, targeted meaning of "a duck has left this event": a duck
+// assignment named by a `heat_results` row this operation would supersede now
+// belongs to an `event_ducks` reservation that has been released.
+//
+// This deliberately replaces an event-wide `EXISTS (any released event_duck)`.
+// That test refused every final correction and reopen for the rest of the event
+// the moment *any* duck was released anywhere — including a spare un-reserved at
+// the registration desk hours before racing, which is routine. Combined with the
+// completion check, that stranded the event: completion demanded a correction
+// the correction endpoint refused, and the only exit was undoing a
+// disqualification a director must be able to keep. Scoping the stop to the rows
+// this command actually rewrites is what the guard's own comment always claimed
+// it meant, and it leaves reactivation reachable.
+const supersededResultReleasedDuckSql = (eventColumn: string, heatColumn: string): string => `EXISTS (
+                 SELECT 1
+                   FROM heat_results superseded
+                   JOIN duck_assignments superseded_assignment
+                     ON superseded_assignment.id = superseded.duck_assignment_id
+                   JOIN event_ducks superseded_duck
+                     ON superseded_duck.id = superseded_assignment.event_duck_id
+                  WHERE superseded.event_id = ${eventColumn}
+                    AND superseded.heat_id = ${heatColumn}
+                    AND superseded.status = 'FINALIZED'
+                    AND superseded_duck.released_at IS NOT NULL
+               )`;
+
+// The other half of the same rule for a correction, which also *writes* rows: a
+// duck assignment the new podium would name must still belong to a duck in this
+// event. `placeholders` comes from `parseResults`, which is bounded to three
+// deduplicated entries, so the list is a validated array and never external SQL.
+const selectedResultReleasedDuckSql = (placeholders: string): string => `EXISTS (
+                 SELECT 1
+                   FROM duck_assignments written_assignment
+                   JOIN event_ducks written_duck
+                     ON written_duck.id = written_assignment.event_duck_id
+                  WHERE written_assignment.id IN (${placeholders})
+                    AND written_duck.released_at IS NOT NULL
+               )`;
+
 const heatSummarySql = `SELECT h.id, h.event_id, h.round, h.heat_number, h.status,
        h.target_size, h.revision, h.roster_locked_at, h.started_at,
        h.finished_at, h.finalized_at,
@@ -131,11 +194,9 @@ const heatSummarySql = `SELECT h.id, h.event_id, h.round, h.heat_number, h.statu
          ))
          OR (h.round = 'FINAL' AND EXISTS (
            SELECT 1 FROM events e
-            WHERE e.id = h.event_id AND e.status IN ('FINAL', 'COMPLETED')
-              AND NOT EXISTS (
-                SELECT 1 FROM event_ducks ed
-                 WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
-              )
+            WHERE e.id = h.event_id
+              AND e.status IN ${FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL}
+              AND NOT ${supersededResultReleasedDuckSql("h.event_id", "h.id")}
          ))
        ) THEN 1 ELSE 0 END AS result_correction_allowed,
        CASE WHEN h.status = 'FINALIZED' AND (
@@ -155,11 +216,9 @@ const heatSummarySql = `SELECT h.id, h.event_id, h.round, h.heat_number, h.statu
          ))
          OR (h.round = 'FINAL' AND EXISTS (
            SELECT 1 FROM events e
-            WHERE e.id = h.event_id AND e.status IN ('FINAL', 'COMPLETED')
-              AND NOT EXISTS (
-                SELECT 1 FROM event_ducks ed
-                 WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
-              )
+            WHERE e.id = h.event_id
+              AND e.status IN ${FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL}
+              AND NOT ${supersededResultReleasedDuckSql("h.event_id", "h.id")}
          ))
        ) THEN 1 ELSE 0 END AS result_reopen_allowed
   FROM heats h`;
@@ -260,6 +319,11 @@ const publishedResults = (
 // exactly "this racer can still be recorded as a winner", and it is the same
 // `ACTIVE` test the result paths guard on, stated once here rather than
 // re-derived from `registrationStatus` by each surface.
+//
+// "Guard on" means in the SQL, not only in a preflight: `activeSelectionGuardSql`
+// counts it again inside the `FINALIZE_HEAT_RESULT` and `CORRECT_HEAT_RESULT`
+// command rows, so this boolean is a faithful preview of what the batch will
+// accept rather than an optimistic one.
 const rosterResponse = (row: RosterRow): Record<string, unknown> => ({
   heatEntryId: row.heat_entry_id,
   raceEntryId: row.race_entry_id,
@@ -1284,7 +1348,10 @@ const validateResultSet = (
   // is allowed to fill and make the final impossible to publish. This is the one
   // place where a non-`ACTIVE` roster entry changes a number, and it changes only
   // how many places exist — never who may hold one, which stays `ACTIVE`-only
-  // below and in the guarded SQL.
+  // below and in the guarded SQL: `activeSelectionGuardSql` is repeated verbatim
+  // inside both the `FINALIZE_HEAT_RESULT` and the `CORRECT_HEAT_RESULT` command
+  // rows, so a racer who stops being `ACTIVE` after this preflight read the
+  // roster still cannot be written into `heat_results`.
   //
   // This stays an exact count and deliberately does not copy the `<` that the
   // completion check uses. The two measure different things. This one validates
@@ -1341,6 +1408,38 @@ const validateResultSet = (
   }
   return null;
 };
+
+// Every racer a result set names must still be `ACTIVE` and must still hold the
+// exact duck assignment the caller resolved, counted inside the batch that
+// writes the result. `validateResultSet` checks the same thing in the preflight,
+// but a preflight cannot hold a lock: withdrawal and disqualification are legal
+// at any heat state, so a second director can disqualify a finalist in the round
+// trips between the roster read and `env.DB.batch(...)`. That write touches only
+// `race_commands`, `registrations`, and `audit_events`, so it bumps no heat
+// revision and the `h.revision = ?` guard cannot see it; withdrawal never closes
+// the duck assignment, so no foreign key sees it either. This count is what
+// sees it.
+//
+// It is appended to a command insert that aliases `heats` as `h`, and it binds
+// the selected race-entry ids, then the resolved assignment ids, then the
+// expected number of rows. Both placeholder lists come from `parseResults`,
+// which is bounded to three deduplicated entries, so they are validated arrays.
+const activeSelectionGuardSql = (
+  selectedPlaceholders: string,
+  assignmentPlaceholders: string,
+): string => `AND (
+    SELECT COUNT(DISTINCT selected.race_entry_id)
+      FROM heat_entries selected
+      JOIN race_entries re ON re.id = selected.race_entry_id
+      JOIN registrations r ON r.id = re.registration_id
+      JOIN duck_assignments current_assignment
+        ON current_assignment.event_id = selected.event_id
+       AND current_assignment.race_entry_id = selected.race_entry_id
+       AND current_assignment.valid_to IS NULL
+     WHERE selected.event_id = h.event_id AND selected.heat_id = h.id
+        AND selected.race_entry_id IN (${selectedPlaceholders}) AND r.status = 'ACTIVE'
+        AND current_assignment.id IN (${assignmentPlaceholders})
+  ) = ?`;
 
 const finalizedResultResponse = async (
   env: Env,
@@ -1418,19 +1517,7 @@ const finalizeResultSet = async (
   const selectedAssignmentIds = results.map((result) => assignments.get(result.raceEntryId) as string);
   const selectedPlaceholders = results.map(() => "?").join(", ");
   const assignmentPlaceholders = selectedAssignmentIds.map(() => "?").join(", ");
-  const activeResultGuard = `AND (
-    SELECT COUNT(DISTINCT selected.race_entry_id)
-      FROM heat_entries selected
-      JOIN race_entries re ON re.id = selected.race_entry_id
-      JOIN registrations r ON r.id = re.registration_id
-      JOIN duck_assignments current_assignment
-        ON current_assignment.event_id = selected.event_id
-       AND current_assignment.race_entry_id = selected.race_entry_id
-       AND current_assignment.valid_to IS NULL
-     WHERE selected.event_id = h.event_id AND selected.heat_id = h.id
-        AND selected.race_entry_id IN (${selectedPlaceholders}) AND r.status = 'ACTIVE'
-        AND current_assignment.id IN (${assignmentPlaceholders})
-  ) = ?`;
+  const activeResultGuard = activeSelectionGuardSql(selectedPlaceholders, assignmentPlaceholders);
   const tagResultGuard = tagToken === null ? "" : `AND h.round = 'ROUND_ONE'
     AND (SELECT COUNT(*) FROM heats awaiting
           WHERE awaiting.event_id = h.event_id
@@ -1647,30 +1734,31 @@ const supersedeResultStatements = (
   ).bind(eventId, heatId),
 ];
 
-// A published final result may be revised while the race is still the race:
-// `FINAL` is the state a director is actually in the moment they disqualify a
-// winner, and `COMPLETED` is where they are if they notice afterwards.
-//
-// Requiring `COMPLETED` alone made the documented remedy circular. The event
-// could not be completed while its podium disagreed with the current eligible
-// count, and the correction that would fix the podium refused to run until the
-// event was completed. Admitting `FINAL` breaks that loop with the state
-// transition the director already has, and it cannot corrupt anything the
-// `COMPLETED` path protects: a `FINAL`-round correction computes no finalist
-// promotion at all (only a `ROUND_ONE` winner feeds a final roster), and neither
-// correction nor reopen writes the event's status forward, so an event that is
-// already `COMPLETED` stays exactly where it was.
-const FINAL_RESULT_REVISABLE_EVENT_STATUSES = ["FINAL", "COMPLETED"];
-
 // The one remaining hard stop, and the only thing the retired "return
-// processing" wording was ever really guarding: a duck has left this event, so
-// the assignment a result row points at no longer describes a duck in the race.
-const downstreamFinalGuard = async (env: Env, eventId: string): Promise<boolean> => {
+// processing" wording was ever really guarding: a duck named by a result row
+// this command rewrites has left the event, so that row's duck assignment no
+// longer describes a duck in the race.
+//
+// It is deliberately targeted rather than event-wide. `assignmentIds` is the set
+// of assignments a correction would write; a reopen writes none and passes an
+// empty list. Both halves are repeated verbatim inside the guarded command row,
+// so this preflight can only ever produce a better error message than the batch,
+// never a different decision.
+const releasedResultDuckGuard = async (
+  env: Env,
+  eventId: string,
+  heatId: string,
+  assignmentIds: readonly string[],
+): Promise<boolean> => {
+  const written = assignmentIds.length === 0
+    ? ""
+    : ` OR ${selectedResultReleasedDuckSql(assignmentIds.map(() => "?").join(", "))}`;
   const dependency = await env.DB.prepare(
-    `SELECT 1 AS blocked FROM event_ducks ed
-      WHERE ed.event_id = ? AND ed.released_at IS NOT NULL
+    `SELECT 1 AS blocked FROM heats h
+      WHERE h.event_id = ? AND h.id = ?
+        AND (${supersededResultReleasedDuckSql("h.event_id", "h.id")}${written})
       LIMIT 1`,
-  ).bind(eventId).first<{ blocked: number }>();
+  ).bind(eventId, heatId, ...assignmentIds).first<{ blocked: number }>();
   return dependency !== null;
 };
 
@@ -1719,10 +1807,14 @@ const reopenResults = async (
       return json({ error: "This result feeds a final roster that is already locked or underway." }, 409);
     }
   } else {
-    if (!FINAL_RESULT_REVISABLE_EVENT_STATUSES.includes(context.event_status)) {
+    if (!(FINAL_RESULT_REVISABLE_EVENT_STATUSES as readonly string[]).includes(context.event_status)) {
       return json({ error: finalResultStateError("reopened") }, 409);
     }
-    if (await downstreamFinalGuard(env, eventId)) {
+    // A reopen supersedes the published podium and writes no new result rows, so
+    // the released-duck stop covers exactly the rows it removes and nothing
+    // else. It needs no eligibility guard: removing a place never requires the
+    // racer who held it to still be able to hold one.
+    if (await releasedResultDuckGuard(env, eventId, heatId, [])) {
       return json({ error: finalResultReleasedDuckError("reopened") }, 409);
     }
   }
@@ -1737,11 +1829,9 @@ const reopenResults = async (
          FROM heats h JOIN events e ON e.id = h.event_id
         WHERE h.id = ? AND h.event_id = ? AND h.status = 'FINALIZED' AND h.revision = ?
           AND ((h.round = 'ROUND_ONE' AND e.status IN ('ROUND_ONE', 'FINAL'))
-            OR (h.round = 'FINAL' AND e.status IN ('FINAL', 'COMPLETED')
-              AND NOT EXISTS (
-                SELECT 1 FROM event_ducks ed
-                    WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
-                 )))`,
+            OR (h.round = 'FINAL'
+              AND e.status IN ${FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL}
+              AND NOT ${supersededResultReleasedDuckSql("h.event_id", "h.id")}))`,
     ).bind(commandId, eventId, heatId, now, now, actor.id, reason, requestFingerprint, heatId, eventId, revision),
     ...supersedeResultStatements(env, eventId, heatId, actor.id, commandId, reason, now),
   ];
@@ -1826,21 +1916,27 @@ const correctResults = async (
     return json({ error: "The corrected result must differ from the published result." }, 422);
   }
 
+  const assignments = new Map(roster.results.map((entry) => [entry.race_entry_id, entry.duck_assignment_id]));
+  // `validateResultSet` has already refused any selection without a current
+  // assignment, so every lookup here resolves.
+  const selectedAssignmentIds = results.map((result) => assignments.get(result.raceEntryId) as string);
+
   let promotion: FinalPromotionRow | null = null;
   if (context.round === "ROUND_ONE") {
     promotion = await finalPromotion(env, eventId, oldResults[0].raceEntryId);
     if (promotion === null || !["PLANNED", "LOADING"].includes(promotion.final_heat_status)) {
       return json({ error: "This winner can be corrected only before the final heat is ready." }, 409);
     }
-  } else if (!FINAL_RESULT_REVISABLE_EVENT_STATUSES.includes(context.event_status)) {
+  } else if (!(FINAL_RESULT_REVISABLE_EVENT_STATUSES as readonly string[]).includes(context.event_status)) {
     return json({ error: finalResultStateError("corrected") }, 409);
-  } else if (await downstreamFinalGuard(env, eventId)) {
+  } else if (await releasedResultDuckGuard(env, eventId, heatId, selectedAssignmentIds)) {
     return json({ error: finalResultReleasedDuckError("corrected") }, 409);
   }
 
   const now = new Date().toISOString();
   const resultRevision = context.result_revision + 1;
-  const assignments = new Map(roster.results.map((entry) => [entry.race_entry_id, entry.duck_assignment_id]));
+  const selectedPlaceholders = results.map(() => "?").join(", ");
+  const assignmentPlaceholders = selectedAssignmentIds.map(() => "?").join(", ");
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO race_commands
@@ -1859,14 +1955,18 @@ const correctResults = async (
                   AND final_heat.round = 'FINAL'
                   AND final_heat.status IN ('PLANNED', 'LOADING')
              ))
-             OR (h.round = 'FINAL' AND e.status IN ('FINAL', 'COMPLETED')
-               AND NOT EXISTS (
-                 SELECT 1 FROM event_ducks ed
-                  WHERE ed.event_id = e.id AND ed.released_at IS NOT NULL
-               )))`,
+             OR (h.round = 'FINAL'
+               AND e.status IN ${FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL}
+               AND NOT ${supersededResultReleasedDuckSql("h.event_id", "h.id")}
+               AND NOT ${selectedResultReleasedDuckSql(assignmentPlaceholders)}))
+           ${activeSelectionGuardSql(selectedPlaceholders, assignmentPlaceholders)}`,
     ).bind(
       commandId, eventId, heatId, now, now, actor.id, reason, requestFingerprint,
       heatId, eventId, revision, oldResults[0].raceEntryId,
+      ...selectedAssignmentIds,
+      ...results.map((result) => result.raceEntryId),
+      ...selectedAssignmentIds,
+      results.length,
     ),
     ...supersedeResultStatements(env, eventId, heatId, actor.id, commandId, reason, now),
   ];

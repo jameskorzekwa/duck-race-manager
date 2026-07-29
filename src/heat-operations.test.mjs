@@ -7,6 +7,8 @@ import { handleApi } from "./api.ts";
 import { staffHomeScript } from "./client-scripts.ts";
 import { handleEventOperations } from "./event-operations.ts";
 import {
+  FINAL_RESULT_REVISABLE_EVENT_STATUSES,
+  FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL,
   FINISH_DUCK_INELIGIBLE_REASON,
   handleHeatOperations,
   winnerByTagCandidate,
@@ -1876,18 +1878,25 @@ test("a final result is reopenable while the event is still FINAL and the event 
 // have: no role, no status, no endpoint, and no column implements it. What the
 // guard actually reads is `event_ducks.released_at`, set when a duck is deleted
 // or released back to inventory, plus the event's own status.
+//
+// It reads it for the rows this command rewrites and for nothing else. An
+// event-wide `EXISTS (any released event_duck)` refused every later correction
+// the moment any duck anywhere left the event — a spare un-reserved at the
+// registration desk did it — which is the shape of stranding this whole area
+// keeps producing.
 test("final correction and reopen name their real preconditions", async (context) => {
   const database = createDatabase();
   context.after(() => database.close());
   const { env, revision } = await seedPublishedFinal(database);
 
-  // A duck has left the event, so a result row's assignment no longer describes
-  // a duck in this race.
+  // A duck named by a published podium row has left the event, so that row's
+  // assignment no longer describes a duck in this race. `assignment-1` backs
+  // the published first place.
   database.exec(`
     UPDATE event_ducks
        SET released_at = '2026-07-26T13:00:00Z', release_reason = 'STAFF_RELEASED',
            released_by_staff_profile_id = 'staff'
-     WHERE id = 'event-duck-6'
+     WHERE id = 'event-duck-1'
   `);
   const correction = await handleHeatOperations(jsonRequest(
     "/api/v1/staff/events/event/heats/heat-final/results/correct",
@@ -1927,9 +1936,47 @@ test("final correction and reopen name their real preconditions", async (context
     "SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-final'",
   ).get().count, 0);
 
+  // A duck released somewhere else in the event is not this result's problem.
+  // `event-duck-6` belongs to a racer who never reached the final, so no row
+  // this command writes or supersedes names it, and the remedy stays reachable.
+  database.exec(`
+    UPDATE event_ducks SET released_at = NULL, release_reason = NULL,
+           released_by_staff_profile_id = NULL WHERE id = 'event-duck-1';
+    UPDATE event_ducks
+       SET released_at = '2026-07-26T13:00:00Z', release_reason = 'STAFF_RELEASED',
+           released_by_staff_profile_id = 'staff'
+     WHERE id = 'event-duck-6';
+  `);
+  const unrelatedDetail = await (await handleHeatOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event/heats/heat-final"),
+    env,
+    actor,
+  )).json();
+  assert.equal(unrelatedDetail.heat.resultCorrectionAllowed, true);
+  assert.equal(unrelatedDetail.heat.resultReopenAllowed, true);
+  const unrelated = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "A duck released elsewhere in the event blocks nothing here.",
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(unrelated.status, 201, JSON.stringify(await unrelated.clone().json()));
+  assert.deepEqual(
+    database.prepare(
+      "SELECT race_entry_id, place FROM heat_results WHERE heat_id = 'heat-final' AND status = 'FINALIZED' ORDER BY place",
+    ).all().map((row) => ({ ...row })),
+    [{ race_entry_id: "entry-4", place: 1 }, { race_entry_id: "entry-1", place: 2 }],
+  );
+
   // The other precondition, stated separately so a caller is never told the
   // wrong reason: the event has to be in a state where a final result exists to
   // revise at all.
+  const correctedRevision = database.prepare(
+    "SELECT revision FROM heats WHERE id = 'heat-final'",
+  ).get().revision;
   database.exec(`
     UPDATE event_ducks SET released_at = NULL, release_reason = NULL,
            released_by_staff_profile_id = NULL WHERE id = 'event-duck-6';
@@ -1939,9 +1986,9 @@ test("final correction and reopen name their real preconditions", async (context
     "/api/v1/staff/events/event/heats/heat-final/results/correct",
     "POST",
     {
-      commandId: commandId(), revision,
+      commandId: commandId(), revision: correctedRevision,
       reason: "A correction attempted from the wrong event state.",
-      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+      results: [{ raceEntryId: "entry-1", place: 1 }, { raceEntryId: "entry-4", place: 2 }],
     },
   ), env, actor);
   assert.equal(wrongState.status, 409);
@@ -1952,13 +1999,322 @@ test("final correction and reopen name their real preconditions", async (context
   const wrongStateReopen = await handleHeatOperations(jsonRequest(
     "/api/v1/staff/events/event/heats/heat-final/results/reopen",
     "POST",
-    { commandId: commandId(), revision, reason: "A reopen attempted from the wrong event state." },
+    {
+      commandId: commandId(),
+      revision: correctedRevision,
+      reason: "A reopen attempted from the wrong event state.",
+    },
   ), env, actor);
   assert.equal(wrongStateReopen.status, 409);
   assert.equal(
     (await wrongStateReopen.json()).error,
     "Final results can be reopened only while the event is FINAL or COMPLETED.",
   );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// ---------------------------------------------------------------------------
+// One event-status list, four places that read it
+// ---------------------------------------------------------------------------
+
+// The states a published final result may be revised from were written out five
+// times: once as a JavaScript array and four times as a SQL literal, in the two
+// heat-summary capability projections and in the two guarded command rows. That
+// is exactly the preflight/guarded-batch drift the shared podium-depth
+// expression was extracted to stop, one table over.
+//
+// This drives the real projection and both real command inserts, captures the
+// SQL the handlers actually prepared, and proves all three carry the identical
+// interpolated string — and that no hand-written variant of it survives in the
+// module.
+test("one interpolated event-status list serves the projection and both command rows", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  assert.deepEqual([...FINAL_RESULT_REVISABLE_EVENT_STATUSES], ["FINAL", "COMPLETED"]);
+  assert.equal(FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL, "('FINAL', 'COMPLETED')");
+
+  const { env, revision } = await seedPublishedFinal(database);
+  const inner = env.DB;
+  const prepared = [];
+  env.DB = {
+    get beforeBatch() {
+      return inner.beforeBatch;
+    },
+    set beforeBatch(hook) {
+      inner.beforeBatch = hook;
+    },
+    prepare(sql) {
+      prepared.push(sql);
+      return inner.prepare(sql);
+    },
+    batch(statements) {
+      return inner.batch(statements);
+    },
+  };
+
+  const detail = await handleHeatOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event/heats/heat-final"),
+    env,
+    actor,
+  );
+  assert.equal(detail.status, 200);
+  const corrected = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "Driving the real correction command row to capture its SQL.",
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(corrected.status, 201, JSON.stringify(await corrected.clone().json()));
+  const reopened = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/reopen",
+    "POST",
+    {
+      commandId: commandId(),
+      revision: (await corrected.json()).heat.revision,
+      reason: "Driving the real reopen command row to capture its SQL.",
+    },
+  ), env, actor);
+  assert.equal(reopened.status, 201, JSON.stringify(await reopened.clone().json()));
+
+  const only = (needle, label) => {
+    const matches = prepared.filter((sql) => sql.includes(needle));
+    assert.ok(matches.length > 0, `${label}: no statement was prepared`);
+    return matches[0];
+  };
+  const projection = only("AS result_correction_allowed", "the heat summary projection");
+  const correctCommand = only("'CORRECT_HEAT_RESULT'", "the correction command row");
+  const reopenCommand = only("'REOPEN_HEAT_RESULT'", "the reopen command row");
+
+  const fragment = `e.status IN ${FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL}`;
+  const occurrences = (sql) => sql.split(fragment).length - 1;
+  // The projection reads it once for correction and once for reopen.
+  assert.equal(occurrences(projection), 2, "both capability projections read the one list");
+  assert.equal(occurrences(correctCommand), 1, "the correction command row reads the one list");
+  assert.equal(occurrences(reopenCommand), 1, "the reopen command row reads the one list");
+
+  // And no hand-written variant of the same set survives anywhere in the module.
+  const source = readFileSync(new URL("./heat-operations.ts", import.meta.url), "utf8");
+  for (const variant of [
+    "('FINAL', 'COMPLETED')",
+    "('FINAL','COMPLETED')",
+    "('COMPLETED', 'FINAL')",
+  ]) {
+    assert.equal(source.includes(variant), false, `a literal ${variant} was retyped instead of derived`);
+  }
+  assert.equal(
+    source.split("FINAL_RESULT_REVISABLE_EVENT_STATUS_SQL").length - 1,
+    5,
+    "one definition and exactly four readers",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// A correction cannot write a racer who left the race
+// ---------------------------------------------------------------------------
+
+// The preflight refusal. `validateResultSet` runs for a correction exactly as it
+// does for a first publication, so the ordinary race-day case — a director opens
+// the correction form for a racer somebody else has already disqualified — is
+// answered with the same stable reason and the same "which selection to drop"
+// list the finish line uses.
+test("a correction naming a racer who already left the race is refused and writes nothing", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { env, revision } = await seedPublishedFinal(database);
+  database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-4'");
+
+  // Two finalists, one eligible: a one-place podium, and the racer who left may
+  // not hold it.
+  const refused = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "A correction naming the racer who was just disqualified.",
+      results: [{ raceEntryId: "entry-4", place: 1 }],
+    },
+  ), env, actor);
+  assert.equal(refused.status, 422);
+  const body = await refused.json();
+  assert.equal(body.reason, FINISH_DUCK_INELIGIBLE_REASON);
+  assert.deepEqual(body.ineligibleRaceEntryIds, ["entry-4"]);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'CORRECT_HEAT_RESULT'",
+  ).get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-final'",
+  ).get().count, 0);
+
+  // The eligible racer can still be corrected into the one place that exists.
+  const corrected = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "The podium shrank to the one racer who can hold a place.",
+      results: [{ raceEntryId: "entry-1", place: 1 }],
+    },
+  ), env, actor);
+  assert.equal(corrected.status, 201, JSON.stringify(await corrected.clone().json()));
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The decisive one. `correctResults` reads the roster, then makes at least two
+// further round trips before `env.DB.batch(...)`. Withdrawal and disqualification
+// are legal at any heat state, they touch only `race_commands`, `registrations`,
+// and `audit_events`, and they never close the duck assignment — so nothing about
+// the heat revision or any foreign key notices one landing in that window. Only a
+// guard inside the batch can.
+//
+// Without the in-batch eligibility count this commits, and `heat_results` ends up
+// holding a `DISQUALIFIED` racer at a published place that the public podium then
+// silently hides, leaving an unexplained gap.
+test("a correction whose racer stops being ACTIVE after the roster read is refused by the batch", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { env, revision } = await seedPublishedFinal(database);
+  const publishedBefore = database.prepare(
+    "SELECT id, race_entry_id, place, source_command_id FROM heat_results WHERE heat_id = 'heat-final' ORDER BY place",
+  ).all().map((row) => ({ ...row }));
+  const revisionBefore = database.prepare("SELECT revision FROM heats WHERE id = 'heat-final'").get().revision;
+
+  // The second device: another director disqualifies the racer this correction
+  // names, after `validateResultSet` accepted them and before the batch runs.
+  env.DB.beforeBatch = () => {
+    database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-4'");
+  };
+  const raced = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "Photo review put the other finalist first.",
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(raced.status, 409);
+
+  // Nothing at all was written: no command row, no superseded history, no new
+  // podium, no revision bump, no audit event.
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'CORRECT_HEAT_RESULT'",
+  ).get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-final'",
+  ).get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM audit_events WHERE action = 'HEAT_RESULT_CORRECTED'",
+  ).get().count, 0);
+  // Byte for byte the podium that was already published, including the row ids
+  // and the command that wrote them: not one result row was replaced.
+  assert.deepEqual(
+    database.prepare(
+      "SELECT id, race_entry_id, place, source_command_id FROM heat_results WHERE heat_id = 'heat-final' ORDER BY place",
+    ).all().map((row) => ({ ...row })),
+    publishedBefore,
+  );
+  assert.equal(
+    database.prepare("SELECT revision FROM heats WHERE id = 'heat-final'").get().revision,
+    revisionBefore,
+  );
+  // The specific corruption this guard exists to stop: no place is held by a
+  // racer a *correction* wrote after they stopped being ACTIVE. The rows that
+  // remain are the original publication, which deliberately keeps naming the
+  // racer it named — that is the documented gap the public podium leaves.
+  assert.equal(database.prepare(
+    `SELECT COUNT(*) AS count
+       FROM heat_results hr
+       JOIN race_commands rc ON rc.id = hr.source_command_id
+      WHERE rc.command_type = 'CORRECT_HEAT_RESULT'`,
+  ).get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a round-one correction whose new winner leaves before the batch writes nothing", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  seedRace(database);
+  seedRoundOneHeats(database);
+  seedFinalHeat(database);
+  database.exec(`
+    UPDATE events SET status = 'ROUND_ONE' WHERE id = 'event';
+    UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-1';
+  `);
+  const DB = d1(database);
+  const env = { DB };
+
+  DB.beforeBatch = () => {
+    database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-2'");
+  };
+  const raced = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/results/correct",
+    "POST",
+    {
+      commandId: commandId(),
+      revision: 0,
+      reason: "The published winner was disqualified after the heat.",
+      results: [{ raceEntryId: "entry-2", place: 1 }],
+    },
+  ), env, actor);
+  assert.equal(raced.status, 409);
+  assert.deepEqual(
+    database.prepare(
+      "SELECT race_entry_id, place FROM heat_results WHERE heat_id = 'heat-1' AND status = 'FINALIZED'",
+    ).all().map((row) => ({ ...row })),
+    [{ race_entry_id: "entry-1", place: 1 }],
+  );
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-1'",
+  ).get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'CORRECT_HEAT_RESULT'",
+  ).get().count, 0);
+  // The finalist roster row the correction would have rewritten is untouched.
+  assert.deepEqual(
+    database.prepare(
+      "SELECT id, race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-final' ORDER BY slot_number",
+    ).all().map((row) => ({ ...row })),
+    [
+      { id: "final-entry-1", race_entry_id: "entry-1", slot_number: 1 },
+      { id: "final-entry-2", race_entry_id: "entry-4", slot_number: 2 },
+    ],
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// The same window, for the duck rather than the racer: a correction resolves a
+// duck assignment, and that assignment is closed before the batch runs.
+test("a correction whose duck assignment closes before the batch writes nothing", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { env, revision } = await seedPublishedFinal(database);
+
+  env.DB.beforeBatch = () => {
+    database.exec(
+      `UPDATE duck_assignments
+          SET valid_to = '2026-07-26T13:00:00Z', end_reason = 'DUCK_DELETED'
+        WHERE id = 'assignment-4'`,
+    );
+  };
+  const raced = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/results/correct",
+    "POST",
+    {
+      commandId: commandId(), revision,
+      reason: "Photo review put the other finalist first.",
+      results: [{ raceEntryId: "entry-4", place: 1 }, { raceEntryId: "entry-1", place: 2 }],
+    },
+  ), env, actor);
+  assert.equal(raced.status, 409);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'CORRECT_HEAT_RESULT'",
+  ).get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_result_history WHERE heat_id = 'heat-final'",
+  ).get().count, 0);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 

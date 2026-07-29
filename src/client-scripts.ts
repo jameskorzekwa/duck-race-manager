@@ -6209,8 +6209,18 @@ if (isSystemAdmin) {
 // Each domain is therefore gated on the markup and the role that would consume
 // it, exactly as loadEvent gates the loaders themselves. The "event" domain is
 // unconditional because both pages resolve and render a working event.
+// "ducks" is deliberately not gated on the participant list alone. loadEvent
+// renders the readiness panel for canRaceRead, and readiness reports duck facts
+// — unpaired active participants and pending NFC stickers — while duck
+// provisioning publishes only ("ducks", "support"). A console that can read the
+// race but not the registration desk would therefore hold a stale readiness
+// panel until something else woke it. Unreachable today, because
+// canOpenAdminConsole admits only administrators and RACE_DIRECTOR and
+// canRegistration already includes RACE_DIRECTOR; gated correctly anyway,
+// because the role shape is one grant away.
 const staffLiveDomains = ["event", "staff"];
-if (canRegistration && participantList) staffLiveDomains.push("participants", "ducks");
+if (canRegistration && participantList) staffLiveDomains.push("participants");
+if ((canRegistration && participantList) || canRaceRead) staffLiveDomains.push("ducks");
 if (canRaceRead && (heatList || finalistCard)) staffLiveDomains.push("heats");
 if (isSystemAdmin && (supportSummary || notificationList || auditList)) staffLiveDomains.push("support");
 

@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { eventSlugFromName, handleEventOperations, normalizedTimezone } from "./event-operations.ts";
+import { handleHeatOperations } from "./heat-operations.ts";
 
 const staff = {
   id: "staff_test",
@@ -1472,8 +1473,39 @@ test("completion readiness is monotone: leaving the race only ever lowers the po
   // The other direction is a real shortfall and must still be refused, with a
   // message that names which side is short rather than claiming a place is
   // missing when the podium has one too many.
+  //
+  // It is reached the way a race day reaches it, not by deleting one result row.
+  // A correction or reopen supersedes *every* published place together, so a
+  // podium missing only its third row is a layout no handler can leave behind
+  // and would pin behaviour nobody can observe. The reachable route is the one
+  // the end-to-end suite uses: publish a podium as deep as the eligible count
+  // then was, and reactivate a finalist afterwards.
   database.exec("UPDATE registrations SET status = 'ACTIVE'");
-  database.exec("DELETE FROM heat_results WHERE id = 'place-3'");
+  const heatOperation = (path, body) => handleHeatOperations(
+    jsonRequest(`/api/v1/staff/events/event_test/heats/final/${path}`, "POST", body),
+    env,
+    staff,
+  );
+  const heatRevision = () => database.prepare("SELECT revision FROM heats WHERE id = 'final'").get().revision;
+  const reopened = await heatOperation("results/reopen", {
+    commandId: crypto.randomUUID(),
+    revision: heatRevision(),
+    reason: "Reopening the podium so it can be republished at the eligible depth.",
+  });
+  assert.equal(reopened.status, 201, JSON.stringify(await reopened.clone().json()));
+  database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-3'");
+  const republished = await heatOperation("results/finalize", {
+    commandId: crypto.randomUUID(),
+    revision: heatRevision(),
+    results: [
+      { raceEntryId: "entry-1", place: 1 },
+      { raceEntryId: "entry-2", place: 2 },
+    ],
+  });
+  assert.equal(republished.status, 201, JSON.stringify(await republished.clone().json()));
+  assert.equal((await completionReadiness()).allowed, true, "the podium publication just accepted completes");
+  // The reactivation is what raises the requirement above the published depth.
+  database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-3'");
   const short = await completionReadiness();
   assert.equal(short.allowed, false);
   assert.deepEqual(short.blockers, [
@@ -1489,14 +1521,19 @@ test("completion readiness is monotone: leaving the race only ever lowers the po
   assert.equal(refused.status, 409);
   assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status, "FINAL");
 
-  // Restore the podium and the transition commits.
-  database.exec(`
-    INSERT INTO heat_results
-      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, revision,
-       finalized_at, recorded_by_staff_profile_id, source_command_id)
-    VALUES ('place-3', 'event_test', 'final', 'entry-3', 'assignment-3', 3, 1,
-            '2026-07-26T02:00:00Z', 'staff_test', 'final-result');
-  `);
+  // The remedy the blocker names, run through the real correction endpoint, and
+  // the transition then commits.
+  const corrected = await heatOperation("results/correct", {
+    commandId: crypto.randomUUID(),
+    revision: heatRevision(),
+    reason: "The reactivated finalist is owed the third place.",
+    results: [
+      { raceEntryId: "entry-1", place: 1 },
+      { raceEntryId: "entry-2", place: 2 },
+      { raceEntryId: "entry-3", place: 3 },
+    ],
+  });
+  assert.equal(corrected.status, 201, JSON.stringify(await corrected.clone().json()));
   database.exec("UPDATE registrations SET status = 'DISQUALIFIED' WHERE id = 'registration-1'");
   const completed = await handleEventOperations(
     jsonRequest("/api/v1/staff/events/event_test/complete", "POST", { commandId: crypto.randomUUID() }),

@@ -153,7 +153,10 @@ const createWorkerHarness = (database) => {
 //
 // `racerCount / heatCapacity` round-one heats each promote their winner, so the
 // caller chooses the finalist count by choosing those two numbers.
-const raceToAwaitingFinal = async (database, { name, slug, racerCount, heatCapacity }) => {
+const raceToAwaitingFinal = async (
+  database,
+  { name, slug, racerCount, heatCapacity, releasedSpareDucks = 0 },
+) => {
   const { api, post } = createWorkerHarness(database);
   const created = await jsonBody(await post("/api/v1/staff/events", {
     commandId: crypto.randomUUID(),
@@ -211,6 +214,39 @@ const raceToAwaitingFinal = async (database, { name, slug, racerCount, heatCapac
       lookupCode: participant.lookupCode,
     }), 201, `pair duck ${participant.visibleNumber}`);
     participants.push(participant);
+  }
+
+  // Spare ducks reserved for the event and then handed back to inventory
+  // because they turned out not to be needed. This is an ordinary registration-
+  // desk action with no participant attached, and it is the plainest way an
+  // event acquires an `event_ducks` row with `released_at` set.
+  const releasedSpares = [];
+  for (let index = 0; index < releasedSpareDucks; index += 1) {
+    const provisioning = await jsonBody(await post("/api/v1/staff/inventory/provisioning", {
+      commandId: crypto.randomUUID(),
+      eventId,
+    }), 201, "provision a spare duck");
+    await jsonBody(await post("/api/v1/staff/inventory/provisioning/confirm", {
+      commandId: crypto.randomUUID(),
+      eventId,
+      duckId: provisioning.duckId,
+      provisioningCommandId: provisioning.provisioningCommandId,
+      physicalWriteVerified: true,
+    }), 201, "confirm the spare duck");
+    const spare = await jsonBody(await api(
+      `/api/v1/staff/inventory/ducks/${provisioning.duckId}`,
+      { token: staffToken },
+    ), 200, "load the spare duck");
+    await jsonBody(await post(
+      `/api/v1/staff/inventory/ducks/${provisioning.duckId}/reservations/release`,
+      {
+        commandId: crypto.randomUUID(),
+        eventId,
+        expectedRevision: spare.duck.revision,
+        reason: "This spare duck is not needed for the race after all.",
+      },
+    ), 201, "release the spare duck back to inventory");
+    releasedSpares.push({ duckId: provisioning.duckId, visibleNumber: provisioning.visibleNumber });
   }
 
   await jsonBody(await post(`/api/v1/staff/events/${eventId}/close-registration`, {
@@ -289,6 +325,7 @@ const raceToAwaitingFinal = async (database, { name, slug, racerCount, heatCapac
     finalists,
     finalHeat,
     leaveRace,
+    releasedSpares,
     completionReadiness,
   };
 };
@@ -804,6 +841,131 @@ test("whatever a final publication accepts, completion accepts immediately", asy
     commandId: crypto.randomUUID(),
   }), 201, "complete after the correction");
   assert.equal(completed.event.status, "COMPLETED");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+// S1. The same reactivation remedy, run in an event that has already handed one
+// duck back to inventory — a spare that turned out not to be needed, released at
+// the registration desk with no participant involved.
+//
+// The released-duck stop used to be `EXISTS (any released event_duck)` for the
+// whole event, so that single routine action permanently disabled every final
+// correction and reopen for the rest of the race. Combined with the completion
+// check it stranded the event outright: `complete` said "correct or reopen that
+// final result", `correct` and `reopen` both answered "not once a duck has been
+// released from this event", the console offered no form because both
+// capabilities projected 0, and `Reset heat` refuses a published result. The
+// only exit was re-disqualifying the racer, destroying the record.
+//
+// The stop is now scoped to the duck assignments the command actually writes or
+// supersedes, which is what its own comment always claimed, so a duck released
+// somewhere else in the event is irrelevant to this podium.
+test("a duck released elsewhere in the event never strands the reactivation remedy", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Released Spare Race",
+    slug: "released-spare-race",
+    racerCount: 9,
+    heatCapacity: 3,
+    releasedSpareDucks: 1,
+  });
+  const {
+    api,
+    post,
+    eventId,
+    finalHeat,
+    finalists,
+    leaveRace,
+    releasedSpares,
+    completionReadiness,
+  } = race;
+  assert.equal(releasedSpares.length, 1);
+  assert.equal(
+    database.prepare(
+      "SELECT COUNT(*) AS count FROM event_ducks WHERE event_id = ? AND released_at IS NOT NULL",
+    ).get(eventId).count,
+    1,
+    "the event genuinely holds a released duck reservation",
+  );
+
+  // A finalist is disqualified before the podium is published, so publication
+  // sizes it at two places and accepts exactly that.
+  await leaveRace(finalists[2], "disqualify");
+  await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: finalHeat.revision,
+      results: [
+        { raceEntryId: finalists[0].raceEntryId, place: 1 },
+        { raceEntryId: finalists[1].raceEntryId, place: 2 },
+      ],
+    },
+  ), 201, "publish the two-place podium the eligible count demanded");
+  assert.equal((await completionReadiness()).allowed, true);
+
+  // The disqualification is reversed on appeal, which is the one change that
+  // raises the requirement.
+  await jsonBody(await post(
+    `/api/v1/staff/registrations/${finalists[2].registrationId}/reactivate`,
+    {
+      commandId: crypto.randomUUID(),
+      expectedRevision: database.prepare(
+        "SELECT revision FROM registrations WHERE id = ?",
+      ).get(finalists[2].registrationId).revision,
+    },
+  ), 201, "reactivate the disqualified finalist");
+  const owed = await completionReadiness();
+  assert.equal(owed.allowed, false);
+  assert.deepEqual(owed.blockers, [
+    "A finalized final published fewer podium places than its eligible finalists can fill."
+    + " Correct or reopen that final result and publish the full podium.",
+  ]);
+
+  // The console is offered the remedy the blocker names, and the server honours
+  // it, despite the released spare duck.
+  const currentFinal = await jsonBody(await api(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}`,
+    { token: staffToken },
+  ), 200, "final heat with a released spare duck in the event");
+  assert.equal(currentFinal.heat.resultCorrectionAllowed, true);
+  assert.equal(currentFinal.heat.resultReopenAllowed, true);
+  const corrected = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/correct`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: currentFinal.heat.revision,
+      reason: "The disqualification was reversed, so the podium owes a third place.",
+      results: [
+        { raceEntryId: finalists[0].raceEntryId, place: 1 },
+        { raceEntryId: finalists[1].raceEntryId, place: 2 },
+        { raceEntryId: finalists[2].raceEntryId, place: 3 },
+      ],
+    },
+  ), 201, "correct the podium in an event holding a released duck");
+  assert.deepEqual(corrected.results.map((result) => result.place), [1, 2, 3]);
+
+  // The event completes with the reactivation intact: nobody had to be
+  // re-disqualified to get out.
+  const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "complete the event without undoing the reactivation");
+  assert.equal(completed.event.status, "COMPLETED");
+  assert.equal(
+    database.prepare("SELECT status FROM registrations WHERE id = ?")
+      .get(finalists[2].registrationId).status,
+    "ACTIVE",
+  );
+  assert.equal(
+    database.prepare(
+      "SELECT COUNT(*) AS count FROM event_ducks WHERE event_id = ? AND released_at IS NOT NULL",
+    ).get(eventId).count,
+    1,
+    "the released spare duck was never quietly re-reserved to make this work",
+  );
+  const board = await jsonBody(await api("/api/v1/race-board"), 200, "completed public board");
+  assert.deepEqual(board.event.podium.map((entry) => entry.place), [1, 2, 3]);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 

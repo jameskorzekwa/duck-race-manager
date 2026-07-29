@@ -1321,8 +1321,20 @@ as deep as the racers who can hold a place, and a withdrawn finalist would
 otherwise demand a place nobody is allowed to fill.
 
 **The completion check is monotone: leaving the race can only ever lower the
-podium it demands, never invalidate one already published.** Publication and
-completion measure the same podium with two deliberately different comparisons:
+podium a published result is measured against, never invalidate one already
+published.** That is a statement about the depth expression `min(3, eligible
+final roster size)` and about completion only. It is not a claim that departures
+are harmless everywhere: if *every* finalist leaves before the podium is
+published, `validateResultSet` refuses the empty podium, the final can never
+reach `FINALIZED`, and completion stays blocked until somebody is reactivated.
+That is correct behaviour — a race with no eligible racer has no result to
+publish — and the finish-line station and the console both name reactivation as
+the remedy rather than dead-ending. What monotonicity guarantees is narrower and
+exact: a podium that was accepted at publication is never later judged
+incomplete by a departure.
+
+Publication and completion measure the same podium with two deliberately
+different comparisons:
 
 - **Exact on write.** `validateResultSet` requires a new or corrected final
   result to contain exactly places 1 through `min(3, eligible final roster
@@ -1348,6 +1360,14 @@ short — "A finalized final published fewer podium places than its eligible
 finalists can fill. Correct or reopen that final result and publish the full
 podium." — and the remedy is reachable, because a final result can be corrected
 or reopened while the event is still `FINAL`.
+
+That remedy has one documented precondition of its own, stated in full under
+Final Correction: correction and reopen are refused when a duck assignment named
+by a result row the command would write or supersede has been released from the
+event. The stop is scoped to those rows precisely so that this blocker always
+names a reachable remedy. A duck released anywhere else in the event — a spare
+handed back at the registration desk, a broken duck deleted for a racer who
+holds no published place — does not touch it.
 
 `COMPLETED` is the final lifecycle status. There is no transition past it; the
 event stays there, with results publicly visible, until an administrator runs
@@ -2367,6 +2387,14 @@ administrator, a fresh heat revision, a 4-to-500-character reason, and explicit
 confirmation. Result takers may finalize new results but cannot alter published
 results.
 
+A correction writes new `heat_results` rows, so it is held to exactly the rule a
+first publication is: every racer it names must still be `ACTIVE` and must still
+hold the duck assignment the request resolved. That is checked in the preflight,
+which names which selection to drop, and repeated as a count inside the guarded
+batch, which is authoritative. A reopen writes no result rows and therefore
+carries no eligibility rule at all — removing a place never requires the racer
+who held it to still be able to hold one.
+
 ### Round-One Correction
 
 A published winner can be directly replaced while the final heat is `PLANNED`
@@ -2413,18 +2441,56 @@ reason, an RFC 4122 v4 `commandId` whose matching retry replays and whose reuse
 for different material is `409`, and one guarded batch that repeats every
 precondition the preflight checked.
 
-Final correction and reopen are blocked once any event duck reservation has been
-released — a deleted or released duck means a published result's duck assignment
-no longer describes a duck in this race. The refusal says exactly that: "Final
-results cannot be corrected once a duck has been released from this event."
-Attempting either from any other event status reports the other precondition
-separately: "Final results can be corrected only while the event is FINAL or
-COMPLETED." Neither message refers to return processing, which is not a concept
-this product implements.
+Final correction and reopen are blocked when a duck assignment named by a
+`heat_results` row **this command would write or supersede** belongs to an event
+duck reservation that has been released. A deleted or released duck means that
+particular result row's duck assignment no longer describes a duck in this race.
+The refusal says exactly that: "Final results cannot be corrected once a duck has
+been released from this event." Attempting either from any other event status
+reports the other precondition separately: "Final results can be corrected only
+while the event is FINAL or COMPLETED." Neither message refers to return
+processing, which is not a concept this product implements.
+
+**The stop is targeted, not event-wide.** It used to refuse whenever *any*
+`event_ducks` row in the event carried a `released_at`, which is a much larger
+set than the sentence describes: releasing one unneeded spare duck back to
+inventory at the registration desk, with no participant attached, permanently
+disabled every final correction and reopen for the rest of the race. Combined
+with the completion check that is a strand: `Complete event` says "correct or
+reopen that final result", both endpoints answer "not once a duck has been
+released from this event", the console offers no form because both capabilities
+project `0`, and `Reset heat` refuses a published result — leaving
+re-disqualifying the racer as the only exit, which destroys exactly the record a
+director must be able to keep. Scoping the refusal to the rows the command
+actually rewrites is what the guard always meant, and it keeps the reactivation
+remedy reachable.
+
+Both halves are enforced twice: in the preflight, which produces the readable
+message, and inside the guarded batch, which is authoritative. A correction
+additionally repeats the eligibility guard that publication uses — every racer
+the corrected podium names must still be `ACTIVE` and still hold the exact duck
+assignment the request resolved, counted inside the batch. Without that, a
+disqualification landing between the roster read and the write could be committed
+into `heat_results`: withdrawal and disqualification touch only `race_commands`,
+`registrations`, and `audit_events`, so they bump no heat revision, and they
+deliberately never close the duck assignment, so no foreign key notices either.
+The public podium would then silently hide a place it had just published.
 
 The console follows the server-projected `resultCorrectionAllowed` and
 `resultReopenAllowed` capabilities rather than re-deriving the rule, so it offers
-the forms during `FINAL` and hides them once a duck has been released.
+the forms during `FINAL` and hides them once a duck named by this result's
+published rows has been released.
+
+Those two capability booleans are visible to every role that can read a heat —
+`ANNOUNCER`, `HEAT_RUNNER`, and `RESULT_TAKER` as well as `RACE_DIRECTOR` —
+because `heatSummarySql` is one role-independent projection. That is deliberate
+and recorded rather than narrowed. They carry no duck identity, number, tag, or
+reason; they name no participant; they add no column and no role; and both
+mutations they describe remain `RACE_DIRECTOR`-only and are refused by the API,
+not by the markup. Since the stop became targeted they no longer report "some
+duck somewhere left this event" at all — only that a place this heat already
+published names a duck that is gone, which is a fact about this heat that these
+same roles can already see on its roster.
 
 Historical result revisions remain until the event is deleted.
 
@@ -2539,9 +2605,11 @@ The gap is also self-limiting. It only appears because the podium row is
 retained while its racer is hidden, and the retention is deliberate: privacy is
 absolute, and the racer who left appears nowhere in the public payload — no
 name, no duck number, no place. A race director who wants the places closed up
-has a real remedy rather than an automatic one, and it is reachable from `FINAL`:
-correct the final result, which supersedes the old podium and publishes a
-genuinely new one under a recorded reason. See Final Correction.
+has a real remedy rather than an automatic one, and it is reachable from `FINAL`
+unless a duck named by one of this result's published rows has itself been
+released from the event: correct the final result, which supersedes the old
+podium and publishes a genuinely new one under a recorded reason. See Final
+Correction.
 
 The same rule already governs a round-one heat whose published winner leaves.
 That heat stays `FINALIZED` and publishes its surviving roster with nobody

@@ -880,6 +880,27 @@ test("the console subscribes only to the live domains the page it is on renders"
     ["event", "staff", "participants", "ducks", "heats"],
   );
 
+  // The fourth shape: race-read without the registration desk. It is
+  // unreachable today — canOpenAdminConsole admits only administrators and
+  // RACE_DIRECTOR, and canRegistration already includes RACE_DIRECTOR — but it
+  // is one role grant away, and such a console still renders the readiness
+  // panel, which reports duck facts that only the "ducks" domain wakes. It
+  // therefore keeps "ducks" and drops "participants", which it cannot repaint.
+  assert.deepEqual(
+    domainsFor({
+      canRegistration: false,
+      participantList: null,
+      canRaceRead: true,
+      heatList: {},
+      finalistCard: {},
+      isSystemAdmin: false,
+      supportSummary: null,
+      notificationList: null,
+      auditList: null,
+    }),
+    ["event", "staff", "ducks", "heats"],
+  );
+
   // The gating is real, not theoretical: these are the hooks each page actually
   // renders, so the registration desk genuinely has no heat or support surface a
   // signal on those domains could repaint.
