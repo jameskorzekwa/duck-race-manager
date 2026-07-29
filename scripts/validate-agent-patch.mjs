@@ -14,6 +14,7 @@ const protectedPaths = [
   /^scripts\/agent-pipeline\.mjs$/i,
   /^scripts\/cleanup-model-workspace\.mjs$/i,
   /^scripts\/validate-agent-patch\.mjs$/i,
+  /^scripts\/wait-for-openchamber-session\.mjs$/i,
 ];
 
 const gitControlPath = (candidate) => candidate.split("/").some((part) => part.toLowerCase() === ".git")

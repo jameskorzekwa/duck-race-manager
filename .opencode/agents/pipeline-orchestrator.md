@@ -38,6 +38,8 @@ permission:
     "**/scripts/cleanup-model-workspace.mjs": deny
     "scripts/validate-agent-patch.mjs": deny
     "**/scripts/validate-agent-patch.mjs": deny
+    "scripts/wait-for-openchamber-session.mjs": deny
+    "**/scripts/wait-for-openchamber-session.mjs": deny
   read:
     "*": allow
     "*.env": deny

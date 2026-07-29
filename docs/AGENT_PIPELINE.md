@@ -213,6 +213,7 @@ opencode.json
 scripts/agent-pipeline.mjs
 scripts/cleanup-model-workspace.mjs
 scripts/validate-agent-patch.mjs
+scripts/wait-for-openchamber-session.mjs
 ```
 
 Do not copy QuickDucks-specific prompts unchanged. Replace domain invariants,
@@ -237,8 +238,12 @@ review workflows as an additional defense.
 Authenticate paid providers only in the local OpenCode/OpenChamber runtime. Do
 not copy `auth.json`, `OPENCODE_AUTH_CONTENT`, access tokens, or refresh tokens to
 GitHub. Verify the local OpenChamber model list before enabling intake. The
-self-hosted job should call `openchamber session create --wait`; it must not load
-provider credentials into the Actions process.
+self-hosted job should dispatch with `openchamber session create` and then poll
+authoritative directory-scoped session status with a bounded trusted helper.
+Require the exact parent, every child session to be idle, and a completed
+terminal marker before handling model output. Avoid one long `--wait` HTTP
+request because intermediaries can end it while the OpenCode session continues.
+The job must not load provider credentials into the Actions process.
 
 Grant `contents: write`, `pull-requests: write`, and `actions: write` only to a
 deterministic publisher that never executes candidate code or invokes a model.

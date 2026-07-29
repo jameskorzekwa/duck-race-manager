@@ -285,7 +285,7 @@ jobs:
           state.phase = "dispatching";
           fs.writeFileSync(process.env.STATE_PATH, JSON.stringify(state));
           NODE
-          set +e
+          status=0
           openchamber session create \
             --dir "$PIPELINE_MODEL_DIR" \
             --title "QuickDucks issue #${PIPELINE_ISSUE} implementation" \
@@ -293,30 +293,27 @@ jobs:
             --model openai/gpt-5.6-sol \
             --agent pipeline-orchestrator \
             --variant xhigh \
-            --wait \
-            --last-assistant \
-            --timeout 5400 \
             --json \
-            > "$RUNNER_TEMP/agent-task/session-result.json"
-          status=$?
-          set -e
-          printf '%s\n' "$status" > "$RUNNER_TEMP/agent-task/task-exit-status.txt"
-
-      - name: Confirm local model session is idle
-        shell: bash
-        run: |
-          set -euo pipefail
-          openchamber session list --dir "$PIPELINE_MODEL_DIR" --with-status --all --limit 100 --json \
-            > "$RUNNER_TEMP/agent-task/session-status.json"
-          STATUS_PATH="$RUNNER_TEMP/agent-task/session-status.json" node <<'NODE'
+            > "$RUNNER_TEMP/agent-task/session-dispatch.json" || status=$?
+          if [[ "$status" -eq 0 ]]; then
+            DISPATCH_PATH="$RUNNER_TEMP/agent-task/session-dispatch.json" \
+              STATE_PATH="$HOME/.local/state/quickducks-agent-runner/active.json" node <<'NODE' || status=$?
           const fs = require("node:fs");
-          const body = JSON.parse(fs.readFileSync(process.env.STATUS_PATH, "utf8"));
-          if (!Array.isArray(body.sessions) || body.sessions.length === 0) {
-            throw new Error("OpenChamber did not report the implementation session.");
-          }
-          const busy = body.sessions.filter((session) => session.status?.type !== "idle");
-          if (busy.length > 0) throw new Error(`Local model sessions remain active: ${busy.map((session) => session.id).join(", ")}`);
+          const dispatch = JSON.parse(fs.readFileSync(process.env.DISPATCH_PATH, "utf8"));
+          if (!dispatch.sessionId || dispatch.promptDispatched !== true) throw new Error("OpenChamber did not confirm implementation dispatch.");
+          const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
+          state.sessionId = dispatch.sessionId;
+          fs.writeFileSync(process.env.STATE_PATH, JSON.stringify(state));
           NODE
+          fi
+          if [[ "$status" -eq 0 ]]; then
+            node "$GITHUB_WORKSPACE/scripts/wait-for-openchamber-session.mjs" \
+              --dispatch "$RUNNER_TEMP/agent-task/session-dispatch.json" \
+              --result "$RUNNER_TEMP/agent-task/session-result.json" \
+              --timeout 5100 \
+              --marker-prefix PIPELINE_TASK_ || status=$?
+          fi
+          printf '%s\n' "$status" > "$RUNNER_TEMP/agent-task/task-exit-status.txt"
 
       - name: Build deterministic task artifact
         id: result
