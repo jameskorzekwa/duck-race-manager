@@ -11,6 +11,7 @@ const STATE_LABELS = [
   "agent:approved",
   "agent:deployed",
   "agent:failed",
+  "agent:error",
 ];
 
 export function closingIssueNumbers(body) {
@@ -92,6 +93,58 @@ export async function validExactCheck(github, owner, repo, pr) {
     if (error.status === 404) return false;
     throw error;
   }
+}
+
+// Applies the bounded retry policy to one agent:failed issue, immediately.
+// Called by the publish job the moment a failure is recorded, and by
+// reconciliation as the sweeper for anything that slipped through. Retries
+// resume from the saved patch; stopping parks the issue at agent:error.
+export async function recoverFailedIssue({ github, context }, issueNumber) {
+  const { owner, repo } = context.repo;
+  const defaultBranch = context.payload.repository.default_branch;
+  const setState = async (state) => {
+    const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+    const labels = [...labelNames(issue)].filter((label) => !STATE_LABELS.includes(label));
+    await github.rest.issues.setLabels({
+      owner, repo, issue_number: issueNumber, labels: [...labels, state],
+    });
+  };
+  const comments = await github.paginate(github.rest.issues.listComments, {
+    owner, repo, issue_number: issueNumber, per_page: 100,
+  });
+  const commentOnce = async (marker, body) => {
+    if (comments.some((comment) => comment.body?.includes(marker))) return;
+    await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: `${marker}\n${body}` });
+  };
+
+  const retries = markerNumbers(comments, "task-retry").length;
+  if (retries >= TASK_RETRY_LIMIT) {
+    await commentOnce(
+      "<!-- agent-pipeline task-exhausted -->",
+      `Agent Task recovery used all ${TASK_RETRY_LIMIT} retries. Add a clarifying comment and rerun Agent Task to resume.`,
+    );
+    await setState("agent:error");
+    return "error";
+  }
+  const digests = attemptDigests(comments);
+  if (digests.length >= 2 && digests.at(-1) === digests.at(-2)) {
+    await commentOnce(
+      `<!-- agent-pipeline no-progress=${digests.at(-1).slice(0, 12)} -->`,
+      "Two consecutive attempts produced an identical patch, so automatic retries stopped. Add a clarifying comment and rerun Agent Task to resume.",
+    );
+    await setState("agent:error");
+    return "error";
+  }
+  await github.rest.issues.createComment({
+    owner, repo, issue_number: issueNumber,
+    body: `<!-- agent-pipeline task-retry=${retries + 1} -->\nRetrying the failed Agent Task from current main.`,
+  });
+  await setState("agent:inbox");
+  await github.rest.actions.createWorkflowDispatch({
+    owner, repo, workflow_id: "agent-task.yml", ref: defaultBranch,
+    inputs: { issue: String(issueNumber) },
+  });
+  return "retried";
 }
 
 export async function reconcileAgentPipeline({ github, context, core }) {
@@ -310,7 +363,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     const attempts = comments.filter((comment) => comment.user?.id === 41898282
       && comment.body?.includes(recoveryPrefix)).length;
     if (attempts >= 3) {
-      await setState(issueNumber, "agent:failed");
+      await setState(issueNumber, "agent:error");
       await commentOnce(
         issueNumber,
         `<!-- agent-pipeline gate-recovery-exhausted=${pr.number}-${pr.head.sha} -->`,
@@ -372,7 +425,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
       const comments = await commentsFor(issue.number);
       const retries = markerNumbers(comments, "orphan-retry").length;
       if (retries >= 3) {
-        await setState(issue.number, "agent:failed");
+        await setState(issue.number, "agent:error");
         await commentOnce(
           issue.number,
           "<!-- agent-pipeline orphan-exhausted -->",
@@ -413,7 +466,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     }
     const retries = markerNumbers(comments, "stale-retry").length;
     if (retries >= 3) {
-      await setState(issue.number, "agent:failed");
+      await setState(issue.number, "agent:error");
       await commentOnce(
         issue.number,
         "<!-- agent-pipeline stale-exhausted -->",
@@ -437,35 +490,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     const latestFailure = comments.findLast((comment) => comment.body?.includes("<!-- agent-pipeline run-failed="));
     const latestTerminal = comments.findLast((comment) => /<!-- agent-pipeline (?:run-failed|review-exhausted)=/.test(comment.body ?? ""));
     if (!latestFailure || latestFailure.id !== latestTerminal?.id) continue;
-    const retries = markerNumbers(comments, "task-retry").length;
-    if (retries >= TASK_RETRY_LIMIT) {
-      await commentOnce(
-        issue.number,
-        "<!-- agent-pipeline task-exhausted -->",
-        `Agent Task recovery exhausted ${TASK_RETRY_LIMIT} retries.`,
-      );
-      continue;
-    }
-    // Retries resume from the previous patch, so an identical digest against the
-    // same gate failure means the attempt made no progress. Stop rather than pay
-    // for the same rewrite again.
-    const digests = attemptDigests(comments);
-    if (digests.length >= 2 && digests.at(-1) === digests.at(-2)) {
-      await commentOnce(
-        issue.number,
-        `<!-- agent-pipeline no-progress=${digests.at(-1).slice(0, 12)} -->`,
-        "Two consecutive attempts produced an identical patch, so automatic retries stopped. Add a clarifying comment and rerun Agent Task to resume.",
-      );
-      continue;
-    }
-    await github.rest.issues.createComment({
-      owner,
-      repo,
-      issue_number: issue.number,
-      body: `<!-- agent-pipeline task-retry=${retries + 1} -->\nRetrying the failed Agent Task from current main.`,
-    });
-    await setState(issue.number, "agent:inbox");
-    await dispatch(issue.number);
+    await recoverFailedIssue({ github, context }, issue.number);
   }
 }
 

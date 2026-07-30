@@ -61,7 +61,7 @@ jobs:
             const states = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:running",
               "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:approved",
-              "agent:deployed", "agent:failed",
+              "agent:deployed", "agent:failed", "agent:error",
             ];
             const labels = issue.labels.map((label) => label.name).filter((label) => !states.includes(label));
             await github.rest.issues.setLabels({
