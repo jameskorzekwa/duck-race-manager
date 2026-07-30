@@ -880,8 +880,9 @@ test("creates registration, race-entry, command, and audit records atomically", 
   // Registering in this browser always claims the link as REGISTRATION, so an
   // earlier followed link can never keep hiding this browser's own lookup code.
   assert.match(db.batches[0][5].sql, /INSERT INTO browser_collection_registrations/);
-  assert.match(db.batches[0][5].sql, /VALUES \(\?, \?, \?, 'REGISTRATION'\)/);
+  assert.match(db.batches[0][5].sql, /VALUES \(\?, \?, \?, 'REGISTRATION', \?\)/);
   assert.match(db.batches[0][5].sql, /DO UPDATE SET added_via = 'REGISTRATION'/);
+  assert.equal(db.batches[0][5].args.at(-1), await hashToken(privateToken));
   assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
   assert.match(response.headers.get("set-cookie") ?? "", /HttpOnly/);
   assert.ok(publicationTask);

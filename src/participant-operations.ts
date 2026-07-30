@@ -74,6 +74,7 @@ interface RegistrationRow {
   lookup_code: string;
   private_token_hash: string;
   email_notifications_enabled: number;
+  sms_notifications_enabled: number;
   created_via: string;
   staff_notes: string | null;
   submitted_at: string;
@@ -96,7 +97,8 @@ const registrationSelect = `
          e.email_required,
          re.id AS race_entry_id, r.first_name, r.last_name, r.email, r.phone,
          r.status, r.lookup_code, r.private_token_hash,
-         r.email_notifications_enabled, r.created_via, r.staff_notes,
+          r.email_notifications_enabled, r.sms_notifications_enabled,
+          r.created_via, r.staff_notes,
          r.submitted_at, r.status_changed_at, r.updated_at,
          r.revision AS registration_revision,
          re.revision AS race_entry_revision, re.duck_name,
@@ -132,6 +134,7 @@ const registrationJson = (row: RegistrationRow): Record<string, unknown> => ({
   status: row.status,
   lookupCode: row.lookup_code,
   emailNotificationsEnabled: row.email_notifications_enabled === 1,
+  smsNotificationsEnabled: row.sms_notifications_enabled === 1,
   notes: row.staff_notes,
   createdVia: row.created_via,
   submittedAt: row.submitted_at,
@@ -540,6 +543,9 @@ const editRegistration = async (
   if ((value.input.emailNotificationsEnabled ? 1 : 0) !== current.email_notifications_enabled) {
     changedFields.push("email_notifications_enabled");
   }
+  if (value.input.phone === null && current.sms_notifications_enabled === 1) {
+    changedFields.push("sms_notifications_enabled");
+  }
   if (value.staffNotes !== current.staff_notes) changedFields.push("staff_notes");
 
   const now = new Date().toISOString();
@@ -556,7 +562,9 @@ const editRegistration = async (
     env.DB.prepare(
       `UPDATE registrations
           SET first_name = ?, last_name = ?, email = ?, phone = ?,
-              email_notifications_enabled = ?, staff_notes = ?,
+              email_notifications_enabled = ?,
+              sms_notifications_enabled = CASE WHEN ? IS NULL THEN 0 ELSE sms_notifications_enabled END,
+              staff_notes = ?,
               updated_at = ?, revision = revision + 1
         WHERE id = ? AND revision = ?
           AND event_id IN (
@@ -569,6 +577,7 @@ const editRegistration = async (
       value.input.email,
       value.input.phone,
       value.input.emailNotificationsEnabled ? 1 : 0,
+      value.input.phone,
       value.staffNotes,
       now,
       registrationId,

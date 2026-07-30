@@ -831,6 +831,13 @@ test("the search section promises a status-only projection", () => {
   );
 });
 
+test("My Ducks explains participant-specific contact access on the originating browser", () => {
+  const markup = renderMyDucks("RACING");
+  assert.match(markup, /participant-specific private proof lets this browser show and edit email, phone, and contact opt-ins/);
+  assert.match(markup, /Anyone with access to this browser profile may see or change those saved details/);
+  assert.match(markup, /Followed participants remain status-only/);
+});
+
 // --- a very small DOM for the two browser clients ---------------------------
 
 const quickMatches = (node, selector) => {

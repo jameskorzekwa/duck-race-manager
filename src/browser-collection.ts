@@ -112,15 +112,17 @@ export const collectionStatements = async (
   collection: BrowserCollection,
   registrationId: string,
   now: string,
+  ownershipProofHash: string | null = null,
 ): Promise<D1PreparedStatement[]> => [
   await collectionOwnerStatement(env, collection, now),
   env.DB.prepare(
     `INSERT INTO browser_collection_registrations
-      (collection_id, registration_id, added_at, added_via)
-     VALUES (?, ?, ?, 'REGISTRATION')
+      (collection_id, registration_id, added_at, added_via, ownership_proof_hash)
+     VALUES (?, ?, ?, 'REGISTRATION', ?)
      ON CONFLICT (collection_id, registration_id)
-     DO UPDATE SET added_via = 'REGISTRATION'`,
-  ).bind(collection.id, registrationId, now),
+     DO UPDATE SET added_via = 'REGISTRATION',
+                   ownership_proof_hash = COALESCE(excluded.ownership_proof_hash, ownership_proof_hash)`,
+  ).bind(collection.id, registrationId, now, ownershipProofHash),
 ];
 
 // Links created from the public name search. These are idempotent and must

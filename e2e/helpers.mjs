@@ -209,7 +209,9 @@ export const publicBoardShape = async () => {
 export const rejectSensitiveKeys = (value) => {
   const forbidden = new Set([
     "email", "phone", "lookupCode", "privateToken", "privateStatusPath",
-    "notes", "location", "storageLocation", "audit", "tagToken",
+    "emailNotificationsEnabled", "smsNotificationsEnabled", "ownershipProof",
+    "email_notifications_enabled", "sms_notifications_enabled", "ownershipProofHash",
+    "ownership_proof_hash", "notes", "location", "storageLocation", "audit", "tagToken",
   ]);
   const visit = (candidate) => {
     if (Array.isArray(candidate)) return candidate.forEach(visit);

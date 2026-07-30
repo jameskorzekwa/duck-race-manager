@@ -264,6 +264,14 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .duck-name-form { gap:.6rem; margin-top:.9rem; padding-top:.9rem; border-top:2px dashed #b8c6c9; font-size:.95rem; font-weight:750; }
 .duck-name-form .actions { gap:.5rem; }
 .duck-name-form .message-line { margin:0; }
+.participant-contact { display:grid; gap:.65rem; margin-top:1rem; padding:1rem; border:2px solid var(--water-dark); border-radius:.8rem; background:#f4fbfd; }
+.participant-contact > * { min-width:0; max-width:100%; }
+.participant-contact-summary { display:grid; gap:.35rem; }
+.participant-contact-summary > * { margin:0; overflow-wrap:anywhere; }
+.participant-contact-line { line-height:1.45; }
+.participant-contact-form { gap:.8rem; padding-top:.25rem; }
+.participant-contact-form .actions { gap:.5rem; }
+.participant-contact-form .message-line { margin:0; }
 .page-panel > .actions[data-duck-follow] { margin:1.2rem 0; }
 .privacy { display:flex; gap:.65rem; align-items:flex-start; padding:1rem; border-radius:.8rem; background:#e4f4f8; color:#245264; font-size:.9rem; line-height:1.5; }
 .privacy strong { flex:none; }
@@ -625,7 +633,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
       <p class="eyebrow">Saved on this device</p>
       <h1 class="page-title">My Ducks</h1>
       <p class="lede">Participants you registered on this device keep their full details and staff lookup code. Ducks you followed show public race status only.</p>
-      <div class="privacy"><strong>Private by design.</strong><span>Email and phone never appear here. Immediately after registration, this tab can show the one-time private status link so you can bookmark it; saved collection responses never include that link.</span></div>
+       <div class="privacy"><strong>Private by design.</strong><span>For participants registered on this device, participant-specific private proof lets this browser show and edit email, phone, and contact opt-ins. Anyone with access to this browser profile may see or change those saved details. Followed participants remain status-only, and ownership proof and private status links never appear on the page or in public responses.</span></div>
       <div class="notice" data-registration-success aria-live="polite" hidden></div>
       <p class="message-line muted" data-my-ducks-error role="alert" hidden></p>
       <div class="my-ducks-flow" data-my-ducks-flow>
@@ -718,7 +726,7 @@ export const renderRegistration = (
       <p class="eyebrow">Participant registration</p>
       <h1 class="page-title" data-event-name>Loading race details…</h1>
       <p class="lede" data-event-date>Registration takes about one minute.</p>
-      <div class="privacy"><strong>Private by design.</strong><span>Your email and phone number are visible only to logged-in authorized race staff. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
+       <div class="privacy"><strong>Private by design.</strong><span>Outside the originating browser, your email and phone number are visible only to logged-in authorized race staff. The originating browser can privately view and edit them from its owned My Ducks card. They are never shown in public search or race status. After duck return processing, QuickDucks permanently deletes the complete race, including participant, duck, tag, result, and audit data.</span></div>
       <div class="notice"><strong>Registering more than one participant?</strong> Finish this form once for each person. You can use the same phone, email, or browser, and QuickDucks will keep their codes together on this device.</div>
       <form method="post" action="/api/v1/registrations" data-registration-form data-protection-ready="${turnstileSiteKey === undefined && !localPreviewWithoutProtection ? "false" : "true"}">
         <div class="field-grid">
@@ -791,7 +799,7 @@ export const renderStatus = (
         ${raceStatus === undefined ? "" : raceStatus === null
           ? '<p class="muted">Race status is not currently public.</p>'
           : publicStatusFacts(raceStatus, false)}</div>
-      <p class="muted">Duck, heat, and result facts match public race status. Email and phone stay staff-only, and the complete race dataset is deleted after return processing.</p>
+       <p class="muted">Duck, heat, and result facts match public race status. Email and phone stay off this status page; they are available only to authorized staff and the originating browser’s owned My Ducks card. The complete race dataset is deleted after return processing.</p>
       <div class="actions">${phaseAllowsRegistration(phase) ? '<a class="button" href="/register">Register another participant</a>' : ""}<a class="button secondary" href="/">Back to home</a></div>
     </section>${liveBoard()}<script src="/assets/live.js" defer></script>`,
   });

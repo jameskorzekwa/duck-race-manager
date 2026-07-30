@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0016_locked_final_winner_correction.sql`, browser
+the Worker, D1 migrations through `0018_participant_contact_preferences.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -402,6 +402,13 @@ storage being unavailable, and redirects to the required
 token are never placed in the redirect URL, browser history, or logs. No duck or
 heat is assigned by public registration.
 
+The browser also retains that registration's high-entropy token as a
+participant-specific ownership proof in browser-local storage. The proof is
+keyed by registration UUID and is never placed in markup, a URL, the collection
+response, or a public response. It is separate from the HttpOnly collection
+cookie: both credentials are required to read or edit that participant's
+contact details from My Ducks.
+
 **Operator step:** keep registration lifecycle state aligned with the intended
 schedule. Timestamps gate submission but do not automatically open or close the
 event. The current browser UI also checks lifecycle status, not the timestamp
@@ -499,6 +506,52 @@ unambiguous, so the participant can open and bookmark it. Invalid,
 cross-origin, absolute, malformed, mismatched, unreadable, or non-removable
 handoffs are never exposed. Full collection and presence responses never return
 the private path or token.
+
+### Editing Contact and Update Preferences
+
+**Implemented:** an owned My Ducks card separately loads the participant's
+email, phone, email opt-in, and SMS opt-in after proving both browser-collection
+membership and participant-specific ownership. Each eligible card shows those
+values and an **Edit contact details** action. Saving can change exactly those
+four fields; names, participant state, lookup code, race entry, duck assignment,
+and race facts are outside this endpoint.
+
+The private read and update routes require the matching registration UUID,
+HttpOnly collection cookie, a `REGISTRATION`-sourced collection link, and the
+matching high-entropy proof. Proof for one owned card cannot authorize another
+card in the same collection. A followed link, an unrelated browser, a missing
+cookie, and a missing, invalid, or mismatched proof receive no contact data.
+Responses are non-cacheable, and no contact field or proof is added to search,
+race-board, public duck, private-status, collection, presence, or WebSocket
+projections.
+
+Older retained `REGISTRATION` links have no participant proof hash. When that
+browser first loads its owned card, an exact-Origin compatibility request may
+mint a new participant-specific proof from that retained owned link. It stores
+only the hash in D1; the browser generates and retains the raw proof before it
+sends the idempotent mint command. The same operation is unavailable to
+`FOLLOWED` links and cannot replace a proof already established for an owned
+link. One proof hash may be retained for the same participant in multiple owned
+collections, but the database refuses to associate it with another participant.
+If browser-local storage is unavailable,
+the current page may use the proof in memory, but later loads fail closed rather
+than falling back to collection-only contact access.
+
+Contact updates require the exact application Origin, a current registration
+revision, and a UUID command ID. A retry with the same participant, revision,
+proof, and normalized four-field material replays without another write; command
+reuse for different material is rejected. Email is lowercased, blank contact
+values become null, the event's required-email policy still applies, and an
+email or SMS opt-in requires its corresponding address. Audit history records
+only the changed field names, never old or new contact values or ownership
+proof. SMS and email delivery remain non-operational; these preferences do not
+enqueue a message.
+
+The privacy notice warns that anyone with access to the originating browser
+profile may view or edit its owned contact details. Cancel discards an edit,
+successful saves repaint from the private API response, and refreshes load the
+persisted values. Followed cards remain public status only and have no contact
+summary or edit action.
 
 The page refreshes through the shared live-update hub after a matching
 event, participant, duck, heat, or return signal. While the live connection is
