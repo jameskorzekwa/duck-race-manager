@@ -127,6 +127,48 @@ test("a verdict followed by a trailing sentence is still a completed turn", asyn
   assert.match(result.lastAssistantMessage.text, /PIPELINE_REVIEW_APPROVED/);
 });
 
+test("a marker in an earlier assistant message still completes the turn", async () => {
+  const clock = fakeClock();
+  const run = (args) => (args[1] === "list"
+    ? listing([{ id: "ses_parent", status: { type: "idle" } }])
+    : { messages: [
+      { completedAt: 4, text: "Detailed findings...\nPIPELINE_REVIEW_APPROVED:abc123" },
+      { completedAt: 5, text: "No blocking issues found." },
+    ] });
+
+  const result = await waitForOpenChamberSession({
+    directory,
+    timeoutSeconds: 60,
+    markerPrefix: "PIPELINE_REVIEW_",
+    run,
+    ...clock,
+    pollIntervalMs: 10,
+    idleGraceMs: 50,
+  });
+
+  assert.match(result.lastAssistantMessage.text, /PIPELINE_REVIEW_APPROVED:abc123/);
+});
+
+test("conflicting markers across messages decide nothing", async () => {
+  const clock = fakeClock();
+  const run = (args) => (args[1] === "list"
+    ? listing([{ id: "ses_parent", status: { type: "idle" } }])
+    : { messages: [
+      { completedAt: 4, text: "PIPELINE_REVIEW_APPROVED:abc123" },
+      { completedAt: 5, text: "PIPELINE_REVIEW_REJECTED:abc123" },
+    ] });
+
+  await assert.rejects(waitForOpenChamberSession({
+    directory,
+    timeoutSeconds: 600,
+    markerPrefix: "PIPELINE_REVIEW_",
+    run,
+    ...clock,
+    pollIntervalMs: 10,
+    idleGraceMs: 20,
+  }), /without exactly one PIPELINE_REVIEW_ marker/);
+});
+
 test("marker extraction requires exactly one unambiguous marker line", () => {
   assert.equal(
     uniqueMarkerLine({ text: "prose\nPIPELINE_TASK_READY:70\nmore prose" }, "PIPELINE_TASK_"),

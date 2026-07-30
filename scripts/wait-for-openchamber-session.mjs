@@ -138,16 +138,30 @@ export async function waitForOpenChamberSession({
           idleSince = null;
         } else {
           idleSince ??= now();
+          // Models are told to end with the marker, but they sometimes place it
+          // in an earlier assistant message or follow it with prose. Never
+          // depend on message layout: scan the recent assistant transcript and
+          // require exactly one marker line across it.
           const response = run([
             "session", "messages",
             "--session", sessionId,
             "--dir", modelDirectory,
-            "--last-assistant",
+            "--role", "assistant",
+            "--limit", "10",
             "--json",
           ]);
-          const message = Array.isArray(response?.messages) ? response.messages.at(-1) : null;
-          if (message?.completedAt != null && uniqueMarkerLine(message, markerPrefix) !== null) {
-            return { sessionId, directory: modelDirectory, sessionStatus: parent.status, lastAssistantMessage: message };
+          const messages = Array.isArray(response?.messages) ? response.messages : [];
+          const carriers = messages.filter(
+            (entry) => entry?.completedAt != null && uniqueMarkerLine(entry, markerPrefix) !== null,
+          );
+          const markerCount = messages.reduce(
+            (total, entry) => total + String(entry?.text ?? "").split(/\r?\n/)
+              .filter((line) => line.trim().startsWith(markerPrefix)).length,
+            0,
+          );
+          const message = messages.at(-1) ?? null;
+          if (carriers.length === 1 && markerCount === 1) {
+            return { sessionId, directory: modelDirectory, sessionStatus: parent.status, lastAssistantMessage: carriers[0] };
           }
           if (now() - idleSince >= idleGraceMs) {
             const suffix = finalLine(message);
