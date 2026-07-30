@@ -531,6 +531,13 @@ const participantDuckName = (registration) => {
 // what is being named, so the control that renames it sits with the duck's
 // identity and stays folded away until it is asked for.
 const participantAddDuckFact = (facts, status, registration) => {
+  // The collection's paired flag comes from the current open assignment in D1.
+  // Fail closed on that authoritative field even if a separately projected
+  // race status still contains a duck or heat from an older assignment.
+  if (registration.paired !== true) {
+    participantAddFact(facts, "Duck", "Waiting for duck assignment");
+    return;
+  }
   const duckName = participantDuckName(registration);
   const link = duckDetailLink(document, status.duck ? status.duck.visibleNumber : null, duckName);
   if (link === null) {
@@ -550,20 +557,24 @@ const participantAddDuckFact = (facts, status, registration) => {
 
 const participantAddRaceFacts = (card, status, registration) => {
   if (!status) {
-    card.append(participantText("p", "Race status is not currently public.", "muted"));
+    if (registration.paired === true) {
+      card.append(participantText("p", "Race status is not currently public.", "muted"));
+    }
     return;
   }
   const facts = participantText("dl", "", "facts");
   participantAddDuckFact(facts, status, registration);
-  const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
-  participantAddFact(facts, "Assigned heat", assigned
-    ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
-    : "Heat not assigned yet");
-  participantAddFact(facts, "Race activity", status.currentHeat
-    ? participantRoundLabel(status.currentHeat.round) + " · Heat " + status.currentHeat.number
-      + " · " + participantHeatStatus(status.currentHeat.status)
-    : "No heat is active right now");
-  participantAddFact(facts, "Race status", participantHumanize(status.outcome));
+  if (registration.paired === true) {
+    const assigned = status.assignedHeat.final || status.assignedHeat.roundOne;
+    participantAddFact(facts, "Assigned heat", assigned
+      ? (status.assignedHeat.final ? "Final" : "Round one") + " · Heat " + assigned.number
+      : "Heat not assigned yet");
+    participantAddFact(facts, "Race activity", status.currentHeat
+      ? participantRoundLabel(status.currentHeat.round) + " · Heat " + status.currentHeat.number
+        + " · " + participantHeatStatus(status.currentHeat.status)
+      : "No heat is active right now");
+    participantAddFact(facts, "Race status", participantHumanize(status.outcome));
+  }
   card.append(facts);
 };
 
@@ -1196,12 +1207,15 @@ const participantCard = (registration) => {
   const qrFigure = registration.followed ? null : participantQrFigure(registration);
   if (qrFigure !== null) {
     card.append(qrFigure);
-    // Once a duck is paired there is nothing left to do at the duck table, so
-    // the card stops sending anyone there and explains what the code is still
-    // good for instead.
-    card.append(participantText("p", registration.paired
-      ? "Staff can scan this code, or type it, to pull up this registration."
-      : "Show this code to staff at the duck table. They can scan it or type the code above.", "muted"));
+  }
+  // The readable lookup code remains usable when QR geometry is unavailable,
+  // so assignment guidance must not depend on drawing the optional QR. Once a
+  // duck is paired there is nothing left to do at the registration table; the
+  // QR caption instead explains what that code is still good for.
+  if (!registration.followed && registration.paired !== true) {
+    card.append(participantText("p", "Show this code to staff at registration table to get your duck!", "muted"));
+  } else if (qrFigure !== null) {
+    card.append(participantText("p", "Staff can scan this code, or type it, to pull up this registration.", "muted"));
   }
   card.append(participantText("p", "Registration: " + participantHumanize(registration.registrationStatus), "muted"));
   participantAddRaceFacts(card, registration.raceStatus, registration);
@@ -1302,11 +1316,11 @@ const participantRender = (registrations) => {
     participantVersion = version;
     // Three groups, one rule: a participant registered on this device is
     // "mine" and keeps its full detail, and everything else is a followed
-    // duck with the public projection only. The awaiting/paired split stays
-    // exactly as it was for the registrations this device owns.
+    // duck with the public projection only. A malformed or missing paired value
+    // fails closed into awaiting rather than revealing assignment-only detail.
     const owned = registrations.filter((registration) => registration.followed !== true);
-    participantRenderSection("awaiting", owned.filter((registration) => !registration.paired));
-    participantRenderSection("paired", owned.filter((registration) => registration.paired));
+    participantRenderSection("awaiting", owned.filter((registration) => registration.paired !== true));
+    participantRenderSection("paired", owned.filter((registration) => registration.paired === true));
     participantRenderSection(
       "followed",
       registrations.filter((registration) => registration.followed === true),

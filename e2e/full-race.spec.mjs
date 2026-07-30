@@ -99,6 +99,27 @@ test.describe("complete race journey", () => {
       await expect(page.getByText("Registration saved.")).toBeVisible();
       expect(page.url()).not.toContain("privateToken");
 
+      // Keep the exact view the registration flow opened. Before D1 reports a
+      // current assignment, no stale or inapplicable race detail belongs on the
+      // card, including at the narrowest supported viewport.
+      const awaitingSection = page.locator('[data-participant-section="awaiting"]');
+      const awaitingCard = awaitingSection.locator(`[data-registration-id="${firstBody.registrationId}"]`);
+      await expect(awaitingSection.getByRole("heading", { name: "Awaiting Duck Assignment", exact: true })).toBeVisible();
+      await expect(awaitingCard).toBeVisible();
+      await expect(awaitingCard.getByText(
+        "Show this code to staff at registration table to get your duck!",
+        { exact: true },
+      )).toBeVisible();
+      for (const label of ["Assigned heat", "Race activity", "Race status"]) {
+        await expect(awaitingCard.getByText(label, { exact: true })).toHaveCount(0);
+      }
+      await page.setViewportSize({ width: 320, height: 900 });
+      await expectNoDocumentOverflow(page);
+      await expect(awaitingCard).toBeVisible();
+      await page.evaluate(() => {
+        globalThis.__quickDucksAssignmentTransition = "awaiting";
+      });
+
       for (let index = 2; index <= 9; index += 1) {
         participants.push(await registerParticipant(client, event.id, index));
       }
@@ -114,16 +135,21 @@ test.describe("complete race journey", () => {
         await pairDuck(client, event.id, ducks[index], participants[index]);
       }
 
-      await page.goto(`/staff/ducks/${ducks[0].tagToken}`);
-      await expect(page.locator(".staff-panel")).toHaveCSS("background-color", "rgb(255, 253, 243)");
-      await expect(page.locator("[data-registration-search-status]")).toContainText("waiting for a duck");
+      // Pair in a second tab so the originating My Ducks view must learn about
+      // the assignment through its existing live refresh and authoritative API
+      // refetch, not through a navigation or client-side pairing assumption.
+      const staffPage = await page.context().newPage();
+      const staffErrors = watchBrowserErrors(staffPage);
+      await staffPage.goto(`/staff/ducks/${ducks[0].tagToken}`);
+      await expect(staffPage.locator(".staff-panel")).toHaveCSS("background-color", "rgb(255, 253, 243)");
+      await expect(staffPage.locator("[data-registration-search-status]")).toContainText("waiting for a duck");
       // Let any initial live refresh finish before selecting a row; a refresh
       // intentionally clears an in-progress pairing review.
-      await page.waitForTimeout(500);
-      const search = page.getByLabel("Participant code, name, phone, or email");
+      await staffPage.waitForTimeout(500);
+      const search = staffPage.getByLabel("Participant code, name, phone, or email");
       await search.fill(participants[0].firstName);
-      await page.getByRole("button", { name: "Find participant" }).click();
-      await page.getByRole("button", { name: /Browser Racer/ }).evaluate((row) => {
+      await staffPage.getByRole("button", { name: "Find participant" }).click();
+      await staffPage.getByRole("button", { name: /Browser Racer/ }).evaluate((row) => {
         row.click();
         const confirm = document.querySelector("[data-confirm-pairing]");
         if (!(confirm instanceof HTMLButtonElement) || confirm.disabled) {
@@ -131,28 +157,53 @@ test.describe("complete race journey", () => {
         }
         confirm.click();
       });
-      await expect(page.getByRole("heading", { name: "Duck #101 paired" })).toBeVisible();
-      await expect(page.locator("[data-staff-message]")).toHaveText("Duck paired successfully.");
+      await expect(staffPage.getByRole("heading", { name: "Duck #101 paired" })).toBeVisible();
+      await expect(staffPage.locator("[data-staff-message]")).toHaveText("Duck paired successfully.");
 
       // Pairing seals this duck into a numbered heat bag it never comes out of,
       // so the race flow is not honest without the panel that names the bag.
       // It stays up until the staffer says the duck is physically in it.
-      const bagPanel = page.locator("[data-heat-bag]");
+      const bagPanel = staffPage.locator("[data-heat-bag]");
       await expect(bagPanel).toBeVisible();
-      await expect(page.locator("[data-heat-bag-instruction]")).toHaveText(/^Put this duck in HEAT \d+ bag$/);
-      await expect(page.locator("[data-heat-bag-duck]")).toHaveText("Duck #101");
-      await page.locator("[data-heat-bag-dismiss]").click();
+      await expect(staffPage.locator("[data-heat-bag-instruction]")).toHaveText(/^Put this duck in HEAT \d+ bag$/);
+      await expect(staffPage.locator("[data-heat-bag-duck]")).toHaveText("Duck #101");
+      await staffPage.locator("[data-heat-bag-dismiss]").click();
       await expect(bagPanel).toBeHidden();
 
       const listed = (await client.get(`/api/v1/staff/events/${event.id}/heats`)).body.heats;
       expect(listed.filter((heat) => heat.round === "ROUND_ONE")).toHaveLength(3);
 
-      await page.goto("/my-ducks");
-      const duckLink = page.getByRole("link", { name: "Duck #101", exact: true });
-      const nameButton = page.getByRole("button", { name: "Name this duck", exact: true });
+      await page.bringToFront();
+      await expect(page).toHaveURL(`${baseUrl}/my-ducks`);
+      expect(await page.evaluate(() => globalThis.__quickDucksAssignmentTransition)).toBe("awaiting");
+      const awaitingCard = page.locator(
+        `[data-participant-section="awaiting"] [data-registration-id="${participants[0].registrationId}"]`,
+      );
+      const pairedCard = page.locator(
+        `[data-participant-section="paired"] [data-registration-id="${participants[0].registrationId}"]`,
+      );
+      await expect(awaitingCard).toHaveCount(0);
+      await expect(pairedCard).toBeVisible();
+      await expect(pairedCard.getByText(
+        "Show this code to staff at registration table to get your duck!",
+        { exact: true },
+      )).toHaveCount(0);
+      for (const label of ["Assigned heat", "Race activity", "Race status"]) {
+        await expect(pairedCard.getByText(label, { exact: true })).toBeVisible();
+      }
+      await expectNoDocumentOverflow(page);
+
+      // The same authoritative post-assignment presentation remains usable
+      // after returning to a wide layout; no reload is needed for either size.
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await expectNoDocumentOverflow(page);
+      const duckLink = pairedCard.getByRole("link", { name: "Duck #101", exact: true });
+      const nameButton = pairedCard.getByRole("button", { name: "Name this duck", exact: true });
       await expect(nameButton).toBeVisible();
       const [duckBox, nameBox] = await Promise.all([duckLink.boundingBox(), nameButton.boundingBox()]);
       expect(nameBox.y).toBeGreaterThanOrEqual(duckBox.y + duckBox.height);
+      expect(staffErrors).toEqual([]);
+      await staffPage.close();
     });
 
     await test.step("close registration and reject late entry", async () => {
