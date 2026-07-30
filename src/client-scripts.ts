@@ -457,6 +457,11 @@ let participantRegisteredId = participantRoot
 let participantSuccessId = null;
 let participantPrivateStatusPath = null;
 let participantVersion = null;
+// A collection read can already be in flight when an edit begins. Busy/dirty
+// tracking prevents another read from starting, but it cannot cancel that old
+// response. Incrementing this generation lets the mutation invalidate the old
+// paint while the queued post-mutation read remains authoritative.
+let participantRenderGeneration = 0;
 const participantOwnershipProofs = new Map();
 const participantOwnershipMints = new Map();
 
@@ -910,6 +915,35 @@ const participantValidContact = (value, registrationId) => {
     && Number.isInteger(value.revision) && value.revision >= 0;
 };
 
+// PATCH responses additionally carry replayed; collection refreshes read the
+// canonical shape without it. Keep the rendered registration and its version
+// key in that canonical shape so the mandatory post-mutation refresh can verify
+// the update without replacing an otherwise unchanged card under the caller.
+const participantContactSnapshot = (value) => ({
+  registrationId: value.registrationId,
+  email: value.email,
+  phone: value.phone,
+  emailNotificationsEnabled: value.emailNotificationsEnabled,
+  smsNotificationsEnabled: value.smsNotificationsEnabled,
+  revision: value.revision,
+});
+
+const participantRememberContact = (registrationId, contact) => {
+  if (participantVersion === null) return;
+  try {
+    const registrations = JSON.parse(participantVersion);
+    if (!Array.isArray(registrations)) throw new Error("invalid participant version");
+    const remembered = registrations.find((item) => item && item.registrationId === registrationId);
+    if (!remembered) throw new Error("registration is no longer rendered");
+    remembered.contact = contact;
+    participantVersion = JSON.stringify(registrations);
+  } catch {
+    // A later authoritative refresh repairs an unexpected local version rather
+    // than allowing an invalid optimization key to suppress a repaint.
+    participantVersion = null;
+  }
+};
+
 const participantEnsureOwnershipProof = async (registrationId) => {
   const remembered = participantOwnershipProofs.get(registrationId);
   if (remembered) return remembered;
@@ -1096,6 +1130,7 @@ const participantPaintContact = (panel, registration) => {
     save.disabled = true;
     save.textContent = "Saving…";
     feedback.hidden = true;
+    participantRenderGeneration += 1;
     const endBusy = globalThis.quickDucksLive.beginBusy();
     try {
       const response = await fetch(
@@ -1127,7 +1162,9 @@ const participantPaintContact = (panel, registration) => {
         save.textContent = "Save changes";
         return;
       }
-      registration.contact = body;
+      const updatedContact = participantContactSnapshot(body);
+      registration.contact = updatedContact;
+      participantRememberContact(registration.registrationId, updatedContact);
       delete form.dataset.liveDirty;
       globalThis.quickDucksLive.markClean(form);
       participantPaintContact(panel, registration);
@@ -1470,6 +1507,7 @@ const participantRefreshFollow = async () => {
 };
 
 const participantFetch = async () => {
+  const renderGeneration = participantRenderGeneration;
   const response = await fetch(participantRoot
     ? "/api/v1/registrations/mine"
     : "/api/v1/registrations/mine/presence", {
@@ -1487,7 +1525,15 @@ const participantFetch = async () => {
   const registrations = await Promise.all(body.registrations.map(participantLoadContact));
   participantSetNavPresence(registrations.length > 0);
   participantSetSearchPlacement(registrations.length > 0);
-  if (!document.hidden) participantRender(registrations);
+  // The hub checks dirty state before starting a refresh. Check it again before
+  // painting because a previously started request can finish after the visitor
+  // opens or changes an editor; that response must not detach the active form.
+  const editStartedDuringFetch = globalThis.quickDucksLive.isDirty?.(participantRoot) === true;
+  if (
+    !document.hidden
+    && !editStartedDuringFetch
+    && renderGeneration === participantRenderGeneration
+  ) participantRender(registrations);
 };
 
 const participantRefreshWork = async () => {

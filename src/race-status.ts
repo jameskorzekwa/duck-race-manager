@@ -31,7 +31,9 @@ interface CurrentHeatRow {
 // The two follow signals that ride alongside a public status. `followId` is a
 // race entry identifier that is inert on its own: it unlocks nothing except the
 // same public status it accompanies, and the follow endpoint revalidates it.
-// `inMyDucks` reports only what this browser's own collection already contains.
+// `inMyDucks` reports only what this browser's own collection already contains
+// on public duck-detail responses. Name search filters those identities before
+// projection and retains this field as `false` for response compatibility.
 export interface PublicFollowState {
   followId: string;
   inMyDucks: boolean;

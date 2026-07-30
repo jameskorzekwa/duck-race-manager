@@ -67,10 +67,11 @@ export const expectNoDocumentOverflow = async (page) => {
 export const registerParticipant = async (client, eventId, index, overrides = {}) => {
   const firstName = overrides.firstName ?? `Racer${index}`;
   const lastName = overrides.lastName ?? "Example";
+  const commandId = overrides.commandId ?? crypto.randomUUID();
   const privateToken = randomToken();
   const response = await client.post("/api/v1/registrations", {
     eventId,
-    commandId: crypto.randomUUID(),
+    commandId,
     privateToken,
     firstName,
     lastName,

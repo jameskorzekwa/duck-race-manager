@@ -708,22 +708,24 @@ const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Pro
   const rateLimit = await env.PUBLIC_SEARCH_RATE_LIMITER.limit({ key: `${eventId}:${clientKey}` });
   if (!rateLimit.success) return json({ error: "Too many searches. Please wait and try again." }, 429);
 
-  // Read-only membership probe for this browser's own collection so a result
-  // can render its already-added state. It never refreshes or issues a cookie.
+  // Resolve only the opaque HttpOnly collection cookie, without refreshing or
+  // reissuing it. Membership is applied inside the search query so known stable
+  // registration identities never consume a result slot or reach the client.
   const collection = await getBrowserCollection(request, env);
   const matches = await env.DB.prepare(
-    `SELECT DISTINCT re.id AS race_entry_id,
-            EXISTS (
-              SELECT 1
-                FROM browser_collection_registrations bcr
-               WHERE bcr.collection_id = ? AND bcr.registration_id = r.id
-            ) AS in_collection
+    `SELECT DISTINCT re.id AS race_entry_id
        FROM registrations r
        JOIN race_entries re ON re.registration_id = r.id
        JOIN events e ON e.id = r.event_id
       WHERE r.event_id = ?
         AND r.status IN ('SUBMITTED', 'ACTIVE')
         AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL', 'COMPLETED')
+        AND NOT EXISTS (
+          SELECT 1
+            FROM browser_collection_registrations bcr
+           WHERE bcr.collection_id = ?
+             AND bcr.registration_id = r.id
+        )
         AND (
           r.first_name = ? COLLATE NOCASE
           OR r.last_name = ? COLLATE NOCASE
@@ -731,9 +733,8 @@ const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Pro
         )
       ORDER BY r.last_name COLLATE NOCASE, r.first_name COLLATE NOCASE
       LIMIT 10`,
-  ).bind(collection?.id ?? "", eventId, name, name, name).all<{
+  ).bind(eventId, collection?.id ?? "", name, name, name).all<{
     race_entry_id: string;
-    in_collection: number;
   }>();
 
   // `followId` is the only identifier this projection exposes. It is inert on
@@ -744,7 +745,10 @@ const searchPublicRaceStatus = async (request: Request, url: URL, env: Env): Pro
     return status === null ? null : {
       ...status,
       followId: row.race_entry_id,
-      inMyDucks: row.in_collection === 1,
+      // Collection members were excluded by stable registration identity above.
+      // Keep the existing response shape for cached clients and public duck
+      // surfaces, but every returned search match is necessarily eligible.
+      inMyDucks: false,
     };
   }))).filter((status) => status !== null);
   return json({ results });
