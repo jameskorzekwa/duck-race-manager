@@ -646,8 +646,10 @@ delete a registration. Ownership of a `FOLLOWED` link is re-checked inside the
 guarded `race_commands` insert that opens the write batch, and the single
 `DELETE` is conditional on that command row and scoped to this collection, this
 registration, and `added_via = 'FOLLOWED'`. The mutation publishes no refresh
-signal because it changes nothing any other browser can see; the page rerenders
-from the authoritative collection endpoint rather than from the response.
+signal because it changes nothing any other browser can see; when the local
+mutation finishes, the shared hub rerenders from the authoritative collection
+endpoint and reruns any active name search. The unfollowed identity becomes
+eligible again unless the browser still holds it as a `REGISTRATION` link.
 
 ### Naming Your Own Duck
 
@@ -870,16 +872,25 @@ show pairing pending, assigned duck and its filtered public duck name, heat,
 current heat, and race outcome. It never returns contact details, lookup codes,
 private links, staff notes, inventory state, location, or audit data.
 
-Each result also carries an opaque `followId` and an `inMyDucks` flag. The flag
-is a read-only probe of the caller's own collection cookie; a search never
-refreshes or issues that cookie. The identifier unlocks nothing beyond the
-public status already shown in the same response.
+Before ordering and applying the ten-result limit, search excludes every stable
+registration identity linked to the caller's valid browser collection, whether
+the link came from registration or following. The comparison is by registration
+identity, never display-name text: an unrelated participant with the same public
+name remains eligible. A browser with no valid collection still sees all matching
+public identities, and another device's collection has no effect. Resolving the
+cookie and filtering are read-only; search never refreshes or issues the cookie.
+
+Each eligible result also carries an opaque `followId` and the compatible
+`inMyDucks: false` field. The identifier unlocks nothing beyond the public status
+already shown in the same response.
 
 Name search restores public status only. It does not restore the private link,
 the lookup code, or a full name, and it does not show withdrawn or disqualified
-registrations. After a submitted search, relevant event, participant, duck,
-heat, and return signals rerun that same authoritative search automatically.
-Unsaved edits in the search control are not replaced.
+registrations. After a submitted search, relevant event, participant, duck, and
+heat signals rerun that same authoritative search automatically.
+Unsaved edits in the search control are not replaced. At every responsive width,
+the result list or no-results message keeps a deliberate gap before the **Your
+data is temporary.** notice.
 
 ### Adding a Search Result to My Ducks
 
@@ -892,10 +903,13 @@ searchable entry of the current public event. Anything else is rejected without
 a write. Adding the same participant twice is a no-op success.
 
 The link is written as `FOLLOWED`, and the action confirms in place and reveals
-the **My Ducks** navigation. A result already in the collection renders the
-confirmed state instead of the action. Because the search response carries no
-lookup code and no private token, a followed entry can never gain either one,
-and `/api/v1/registrations/mine` returns `lookupCode: null` for it.
+the **My Ducks** navigation. The shared live hub then reruns the authoritative
+collection and active search reads, so the newly followed identity leaves the
+results rather than relying on its display name or a cached membership list. A
+stale compatible response that still marks a result `inMyDucks: true` renders a
+confirmed state with no action. Because the search response carries no lookup
+code and no private token, a followed entry can never gain either one, and
+`/api/v1/registrations/mine` returns `lookupCode: null` for it.
 
 ### Following from a Duck Tag Scan or a Duck Page
 

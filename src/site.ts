@@ -126,6 +126,7 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .search-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.75rem; align-items:end; margin-top:1rem; }
 .search-form .button { min-height:3.2rem; }
 .search-message { margin:.9rem 0 0; }
+.my-ducks-search > .privacy { margin-top:1.5rem; }
 .page-panel { max-width:49rem; margin:2rem auto 5rem; padding:clamp(1.2rem,5vw,3rem); border:3px solid var(--ink); border-radius:1.5rem; background:var(--paper); box-shadow:8px 8px 0 var(--ink); }
 .page-panel > .duck-mark { float:right; width:8rem; color:var(--water-dark); }
 .page-title { max-width:12ch; font-size:clamp(2.7rem,10vw,5.4rem); }

@@ -65,7 +65,13 @@ test.describe("owned My Ducks contact preferences", () => {
     await phone.fill("+15550108888");
     await emailUpdates.check();
     await smsUpdates.check();
+    const updateResponse = page.waitForResponse((response) =>
+      response.request().method() === "PATCH"
+      && /\/api\/v1\/registrations\/mine\/[0-9a-f-]{36}\/contact$/i.test(new URL(response.url()).pathname));
     await form.getByRole("button", { name: "Save changes" }).click();
+    expect((await updateResponse).status()).toBe(200);
+    await expect(card).toHaveCount(1);
+    await expect(card).toBeVisible();
     await expect(card.locator("[data-contact-form]")).toBeHidden();
     await expect(card.locator("[data-contact-summary]")).toContainText("Email: owned.updated@example.test");
     await expect(card.locator("[data-contact-summary]")).toContainText("Phone: +15550108888");

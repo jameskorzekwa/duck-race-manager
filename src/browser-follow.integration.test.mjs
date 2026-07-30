@@ -212,13 +212,13 @@ test("a followed search result joins My Ducks without ever exposing a lookup cod
     { hasRegistrations: true },
   );
 
-  // Searching again from the follower's browser reflects the existing entry.
+  // Searching again from the follower's browser excludes the stable identity.
   const repeatSearch = await jsonBody(
     await api("/api/v1/race-status/search?eventId=event-follow&name=Daisy", { cookie: followerCookie }),
     200,
     "repeat search",
   );
-  assert.equal(repeatSearch.results[0].inMyDucks, true);
+  assert.deepEqual(repeatSearch.results, []);
   assert.equal(JSON.stringify(repeatSearch).includes(owner.lookupCode), false);
 
   // Following twice is an idempotent no-op success.
@@ -251,6 +251,103 @@ test("a followed search result joins My Ducks without ever exposing a lookup cod
     ).all().map((row) => ({ ...row })),
     [{ added_via: "FOLLOWED", count: 1 }, { added_via: "REGISTRATION", count: 1 }],
   );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("name search filters stable device-known identities while preserving same-name participants", async (context) => {
+  const { api, database } = harness(context);
+  seedEvent(database);
+  const registrations = [
+    await register(api, context, "Robin", "River"),
+    await register(api, context, "Robin", "River"),
+    await register(api, context, "Robin", "River"),
+  ].map((registration) => ({
+    ...registration,
+    raceEntryId: database.prepare(
+      "SELECT id FROM race_entries WHERE registration_id = ?",
+    ).get(registration.registrationId).id,
+  }));
+  const [owned, followable, unrelated] = registrations;
+  const search = async (cookie, label) => {
+    const response = await api(
+      "/api/v1/race-status/search?eventId=event-follow&name=Robin%20River",
+      cookie === undefined ? {} : { cookie },
+    );
+    const body = await jsonBody(response, 200, label);
+    assert.equal(response.headers.get("set-cookie"), null, "search must stay read-only");
+    return body;
+  };
+  const resultIds = (body) => body.results.map((result) => result.followId).sort();
+
+  // A clean device sees all independent identities even though every policy
+  // display name is identical.
+  const initial = await search(undefined, "initial duplicate-name search");
+  assert.deepEqual(resultIds(initial), registrations.map((item) => item.raceEntryId).sort());
+  assert.deepEqual(initial.results.map((item) => item.participantDisplayName), [
+    "Robin R.", "Robin R.", "Robin R.",
+  ]);
+  assert.ok(initial.results.every((item) => item.inMyDucks === false));
+  const serialized = JSON.stringify(initial);
+  for (const registration of registrations) {
+    assert.equal(serialized.includes(registration.lookupCode), false);
+    assert.equal(serialized.includes(registration.registrationId), false);
+  }
+  assert.equal(/email|phone|lookupCode|privateStatusPath|ownershipProof|tagToken|inventory|notes/i.test(serialized), false);
+
+  // The browser that created one duplicate excludes only that registration's
+  // stable identity; name equality does not hide the other two.
+  const afterRegistration = await search(owned.cookie, "owned identity search");
+  assert.deepEqual(resultIds(afterRegistration), [followable.raceEntryId, unrelated.raceEntryId].sort());
+
+  const followResponse = await api("/api/v1/registrations/mine/follow", {
+    method: "POST",
+    cookie: owned.cookie,
+    headers: { origin: "https://quickducks.com" },
+    body: { followId: followable.raceEntryId },
+  });
+  assert.deepEqual(
+    await jsonBody(followResponse, 200, "follow one same-name identity"),
+    { followed: true, alreadyInCollection: false },
+  );
+
+  // Owned and followed links overlap in one device collection. Both identities
+  // are excluded, while the third duplicate remains eligible.
+  const afterFollow = await search(owned.cookie, "owned and followed identity search");
+  assert.deepEqual(resultIds(afterFollow), [unrelated.raceEntryId]);
+
+  // Collection membership is device-scoped, not a global suppression.
+  const otherDevice = await search(undefined, "unrelated device search");
+  assert.deepEqual(resultIds(otherDevice), registrations.map((item) => item.raceEntryId).sort());
+
+  await jsonBody(
+    await api("/api/v1/registrations/mine/unfollow", {
+      method: "POST",
+      cookie: owned.cookie,
+      headers: { origin: "https://quickducks.com" },
+      body: { commandId: crypto.randomUUID(), registrationId: followable.registrationId },
+    }),
+    200,
+    "unfollow same-name identity",
+  );
+  const afterUnfollow = await search(owned.cookie, "search after unfollow");
+  assert.deepEqual(resultIds(afterUnfollow), [followable.raceEntryId, unrelated.raceEntryId].sort());
+  assert.equal(resultIds(afterUnfollow).includes(owned.raceEntryId), false, "owned identity stays filtered");
+
+  // Following every remaining eligible identity produces the ordinary
+  // no-results response; filtering occurs before the result limit.
+  for (const followId of resultIds(afterUnfollow)) {
+    await jsonBody(
+      await api("/api/v1/registrations/mine/follow", {
+        method: "POST",
+        cookie: owned.cookie,
+        headers: { origin: "https://quickducks.com" },
+        body: { followId },
+      }),
+      200,
+      `follow ${followId}`,
+    );
+  }
+  assert.deepEqual((await search(owned.cookie, "all identities known")).results, []);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
@@ -293,6 +390,23 @@ test("a followed link never suppresses a registration made in the same browser",
     [owner.lookupCode, own.lookupCode],
   );
   assert.deepEqual(mine.registrations.map((item) => item.displayName), ["Daisy Duck", "Donald Mallard"]);
+  // Registration ownership wins for the same stable identity. The unfollow
+  // endpoint cannot remove that link, and search continues to exclude it.
+  const refusedUnfollow = await api("/api/v1/registrations/mine/unfollow", {
+    method: "POST",
+    cookie: followerCookie,
+    headers: { origin: "https://quickducks.com" },
+    body: { commandId: crypto.randomUUID(), registrationId: owner.registrationId },
+  });
+  assert.equal(refusedUnfollow.status, 404);
+  assert.deepEqual(
+    (await jsonBody(
+      await api("/api/v1/race-status/search?eventId=event-follow&name=Daisy", { cookie: followerCookie }),
+      200,
+      "upgraded owned identity search",
+    )).results,
+    [],
+  );
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM browser_collection_registrations WHERE added_via = 'FOLLOWED'").get().count,
     0,
