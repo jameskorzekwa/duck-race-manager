@@ -2,7 +2,7 @@ name: Agent Reconcile
 
 on:
   schedule:
-    - cron: "17,47 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 permissions: {}

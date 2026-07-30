@@ -151,6 +151,31 @@ test("local model agents deny unspecified and executable tools", async () => {
   assert.equal(config.plugin, undefined);
 });
 
+test("failures retry immediately and only stopped recovery parks at agent:error", async () => {
+  const task = await read(".github/workflows/agent-task.yml");
+  const publish = task.slice(task.indexOf("  publish:"));
+  assert.match(publish, /recoverFailedIssue\(\{ github, context \}, issueNumber\)/);
+  assert.ok(
+    publish.indexOf("run-failed=${context.runId}") < publish.indexOf("recoverFailedIssue"),
+    "the failure must be durably recorded before the retry decision runs",
+  );
+
+  const reconcile = await read(".github/workflows/agent-reconcile.yml");
+  assert.match(reconcile, /cron: "\*\/10 \* \* \* \*"/);
+
+  const implementation = await read("scripts/agent-pipeline.mjs");
+  assert.match(implementation, /"agent:error",/);
+  for (const marker of ["task-exhausted", "no-progress", "gate-recovery-exhausted", "orphan-exhausted", "stale-exhausted"]) {
+    assert.match(implementation, new RegExp(marker));
+  }
+
+  const review = await read(".github/workflows/agent-review.yml");
+  assert.match(review, /setIssueState\("agent:error"\);\n\s+await github\.rest\.issues\.createComment\(\{\n\s+owner, repo, issue_number: issueNumber,\n\s+body: `<!-- agent-pipeline review-exhausted/);
+
+  // A James reply on an agent:question issue triggers an immediate resume.
+  assert.match(task, /startsWith\(github\.event\.comment\.body, '\/oc'\) \|\| contains\(github\.event\.issue\.labels\.\*\.name, 'agent:question'\)/);
+});
+
 test("a blocked implementation can ask James and resume on his reply", async () => {
   const workflow = await read(".github/workflows/agent-task.yml");
   const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));

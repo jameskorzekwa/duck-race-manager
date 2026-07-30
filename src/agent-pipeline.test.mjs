@@ -1,7 +1,61 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closingIssueNumbers, markerNumbers, questionAnswered, validExactCheck } from "../scripts/agent-pipeline.mjs";
+import { closingIssueNumbers, markerNumbers, questionAnswered, recoverFailedIssue, validExactCheck } from "../scripts/agent-pipeline.mjs";
+
+function fakeRecoveryGithub(comments) {
+  const actions = { labels: [], comments: [], dispatched: 0 };
+  const github = {
+    paginate: async () => comments,
+    rest: {
+      issues: {
+        get: async () => ({ data: { labels: [{ name: "agent:failed" }, { name: "enhancement" }] } }),
+        setLabels: async ({ labels }) => { actions.labels = labels; },
+        createComment: async ({ body }) => { actions.comments.push(body); },
+      },
+      actions: { createWorkflowDispatch: async () => { actions.dispatched += 1; } },
+    },
+  };
+  const context = { repo: { owner: "o", repo: "r" }, payload: { repository: { default_branch: "main" } } };
+  return { github, context, actions };
+}
+
+test("a fresh failure retries immediately and lands back in the queue path", async () => {
+  const digest = (value) => `<!-- agent-pipeline attempt-digest=${value.repeat(64)} -->`;
+  const { github, context, actions } = fakeRecoveryGithub([
+    { body: `<!-- agent-pipeline run-failed=1 --> ${digest("a")}` },
+    { body: `<!-- agent-pipeline run-failed=2 --> ${digest("b")}` },
+  ]);
+
+  assert.equal(await recoverFailedIssue({ github, context }, 70), "retried");
+  assert.ok(actions.comments.some((body) => body.includes("task-retry=1")));
+  assert.deepEqual(actions.labels, ["enhancement", "agent:inbox"]);
+  assert.equal(actions.dispatched, 1);
+});
+
+test("a spent retry budget parks the issue at agent:error", async () => {
+  const { github, context, actions } = fakeRecoveryGithub(
+    Array.from({ length: 10 }, (_, index) => ({ body: `<!-- agent-pipeline task-retry=${index + 1} -->` })),
+  );
+
+  assert.equal(await recoverFailedIssue({ github, context }, 70), "error");
+  assert.ok(actions.comments.some((body) => body.includes("task-exhausted")));
+  assert.deepEqual(actions.labels, ["enhancement", "agent:error"]);
+  assert.equal(actions.dispatched, 0);
+});
+
+test("two identical attempts park the issue at agent:error", async () => {
+  const digest = `<!-- agent-pipeline attempt-digest=${"c".repeat(64)} -->`;
+  const { github, context, actions } = fakeRecoveryGithub([
+    { body: `<!-- agent-pipeline run-failed=1 --> ${digest}` },
+    { body: `<!-- agent-pipeline run-failed=2 --> ${digest}` },
+  ]);
+
+  assert.equal(await recoverFailedIssue({ github, context }, 70), "error");
+  assert.ok(actions.comments.some((body) => body.includes("no-progress")));
+  assert.deepEqual(actions.labels, ["enhancement", "agent:error"]);
+  assert.equal(actions.dispatched, 0);
+});
 
 test("a question resumes only on a James reply newer than the question", () => {
   const question = {

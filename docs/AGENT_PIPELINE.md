@@ -57,6 +57,7 @@ Pipeline state is represented by labels:
 | `agent:approved` | Independent review passed at the current head |
 | `agent:merge-slot` | The single PR/release allowed in production lane |
 | `agent:deployed` | Production release and smoke verification succeeded |
+| `agent:error` | Automatic recovery stopped (retry budget, no progress, or review retries spent); a clarifying comment plus a rerun resumes it |
 | `agent:failed` | Bounded recovery or human intervention is required |
 
 Grouped issues also receive one marker:
