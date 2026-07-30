@@ -537,7 +537,7 @@ test.describe("sitewide UI consistency", () => {
     await expect(page.locator("[data-live-board]")).toBeVisible();
   });
 
-  test("a just-registered card looks exactly like a plain refresh, before and after pairing", async ({ page }) => {
+  test("an originating card moves from awaiting duck assignment to assigned state through live refresh", async ({ page }) => {
     const errors = watchBrowserErrors(page);
     const seeded = await seedState("registration");
     const { client } = await bootstrap();
@@ -561,7 +561,26 @@ test.describe("sitewide UI consistency", () => {
     await expect(notice.getByRole("link", { name: "Open private status" })).toBeVisible();
     await expect(notice).toHaveClass(/\bnotice\b/);
 
-    const card = page.locator('[data-registration-id]', { hasText: "Plain Cardholder" });
+    const registrations = (await client.get(
+      `/api/v1/staff/events/${seeded.eventId}/registrations?q=${encodeURIComponent("Cardholder")}`,
+    )).body.registrations;
+    const created = registrations.find((registration) => registration.lastName === "Cardholder");
+    expect(created).toBeTruthy();
+
+    const awaitingSection = page.locator('[data-participant-section="awaiting"]');
+    const card = awaitingSection.locator(`[data-registration-id="${created.registrationId}"]`);
+    await expect(
+      awaitingSection.getByRole("heading", { level: 2, name: "Awaiting Duck Assignment", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Awaiting Participants", exact: true })).toHaveCount(0);
+    await expect(
+      card.getByText("Show this code to staff at registration table to get your duck!", { exact: true }),
+    ).toBeVisible();
+    await expect(card.locator("dt")).toHaveText(["Duck"]);
+    for (const label of ["Assigned heat", "Race activity", "Race status"]) {
+      await expect(card.getByText(label, { exact: true })).toHaveCount(0);
+    }
+
     const plainBackground = "rgb(255, 255, 255)";
     await expect(card).toHaveClass("duck-card participant-card");
     await expect(card).toHaveCSS("background-color", plainBackground);
@@ -570,23 +589,84 @@ test.describe("sitewide UI consistency", () => {
     expect(await card.getAttribute("aria-current")).toBeNull();
     expect(await card.evaluate((node) => node === document.activeElement)).toBe(false);
 
-    // Pairing must not bring the highlight back on the paired card either.
-    const registrations = (await client.get(
-      `/api/v1/staff/events/${seeded.eventId}/registrations?q=${encodeURIComponent("Cardholder")}`,
-    )).body.registrations;
-    const created = registrations.find((registration) => registration.lastName === "Cardholder");
-    expect(created).toBeTruthy();
-    const duck = await intakeDuck(client, seeded.eventId, 401);
-    await pairDuck(client, seeded.eventId, duck, created);
+    // This is the populated awaiting card, not only the empty My Ducks shell.
+    // Keep its exact guidance visible and its carousel contained at every
+    // responsive width the public suite supports.
+    for (const width of [320, 390, 768, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(card).toBeVisible();
+      await expect(
+        card.getByText("Show this code to staff at registration table to get your duck!", { exact: true }),
+      ).toBeVisible();
+      await expect(card.locator("dt")).toHaveText(["Duck"]);
+      for (const label of ["Assigned heat", "Race activity", "Race status"]) {
+        await expect(card.getByText(label, { exact: true })).toHaveCount(0);
+      }
+      await expectNoDocumentOverflow(page);
+    }
 
-    await page.reload();
-    const pairedCard = page.locator('[data-participant-section="paired"] [data-registration-id]', {
-      hasText: "Plain Cardholder",
-    });
+    // Pair through the real staff handler and leave the originating page open.
+    // The refresh signal carries no assignment state; the page must refetch the
+    // browser collection and regroup from its authoritative paired field. The
+    // response deadline is shorter than the disconnected five-second polling
+    // fallback, so this transition exercises the prompt live-signal path.
+    const duck = await intakeDuck(client, seeded.eventId, 401);
+    const pairedCollectionPromise = page.waitForResponse(async (response) => {
+      const url = new URL(response.url());
+      if (
+        response.request().method() !== "GET"
+        || url.pathname !== "/api/v1/registrations/mine"
+        || response.status() !== 200
+      ) return false;
+      const body = await response.json().catch(() => null);
+      return body?.registrations?.some((registration) =>
+        registration.registrationId === created.registrationId && registration.paired === true
+      ) === true;
+    }, { timeout: 4_500 });
+    await pairDuck(client, seeded.eventId, duck, created);
+    const pairedCollection = await pairedCollectionPromise;
+    const pairedCollectionBody = await pairedCollection.json();
+    expect(
+      pairedCollectionBody.registrations.find((registration) =>
+        registration.registrationId === created.registrationId
+      )?.paired,
+    ).toBe(true);
+
+    const pairedCard = page.locator(
+      `[data-participant-section="paired"] [data-registration-id="${created.registrationId}"]`,
+    );
+    await expect(pairedCard).toBeVisible();
+    await expect(card).toHaveCount(0);
+    await expect(pairedCard.getByRole("link", { name: "Duck #401", exact: true })).toBeVisible();
+    await expect(pairedCard.locator("dt")).toHaveText([
+      "Duck",
+      "Assigned heat",
+      "Race activity",
+      "Race status",
+    ]);
+    await expect(
+      pairedCard.getByText("Show this code to staff at registration table to get your duck!", { exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      pairedCard.getByText("Staff can scan this code, or type it, to pull up this registration.", { exact: true }),
+    ).toBeVisible();
+
+    // Pairing must not bring the retired highlight back on the paired card.
     await expect(pairedCard).toHaveClass("duck-card participant-card");
     await expect(pairedCard).toHaveCSS("background-color", plainBackground);
     await expect(pairedCard.locator(".success-tag")).toHaveCount(0);
     await expect(pairedCard).not.toContainText("Just registered");
+    for (const width of [320, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(pairedCard).toBeVisible();
+      await expect(pairedCard.locator("dt")).toHaveText([
+        "Duck",
+        "Assigned heat",
+        "Race activity",
+        "Race status",
+      ]);
+      await expectNoDocumentOverflow(page);
+    }
 
     // A followed participant keeps its own pill, so the removal was surgical.
     await page.locator("[data-status-search] input[name='name']").fill(
