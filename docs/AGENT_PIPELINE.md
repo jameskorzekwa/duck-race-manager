@@ -48,7 +48,8 @@ Pipeline state is represented by labels:
 | `agent:inbox` | Accepted and waiting for triage |
 | `agent:triage` | Classification is active |
 | `agent:ready` | Independently releasable work is ready |
-| `agent:running` | An implementation or repair run is active |
+| `agent:queued` | Accepted for implementation, waiting for the single model runner |
+| `agent:running` | The model runner has started this implementation or repair |
 | `agent:grouped` | Requirements belong to a canonical active issue |
 | `agent:blocked` | Explicit dependencies or input are outstanding |
 | `agent:review` | A PR is under deterministic CI or agent review |
@@ -325,6 +326,33 @@ authoritative. Add this guide to the repository's main documentation index.
    merge slot, environment approval, deployment, smoke tests, and final issue state.
 8. Test a duplicate, a grouped update, a blocked issue, a failed test, and a
    reconciler retry before increasing concurrency.
+
+## Choosing Models
+
+The paid models are selected by repository Actions variables, so changing them
+never requires a commit and takes effect on the next run:
+
+| Variable | Role | Default |
+| --- | --- | --- |
+| `AGENT_IMPLEMENT_MODEL` | Implementation lead session | `openai/gpt-5.6-sol` |
+| `AGENT_IMPLEMENT_VARIANT` | Implementation reasoning variant | `xhigh` |
+| `AGENT_REVIEW_MODEL` | Independent review session | `anthropic/claude-opus-4-8` |
+
+Set them in Settings -> Secrets and variables -> Actions -> Variables, or:
+
+```sh
+gh variable set AGENT_IMPLEMENT_MODEL --body "anthropic/claude-sonnet-5"
+gh variable set AGENT_IMPLEMENT_VARIANT --body "default"
+gh variable set AGENT_REVIEW_MODEL --body "openai/gpt-5.6-sol"
+gh variable delete AGENT_IMPLEMENT_MODEL   # return to the default
+```
+
+Only repository administrators can set variables, the workflows validate the
+`provider/model` format before use, and the model must be available in the local
+OpenChamber runtime or dispatch fails closed. Keep implementation and review on
+different model families so the reviewer does not share the author's blind
+spots. The read-only scout, tester, and risk subagent models remain pinned in
+`.opencode/agents/pipeline-*.md` and change through a normal pull request.
 
 ## OpenChamber Setup
 

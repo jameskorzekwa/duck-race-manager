@@ -474,24 +474,30 @@ for each collected registration:
   from its race status like any other visitor. See **Naming Your Own Duck**.
 
 Cards are grouped into three horizontally swipeable sections with keyboard and
-previous/next controls: **Awaiting Participants** and paired **My Ducks** hold
+previous/next controls: **Awaiting Duck Assignment** and paired **My Ducks** hold
 the participants registered on this device, and **Ducks I'm Following** holds
 every `FOLLOWED` entry whether or not that participant has a duck yet. The page
 states the difference in place: entries registered here keep their full details
-and staff lookup code, and followed entries show the public projection only. A
-live or polling refresh immediately regroups a registered card when staff pair
-or unpair its participant. A group with no participants normally hides its
+and staff lookup code, and followed entries show the public projection only. An
+unassigned registered card says **Show this code to staff at registration table
+to get your duck!** and does not render Assigned heat, Race activity, or Race
+status facts that do not yet apply. The awaiting/assigned boundary uses the
+collection response's current open-assignment projection, even if historical
+heat or outcome data remains. A live or polling refresh refetches that
+authoritative collection and immediately regroups a registered card when staff
+pair or unpair its participant. A group with no participants normally hides its
 entire section, including its heading and controls, rather than rendering an
-empty state. During open registration, the empty Awaiting Participants section
-keeps its heading and **Register another participant** action while its track and
-carousel controls stay hidden. When all groups are empty the page keeps one
-guidance message so it is never blank. Sections stay hidden until the first
-successful full collection response, so a failed initial request shows only the
-error-only line and keeps checking rather than claiming an empty collection.
+empty state. During open registration, the empty Awaiting Duck Assignment
+section keeps its heading and **Register another participant** action while its
+track and carousel controls stay hidden. When all groups are empty the page
+keeps one guidance message so it is never blank. Sections stay hidden until the
+first successful full collection response, so a failed initial request shows
+only the error-only line and keeps checking rather than claiming an empty
+collection.
 
 While registration is open, **Register another participant** sits in the
-Awaiting Participants heading row instead of below the complete page. The row
-wraps the action below the heading on narrow screens.
+Awaiting Duck Assignment heading row instead of below the complete page. The
+row wraps the action below the heading on narrow screens.
 
 After the registration redirect, the page scrolls the matching card into view.
 The card itself is rendered exactly as it is on a plain refresh: it carries no
@@ -581,8 +587,8 @@ The button is rendered only when the collection response marks that entry
   registration was created on this device. A `FOLLOWED` entry is someone else's
   registration and is **never** deletable here.
 - The race entry has no duck assignment at all, current or already ended. In
-  practice this means the card is in **Awaiting Participants**; an entry that was
-  paired and later unassigned is still not deletable.
+  practice this means the card is in **Awaiting Duck Assignment**; an entry that
+  was paired and later unassigned is still not deletable.
 - The race entry appears on no heat roster.
 - The event is `REGISTRATION_OPEN`, `REGISTRATION_CLOSED`, `ROUND_ONE`, `FINAL`,
   or `COMPLETED`. A registration that has no duck and no heat place never entered

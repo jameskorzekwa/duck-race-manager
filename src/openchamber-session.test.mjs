@@ -130,6 +130,48 @@ test("polling remains bounded while sessions stay busy", async () => {
     run: () => listing([{ id: "ses_parent", status: { type: "busy" } }]),
     ...clock,
     pollIntervalMs: 250,
+    abort: async () => true,
+  }), /did not complete within 1 seconds/);
+});
+
+test("a timed-out session is aborted so its work can seed the next attempt", async () => {
+  const clock = fakeClock();
+  const aborted = [];
+  let stopped = false;
+
+  await assert.rejects(waitForOpenChamberSession({
+    directory,
+    timeoutSeconds: 1,
+    markerPrefix: "PIPELINE_TASK_",
+    run: (args) => (args[1] === "list"
+      ? listing([
+        { id: "ses_parent", status: { type: stopped ? "idle" : "busy" } },
+        { id: "ses_child", parentID: "ses_parent", status: { type: stopped ? "idle" : "busy" } },
+      ])
+      : assistant(null)),
+    ...clock,
+    pollIntervalMs: 250,
+    abort: async ({ sessionIds }) => {
+      aborted.push(...sessionIds);
+      stopped = true;
+      return true;
+    },
+  }), /did not complete within 1 seconds/);
+
+  assert.deepEqual(aborted, ["ses_parent", "ses_child"]);
+});
+
+test("an abort failure still reports the timeout instead of hanging", async () => {
+  const clock = fakeClock();
+
+  await assert.rejects(waitForOpenChamberSession({
+    directory,
+    timeoutSeconds: 1,
+    markerPrefix: "PIPELINE_TASK_",
+    run: () => listing([{ id: "ses_parent", status: { type: "busy" } }]),
+    ...clock,
+    pollIntervalMs: 250,
+    abort: async () => { throw new Error("proxy unreachable"); },
   }), /did not complete within 1 seconds/);
 });
 
