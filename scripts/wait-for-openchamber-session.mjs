@@ -29,6 +29,32 @@ function runOpenChamber(args) {
   }
 }
 
+// A run that outlives its polling budget must not leave the model running:
+// an orphan session burns paid tokens and blocks every later run's recovery
+// gate. Abort is best-effort through the local OpenChamber proxy using the
+// desktop client token; the timeout failure is reported either way.
+export async function abortSessions({ directory, sessionIds, fetchImpl = fetch }) {
+  try {
+    const dataDir = process.env.OPENCHAMBER_DATA_DIR?.trim()
+      || path.join(process.env.HOME ?? "", ".config", "openchamber");
+    const settings = JSON.parse(readFileSync(path.join(dataDir, "settings.json"), "utf8"));
+    const port = Number(settings?.desktopLocalPort);
+    const token = String(settings?.desktopLocalClientToken ?? "").trim();
+    if (!Number.isInteger(port) || port <= 0 || token.length === 0) return false;
+    const encoded = encodeURIComponent(directory);
+    for (const sessionId of sessionIds) {
+      await fetchImpl(`http://127.0.0.1:${port}/api/session/${sessionId}/abort?directory=${encoded}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(10_000),
+      }).catch(() => {});
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function listSessions(run, directory) {
   const status = run([
     "session", "list",
@@ -63,6 +89,7 @@ export async function waitForOpenChamberSession({
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   idleGraceMs = DEFAULT_IDLE_GRACE_MS,
   discoveryMs = DEFAULT_DISCOVERY_MS,
+  abort = abortSessions,
   onSessionResolved,
 }) {
   const modelDirectory = String(directory ?? "").trim();
@@ -126,6 +153,24 @@ export async function waitForOpenChamberSession({
     if (remaining > 0) await sleep(Math.min(pollIntervalMs, remaining));
   }
 
+  // Deadline passed with the session still active. Stop the model so the
+  // partially completed workspace settles, can be saved as the next attempt's
+  // seed, and cannot orphan-block later runs.
+  try {
+    const busy = listSessions(run, modelDirectory)
+      .filter((session) => session?.status?.type !== "idle")
+      .map((session) => session.id);
+    if (busy.length > 0) {
+      await abort({ directory: modelDirectory, sessionIds: busy });
+      const settleDeadline = now() + 120_000;
+      while (now() < settleDeadline) {
+        const remainingBusy = listSessions(run, modelDirectory)
+          .some((session) => session?.status?.type !== "idle");
+        if (!remainingBusy) break;
+        await sleep(Math.min(pollIntervalMs, settleDeadline - now()));
+      }
+    }
+  } catch {}
   throw new Error(`Session ${sessionId ?? "dispatch"} did not complete within ${timeoutSeconds} seconds.`);
 }
 
