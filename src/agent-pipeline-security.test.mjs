@@ -147,6 +147,18 @@ test("local model agents deny unspecified and executable tools", async () => {
   assert.equal(config.plugin, undefined);
 });
 
+test("an ordinary issue comment cannot cancel a queued implementation", async () => {
+  const workflow = await read(".github/workflows/agent-task.yml");
+  const concurrency = workflow.slice(workflow.indexOf("concurrency:"), workflow.indexOf("jobs:"));
+
+  assert.match(concurrency, /github\.event_name == 'issue_comment'/);
+  assert.match(concurrency, /startsWith\(github\.event\.comment\.body, '\/agent'\)/);
+  assert.match(concurrency, /startsWith\(github\.event\.comment\.body, '\/oc'\)/);
+  assert.match(concurrency, /quickducks-agent-comment-\{0\}', github\.run_id/);
+  assert.match(concurrency, /quickducks-agent-issue-\{0\}', github\.event\.issue\.number \|\| inputs\.issue/);
+  assert.match(concurrency, /cancel-in-progress: false/);
+});
+
 test("failed hosted verification feeds bounded untrusted evidence back to the next attempt", async () => {
   const workflow = await read(".github/workflows/agent-task.yml");
   const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));

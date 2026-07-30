@@ -14,8 +14,15 @@ on:
 
 permissions: {}
 
+# A comment that carries no pipeline command does no work, so it must not join an
+# issue's serialization group: GitHub supersedes an already pending run in the
+# same group, and an ordinary comment could cancel a queued implementation.
 concurrency:
-  group: quickducks-agent-issue-${{ github.event.issue.number || inputs.issue || github.run_id }}
+  group: >-
+    ${{ github.event_name == 'issue_comment'
+      && !(startsWith(github.event.comment.body, '/agent') || startsWith(github.event.comment.body, '/oc'))
+      && format('quickducks-agent-comment-{0}', github.run_id)
+      || format('quickducks-agent-issue-{0}', github.event.issue.number || inputs.issue || github.run_id) }}
   cancel-in-progress: false
 
 jobs:
