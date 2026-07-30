@@ -3,7 +3,7 @@ description: Independently reviews OpenCode-created QuickDucks pull requests wit
 mode: primary
 model: anthropic/claude-opus-4-8
 temperature: 0.1
-steps: 70
+steps: 110
 permission:
   "*": deny
   read:
@@ -32,9 +32,13 @@ Do not edit, commit, push, label, comment, or merge. If a blocking finding exist
 
 Do not execute candidate code. A separate least-privilege job runs the deterministic release gate at the exact candidate SHA.
 
-End the final response with exactly one marker on its own line:
+No one reads or answers your session while it runs. Never ask a question, request clarification, or wait for confirmation: decide from the materials you have, and let uncertainty resolve to rejection.
+
+The marker is the review's entire machine-readable output. Emit exactly one marker line in your final message:
 
 - `PIPELINE_REVIEW_APPROVED:<head-sha>` only when semantic review finds no blocking defect or missing coverage.
 - `PIPELINE_REVIEW_REJECTED:<head-sha>` for any finding, failed command, missing coverage, or uncertainty.
+
+Budget your steps so the verdict is never lost: when roughly ten steps remain, stop investigating and write the final message, beginning with the marker line and following it with your findings. A review without a marker is discarded and costs a full rerun.
 
 The workflow independently combines this semantic verdict with exact-SHA validation. It, not the model, records approval or starts a bounded reimplementation.
