@@ -19,6 +19,43 @@ test("the summary starts at the failing-test section", () => {
   assert.doesNotMatch(summary, /unrelated passing test/);
 });
 
+test("a Playwright failure survives the local Worker request log", () => {
+  const noise = Array.from(
+    { length: 400 },
+    (_, index) => `[WebServer] [wrangler:info] GET /api/v1/events/current 200 OK (${index}ms)`,
+  );
+  const log = [
+    ...noise,
+    "  1) e2e/my-ducks-contact-preferences.spec.mjs:15:3 › owned My Ducks contact preferences › views edits cancels",
+    "    Error: expect(locator).toBeFocused() failed",
+    "    Error: strict mode violation: locator('[data-contact-form]').getByLabel('Email') resolved to 2 elements:",
+    "    > 47 |     await expect(form.getByLabel(\"Email\")).toBeFocused();",
+    ...noise,
+    "  1 failed",
+  ].join("\n");
+
+  const summary = summarizeVerificationFailure(log);
+
+  assert.match(summary, /my-ducks-contact-preferences\.spec\.mjs:15:3/);
+  assert.match(summary, /strict mode violation/);
+  assert.match(summary, /resolved to 2 elements/);
+  assert.match(summary, /> 47 \|/);
+  assert.doesNotMatch(summary, /\[WebServer\]/);
+});
+
+test("a Playwright run summary anchors the excerpt when no entry is printed", () => {
+  const log = [
+    "[WebServer] [wrangler:info] GET / 200 OK (1ms)",
+    "  3 failed",
+    "    e2e/full-race.spec.mjs:10:1 › the whole race",
+  ].join("\n");
+
+  const summary = summarizeVerificationFailure(log);
+
+  assert.ok(summary.startsWith("3 failed"));
+  assert.match(summary, /full-race\.spec\.mjs:10:1/);
+});
+
 test("a log without a failing-test section falls back to a bounded tail", () => {
   const log = Array.from({ length: 500 }, (_, index) => `line ${index}`).join("\n");
 
