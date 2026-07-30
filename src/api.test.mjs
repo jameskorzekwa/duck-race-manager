@@ -233,9 +233,10 @@ test("public name search returns race status without contact details", async () 
   assert.equal("privateStatusPath" in body.results[0], false);
   assert.doesNotMatch(db.statements[0].sql, /email|phone|lookup_code/i);
   assert.doesNotMatch(db.statements[0].sql, /LIKE/i);
-  // An anonymous search binds an unmatchable collection id, so every result is
-  // reported as not yet collected without touching the cookie.
-  assert.deepEqual(db.statements[0].args, ["", "event_test", "Daisy", "Daisy", "Daisy"]);
+  // An anonymous search binds an unmatchable collection id, so no identity is
+  // excluded and the read-only search does not touch a cookie.
+  assert.deepEqual(db.statements[0].args, ["event_test", "", "Daisy", "Daisy", "Daisy"]);
+  assert.match(db.statements[0].sql, /NOT EXISTS[\s\S]*bcr\.registration_id = r\.id/);
   assert.equal(body.results[0].inMyDucks, false);
   assert.equal(body.results[0].followId, "entry_test");
 });
@@ -461,7 +462,7 @@ test("a followed collection entry is projected without a lookup code or unmasked
   assert.doesNotMatch(db.statements[2].sql, /email|phone|private_token/i);
 });
 
-test("name search marks results already saved in this browser's collection", async () => {
+test("name search excludes identities already saved in this browser's collection", async () => {
   const cookieToken = "C".repeat(43);
   const db = makeDb(
     (sql) => {
@@ -489,7 +490,8 @@ test("name search marks results already saved in this browser's collection", asy
         final_place: null,
       };
     },
-    () => ({ results: [{ race_entry_id: "entry_test", in_collection: 1 }] }),
+    // The real query's NOT EXISTS predicate removes the collection member.
+    () => ({ results: [] }),
   );
   const response = await handleApi(
     new Request("https://quickducks.com/api/v1/race-status/search?eventId=event_test&name=Daisy", {
@@ -499,12 +501,12 @@ test("name search marks results already saved in this browser's collection", asy
   );
   const body = await response.json();
 
-  assert.equal(body.results[0].inMyDucks, true);
-  assert.equal(body.results[0].followId, "entry_test");
-  assert.equal("lookupCode" in body.results[0], false);
+  assert.deepEqual(body.results, []);
   // Search stays read-only: it never refreshes or reissues the collection cookie.
   assert.equal(response.headers.get("set-cookie"), null);
-  assert.equal(db.statements[1].args[0], "collection_test");
+  assert.deepEqual(db.statements[1].args, ["event_test", "collection_test", "Daisy", "Daisy", "Daisy"]);
+  assert.match(db.statements[1].sql, /NOT EXISTS[\s\S]*bcr\.collection_id = \?[\s\S]*bcr\.registration_id = r\.id/);
+  assert.doesNotMatch(db.statements[1].sql, /first_name[\s\S]*browser_collection_registrations|last_name[\s\S]*browser_collection_registrations/);
   assert.equal(db.statements.some((statement) => /UPDATE browser_registration_collections/.test(statement.sql)), false);
 });
 

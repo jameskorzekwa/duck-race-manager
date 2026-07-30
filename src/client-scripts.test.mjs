@@ -1843,7 +1843,10 @@ const homeHarness = (route) => {
   const cleaned = [];
   const live = {
     markClean(root) { cleaned.push(root); },
-    subscribe(subscriber) { subscriptions.push(subscriber); },
+    subscribe(subscriber) {
+      subscriptions.push(subscriber);
+      return { refresh: subscriber.refresh };
+    },
   };
 
   new Function("document", "fetch", "FormData", "globalThis", searchScript)(
@@ -1878,7 +1881,17 @@ test("a search result offers one add action that confirms and reveals the My Duc
     return Response.json({ followed: true, alreadyInCollection: false }, { status: followStatus });
   });
 
+  const dirtyInput = harness.document.createElement("input");
+  dirtyInput.dataset.liveDirty = "true";
+  harness.form.append(dirtyInput);
   await harness.form.dispatch("submit");
+  assert.equal(
+    harness.requests.filter((item) => item.url.startsWith("/api/v1/race-status/search")).length,
+    1,
+    "one submit must spend only one public-search request",
+  );
+  assert.equal(harness.cleaned.length, 0, "an already-completed search must not queue itself again");
+  assert.equal(dirtyInput.dataset.liveDirty, undefined, "the submitted query must allow later live refreshes");
   const card = harness.results.children[0];
   assert.equal(card.className, "duck-card");
   assert.equal(card.children[0].textContent, "Daisy D.");
@@ -1927,6 +1940,37 @@ test("a result already in the collection renders the added state with no add act
   assert.equal(actions.children[0].textContent, "In My Ducks");
   assert.equal(actions.children.some((child) => child.tagName === "BUTTON"), false);
   assert.equal(harness.requests.filter((item) => item.url.includes("/follow")).length, 0);
+});
+
+test("an authoritative search refresh clears stale cards into the no-results state", async () => {
+  let results = [
+    searchResult(),
+    searchResult({ followId: "22222222-2222-4222-8222-222222222222" }),
+  ];
+  const harness = homeHarness((url) => {
+    if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
+    return Response.json({ results });
+  });
+
+  await harness.form.dispatch("submit");
+  assert.equal(harness.results.children.length, 2, "same-name identities render independently");
+  assert.equal(harness.message.textContent, "2 matches found.");
+  assert.equal(
+    harness.requests.filter((item) => item.url.startsWith("/api/v1/race-status/search")).length,
+    1,
+  );
+
+  // Registration, follow, unfollow, and live updates all converge through this
+  // server refetch; no name-based or cached membership assumption is retained.
+  results = [];
+  await harness.subscriptions[0].refresh();
+  assert.equal(harness.results.children.length, 0);
+  assert.equal(harness.message.textContent, "No matching public race status was found.");
+  assert.equal(
+    harness.requests.filter((item) => item.url.startsWith("/api/v1/race-status/search")).length,
+    2,
+    "one later live refresh must issue one new authoritative search",
+  );
 });
 
 test("a failed add restores the action and reports the failure on that result", async () => {
@@ -2014,7 +2058,7 @@ const participantSection = (document, kind) => {
   return { controls, section, track };
 };
 
-const myDucksHarness = (route, search = "", confirmResult = true) => {
+const myDucksHarness = (route, search = "", confirmResult = true, localStorage) => {
   const document = new QuickDocument("#document");
   const navigation = document.createElement("a");
   navigation.dataset.myDucksNav = "";
@@ -2064,6 +2108,7 @@ const myDucksHarness = (route, search = "", confirmResult = true) => {
     { search, pathname: "/my-ducks", hash: "", origin: "https://quickducks.com" },
     { addEventListener() {} },
     {
+      localStorage,
       quickDucksLive: {
         beginBusy() {
           busy.push("begin");
@@ -2161,6 +2206,72 @@ const renderMyDucks = async (registrations) => {
 
 const deleteButton = (card) => card.descendants()
   .find((node) => node.tagName === "BUTTON" && node.dataset.deleteRegistration !== undefined) ?? null;
+
+test("saving contact details keeps the owned card while the authoritative refresh verifies them", async () => {
+  const registrationId = "11111111-1111-4111-8111-111111111111";
+  const proof = "P".repeat(43);
+  const storage = {
+    getItem(key) {
+      return key === "quickducks.participant-ownership.v1"
+        ? JSON.stringify({ [registrationId]: proof })
+        : null;
+    },
+    setItem() {},
+  };
+  let contact = {
+    registrationId,
+    email: "owned.contact@example.test",
+    phone: "+15550107777",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: false,
+    revision: 0,
+  };
+  const harness = myDucksHarness((url, options) => {
+    if (url === "/api/v1/registrations/mine") {
+      return Response.json({ registrations: [collected(registrationId, false)] });
+    }
+    if (options.method === "PATCH") {
+      const update = JSON.parse(options.body);
+      contact = {
+        registrationId,
+        email: update.email,
+        phone: update.phone,
+        emailNotificationsEnabled: update.emailNotificationsEnabled,
+        smsNotificationsEnabled: update.smsNotificationsEnabled,
+        revision: 1,
+      };
+      return Response.json({ ...contact, replayed: false });
+    }
+    return Response.json(contact);
+  }, "", true, storage);
+  await harness.subscriptions[0].refresh();
+
+  const originalCard = harness.awaiting.track.children[0];
+  const originalPanel = originalCard.querySelector("[data-contact-panel]");
+  await originalCard.querySelector("[data-contact-edit]").dispatch("click");
+  const form = originalCard.querySelector("[data-contact-form]");
+  const input = (name) => form.descendants().find((node) => node.name === name);
+  input("email").value = "owned.updated@example.test";
+  input("phone").value = "+15550108888";
+  input("emailNotificationsEnabled").checked = true;
+  input("smsNotificationsEnabled").checked = true;
+  await form.dispatch("submit");
+
+  assert.equal(harness.awaiting.track.children[0], originalCard);
+  assert.ok(originalCard.descendants().includes(originalPanel));
+  assert.match(originalPanel.text(), /Email: owned\.updated@example\.test/);
+  assert.match(originalPanel.text(), /Phone: \+15550108888/);
+  assert.match(originalPanel.text(), /Email updates: Opted in/);
+  assert.match(originalPanel.text(), /SMS updates: Opted in/);
+  assert.equal(originalPanel.querySelector("[data-contact-form]").hidden, true);
+
+  // Ending the live busy period queues this read in the browser. The response
+  // is authoritative, but because it confirms the mutation it must not detach
+  // the card a Playwright/user interaction is still observing.
+  await harness.subscriptions[0].refresh();
+  assert.equal(harness.awaiting.track.children[0], originalCard);
+  assert.match(originalPanel.text(), /Email: owned\.updated@example\.test/);
+});
 
 test("an empty participant group normally hides its whole section instead of an empty state", async () => {
   const awaitingOnly = await renderMyDucks([collected("11111111-1111-4111-8111-111111111111", false)]);
