@@ -6,6 +6,7 @@ const STATE_LABELS = [
   "agent:running",
   "agent:grouped",
   "agent:blocked",
+  "agent:question",
   "agent:review",
   "agent:approved",
   "agent:deployed",
@@ -18,6 +19,19 @@ export function closingIssueNumbers(body) {
 }
 
 export const TASK_RETRY_LIMIT = 10;
+
+// An agent:question issue resumes when James replies after the latest posted
+// question. Automation comments never count as an answer.
+export function questionAnswered(comments, trustedUserId = 38769771) {
+  const lastQuestion = comments.findLast(
+    (comment) => String(comment.body ?? "").includes("<!-- agent-pipeline question="),
+  );
+  if (!lastQuestion) return false;
+  return comments.some(
+    (comment) => comment.user?.id === trustedUserId
+      && Date.parse(comment.created_at) > Date.parse(lastQuestion.created_at),
+  );
+}
 
 export function attemptDigests(comments) {
   return comments.flatMap(({ body }) => [...String(body ?? "")
@@ -375,6 +389,14 @@ export async function reconcileAgentPipeline({ github, context, core }) {
       await setState(issue.number, "agent:inbox");
       await dispatch(issue.number);
     }
+  }
+
+  for (const issue of await issuesWithLabel("agent:question")) {
+    if (issuesWithOpenPulls.has(issue.number)) continue;
+    const comments = await commentsFor(issue.number);
+    if (!questionAnswered(comments)) continue;
+    await setState(issue.number, "agent:inbox");
+    await dispatch(issue.number);
   }
 
   for (const issue of [...await issuesWithLabel("agent:queued"), ...await issuesWithLabel("agent:running")]) {
