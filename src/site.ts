@@ -126,6 +126,7 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .search-form { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:.75rem; align-items:end; margin-top:1rem; }
 .search-form .button { min-height:3.2rem; }
 .search-message { margin:.9rem 0 0; }
+.my-ducks-search > .privacy { margin-top:1.5rem; }
 .page-panel { max-width:49rem; margin:2rem auto 5rem; padding:clamp(1.2rem,5vw,3rem); border:3px solid var(--ink); border-radius:1.5rem; background:var(--paper); box-shadow:8px 8px 0 var(--ink); }
 .page-panel > .duck-mark { float:right; width:8rem; color:var(--water-dark); }
 .page-title { max-width:12ch; font-size:clamp(2.7rem,10vw,5.4rem); }
@@ -1845,6 +1846,12 @@ const searchMessage = document.querySelector("[data-search-message]");
 const searchResults = document.querySelector("[data-search-results]");
 let lastSearchName = null;
 let searchBusy = false;
+const clearStatusSearchDraft = () => {
+  delete searchForm.dataset.liveDirty;
+  for (const control of searchForm.querySelectorAll('[data-live-dirty="true"]')) {
+    delete control.dataset.liveDirty;
+  }
+};
 const runStatusSearch = async (name) => {
   searchBusy = true;
   searchResults.replaceChildren();
@@ -1880,10 +1887,16 @@ const runStatusSearch = async (name) => {
 searchForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   lastSearchName = String(new FormData(searchForm).get("name"));
-  await runStatusSearch(lastSearchName);
-  globalThis.quickDucksLive.markClean(searchForm);
+  // The shared live runtime marks typed inputs dirty. Clear that draft after the
+  // visitor submits it, then put this one authoritative read through the search
+  // subscription's own queue. That coalesces any live refresh already waiting
+  // behind the draft instead of markClean fanning out another search and an
+  // unrelated My Ducks reload. Follow still calls markClean above because its
+  // mutation changes both subscribers.
+  clearStatusSearchDraft();
+  await statusSearchSubscription.refresh();
 });
-globalThis.quickDucksLive.subscribe({
+const statusSearchSubscription = globalThis.quickDucksLive.subscribe({
   domains: ["event", "participants", "ducks", "heats"],
   root: searchForm,
   refresh: async () => {

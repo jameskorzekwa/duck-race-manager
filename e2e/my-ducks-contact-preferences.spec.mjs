@@ -12,7 +12,13 @@ test.describe("owned My Ducks contact preferences", () => {
     await seedState("registration", { participants: 1, heatSize: 3 });
   });
 
-  test("views edits cancels and retains participant contact on the originating device", async ({ page }) => {
+  test("views edits cancels and retains participant contact on the originating device", async ({ page }, testInfo) => {
+    // This suite intentionally exercises several authoritative My Ducks
+    // refreshes. Keep its production-equivalent rate-limit budget independent
+    // from the search-filtering scenario and from a previous failed retry.
+    await page.context().setExtraHTTPHeaders({
+      "cf-connecting-ip": `192.0.2.${170 + testInfo.retry}`,
+    });
     const errors = watchBrowserErrors(page);
     await page.goto("/register");
     const registration = page.locator("[data-registration-form]");
@@ -65,7 +71,13 @@ test.describe("owned My Ducks contact preferences", () => {
     await phone.fill("+15550108888");
     await emailUpdates.check();
     await smsUpdates.check();
+    const updateResponse = page.waitForResponse((response) =>
+      response.request().method() === "PATCH"
+      && /\/api\/v1\/registrations\/mine\/[0-9a-f-]{36}\/contact$/i.test(new URL(response.url()).pathname));
     await form.getByRole("button", { name: "Save changes" }).click();
+    expect((await updateResponse).status()).toBe(200);
+    await expect(card).toHaveCount(1);
+    await expect(card).toBeVisible();
     await expect(card.locator("[data-contact-form]")).toBeHidden();
     await expect(card.locator("[data-contact-summary]")).toContainText("Email: owned.updated@example.test");
     await expect(card.locator("[data-contact-summary]")).toContainText("Phone: +15550108888");
@@ -89,7 +101,10 @@ test.describe("owned My Ducks contact preferences", () => {
     expect(errors).toEqual([]);
   });
 
-  test("unrelated and follower-only browsers never receive owned contact controls", async ({ page, browser }) => {
+  test("unrelated and follower-only browsers never receive owned contact controls", async ({ page, browser }, testInfo) => {
+    await page.context().setExtraHTTPHeaders({
+      "cf-connecting-ip": `192.0.2.${180 + (testInfo.retry * 2)}`,
+    });
     await page.goto("/register");
     const registration = page.locator("[data-registration-form]");
     await registration.getByLabel("First name").fill("Followable");
@@ -107,6 +122,9 @@ test.describe("owned My Ducks contact preferences", () => {
     expect(ownership.proof).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
     const otherContext = await browser.newContext();
+    await otherContext.setExtraHTTPHeaders({
+      "cf-connecting-ip": `192.0.2.${181 + (testInfo.retry * 2)}`,
+    });
     const other = await otherContext.newPage();
     const automaticContactRequests = [];
     other.on("request", (request) => {

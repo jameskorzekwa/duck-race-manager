@@ -115,6 +115,7 @@ test("My Ducks sections and app dialogs keep the shared spacing rhythm", () => {
   assert.match(css, /\.participant-section \{ margin:2rem 0; padding-top:1\.5rem;/);
   assert.match(css, /\.participant-section-head \{[^}]*gap:\.8rem;/);
   assert.match(css, /\.participant-track \{[^}]*gap:1rem;[^}]*scroll-snap-type:x mandatory;/);
+  assert.match(css, /\.my-ducks-search > \.privacy \{ margin-top:1\.5rem; \}/);
   assert.match(css, /\.app-confirmation h2 \{ margin-bottom:\.75rem;/);
   assert.match(css, /\.app-confirmation-message \{ margin-bottom:1\.5rem;/);
   assert.match(css, /\.app-confirmation-actions \{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:\.8rem; \}/);
