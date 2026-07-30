@@ -772,10 +772,10 @@ test("My Ducks offers Register again only while registration is open", () => {
   }
 });
 
-test("Register again sits on the Awaiting Participants header row and wraps on a narrow screen", () => {
+test("Register again sits on the Awaiting Duck Assignment header row and wraps on a narrow screen", () => {
   const markup = renderMyDucks("REGISTRATION");
   const head = markup.match(
-    /<div class="participant-section-head">\s*<h2 id="awaiting-participants-title">Awaiting Participants<\/h2>([\s\S]*?)<\/div>\s*<p class="muted">Participants you registered on this device, waiting/,
+    /<div class="participant-section-head">\s*<h2 id="awaiting-participants-title">Awaiting Duck Assignment<\/h2>([\s\S]*?)<\/div>\s*<p class="muted">Participants you registered on this device, waiting/,
   )?.[1];
 
   assert.ok(head, "the awaiting heading row must still be one participant-section-head block");

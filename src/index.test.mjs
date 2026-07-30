@@ -200,7 +200,7 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(staffInventory.headers.get("cache-control"), "no-store");
 });
 
-test("renders the private My Ducks page with two accessible horizontal sections", async () => {
+test("renders the private My Ducks page with accessible assignment sections", async () => {
   const response = await worker.fetch(
     new Request("https://quickducks.com/my-ducks"),
     phaseEnv("REGISTRATION_OPEN"),
@@ -211,11 +211,11 @@ test("renders the private My Ducks page with two accessible horizontal sections"
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
   assert.match(body, /<meta name="robots" content="noindex,nofollow">/);
-  assert.match(body, /<h2 id="awaiting-participants-title">Awaiting Participants<\/h2>/);
+  assert.match(body, /<h2 id="awaiting-participants-title">Awaiting Duck Assignment<\/h2>/);
   assert.match(body, /<h2 id="paired-participants-title">My Ducks<\/h2>/);
   assert.match(body, /data-carousel-previous/);
   assert.match(body, /data-carousel-next/);
-  assert.match(body, /tabindex="0" aria-label="Awaiting participant registrations"/);
+  assert.match(body, /tabindex="0" aria-label="Awaiting duck assignment registrations"/);
   assert.match(body, /scroll-snap-type:x mandatory/);
   assert.doesNotMatch(body, /data-my-ducks-freshness|Loading saved registrations|Updated just now/);
   assert.match(body, /<p class="message-line muted" data-my-ducks-error role="alert" hidden><\/p>/);

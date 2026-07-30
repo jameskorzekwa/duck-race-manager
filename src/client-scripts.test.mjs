@@ -392,6 +392,24 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(participantScript, /\/api\/v1\/registrations\/mine\/presence/);
   assert.match(participantScript, /Open private status/);
   assert.match(participantScript, /registration\.paired/);
+  assert.match(participantScript, /Show this code to staff at registration table to get your duck!/);
+  // The collection's current-assignment projection is the only visibility
+  // boundary. Stale duck, heat, or outcome fields must not reveal assigned
+  // details while the authoritative paired field says this card is awaiting.
+  const unpairedGuard = participantScript.indexOf("if (registration.paired !== true) {");
+  const pairedGuard = participantScript.indexOf("if (registration.paired === true) {");
+  const raceFactsGuard = participantScript.indexOf("if (registration.paired === true) {", pairedGuard + 1);
+  assert.ok(unpairedGuard >= 0);
+  assert.ok(pairedGuard > unpairedGuard);
+  assert.ok(raceFactsGuard > pairedGuard);
+  assert.match(participantScript, /owned\.filter\(\(registration\) => registration\.paired !== true\)/);
+  assert.match(participantScript, /owned\.filter\(\(registration\) => registration\.paired === true\)/);
+  for (const label of ['"Assigned heat"', '"Race activity"', '"Race status"']) {
+    assert.ok(
+      participantScript.indexOf(label, raceFactsGuard) > raceFactsGuard,
+      `${label} must stay behind the paired guard`,
+    );
+  }
   assert.match(participantScript, /history\.replaceState/);
   // The just-registered card is scrolled into view but never focused or marked:
   // it must look exactly like it does on a plain refresh.
@@ -3901,7 +3919,7 @@ test("My Ducks paired cards link the duck number and awaiting cards do not", () 
     assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
     currentHeat: null,
     outcome: "NOT_RACED",
-  });
+  }, { paired: true });
   const pairedDuckFact = paired.children[0].children[0];
   assert.deepEqual(pairedDuckFact.children.map((part) => part.tagName), ["DT", "DD"]);
   assert.equal(pairedDuckFact.children[0].textContent, "Duck");
@@ -3912,13 +3930,19 @@ test("My Ducks paired cards link the duck number and awaiting cards do not", () 
 
   const awaiting = card();
   participantAddRaceFacts(awaiting, {
-    duck: null,
-    assignedHeat: { roundOne: null, final: null },
-    currentHeat: null,
-    outcome: "AWAITING_DUCK_PAIRING",
-  });
+    // Deliberately stale assignment details: the collection's current-pairing
+    // projection is authoritative, so none of these may make the card assigned.
+    duck: { visibleNumber: 42 },
+    assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
+    currentHeat: { round: "ROUND_ONE", number: 3, status: "RUNNING" },
+    outcome: "RUNNING",
+  }, { paired: false });
   const awaitingDuckFact = awaiting.children[0].children[0];
   assert.equal(awaitingDuckFact.children[1].textContent, "Waiting for duck assignment");
+  assert.deepEqual(
+    awaiting.children[0].children.map((fact) => fact.children[0].textContent),
+    ["Duck"],
+  );
   assert.equal(
     awaitingDuckFact.children.some((part) => part.children.some((child) => child.tagName === "A")),
     false,
@@ -4004,6 +4028,11 @@ test("a card drops its QR rather than drawing unexpected geometry", async () => 
     const [card] = harness.awaiting.track.children;
     assert.equal(cardQr(card), null, `must not draw ${JSON.stringify(override.qr)}`);
     assert.match(card.text(), /Staff lookup code: DAISY123/, "the typed code still works");
+    assert.match(
+      card.text(),
+      /Show this code to staff at registration table to get your duck!/,
+      "the typed code keeps its assignment guidance",
+    );
   }
 });
 
@@ -4023,7 +4052,7 @@ test("a followed card refuses a QR even if the server ever sent geometry", async
   assert.doesNotMatch(followed.text(), /lookup code:/i);
 });
 
-test("the QR caption follows the duck table, and each label names its participant", async () => {
+test("the QR caption explains duck assignment, and each label names its participant", async () => {
   const harness = await renderMyDucks([
     collected("11111111-1111-4111-8111-111111111111", false),
     collected("22222222-2222-4222-8222-222222222222", true),
@@ -4032,10 +4061,10 @@ test("the QR caption follows the duck table, and each label names its participan
   const [awaiting] = harness.awaiting.track.children;
   const [paired] = harness.paired.track.children;
 
-  // Before pairing the code is an instruction to go somewhere; afterwards that
-  // errand is done and sending them back to the duck table would be wrong.
-  assert.match(awaiting.text(), /Show this code to staff at the duck table/);
-  assert.doesNotMatch(paired.text(), /at the duck table/);
+  // Before pairing the code gives the exact assignment instruction; afterwards
+  // that errand is done and the assignment instruction disappears.
+  assert.match(awaiting.text(), /Show this code to staff at registration table to get your duck!/);
+  assert.doesNotMatch(paired.text(), /Show this code to staff at registration table to get your duck!/);
   assert.match(paired.text(), /pull up this registration/);
 
   // Several cards share a screen, so the accessible name has to distinguish them.
