@@ -151,6 +151,33 @@ test("local model agents deny unspecified and executable tools", async () => {
   assert.equal(config.plugin, undefined);
 });
 
+test("a blocked implementation can ask James and resume on his reply", async () => {
+  const workflow = await read(".github/workflows/agent-task.yml");
+  const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));
+  const publish = workflow.slice(workflow.indexOf("  publish:"));
+
+  assert.match(implement, /PIPELINE_TASK_QUESTION:\(\\d\+\)/);
+  assert.match(publish, /result\.decision\.type === "question"/);
+  assert.match(publish, /agent:question/);
+  assert.match(publish, /<!-- agent-pipeline question=\$\{context\.runId\} -->/);
+  // Question text is model output: it may not forge durable markers, and the
+  // question path must publish no candidate PR and dispatch no gates.
+  assert.match(publish, /replaceAll\("<!--", "&lt;!--"\)/);
+  const questionBranch = publish.slice(
+    publish.indexOf('result.decision.type === "question"'),
+    publish.indexOf("} else {", publish.indexOf('result.decision.type === "question"')),
+  );
+  assert.doesNotMatch(questionBranch, /pulls\.create|gh pr create|workflow run/);
+
+  const reconciliation = await read("scripts/agent-pipeline.mjs");
+  assert.match(reconciliation, /issuesWithLabel\("agent:question"\)/);
+  assert.match(reconciliation, /questionAnswered\(comments\)/);
+
+  const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
+  assert.match(orchestrator, /PIPELINE_TASK_QUESTION:N/);
+  assert.match(orchestrator, /finish every part of the implementation the answer does not affect/);
+});
+
 test("queued work is labeled queued until the model runner actually starts", async () => {
   const workflow = await read(".github/workflows/agent-task.yml");
   const prepare = workflow.slice(workflow.indexOf("  prepare:"), workflow.indexOf("  mark-running:"));

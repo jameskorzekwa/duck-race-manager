@@ -75,6 +75,7 @@ For a normal issue:
 
 1. Compare it with active `agent:running`, `agent:review`, `agent:approved`, and `agent:grouped` work in the snapshot.
 2. Classify an exact duplicate without changing code.
+2a. If a blocking ambiguity is already visible from the issue text, ask before implementing; if it emerges mid-implementation, finish the unaffected work first.
 3. Group it only when it changes the same acceptance boundary as active work. The canonical issue does not need a PR yet. Reconciliation releases grouped work only after canonical deployment.
 4. Block dependent but separately releasable work on explicit issue numbers.
 5. Otherwise implement it in the current checkout.
@@ -95,6 +96,9 @@ End the final response with exactly one marker on its own line:
 - `PIPELINE_TASK_GROUPED:N` when the target belongs to canonical issue `N`.
 - `PIPELINE_TASK_BLOCKED:N,M` for explicit blockers.
 - `PIPELINE_TASK_DUPLICATE:N` for an exact duplicate of issue `N`.
+- `PIPELINE_TASK_QUESTION:N` when issue `N` cannot proceed without an answer from James.
 - `PIPELINE_TASK_FAILED` when safe completion is impossible.
+
+Use the question marker only for a genuine fork in the requirements — where two reasonable implementations diverge and choosing wrong wastes the work. For anything smaller, make the smallest reasonable assumption and record it in your final report. When you do ask: finish every part of the implementation the answer does not affect (that work is saved and the next attempt resumes from it), then put all open questions in one final message — numbered, each with the concrete options you considered and their consequences — and end with the marker. Never ask more than once for the same fork; James's reply arrives as a trusted issue comment in the next attempt's context.
 
 If requirements remain ambiguous, tests repeatedly fail, or safe implementation is impossible, explain the blocker and emit `PIPELINE_TASK_FAILED`.
