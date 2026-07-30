@@ -327,11 +327,14 @@ test.describe("staff roles and the Admin views", () => {
     // Paired: the duck is sealed in a heat bag, so it stays in the race and only
     // eligibility can change. Delete is not offered at all, and the card says why.
     await participantRow(page, `${paired.firstName} ${paired.lastName}`).click();
-    await expect.poll(() => actionLabels(page)).toContain("Withdraw");
-    expect(await actionLabels(page)).toContain("Disqualify");
-    expect(await actionLabels(page)).not.toContain("Delete registration");
+    // "Withdraw" is also offered for the previously selected unpaired racer, so
+    // polling on it can pass while the pane still shows the old selection. Wait
+    // for a paired-only signal before asserting which actions are absent.
     const note = page.locator("[data-participant-action-note]");
     await expect(note).toBeVisible();
+    await expect.poll(() => actionLabels(page)).not.toContain("Delete registration");
+    expect(await actionLabels(page)).toContain("Withdraw");
+    expect(await actionLabels(page)).toContain("Disqualify");
     await expect(note).toContainText(`Duck #${paired.visibleNumber} is already sealed in a heat bag`);
     await expect(note).toContainText("cannot be deleted");
 
