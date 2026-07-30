@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   resolveParentSession,
+  uniqueMarkerLine,
   waitForIdleSessions,
   waitForOpenChamberSession,
 } from "../scripts/wait-for-openchamber-session.mjs";
@@ -103,6 +104,41 @@ test("polling fails closed when no session ever appears", async () => {
   }), /never reported a dispatched session/);
 });
 
+test("a verdict followed by a trailing sentence is still a completed turn", async () => {
+  const clock = fakeClock();
+  const text = [
+    "PIPELINE_REVIEW_APPROVED:abc123",
+    "No security, privacy, correctness, or contract regressions found.",
+  ].join("\n");
+  const run = (args) => (args[1] === "list"
+    ? listing([{ id: "ses_parent", status: { type: "idle" } }])
+    : assistant({ completedAt: 5, text }));
+
+  const result = await waitForOpenChamberSession({
+    directory,
+    timeoutSeconds: 60,
+    markerPrefix: "PIPELINE_REVIEW_",
+    run,
+    ...clock,
+    pollIntervalMs: 10,
+    idleGraceMs: 50,
+  });
+
+  assert.match(result.lastAssistantMessage.text, /PIPELINE_REVIEW_APPROVED/);
+});
+
+test("marker extraction requires exactly one unambiguous marker line", () => {
+  assert.equal(
+    uniqueMarkerLine({ text: "prose\nPIPELINE_TASK_READY:70\nmore prose" }, "PIPELINE_TASK_"),
+    "PIPELINE_TASK_READY:70",
+  );
+  assert.equal(uniqueMarkerLine({ text: "no marker at all" }, "PIPELINE_TASK_"), null);
+  assert.equal(
+    uniqueMarkerLine({ text: "PIPELINE_TASK_READY:70\nPIPELINE_TASK_FAILED" }, "PIPELINE_TASK_"),
+    null,
+  );
+});
+
 test("polling rejects stable idle without a terminal marker", async () => {
   const clock = fakeClock();
   const run = (args) => (args[1] === "list"
@@ -117,7 +153,7 @@ test("polling rejects stable idle without a terminal marker", async () => {
     ...clock,
     pollIntervalMs: 10,
     idleGraceMs: 20,
-  }), /became idle without a completed PIPELINE_TASK_ marker/);
+  }), /became idle without exactly one PIPELINE_TASK_ marker/);
 });
 
 test("polling remains bounded while sessions stay busy", async () => {

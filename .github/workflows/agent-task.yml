@@ -432,7 +432,12 @@ jobs:
           } catch {}
           const report = sessionResult.lastAssistantMessage?.text?.trim()
             ?? "Implementation produced no final report.";
-          const marker = report.split(/\r?\n/).at(-1)?.trim() ?? "";
+          // The marker may sit anywhere in the final message, but it must be
+          // unambiguous: exactly one marker line decides the outcome.
+          const markerLines = report.split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith("PIPELINE_TASK_"));
+          const marker = markerLines.length === 1 ? markerLines[0] : "";
           const patch = fs.readFileSync(`${artifactDir}/task.patch`);
           let decision = { type: "failed", numbers: [] };
           let match;
