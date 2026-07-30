@@ -13,6 +13,18 @@ export interface RegistrationValidation {
   errors: Record<string, string>;
 }
 
+export interface ContactPreferencesInput {
+  email: string | null;
+  phone: string | null;
+  emailNotificationsEnabled: boolean;
+  smsNotificationsEnabled: boolean;
+}
+
+export interface ContactPreferencesValidation {
+  value?: ContactPreferencesInput;
+  errors: Record<string, string>;
+}
+
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const tokenAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
@@ -23,6 +35,37 @@ const cleanOptional = (value: string | File | null): string | null => {
   if (typeof value !== "string") return null;
   const cleaned = value.trim();
   return cleaned === "" ? null : cleaned;
+};
+
+export const validateContactPreferences = (
+  input: ContactPreferencesInput,
+  emailRequired: boolean,
+): ContactPreferencesValidation => {
+  const email = input.email?.trim().toLowerCase() || null;
+  const phone = input.phone?.trim() || null;
+  const errors: Record<string, string> = {};
+
+  if (emailRequired && email === null) errors.email = "Email is required for this race.";
+  if (email !== null && (email.length > 254 || !emailPattern.test(email))) {
+    errors.email = "Enter a valid email address.";
+  }
+  if (phone !== null && phone.length > 32) errors.phone = "Use 32 characters or fewer.";
+  if (input.emailNotificationsEnabled && email === null) {
+    errors.emailNotificationsEnabled = "Add an email address before choosing email updates.";
+  }
+  if (input.smsNotificationsEnabled && phone === null) {
+    errors.smsNotificationsEnabled = "Add a phone number before choosing SMS updates.";
+  }
+
+  return Object.keys(errors).length > 0 ? { errors } : {
+    errors,
+    value: {
+      email,
+      phone,
+      emailNotificationsEnabled: input.emailNotificationsEnabled,
+      smsNotificationsEnabled: input.smsNotificationsEnabled,
+    },
+  };
 };
 
 export const validateRegistration = (

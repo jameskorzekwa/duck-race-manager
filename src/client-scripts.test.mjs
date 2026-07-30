@@ -18,12 +18,14 @@ import {
   liveScript,
   liveRuntimeHelpersScript,
   liveUiScript,
+  ownershipProofHelpersScript,
   participantHandoffHelpersScript,
   participantQrDecoderScript,
   participantQrHelpersScript,
   participantScript,
   podiumPlaceHelpersScript,
   registrationHandoffHelpersScript,
+  registrationOwnershipProofHelpersScript,
   registrationScript,
   rosterEligibilityHelpersScript,
   stationStateHelpersScript,
@@ -45,6 +47,35 @@ const eventSlugHelpers = () => new Function(
 const participantQrHelpers = () => new Function(
   `${participantQrHelpersScript}; return { qrParseParticipantPayload, qrScannerSupported, qrNativeDetection, qrCameraProblem, qrCropFrame };`,
 )();
+
+test("participant ownership proofs remain participant-scoped and out of URLs", () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const registration = new Function(
+    `${registrationOwnershipProofHelpersScript}; return { registrationOwnershipStoreProof };`,
+  )();
+  const participant = new Function(
+    `${ownershipProofHelpersScript}; return { participantOwnershipReadProof, participantOwnershipStoreProof };`,
+  )();
+  const firstId = "11111111-1111-4111-8111-111111111111";
+  const secondId = "22222222-2222-4222-8222-222222222222";
+  const firstProof = "a".repeat(43);
+  const secondProof = "b".repeat(43);
+
+  assert.equal(registration.registrationOwnershipStoreProof(storage, firstId, firstProof), true);
+  assert.equal(participant.participantOwnershipStoreProof(storage, secondId, secondProof), true);
+  assert.equal(participant.participantOwnershipReadProof(storage, firstId), firstProof);
+  assert.equal(participant.participantOwnershipReadProof(storage, secondId), secondProof);
+  assert.equal(participant.participantOwnershipReadProof(storage, crypto.randomUUID()), null);
+  assert.equal(participant.participantOwnershipStoreProof(storage, firstId, "too-short"), false);
+  assert.equal([...values.values()].some((value) => value.includes("/r/") || value.includes("http")), false);
+
+  values.set("quickducks.participant-ownership.v1", "not-json");
+  assert.equal(participant.participantOwnershipReadProof(storage, firstId), null);
+});
 
 test("the scanner only accepts QuickDucks participant payloads", async () => {
   const { qrParseParticipantPayload } = participantQrHelpers();

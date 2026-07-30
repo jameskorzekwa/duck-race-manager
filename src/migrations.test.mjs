@@ -21,6 +21,7 @@ const migrationNames = [
   "0015_participant_duck_names.sql",
   "0016_locked_final_winner_correction.sql",
   "0017_final_podium_selections.sql",
+  "0018_participant_contact_preferences.sql",
 ];
 
 const lifecycleStatuses = [
@@ -212,6 +213,106 @@ test("0013 keeps existing collection links registration-sourced and constrains n
   // The purge path still clears every collection link regardless of source.
   database.exec("DELETE FROM browser_collection_registrations");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM browser_collection_registrations").get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0018 adds private contact proof and SMS consent without breaking older writes", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0018_participant_contact_preferences.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event-contact', 'contact-race', 'Contact Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, phone, status, lookup_code,
+       private_token_hash, submitted_at, status_changed_at)
+    VALUES
+      ('registration-contact', 'event-contact', 'Daisy', 'Duck', '+15550100',
+       'SUBMITTED', 'DAASY234', 'private-hash',
+       '2026-07-29T00:00:00Z', '2026-07-29T00:00:00Z'),
+      ('registration-other', 'event-contact', 'Donald', 'Duck', '+15550101',
+       'SUBMITTED', 'DNNALD23', 'private-hash-other',
+       '2026-07-29T00:00:00Z', '2026-07-29T00:00:00Z');
+    INSERT INTO browser_registration_collections
+      (id, token_hash, created_at, last_seen_at, expires_at)
+    VALUES ('collection-owner', 'cookie-owner', '2026-07-29T00:00:00Z',
+            '2026-07-29T00:00:00Z', '2027-07-29T00:00:00Z');
+    INSERT INTO browser_collection_registrations
+      (collection_id, registration_id, added_at, added_via)
+    VALUES ('collection-owner', 'registration-contact', '2026-07-29T00:00:00Z', 'REGISTRATION');
+  `);
+
+  applyMigrations(database, ["0018_participant_contact_preferences.sql"]);
+  assert.equal(database.prepare(
+    "SELECT ownership_proof_hash FROM browser_collection_registrations WHERE collection_id = 'collection-owner'",
+  ).get().ownership_proof_hash, null);
+  assert.equal(
+    database.prepare("SELECT sms_notifications_enabled FROM registrations").get().sms_notifications_enabled,
+    0,
+  );
+
+  // The previously deployed Worker still omits both new columns.
+  database.exec(`
+    INSERT INTO browser_registration_collections
+      (id, token_hash, created_at, last_seen_at, expires_at)
+    VALUES ('collection-old-worker', 'cookie-old-worker', '2026-07-29T00:00:00Z',
+            '2026-07-29T00:00:00Z', '2027-07-29T00:00:00Z');
+    INSERT INTO browser_collection_registrations (collection_id, registration_id, added_at)
+    VALUES ('collection-old-worker', 'registration-contact', '2026-07-29T00:00:00Z');
+  `);
+  database.prepare(
+    "UPDATE browser_collection_registrations SET ownership_proof_hash = ? WHERE collection_id = ?",
+  ).run("a".repeat(64), "collection-owner");
+  // The same participant may retain the same proof in another owned collection,
+  // but that proof cannot be installed for a different participant.
+  database.prepare(
+    "UPDATE browser_collection_registrations SET ownership_proof_hash = ? WHERE collection_id = ?",
+  ).run("a".repeat(64), "collection-old-worker");
+  assert.throws(
+    () => database.exec(`
+      INSERT INTO browser_collection_registrations
+        (collection_id, registration_id, added_at, added_via, ownership_proof_hash)
+      VALUES ('collection-old-worker', 'registration-other', '2026-07-29T00:00:00Z',
+              'REGISTRATION', '${"a".repeat(64)}');
+    `),
+    /ownership proof belongs to another participant/,
+  );
+  database.exec(`
+    INSERT INTO browser_collection_registrations
+      (collection_id, registration_id, added_at, added_via)
+    VALUES ('collection-old-worker', 'registration-other', '2026-07-29T00:00:00Z',
+            'REGISTRATION');
+  `);
+  assert.throws(
+    () => database.prepare(`
+      UPDATE browser_collection_registrations
+         SET ownership_proof_hash = ?
+       WHERE collection_id = ? AND registration_id = ?
+    `).run("a".repeat(64), "collection-old-worker", "registration-other"),
+    /ownership proof belongs to another participant/,
+  );
+  database.prepare(
+    "UPDATE registrations SET sms_notifications_enabled = 1 WHERE id = ?",
+  ).run("registration-contact");
+  database.prepare("UPDATE registrations SET phone = NULL WHERE id = ?").run("registration-contact");
+  assert.equal(database.prepare(
+    "SELECT phone, sms_notifications_enabled FROM registrations WHERE id = ?",
+  ).get("registration-contact").sms_notifications_enabled, 0);
+  assert.throws(
+    () => database.exec(`
+      UPDATE browser_collection_registrations
+         SET added_via = 'FOLLOWED'
+       WHERE collection_id = 'collection-owner';
+    `),
+    /followed links cannot hold ownership proof/,
+  );
+  assert.throws(
+    () => database.prepare(
+      "UPDATE browser_collection_registrations SET ownership_proof_hash = ? WHERE collection_id = ?",
+    ).run("not-a-valid-hash", "collection-old-worker"),
+    /CHECK constraint failed/,
+  );
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

@@ -355,6 +355,36 @@ test("partial participant edits ignore legacy preference data and omit PII from 
   database.close();
 });
 
+test("staff clearing a phone also clears SMS consent without breaking older edit clients", async () => {
+  const { database, env } = makeContext();
+  database.prepare(
+    "UPDATE registrations SET sms_notifications_enabled = 1 WHERE id = 'registration-one'",
+  ).run();
+  const commandId = crypto.randomUUID();
+  const response = await handleParticipantOperations(
+    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one", "PATCH", {
+      commandId,
+      expectedRevision: 0,
+      phone: null,
+    }),
+    env,
+    staffActor,
+  );
+  assert.equal(response.status, 200);
+  const row = database.prepare(
+    "SELECT phone, sms_notifications_enabled FROM registrations WHERE id = 'registration-one'",
+  ).get();
+  assert.equal(row.phone, null);
+  assert.equal(row.sms_notifications_enabled, 0);
+  assert.deepEqual(
+    JSON.parse(database.prepare(
+      "SELECT details_json FROM audit_events WHERE command_id = ?",
+    ).get(commandId).details_json).changed_fields,
+    ["phone", "sms_notifications_enabled"],
+  );
+  database.close();
+});
+
 test("withdraw, reactivate, and disqualify are authorized idempotent status commands", async () => {
   const { database, env } = makeContext();
   const disallowed = await handleParticipantOperations(
