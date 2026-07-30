@@ -21,12 +21,23 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.match(implement, /--timeout 9600/);
   assert.match(implement, /untrustedReviewEvidence/);
   assert.match(implement, /git archive "\$EXPECTED_BASE"/);
+  assert.match(implement, /seed-model-workspace\.mjs/);
+  assert.match(implement, /apply --3way --index "\$seed"/);
+  assert.ok(
+    implement.indexOf('apply --3way --index "$seed"') < implement.indexOf("rsync -a --delete --exclude '.git/' \"$seed_repo/\""),
+    "a resumed patch must be validated before it reaches the model workspace",
+  );
+  assert.match(implement, /&& node "\$GITHUB_WORKSPACE\/scripts\/validate-agent-patch\.mjs" "\$seed_repo"/);
+  assert.match(implement, /resumedFromPreviousAttempt/);
+  assert.match(implement, /--mode save/);
   assert.match(implement, /validate-agent-patch\.mjs" --source "\$PIPELINE_MODEL_DIR"/);
   for (const runtimePath of ["node_modules", "package.json", "package-lock.json", "bun.lock"]) {
     assert.match(implement, new RegExp(`\\.opencode/${runtimePath.replace(".", "\\.")}`));
   }
   assert.ok(implement.indexOf(".opencode/node_modules") < implement.indexOf("validate-agent-patch.mjs\" --source"));
-  assert.ok(implement.indexOf("validate-agent-patch.mjs\" --source") < implement.indexOf("rsync -a"));
+  const extractionRsync = 'rsync -a --delete --exclude \'.git/\' "$PIPELINE_MODEL_DIR/" "$patch_repo/"';
+  assert.ok(implement.includes(extractionRsync));
+  assert.ok(implement.indexOf("validate-agent-patch.mjs\" --source") < implement.indexOf(extractionRsync));
   assert.match(implement, /cleanup-model-workspace\.mjs/);
   assert.match(implement, /wait-for-openchamber-session\.mjs/);
   assert.doesNotMatch(implement, /openchamber session create[\s\S]*?--wait/);
@@ -44,6 +55,8 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.doesNotMatch(publish, /opencode run|npm test|npm run test:e2e/);
   assert.doesNotMatch(publish, /exchange_github_app_token|api\.opencode\.ai|id-token: write/);
   assert.match(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/);
+  assert.match(publish, /attempt-digest=\$\{attemptDigest\}/);
+  assert.match(publish, /ATTEMPT_DIGEST: \$\{\{ needs\.implement\.outputs\.digest \}\}/);
   assert.match(publish, /base64 \| tr -d '\\n'/);
   assert.match(publish, /github-actions\[bot\]/);
   assert.match(publish, /gh workflow run ci\.yml --ref "\$branch"/);

@@ -37,6 +37,7 @@ test("agent patches cannot change executable pipeline control", () => {
     "scripts/agent-pipeline.mjs",
     "scripts/cleanup-model-workspace.mjs",
     "scripts/e2e-redaction.mjs",
+    "scripts/seed-model-workspace.mjs",
     "scripts/summarize-verification-failure.mjs",
     "scripts/validate-agent-patch.mjs",
     "scripts/wait-for-openchamber-session.mjs",

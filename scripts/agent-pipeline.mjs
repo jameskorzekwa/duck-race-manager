@@ -16,6 +16,14 @@ export function closingIssueNumbers(body) {
   return [...new Set(matches.map((match) => Number(match[1])))];
 }
 
+export const TASK_RETRY_LIMIT = 10;
+
+export function attemptDigests(comments) {
+  return comments.flatMap(({ body }) => [...String(body ?? "")
+    .matchAll(/<!-- agent-pipeline attempt-digest=([0-9a-f]{64}) -->/g)]
+    .map((match) => match[1]));
+}
+
 export function markerNumbers(comments, name) {
   return markerGroups(comments, name).flat();
 }
@@ -404,11 +412,23 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     const latestTerminal = comments.findLast((comment) => /<!-- agent-pipeline (?:run-failed|review-exhausted)=/.test(comment.body ?? ""));
     if (!latestFailure || latestFailure.id !== latestTerminal?.id) continue;
     const retries = markerNumbers(comments, "task-retry").length;
-    if (retries >= 3) {
+    if (retries >= TASK_RETRY_LIMIT) {
       await commentOnce(
         issue.number,
         "<!-- agent-pipeline task-exhausted -->",
-        "Agent Task recovery exhausted three retries.",
+        `Agent Task recovery exhausted ${TASK_RETRY_LIMIT} retries.`,
+      );
+      continue;
+    }
+    // Retries resume from the previous patch, so an identical digest against the
+    // same gate failure means the attempt made no progress. Stop rather than pay
+    // for the same rewrite again.
+    const digests = attemptDigests(comments);
+    if (digests.length >= 2 && digests.at(-1) === digests.at(-2)) {
+      await commentOnce(
+        issue.number,
+        `<!-- agent-pipeline no-progress=${digests.at(-1).slice(0, 12)} -->`,
+        "Two consecutive attempts produced an identical patch, so automatic retries stopped. Add a clarifying comment and rerun Agent Task to resume.",
       );
       continue;
     }
