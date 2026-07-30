@@ -368,8 +368,14 @@ jobs:
           } catch {}
           const report = sessionResult.lastAssistantMessage?.text?.trim()
             ?? "Independent review produced no final report.";
-          const finalLine = report.split(/\r?\n/).at(-1)?.trim();
-          const approved = exitStatus === 0 && finalLine === `PIPELINE_REVIEW_APPROVED:${sha}`;
+          // The verdict may sit anywhere in the final message, but it must be
+          // unambiguous: exactly one marker line, and it must approve this SHA.
+          const markerLines = report.split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith("PIPELINE_REVIEW_"));
+          const approved = exitStatus === 0
+            && markerLines.length === 1
+            && markerLines[0] === `PIPELINE_REVIEW_APPROVED:${sha}`;
           fs.writeFileSync(`${artifactDir}/review-result.json`, JSON.stringify({
             sha,
             verdict: approved ? "approved" : "rejected",

@@ -15,6 +15,18 @@ function finalLine(message) {
   return String(message?.text ?? "").trim().split(/\r?\n/).at(-1)?.trim() ?? "";
 }
 
+// Models are instructed to end with the marker, but a reviewer that appends one
+// trailing sentence after a genuine verdict must not be scored as an
+// infrastructure failure. Accept the marker anywhere in the final message as
+// its own line, but only when it is unambiguous: exactly one marker line.
+export function uniqueMarkerLine(message, markerPrefix) {
+  const markers = String(message?.text ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(markerPrefix));
+  return markers.length === 1 ? markers[0] : null;
+}
+
 function runOpenChamber(args) {
   try {
     const output = execFileSync("openchamber", args, {
@@ -134,12 +146,12 @@ export async function waitForOpenChamberSession({
             "--json",
           ]);
           const message = Array.isArray(response?.messages) ? response.messages.at(-1) : null;
-          if (message?.completedAt != null && finalLine(message).startsWith(markerPrefix)) {
+          if (message?.completedAt != null && uniqueMarkerLine(message, markerPrefix) !== null) {
             return { sessionId, directory: modelDirectory, sessionStatus: parent.status, lastAssistantMessage: message };
           }
           if (now() - idleSince >= idleGraceMs) {
             const suffix = finalLine(message);
-            throw new Error(`Session ${sessionId} became idle without a completed ${markerPrefix} marker${suffix ? `; final line: ${suffix}` : "."}`);
+            throw new Error(`Session ${sessionId} became idle without exactly one ${markerPrefix} marker${suffix ? `; final line: ${suffix}` : "."}`);
           }
         }
       }
