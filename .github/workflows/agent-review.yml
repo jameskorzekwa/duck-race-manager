@@ -663,7 +663,10 @@ jobs:
     permissions:
       actions: read
       checks: read
-      contents: read
+      # The lane merges the admitted PR directly with the REST API, because the
+      # workflow token cannot arm native auto-merge. This job checks out and
+      # executes only the trusted default branch.
+      contents: write
       issues: write
       pull-requests: write
     steps:

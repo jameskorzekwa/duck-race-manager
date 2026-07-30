@@ -499,15 +499,16 @@ export async function queueNextApproved({ github, context, core }) {
   }
   await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["agent:merge-slot"] });
   try {
-    await github.graphql(`
-      mutation($pullRequestId: ID!, $headOid: GitObjectID!) {
-        enablePullRequestAutoMerge(input: {
-          pullRequestId: $pullRequestId,
-          mergeMethod: MERGE,
-          expectedHeadOid: $headOid
-        }) { pullRequest { number } }
-      }
-    `, { pullRequestId: pr.node_id, headOid: pr.head.sha });
+    // The workflow token may not arm native auto-merge (FORBIDDEN), and both
+    // required contexts are already green statuses by the time a PR is
+    // admitted here, so merge directly at the exact reviewed head. Branch
+    // protection still applies: an unsatisfied requirement fails the merge and
+    // releases the slot for the next reconciliation pass.
+    await github.rest.pulls.merge({
+      owner, repo, pull_number: pr.number,
+      merge_method: "merge",
+      sha: pr.head.sha,
+    });
   } catch (error) {
     try {
       await github.rest.issues.removeLabel({
