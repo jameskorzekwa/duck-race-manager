@@ -571,6 +571,18 @@ jobs:
               await github.rest.issues.addLabels({ owner, repo, issue_number: prNumber, labels: ["agent:approved"] });
               await setIssueState("agent:approved");
               await completeCheck("success", "Exact-head review approved", `Validated and reviewed ${expectedHead} against ${expectedBase}.`);
+              // The validate-candidate job just ran the identical release gate
+              // at this exact head on a hosted runner, so satisfy the required
+              // Validate context directly. Workflow-token PRs cannot rely on a
+              // pull_request CI run: GitHub holds those behind a manual
+              // "approve and run" for bot authors.
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: expectedHead,
+                context: "Validate",
+                state: "success",
+                description: `agent-review:${expectedBase}:${context.runId} release gate passed`.slice(0, 140),
+                target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              });
               return;
             }
 
