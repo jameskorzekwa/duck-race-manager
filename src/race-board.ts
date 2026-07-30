@@ -34,8 +34,9 @@ interface BoardRow {
 export interface PublicRaceBoardEntry {
   participantDisplayName: string;
   duckNumber: number | null;
-  // The participant-chosen name, filtered at read time, or null. The board
-  // always keeps `duckNumber` beside it.
+  // The participant-chosen name, filtered at read time, or null. Renderers use
+  // it instead of the generic numbered label and retain `duckNumber` for the
+  // detail link and unnamed fallback.
   duckName: string | null;
   place: number | null;
 }

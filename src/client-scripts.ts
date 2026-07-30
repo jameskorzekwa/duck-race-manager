@@ -517,20 +517,23 @@ const participantAddFact = (container, label, value) => {
   container.append(fact);
 };
 
-// A participant-chosen duck name is owner-only. The server sends it for
-// 'REGISTRATION' links and never for a followed one, and this guard repeats
-// that rule so the name can only ever be drawn on its owner's own card.
+// Owned cards carry the editable value at the top level. Followed cards must not
+// gain that owner-only field or its controls, but they do render the same public
+// name every other visitor receives through the public race-status projection.
 const participantDuckName = (registration) => {
-  if (!registration || registration.followed === true) return null;
-  const name = typeof registration.duckName === "string" ? registration.duckName.trim() : "";
+  if (!registration) return null;
+  const projected = registration.followed === true
+    ? registration.raceStatus && registration.raceStatus.duckName
+    : registration.duckName;
+  const name = typeof projected === "string" ? projected.trim() : "";
   return name.length === 0 ? null : name;
 };
 
 // A paired card links its duck number to the public duck detail view. An
 // awaiting card has no duck number, so it keeps plain text and no link. When
 // the owner named this duck, the name replaces "Duck #N" as the link text and
-// the number stays beside it, quietly, so the card still matches the physical
-// duck.
+// the number remains the link destination but no longer remains as a competing
+// generic label.
 //
 // Naming belongs to this fact rather than to a block of its own: the duck is
 // what is being named, so the control that renames it sits with the duck's
@@ -552,9 +555,6 @@ const participantAddDuckFact = (facts, status, registration) => {
   const fact = participantText("div", "", "fact");
   const value = participantText("dd", "");
   value.append(link);
-  if (duckName !== null) {
-    value.append(participantText("span", "Duck #" + status.duck.visibleNumber, "duck-number-note"));
-  }
   fact.append(participantText("dt", "Duck"), value);
   if (participantCanName(registration)) value.append(...participantNameControls(registration));
   facts.append(fact);
@@ -862,7 +862,7 @@ const participantNameControls = (registration) => {
   form.append(
     label,
     actions,
-    participantText("p", "The name you choose is shown publicly beside this duck’s number, on the race board and its duck page. Keep it friendly: race staff can remove a name that is not.", "muted"),
+    participantText("p", "The name you choose replaces the generic duck number on public race status, the race board, and this duck’s page. Keep it friendly: race staff can remove a name that is not.", "muted"),
     feedback,
   );
 
@@ -1881,9 +1881,9 @@ const duckDetailPath = (duckNumber) => "/duck/" + encodeURIComponent(String(duck
 // Returns null unless a real duck number is assigned, so an unpaired entry
 // renders plain text and never an empty or misleading link. The node is built
 // with safe DOM APIs and is a plain navigation with no script behaviour.
-// The optional label replaces only the visible text, never the destination, and
-// only one surface passes it: the owner's own My Ducks card, where a
-// participant-chosen duck name stands in for "Duck #N".
+// The optional public name replaces only the visible text, never the numbered
+// destination. Every public surface uses the same helper so named and unnamed
+// ducks cannot drift into different link rules.
 const duckDetailLink = (documentObject, duckNumber, label) => {
   if (typeof duckNumber !== "number" || !Number.isInteger(duckNumber) || duckNumber <= 0) return null;
   const link = documentObject.createElement("a");
@@ -2163,14 +2163,13 @@ const liveAddFact = (container, label, value) => {
   container.append(fact);
 };
 
-// Mirrors the server's duck identity exactly: the canonical number first, then
-// the participant-chosen name when the server's read-time filter allowed one.
+// Mirrors the server's duck identity exactly: a filtered participant-chosen
+// name replaces the generic numbered label, and an unnamed duck falls back.
 const liveDuckIdentity = (status) => {
   if (!status.duck) return "Waiting for duck assignment";
-  const number = "Duck #" + status.duck.visibleNumber;
   return typeof status.duckName === "string" && status.duckName.length > 0
-    ? number + " · " + status.duckName
-    : number;
+    ? status.duckName
+    : "Duck #" + status.duck.visibleNumber;
 };
 
 const liveRaceFacts = (container, status, includeParticipant) => {
@@ -2195,21 +2194,14 @@ const liveRaceFacts = (container, status, includeParticipant) => {
 // A board entry links to the public duck detail view whenever it actually shows
 // a duck number. Entries still waiting for a duck keep plain pending text.
 //
-// The link text stays the canonical "Duck #N" so the board always matches the
-// duck in the water; a participant-chosen name is appended beside it as a plain
-// text node, like every other value here.
 const liveBoardDuckName = (entry) =>
   typeof entry.duckName === "string" && entry.duckName.length > 0 ? entry.duckName : null;
 
 const liveBoardDuckCell = (entry) => {
   const cell = liveText("span", "");
-  const link = duckDetailLink(document, entry.duckNumber);
+  const link = duckDetailLink(document, entry.duckNumber, liveBoardDuckName(entry));
   if (link === null) cell.textContent = "Duck number pending";
   else cell.append(link);
-  const duckName = liveBoardDuckName(entry);
-  if (link !== null && duckName !== null) {
-    cell.append(liveText("span", " · " + duckName, "duck-name-note"));
-  }
   if (entry.place !== null) {
     cell.append(liveText("span", " · " + livePlaceLabel(entry.place) + " place"));
   }
@@ -2303,12 +2295,8 @@ const liveRenderBoard = (board) => {
     const places = liveText("div", "", "podium");
     for (const entry of event.podium) {
       const place = liveText("p", livePlaceLabel(entry.place) + " · " + entry.participantDisplayName, "podium-place");
-      const link = duckDetailLink(document, entry.duckNumber);
+      const link = duckDetailLink(document, entry.duckNumber, liveBoardDuckName(entry));
       if (link !== null) place.append(liveText("span", " · "), link);
-      const duckName = liveBoardDuckName(entry);
-      if (link !== null && duckName !== null) {
-        place.append(liveText("span", " · " + duckName, "duck-name-note"));
-      }
       places.append(place);
     }
     podium.append(places);
@@ -2353,6 +2341,17 @@ const liveFetchJson = async (url) => {
   return response.json();
 };
 
+// A public duck page's heading and document title are part of the same live
+// view as its facts. Updating all three from the refetched status prevents an
+// old generic label from surviving a prompt rename signal.
+const liveUpdateDuckHeading = (status) => {
+  const heading = document.querySelector("[data-duck-heading]");
+  if (!heading || !status || !status.duck) return;
+  const identity = liveDuckIdentity(status);
+  heading.textContent = identity;
+  document.title = identity + " · QuickDucks";
+};
+
 const liveRefreshPersonal = async () => {
   const personal = document.querySelector("[data-live-personal]");
   if (!personal) return;
@@ -2390,6 +2389,7 @@ const liveRefreshPersonal = async () => {
       if (document.hidden) return;
       personal.replaceChildren();
       liveDuckDetailFacts(personal, body.raceStatus);
+      liveUpdateDuckHeading(body.raceStatus);
       return;
     }
     const body = await liveFetchJson("/api/v1/ducks/" + encodeURIComponent(token));
@@ -2397,6 +2397,7 @@ const liveRefreshPersonal = async () => {
     personal.replaceChildren();
     if (body.destination === "RACE_STATUS") {
       liveRaceFacts(personal, body.raceStatus, true);
+      liveUpdateDuckHeading(body.raceStatus);
     } else {
       document.querySelector("main")?.replaceChildren();
       location.replace("/");

@@ -1993,7 +1993,7 @@ test("a failed add restores the action and reports the failure on that result", 
   assert.equal(harness.navigation.hidden, true);
 });
 
-test("a search result shows the chosen duck name beside the duck number", async () => {
+test("a search result replaces the generic label with the chosen duck name", async () => {
   const named = homeHarness((url) => {
     if (url.startsWith("/api/v1/events/current")) return currentEventResponse();
     return Response.json({
@@ -2008,7 +2008,7 @@ test("a search result shows the chosen duck name beside the duck number", async 
   await named.form.dispatch("submit");
   assert.equal(
     named.results.children[0].children[1].textContent,
-    "Duck #12 · Sir Quacks-a-Lot · Heat 3 · not raced",
+    "Sir Quacks-a-Lot · Heat 3 · not raced",
   );
 
   // No name, or one the server's read-time filter suppressed, leaves the number
@@ -2177,6 +2177,7 @@ const pairedStatus = (visibleNumber = 12) => ({
   event: { id: "event-1", slug: "race", name: "Race", eventDate: null, status: "ROUND_ONE" },
   participantDisplayName: "Daisy D.",
   duck: { visibleNumber },
+  duckName: null,
   assignedHeat: { roundOne: { number: 3, status: "PLANNED" }, final: null },
   currentHeat: null,
   outcome: "NOT_RACED",
@@ -2580,7 +2581,7 @@ test("My Ducks separates own unpaired, own paired, and followed participants", a
   assert.equal(ownOnly.followed.track.children.length, 0);
 });
 
-test("the owner's card shows the chosen duck name and keeps the number beside it", async () => {
+test("the owner's card replaces the generic label with the chosen duck name", async () => {
   const harness = await renderMyDucks([
     collected("22222222-2222-4222-8222-222222222222", true, {
       nameable: true,
@@ -2597,9 +2598,12 @@ test("the owner's card shows the chosen duck name and keeps the number beside it
   assert.equal(link.className, "duck-number-link");
   assert.equal(link.textContent, "Sir Quacks-a-Lot", "the chosen name replaces Duck #12");
   assert.equal(link.href, "/duck/12", "the link still points at the public duck page");
-  // The number stays visible so the card matches the physical duck.
-  assert.equal(value.children[1].textContent, "Duck #12");
-  assert.equal(value.children[1].className, "duck-number-note");
+  assert.equal(
+    value.children.some((child) => child.className === "duck-number-note"),
+    false,
+    "the generic Duck #12 label is completely replaced",
+  );
+  assert.doesNotMatch(value.text(), /Duck #12/);
   // Renaming lives with the duck's identity: the control is a Rename button in
   // this same fact, and the field it reveals starts folded away and pre-filled.
   const toggle = nameToggle(card);
@@ -2612,7 +2616,7 @@ test("the owner's card shows the chosen duck name and keeps the number beside it
   assert.equal(toggle.getAttribute("aria-controls"), form.id);
   const input = form.descendants().find((node) => node.tagName === "INPUT");
   assert.equal(input.value, "Sir Quacks-a-Lot");
-  assert.match(form.text(), /shown publicly beside this duck’s number/);
+  assert.match(form.text(), /replaces the generic duck number on public race status/);
   assert.match(form.text(), /race staff can remove a name that is not/);
 });
 
@@ -2751,19 +2755,20 @@ test("saving a name folds the field away again", async () => {
   assert.equal(nameToggle(repainted).textContent, "Rename");
 });
 
-test("a followed entry never renders a duck name even if one is sent", async () => {
+test("a followed entry renders the public duck name without owner naming controls", async () => {
   const harness = await renderMyDucks([
     followedEntry("33333333-3333-4333-8333-333333333333", {
       paired: true,
-      duckName: "Not Mine To Name",
+      duckName: "Owner Field Must Stay Hidden",
       nameable: true,
-      raceStatus: pairedStatus(88),
+      raceStatus: { ...pairedStatus(88), duckName: "Public Bubbles" },
     }),
   ]);
 
   const [card] = harness.followed.track.children;
-  assert.doesNotMatch(card.text(), /Not Mine To Name/);
-  assert.equal(duckFact(card).children[1].children[0].textContent, "Duck #88");
+  assert.doesNotMatch(card.text(), /Owner Field Must Stay Hidden/);
+  assert.equal(duckFact(card).children[1].children[0].textContent, "Public Bubbles");
+  assert.doesNotMatch(card.text(), /Duck #88/);
   assert.equal(nameForm(card), null);
 });
 
@@ -3739,6 +3744,11 @@ test("the duck detail link builder emits a plain navigation only for a real duck
   assert.equal(link.listeners.size, 0);
   assert.equal(link.getAttribute("target"), null);
 
+  const named = duckDetailLink(document, 128, "<Captain Quacks>");
+  assert.equal(named.href, "/duck/128", "the number remains the destination");
+  assert.equal(named.textContent, "<Captain Quacks>", "the public name replaces only visible text");
+  assert.equal(named.children.length, 0, "the public name is never parsed as markup");
+
   // No duck assigned, or any value that is not a usable visible number, must
   // never produce a link.
   for (const value of [null, undefined, 0, -3, 1.5, "128", Number.NaN]) {
@@ -3773,6 +3783,9 @@ const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = nu
   const document = new FakeDocument(false);
   const personal = document.createElement("div");
   personal.dataset.livePersonal = "number";
+  const heading = document.createElement("h1");
+  heading.dataset.duckHeading = "";
+  heading.textContent = "Duck #128";
   const nodes = {
     "[data-live-board]": document.createElement("section"),
     "[data-live-board-stage]": document.createElement("p"),
@@ -3781,6 +3794,7 @@ const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = nu
     "[data-live-board-content]": document.createElement("div"),
     "[data-live-board-error]": document.createElement("p"),
     "[data-live-personal]": personal,
+    "[data-duck-heading]": heading,
     main: document.createElement("main"),
   };
   document.querySelector = (selector) => nodes[selector] ?? null;
@@ -3810,7 +3824,7 @@ const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = nu
     { quickDucksLive: { subscribe(options) { subscriptions.push(options); } } },
     { pathname: "/duck/128", reload() { reloads.push("reload"); }, replace(value) { reloads.push(value); } },
   );
-  return { api, nodes, personal, requests, subscriptions, reloads };
+  return { api, heading, nodes, personal, requests, subscriptions, reloads, document };
 };
 
 test("the public duck detail page subscribes to the shared live hub and refetches authoritatively", async () => {
@@ -3916,7 +3930,7 @@ test("official heat winners render an accessible gold text marker beside the par
   assert.equal(nodeText(participant), "Daisy D.Winner");
 });
 
-test("a board entry shows the chosen duck name beside the number it never replaces", () => {
+test("a board entry replaces its generic label with the chosen duck name", () => {
   const { api } = liveDuckPage();
 
   const named = api.liveBoardDuckCell({
@@ -3925,13 +3939,12 @@ test("a board entry shows the chosen duck name beside the number it never replac
     duckName: "Sir Quacks-a-Lot",
     place: null,
   });
-  // The link text is still the canonical number; the name rides beside it.
   assert.equal(named.children[0].tagName, "A");
-  assert.equal(named.children[0].textContent, "Duck #128");
+  assert.equal(named.children[0].textContent, "Sir Quacks-a-Lot");
   assert.equal(named.children[0].href, "/duck/128");
-  assert.equal(nodeText(named), "Duck #128 · Sir Quacks-a-Lot");
+  assert.equal(nodeText(named), "Sir Quacks-a-Lot");
 
-  // A placed entry keeps number, name, and place in that order.
+  // A placed entry keeps the chosen name and official place.
   assert.equal(
     nodeText(api.liveBoardDuckCell({
       participantDisplayName: "Jamie R.",
@@ -3939,7 +3952,7 @@ test("a board entry shows the chosen duck name beside the number it never replac
       duckName: "Bubbles",
       place: 1,
     })),
-    "Duck #4 · Bubbles · 1st place",
+    "Bubbles · 1st place",
   );
 
   // A suppressed, cleared, or absent name simply leaves the number.
@@ -3974,11 +3987,11 @@ test("a board entry shows the chosen duck name beside the number it never replac
     duckName: "<img src=x onerror=alert(1)>",
     place: null,
   });
-  assert.equal(nodeText(hostile), "Duck #9 · <img src=x onerror=alert(1)>");
+  assert.equal(nodeText(hostile), "<img src=x onerror=alert(1)>");
   assert.equal(hostile.children.some((child) => child.tagName === "IMG"), false);
 });
 
-test("the public duck detail page shows the chosen name beside the number", async () => {
+test("the public duck detail live repaint replaces every generic duck label", async () => {
   const page = liveDuckPage({
     raceStatus: {
       participantDisplayName: "Jamie R.",
@@ -3997,8 +4010,10 @@ test("the public duck detail page shows the chosen name beside the number", asyn
     page.personal.children[0].children
       .map((fact) => fact.children.map((part) => part.textContent))
       .find(([label]) => label === "Duck"),
-    ["Duck", "Duck #128 · Sir Quacks-a-Lot"],
+    ["Duck", "Sir Quacks-a-Lot"],
   );
+  assert.equal(page.heading.textContent, "Sir Quacks-a-Lot");
+  assert.equal(page.document.title, "Sir Quacks-a-Lot · QuickDucks");
 });
 
 const participantCards = () => {

@@ -1571,7 +1571,7 @@ test("renders a public duck detail view addressed by the visible duck number", a
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("x-robots-tag"), "noindex, nofollow");
   assert.match(body, /<meta name="robots" content="noindex,nofollow">/);
-  assert.match(body, /<h1 class="page-title">Duck #128<\/h1>/);
+  assert.match(body, /<h1 class="page-title" data-duck-heading>Duck #128<\/h1>/);
   assert.match(body, /<title>Duck #128 · QuickDucks<\/title>/);
   assert.match(body, /Follow this duck through Summer Duck Race\./);
 

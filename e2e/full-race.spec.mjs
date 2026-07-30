@@ -22,8 +22,14 @@ test.describe("complete race journey", () => {
     await seedState("empty");
   });
 
-  test("drives a race from empty through results and complete deletion", async ({ page }) => {
+  test("drives a race from empty through results and complete deletion", async ({ page }, testInfo) => {
     test.setTimeout(240_000);
+    // This broad journey now exercises the public naming mutation too. Give its
+    // browser an independent production-equivalent limiter key so sequential
+    // suites and retries cannot spend one another's budget.
+    await page.context().setExtraHTTPHeaders({
+      "cf-connecting-ip": `192.0.2.${200 + testInfo.retry}`,
+    });
     const errors = watchBrowserErrors(page);
     const { admin, client } = await bootstrap();
     const eventName = "Playwright Harbor Derby";
@@ -202,6 +208,16 @@ test.describe("complete race journey", () => {
       await expect(nameButton).toBeVisible();
       const [duckBox, nameBox] = await Promise.all([duckLink.boundingBox(), nameButton.boundingBox()]);
       expect(nameBox.y).toBeGreaterThanOrEqual(duckBox.y + duckBox.height);
+
+      const namingResponse = page.waitForResponse((response) =>
+        new URL(response.url()).pathname === "/api/v1/registrations/mine/duck-name"
+        && response.request().method() === "POST");
+      await nameButton.click();
+      await pairedCard.getByLabel("Duck name", { exact: true }).fill("Harbor Hero");
+      await pairedCard.getByRole("button", { name: "Save name", exact: true }).click();
+      expect((await namingResponse).status()).toBe(200);
+      await expect(pairedCard.getByRole("link", { name: "Harbor Hero", exact: true })).toBeVisible();
+      await expect(pairedCard.getByText("Duck #101", { exact: true })).toHaveCount(0);
       expect(staffErrors).toEqual([]);
       await staffPage.close();
     });
@@ -238,8 +254,11 @@ test.describe("complete race journey", () => {
       const firstHeatDetail = (await client.get(
         `/api/v1/staff/events/${event.id}/heats/${firstHeat.id}`,
       )).body;
+      const firstWinner = firstHeatDetail.roster.find((entry) =>
+        entry.duck.visibleNumber === ducks[0].visibleNumber)
+        ?? firstHeatDetail.roster[0];
       const winnerDuck = ducks.find(
-        (duck) => duck.visibleNumber === firstHeatDetail.roster[0].duck.visibleNumber,
+        (duck) => duck.visibleNumber === firstWinner.duck.visibleNumber,
       );
       expect(winnerDuck).toBeTruthy();
 
@@ -272,7 +291,12 @@ test.describe("complete race journey", () => {
         await transitionHeat(client, event.id, heat, "call");
         await transitionHeat(client, event.id, heat, "start");
         await transitionHeat(client, event.id, heat, "finish");
-        await finalizeHeat(client, event.id, heat, [{ raceEntryId: detail.roster[0].raceEntryId, place: 1 }]);
+        // Make the browser-registered participant a winner when its heat comes
+        // up, so the participant-provided duck name is exercised all the way
+        // through finalist promotion and the official public podium.
+        const winner = detail.roster.find((entry) => entry.duck.visibleNumber === ducks[0].visibleNumber)
+          ?? detail.roster[0];
+        await finalizeHeat(client, event.id, heat, [{ raceEntryId: winner.raceEntryId, place: 1 }]);
       }
     });
 
@@ -361,6 +385,13 @@ test.describe("complete race journey", () => {
       await expect(page.getByRole("heading", { name: "Official podium" })).toBeVisible();
       await expect(page.getByText("Winner", { exact: true }).first()).toBeVisible();
       await expect(page.getByText("Results official", { exact: true })).toBeVisible();
+      const podium = page.locator(".podium");
+      await expect(podium.getByRole("link", { name: "Harbor Hero", exact: true })).toBeVisible();
+      await expect(podium.getByText("Duck #101", { exact: true })).toHaveCount(0);
+      await expect(podium.getByRole("link", {
+        name: `Duck #${finalDetail.roster[1].duck.visibleNumber}`,
+        exact: true,
+      })).toBeVisible();
     });
 
     await test.step("delete the complete dataset and leave staff access intact", async () => {

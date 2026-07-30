@@ -370,15 +370,15 @@ test("My Ducks keeps the registration action while sections stay gated until dat
 test("My Ducks separates participants registered here from ducks that are only followed", () => {
   const myDucks = renderMyDucks("REGISTRATION");
 
-  // The followed set is its own section with its own carousel, and it says
-  // plainly that those entries carry no staff code and no duck name.
+  // The followed set is its own section with its own carousel. Public duck names
+  // remain visible there, without granting owner-only code or naming controls.
   assert.match(myDucks, /<h2 id="followed-participants-title">Ducks I’m Following<\/h2>/);
   assert.match(myDucks, /data-participant-track tabindex="0" aria-label="Followed participants" hidden/);
-  assert.match(myDucks, /someone else’s registration, so they show public race status only — no staff lookup code and no duck name/);
+  assert.match(myDucks, /they show public race status and any public duck name, but no staff lookup code or naming controls/);
   // The owned sections say the opposite, so the distinction is on the page and
   // not only in the card contents.
   assert.match(myDucks, /Participants you registered on this device, waiting for staff to pair a physical duck\. Their staff lookup code stays on this device\./);
-  assert.match(myDucks, /Participants you registered on this device, already paired with their race duck\. Use Rename on a duck to give it a name/);
+  assert.match(myDucks, /Participants you registered on this device, already paired with their race duck\. Use Rename on a duck to give it a public name/);
   assert.match(myDucks, /Participants you registered on this device keep their full details and staff lookup code\./);
   // The followed section still follows the shared hidden-until-data rule.
   const followed = myDucks.slice(myDucks.indexOf('data-participant-section="followed"'));
@@ -435,7 +435,7 @@ test("the public duck detail view renders every promised public fact", () => {
     ["Currently running", "Final · Heat 1 · Racing now"],
     ["Race status", "Finalist"],
   ]);
-  assert.match(markup, /<h1 class="page-title">Duck #128<\/h1>/);
+  assert.match(markup, /<h1 class="page-title" data-duck-heading>Duck #128<\/h1>/);
   assert.match(markup, /<meta name="robots" content="noindex,nofollow">/);
   // It follows the same live contract as the other public duck/status pages.
   assert.match(markup, /<div data-live-personal="number">/);
@@ -476,13 +476,13 @@ test("the public duck detail view degrades cleanly before heats and results exis
   assert.match(markup, /<dt>Currently running<\/dt><dd>No heat is running right now<\/dd>/);
 });
 
-test("both public duck views show a chosen duck name beside the canonical number", () => {
+test("both public duck views replace the generic label with a chosen duck name", () => {
   for (const [label, render] of [["tag scan", renderDuck], ["duck number", renderPublicDuck]]) {
     const named = render(duckStatus({ duckName: "Sir Quacks-a-Lot" }));
-    assert.match(named, /<dt>Duck<\/dt><dd>Duck #128 · Sir Quacks-a-Lot<\/dd>/, label);
-    // The heading stays the canonical number, so the page still matches the
-    // duck in the water even when the name is long or confusing.
-    assert.match(named, /<h1 class="page-title">Duck #128<\/h1>/, label);
+    assert.match(named, /<dt>Duck<\/dt><dd>Sir Quacks-a-Lot<\/dd>/, label);
+    assert.match(named, /<h1 class="page-title" data-duck-heading>Sir Quacks-a-Lot<\/h1>/, label);
+    assert.match(named, /<title>Sir Quacks-a-Lot · QuickDucks<\/title>/, label);
+    assert.doesNotMatch(named, /Duck #128/, label);
 
     // No name, or a name the read-time filter suppressed, leaves "Duck #N".
     assert.match(render(duckStatus({ duckName: null })), /<dt>Duck<\/dt><dd>Duck #128<\/dd>/, label);
@@ -575,10 +575,9 @@ test("the duck number link style is shared by the board and My Ducks", () => {
   assert.ok(style);
   assert.match(style, /\.duck-number-link \{[^}]*text-decoration:underline;/);
   assert.match(style, /\.duck-number-link:focus-visible \{ outline:4px solid #83d8ec; outline-offset:2px; \}/);
-  // My Ducks passes the owner's chosen duck name as the link label. The
-  // destination stays the shared public duck path either way.
+  // Every named public surface can pass the chosen name as the link label. The
+  // destination stays the shared numbered public path either way.
   assert.match(participantScript, /duckDetailLink\(document, status\.duck \? status\.duck\.visibleNumber : null, duckName\)/);
-  assert.match(style, /\.duck-number-note \{[^}]*color:var\(--muted\);/);
 });
 
 test("every pattern attribute compiles the way a browser compiles it", () => {
