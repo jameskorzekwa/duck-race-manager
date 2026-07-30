@@ -2,6 +2,7 @@ const STATE_LABELS = [
   "agent:inbox",
   "agent:triage",
   "agent:ready",
+  "agent:queued",
   "agent:running",
   "agent:grouped",
   "agent:blocked",
@@ -373,7 +374,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     }
   }
 
-  for (const issue of await issuesWithLabel("agent:running")) {
+  for (const issue of [...await issuesWithLabel("agent:queued"), ...await issuesWithLabel("agent:running")]) {
     if (Date.now() - Date.parse(issue.updated_at) <= 90 * 60 * 1000 || issuesWithOpenPulls.has(issue.number)) continue;
     const comments = await commentsFor(issue.number);
     const taskRuns = markerNumbers(comments, "task-run");

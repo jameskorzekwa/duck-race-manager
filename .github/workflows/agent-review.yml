@@ -158,7 +158,7 @@ jobs:
               await removeLabel(prNumber, label);
             }
             const states = [
-              "agent:inbox", "agent:triage", "agent:ready", "agent:running",
+              "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
               "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
               "agent:deployed", "agent:failed",
             ];
@@ -517,7 +517,7 @@ jobs:
             const expectedHead = process.env.EXPECTED_HEAD;
             const expectedBase = process.env.EXPECTED_BASE;
             const stateLabels = [
-              "agent:inbox", "agent:triage", "agent:ready", "agent:running",
+              "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
               "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
               "agent:deployed", "agent:failed",
             ];

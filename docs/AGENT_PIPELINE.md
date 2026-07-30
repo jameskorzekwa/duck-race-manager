@@ -48,7 +48,8 @@ Pipeline state is represented by labels:
 | `agent:inbox` | Accepted and waiting for triage |
 | `agent:triage` | Classification is active |
 | `agent:ready` | Independently releasable work is ready |
-| `agent:running` | An implementation or repair run is active |
+| `agent:queued` | Accepted for implementation, waiting for the single model runner |
+| `agent:running` | The model runner has started this implementation or repair |
 | `agent:grouped` | Requirements belong to a canonical active issue |
 | `agent:blocked` | Explicit dependencies or input are outstanding |
 | `agent:review` | A PR is under deterministic CI or agent review |

@@ -151,6 +151,26 @@ test("local model agents deny unspecified and executable tools", async () => {
   assert.equal(config.plugin, undefined);
 });
 
+test("queued work is labeled queued until the model runner actually starts", async () => {
+  const workflow = await read(".github/workflows/agent-task.yml");
+  const prepare = workflow.slice(workflow.indexOf("  prepare:"), workflow.indexOf("  mark-running:"));
+  const markRunning = workflow.slice(workflow.indexOf("  mark-running:"), workflow.indexOf("  implement:"));
+  const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));
+
+  assert.match(prepare, /setState\(issue, "agent:queued"\)/);
+  assert.doesNotMatch(prepare, /setState\(issue, "agent:running"\)/);
+  assert.match(markRunning, /implement\?\.status === "in_progress"/);
+  assert.match(markRunning, /"agent:running"/);
+  assert.match(markRunning, /issues: write/);
+  assert.doesNotMatch(markRunning, /contents: write|pull-requests: write/);
+  // The model job itself must stay token-free.
+  assert.doesNotMatch(implement, /GITHUB_TOKEN:|issues: write/);
+
+  const reconciliation = await read("scripts/agent-pipeline.mjs");
+  assert.match(reconciliation, /"agent:queued"/);
+  assert.match(reconciliation, /issuesWithLabel\("agent:queued"\), \.\.\.await issuesWithLabel\("agent:running"\)/);
+});
+
 test("an ordinary issue comment cannot cancel a queued implementation", async () => {
   const workflow = await read(".github/workflows/agent-task.yml");
   const concurrency = workflow.slice(workflow.indexOf("concurrency:"), workflow.indexOf("jobs:"));
