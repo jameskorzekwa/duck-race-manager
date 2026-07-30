@@ -19,15 +19,16 @@ test("markerNumbers extracts comma-separated machine state", () => {
 
 test("validExactCheck accepts trusted-default-branch workflow dispatch", async () => {
   const github = {
+    paginate: async (fn, args) => (await fn(args)).data,
     rest: {
-      checks: {
-        listForRef: async () => ({ data: { check_runs: [{
-          app: { slug: "github-actions" },
-          conclusion: "success",
-          external_id: "agent-review:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:123",
-          started_at: "2026-07-28T12:00:00Z",
-          status: "completed",
-        }] } }),
+      repos: {
+        listCommitStatusesForRef: async () => ({ data: [{
+          context: "Agent Review / Exact SHA",
+          creator: { id: 41898282 },
+          state: "success",
+          description: "agent-review:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:123 Exact-head review approved",
+          created_at: "2026-07-28T12:00:00Z",
+        }] }),
       },
       actions: {
         getWorkflowRun: async () => ({ data: {
