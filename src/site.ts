@@ -642,7 +642,7 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
 
       <section class="participant-section" data-participant-section="awaiting"${phaseAllowsRegistration(phase) ? ' data-keep-empty="true"' : ""} aria-labelledby="awaiting-participants-title" hidden>
         <div class="participant-section-head">
-          <h2 id="awaiting-participants-title">Awaiting Participants</h2>
+          <h2 id="awaiting-participants-title">Awaiting Duck Assignment</h2>
           <div class="participant-section-head-actions">
 ${phaseAllowsRegistration(phase) ? '            <a class="button small" href="/register" data-register-another>Register another participant</a>\n' : ""}            <div class="carousel-controls" data-carousel-controls hidden>
               <button class="button secondary small" type="button" data-carousel-previous aria-controls="awaiting-participants">Previous</button>
@@ -651,7 +651,7 @@ ${phaseAllowsRegistration(phase) ? '            <a class="button small" href="/r
           </div>
         </div>
         <p class="muted">Participants you registered on this device, waiting for staff to pair a physical duck. Their staff lookup code stays on this device.</p>
-        <div class="participant-track" id="awaiting-participants" data-participant-track tabindex="0" aria-label="Awaiting participant registrations" hidden></div>
+        <div class="participant-track" id="awaiting-participants" data-participant-track tabindex="0" aria-label="Awaiting duck assignment registrations" hidden></div>
       </section>
 
       <section class="participant-section" data-participant-section="paired" aria-labelledby="paired-participants-title" hidden>
