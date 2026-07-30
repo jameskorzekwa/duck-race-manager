@@ -663,7 +663,7 @@ ${phaseAllowsRegistration(phase) ? '            <a class="button small" href="/r
             <button class="button secondary small" type="button" data-carousel-next aria-controls="paired-participants">Next</button>
           </div>
         </div>
-        <p class="muted">Participants you registered on this device, already paired with their race duck. Use Rename on a duck to give it a name, and it appears here instead of the number.</p>
+        <p class="muted">Participants you registered on this device, already paired with their race duck. Use Rename on a duck to give it a public name, and it appears instead of the generic duck number.</p>
         <div class="participant-track" id="paired-participants" data-participant-track tabindex="0" aria-label="Paired participant registrations" hidden></div>
       </section>
 
@@ -675,7 +675,7 @@ ${phaseAllowsRegistration(phase) ? '            <a class="button small" href="/r
             <button class="button secondary small" type="button" data-carousel-next aria-controls="followed-participants">Next</button>
           </div>
         </div>
-        <p class="muted">Participants you followed from a duck tag, a duck page, or the search below. These are someone else’s registration, so they show public race status only — no staff lookup code and no duck name.</p>
+        <p class="muted">Participants you followed from a duck tag, a duck page, or the search below. These are someone else’s registration, so they show public race status and any public duck name, but no staff lookup code or naming controls.</p>
         <div class="participant-track" id="followed-participants" data-participant-track tabindex="0" aria-label="Followed participants" hidden></div>
       </section>
       </div>
@@ -829,14 +829,14 @@ const roundLabel = (round: string): string => round === "FINAL" ? "Final" : "Rou
 const outcomeLabel = (outcome: string): string =>
   outcome.replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
 
-// The canonical duck number always leads, because it is what is printed on the
-// duck in the water. A participant-chosen name follows it when there is one that
-// the read-time filter allows, so the two never disagree and a suppressed or
-// cleared name simply leaves "Duck #N".
+// A participant-chosen name is the public label when one survives the read-time
+// filter. The printed number remains authoritative data and the detail-link
+// destination, but only supplies the visible fallback for an unnamed duck.
 const duckIdentity = (status: PublicRaceStatus): string => {
   if (status.duck === null) return "Waiting for duck assignment";
-  const number = `Duck #${status.duck.visibleNumber}`;
-  return status.duckName === null ? number : `${number} · ${status.duckName}`;
+  return typeof status.duckName === "string" && status.duckName.length > 0
+    ? status.duckName
+    : `Duck #${status.duck.visibleNumber}`;
 };
 
 const publicStatusFacts = (status: PublicRaceStatus, showParticipant = true): string => {
@@ -875,7 +875,7 @@ export const renderDuck = (
   phase: PublicPhase = "PREPARING",
   follow: PublicFollowState | null = null,
 ): string => page({
-  title: status.duck === null ? "Race status" : `Duck #${status.duck.visibleNumber}`,
+  title: status.duck === null ? "Race status" : duckIdentity(status),
   description: "Public QuickDucks NFC duck race status.",
   robots: "noindex,nofollow",
   phase,
@@ -884,7 +884,7 @@ export const renderDuck = (
     <section class="page-panel">
       ${duck()}
       <p class="eyebrow">Public race status</p>
-      <h1 class="page-title">${status.duck === null ? "Waiting for a duck" : `Duck #${status.duck.visibleNumber}`}</h1>
+      <h1 class="page-title" data-duck-heading>${status.duck === null ? "Waiting for a duck" : escapeHtml(duckIdentity(status))}</h1>
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
       <div data-live-personal="duck">${publicStatusFacts(status)}</div>${followPanel(follow)}
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, or private links.</span></div>
@@ -927,7 +927,7 @@ export const renderPublicDuck = (
   phase: PublicPhase = "PREPARING",
   follow: PublicFollowState | null = null,
 ): string => {
-  const heading = status.duck === null ? "This duck" : `Duck #${status.duck.visibleNumber}`;
+  const heading = status.duck === null ? "This duck" : duckIdentity(status);
   return page({
     title: heading,
     description: "Public QuickDucks race status for one duck number.",
@@ -938,7 +938,7 @@ export const renderPublicDuck = (
     <section class="page-panel">
       ${duck()}
       <p class="eyebrow">Public duck detail</p>
-      <h1 class="page-title">${escapeHtml(heading)}</h1>
+      <h1 class="page-title" data-duck-heading>${escapeHtml(heading)}</h1>
       <p class="lede">Follow this duck through ${escapeHtml(status.event.name)}.</p>
       <div data-live-personal="number">${duckDetailFacts(status)}</div>${followPanel(follow)}
       <div class="privacy"><strong>Public, not personal.</strong><span>This page shows race progress but never contact information, staff codes, private links, or the duck’s tag.</span></div>
@@ -1766,11 +1766,10 @@ const createText = (tag, text, className) => {
 const describeStatus = (status) => {
   if (!status) return "Race status is not currently public.";
   const parts = [];
-  // The canonical number leads and the chosen name follows it, exactly as on
-  // the duck pages and the race board.
   if (status.duck) {
-    parts.push("Duck #" + status.duck.visibleNumber
-      + (typeof status.duckName === "string" && status.duckName.length > 0 ? " · " + status.duckName : ""));
+    parts.push(typeof status.duckName === "string" && status.duckName.length > 0
+      ? status.duckName
+      : "Duck #" + status.duck.visibleNumber);
   }
   if (status.assignedHeat.roundOne) parts.push("Heat " + status.assignedHeat.roundOne.number);
   else if (status.duck) parts.push("Heat assignment pending");

@@ -840,12 +840,16 @@ const nameDuck = (api, cookie, registrationId, duckName, commandId = crypto.rand
     body: { commandId, registrationId, duckName },
   });
 
-test("the owner names their paired duck and every public surface shows it beside the number", async (context) => {
+test("a chosen name replaces the generic label on every public view while an unnamed duck keeps it", async (context) => {
   const { api, staffApi, database } = harness(context);
   seedEvent(database);
   const owner = await register(api, context, "Daisy", "Duck");
   const raceEntryId = pairDuck(database, owner.registrationId, 12, tagToken);
+  seedHeat(database, raceEntryId, { round: "ROUND_ONE", heatNumber: 1 });
   const follower = await followFrom(api, raceEntryId);
+  const unnamed = await register(api, context, "Donald", "Mallard");
+  const unnamedTagToken = "u".repeat(32);
+  pairDuck(database, unnamed.registrationId, 13, unnamedTagToken);
 
   const commandId = crypto.randomUUID();
   assert.deepEqual(
@@ -868,19 +872,56 @@ test("the owner names their paired duck and every public surface shows it beside
   assert.equal(mine.registrations[0].nameable, true);
   assert.equal(mine.registrations[0].paired, true);
 
-  // Every public surface now carries the name, and every one of them keeps the
-  // canonical duck number so the duck on the page still matches the duck in the
-  // water.
-  const surfaces = [
+  // APIs retain the authoritative number as data and add only the filtered
+  // public name. They still carry no participant contact, proof, staff, tag, or
+  // inventory fields.
+  const publicApis = [
     ["tag scan api", await (await api(`/api/v1/ducks/${tagToken}`)).text()],
     ["duck number api", await (await api("/api/v1/ducks/number/12")).text()],
     ["public search", await (await api("/api/v1/race-status/search?eventId=event-ducks&name=Daisy")).text()],
-    ["tag page", await (await api(`/t/${tagToken}`)).text()],
-    ["duck page", await (await api("/duck/12")).text()],
+    ["race board", await (await api("/api/v1/race-board")).text()],
   ];
-  for (const [label, body] of surfaces) {
+  for (const [label, body] of publicApis) {
     assert.equal(body.includes("Sir Quacks-a-Lot"), true, `${label} must carry the duck name`);
     assert.match(body, /Duck #12|"visibleNumber":12|"duckNumber":12/, `${label} must keep the number`);
+    assert.doesNotMatch(
+      body,
+      /"(?:email|phone|lookupCode|privateToken|privateStatusPath|ownershipProof|notes|location|tagToken|audit)"\s*:/i,
+      `${label} must stay public-only`,
+    );
+  }
+
+  // Rendered labels use the chosen name completely in place of "Duck #12".
+  // That includes the private status view's public race facts; its separate
+  // participant proof and lookup-code panel are unchanged.
+  const privateToken = owner.privateStatusPath.split("/").at(-1);
+  const renderedViews = [
+    ["tag page", await (await api(`/t/${tagToken}`)).text()],
+    ["duck page", await (await api("/duck/12")).text()],
+    ["private status page", await (await api(owner.privateStatusPath)).text()],
+  ];
+  for (const [label, body] of renderedViews) {
+    assert.match(body, /Sir Quacks-a-Lot/, `${label} must carry the duck name`);
+    assert.doesNotMatch(body, /Duck #12/, `${label} must replace the generic label`);
+  }
+  const privateStatus = await jsonBody(
+    await api(`/api/v1/registrations/${privateToken}`),
+    200,
+    "private status api",
+  );
+  assert.equal(privateStatus.raceStatus.participantDisplayName, "Daisy D.");
+  assert.equal(privateStatus.raceStatus.duckName, "Sir Quacks-a-Lot");
+  assert.equal(privateStatus.raceStatus.duck.visibleNumber, 12);
+
+  // Compatibility for a genuinely unnamed duck is checked through the same
+  // server renderers, not inferred from the named case.
+  for (const [label, body] of [
+    ["unnamed tag page", await (await api(`/t/${unnamedTagToken}`)).text()],
+    ["unnamed duck page", await (await api("/duck/13")).text()],
+    ["unnamed private status page", await (await api(unnamed.privateStatusPath)).text()],
+  ]) {
+    assert.match(body, /Duck #13/, `${label} must retain the numbered fallback`);
+    assert.doesNotMatch(body, /Sir Quacks-a-Lot/, label);
   }
 
   // A follower now sees the public name of the duck they follow, through the

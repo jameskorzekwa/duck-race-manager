@@ -659,11 +659,10 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
       registrationStatus: row.status,
       paired: row.is_paired === 1,
       deletable: !followed && row.is_deletable === 1,
-      // The owner's own card shows the name it wrote, and a followed card shows
-      // nothing: the name belongs to the participant's own duck card here, while
-      // the public surfaces identify it by number first. The read-time filter
-      // runs even for the owner, so a name that staff cleared or that the
-      // wordlist now rejects disappears from the card and its rename form too.
+      // The owner-specific field is present only on the card that may edit it.
+      // A followed card reads the same public name from `raceStatus.duckName`
+      // that every anonymous surface receives, without gaining a naming control.
+      // The read-time filter also makes a cleared or newly rejected name vanish.
       duckName: followed ? null : publicDuckName(row.duck_name),
       nameable: !followed && row.is_nameable === 1,
       raceStatus: await getPublicStatusByRaceEntry(env, row.race_entry_id),

@@ -186,6 +186,11 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && pathname === "/api/v1/registrations") {
     return domains("participants");
   }
+  // A participant's chosen duck name appears on participant, duck-detail, and
+  // race/heat surfaces. Other open browsers must refetch all three promptly.
+  if (method === "POST" && pathname === "/api/v1/registrations/mine/duck-name") {
+    return domains("participants", "ducks", "heats");
+  }
   // Public self-service deletion removes a participant from the race dataset,
   // so every participant surface has to refetch, exactly like creation.
   if (method === "POST" && pathname === "/api/v1/registrations/mine/delete") {

@@ -695,13 +695,14 @@ to that entry. A followed link, an unrelated registration, and a missing cookie
 are one indistinguishable `404`; an owned entry with no duck yet returns `409`.
 The My Ducks projection reports the same permission in advance as `nameable`.
 
-**The name is public.** It appears beside the canonical duck number — never
-instead of it — on the live race board rosters and podium, `/duck/<number>`,
-`/t/<tag-token>`, and public race-status search results, rendered as
-`Duck #12 · Sir Quacks-a-Lot`. Page headings and board links keep the bare
-number, so a duck on a screen always matches the duck in the water. The owner's
-own My Ducks card is unchanged: the name replaces "Duck #N" as the link text with
-the number quietly beside it.
+**The name is public.** On public race status, owned and followed My Ducks cards,
+the live race board rosters and podium, `/duck/<number>`, `/t/<tag-token>`, and
+public race-status search results, a filtered non-empty name completely replaces
+the corresponding generic `Duck #N` label. An unnamed or read-time-suppressed
+duck still displays `Duck #N`. The visible number remains authoritative response
+data and the destination of the numbered detail link; replacing its generic label
+does not expose a tag or change how a duck is resolved. Every one of these views
+also keeps the event's policy-filtered participant display name.
 
 The **announcer station deliberately does not receive it**. Its roster
 projection stays slot, participant name, and duck number. A name that slips past
@@ -846,8 +847,10 @@ privacy-filtered race-status facts used by the browser collection and public
 status: current duck, assigned round-one and final heat, current event heat, and
 race outcome. Neither response returns email or phone.
 
-The private HTML page refreshes these registration and race facts after live
-signals and through the same polling fallback. The private token remains the
+The private HTML page applies the same duck-label rule: a filtered name replaces
+`Duck #N`, while an unnamed duck keeps the fallback. It refreshes these
+registration and race facts, including that label, after live signals and through
+the same polling fallback. The private token remains the
 credential and is never sent through the live signal channel. A missing private
 record clears the rendered participant facts instead of leaving stale data on
 screen; deleting the event revalidates the server route immediately.
@@ -874,8 +877,8 @@ client network key.
 Only `SUBMITTED` and `ACTIVE` registrations in events from
 `REGISTRATION_OPEN` through `COMPLETED` are searchable. Display names follow the
 event policy: first name, first name plus last initial, or full name. Search can
-show pairing pending, assigned duck and its filtered public duck name, heat,
-current heat, and race outcome. It never returns contact details, lookup codes,
+show pairing pending, an assigned duck under its filtered public name (or
+`Duck #N` when unnamed), heat, current heat, and race outcome. It never returns contact details, lookup codes,
 private links, staff notes, inventory state, location, or audit data.
 
 Before ordering and applying the ten-result limit, search excludes every stable
@@ -935,8 +938,9 @@ participant at all, so there is nothing on its page to follow. The membership
 check is a read-only probe of the caller's own collection cookie, so a tag GET
 stays read-only and issues no cookie. Nothing else about these responses changed:
 they still carry no contact details, lookup code, private link, or staff data.
-They do carry the duck's filtered public `duckName`, always alongside its visible
-number.
+They do carry the duck's filtered public `duckName` and visible number as separate
+data. Renderers use the name as the label and the number as its fallback and
+detail-link destination.
 
 ### Public Duck Detail View
 
@@ -947,8 +951,8 @@ needs no tag, no token, and no cookie.
 The number is resolved against the same event the public race board renders, and
 only while that event is between `REGISTRATION_OPEN` and `COMPLETED`. The page
 reuses the shared public status projection, so it can show the event, the
-policy-filtered participant name, the visible duck number with the
-participant-chosen duck name beside it when there is one the filter allows, the
+policy-filtered participant name, the participant-chosen duck name when the
+filter allows one (otherwise the visible `Duck #N` fallback), the
 round-one heat, the final heat, the heat currently running, the race outcome, and
 an official finishing place once a heat is finalized. It never shows contact
 details, lookup codes, private links, raw tag tokens, inventory location, staff
@@ -966,9 +970,11 @@ public duck and status pages. The page therefore adds no enumeration signal
 beyond the duck numbers the board already publishes, and it is honest about a
 duck that physically exists without naming anybody.
 
-The live race board and the paired My Ducks cards link their duck numbers to
-this view as plain navigations. An entry with no duck assigned renders text and
-no link. The page itself refreshes through the shared live hub on the `event`,
+The live race board and paired or followed My Ducks cards link the displayed duck
+label to this numbered view as a plain navigation. An entry with no duck assigned
+renders text and no link. A live refetch updates the page heading, document title,
+and facts together, so a stale generic label cannot remain after a rename. The
+page itself refreshes through the shared live hub on the `event`,
 `participants`, `ducks`, `heats`, and `returns` domains and refetches the
 authoritative API, exactly like the other public pages.
 
@@ -991,7 +997,7 @@ Otherwise the request redirects to the home page. Unknown, invalid, retired,
 unassigned, and deleted tags, and tags on a duck whose participant withdrew or
 was disqualified, therefore do not expose inventory metadata or that participant.
 A successful status page can show the event, policy-filtered
-participant name, visible duck number, assigned round-one/final heat, current
+participant name, filtered public duck name or numbered fallback, assigned round-one/final heat, current
 active heat, and race outcome. It never shows contact details, lookup codes,
 private links, staff history, or storage location.
 
@@ -2648,9 +2654,10 @@ event, `/race` has nothing to report, so it redirects to the home page with a
   instead of raw enum text.
 - Ordered round-one and final heats.
 - Safe heat status, including calling, running, and awaiting-result emphasis.
-- Policy-filtered participant display names and visible duck numbers, with the
-  participant-chosen duck name beside the number when there is one the read-time
-  filter allows. The link text stays the bare number; the name never replaces it.
+- Policy-filtered participant display names and visible duck numbers. A filtered
+  participant-chosen duck name completely replaces the generic `Duck #N` label;
+  unnamed and read-time-suppressed entries retain that fallback. The numbered
+  detail-link destination and response field do not change.
 - Finalized heat winners moved to the top of their heat roster with an accessible
   gold **Winner** ribbon beside the participant; all non-winners retain slot
   order. The ordered final podium carries the duck name on the same terms.
@@ -2672,8 +2679,8 @@ Participant-level race status remains available through an assigned active duck
 tag, exact public name search, and browser collection cards. It exposes:
 
 - Policy-filtered participant display name.
-- Visible duck number when currently assigned, and the filtered participant-
-  chosen duck name beside it.
+- Visible duck number when currently assigned, with the filtered participant-
+  chosen duck name as its displayed label or `Duck #N` when unnamed.
 - Round-one and final heat numbers and statuses.
 - The event's one currently calling, running, or awaiting-result heat.
 - Pairing pending, heat assignment pending, not raced, running, awaiting result,

@@ -49,10 +49,9 @@ export interface PublicRaceStatus {
   };
   participantDisplayName: string;
   duck: { visibleNumber: number } | null;
-  // The participant-chosen name for this duck, or null when there is none and
-  // when the read-time filter suppresses one. The canonical duck number is
-  // always present alongside it, so a surface can show both and still match the
-  // number printed on the physical duck.
+  // The participant-chosen name for this duck, or null when there is none or
+  // when the read-time filter suppresses one. Public renderers use this as the
+  // duck's label and fall back to the separately projected visible number.
   duckName: string | null;
   assignedHeat: {
     roundOne: { number: number; status: string } | null;

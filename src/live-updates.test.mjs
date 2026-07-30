@@ -166,6 +166,7 @@ test("failed best-effort publication settles inside waitUntil", async () => {
 test("successful mutation routes have explicit bounded refresh domains", () => {
   const cases = [
     ["POST", "/api/v1/registrations", ["participants"]],
+    ["POST", "/api/v1/registrations/mine/duck-name", ["participants", "ducks", "heats"]],
     ["POST", "/api/v1/registrations/mine/delete", ["participants"]],
     ["POST", "/api/v1/staff/profiles", ["staff"]],
     ["POST", "/api/v1/staff/profiles/profile/role", ["staff"]],

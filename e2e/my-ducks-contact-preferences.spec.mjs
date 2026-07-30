@@ -90,6 +90,8 @@ test.describe("owned My Ducks contact preferences", () => {
     });
     await expect(refreshed.locator("[data-contact-summary]")).toContainText("owned.updated@example.test");
     await expect(refreshed.locator("[data-contact-summary]")).toContainText("+15550108888");
+    await expect(refreshed.locator("[data-contact-summary]")).toContainText("Email updates: Opted in");
+    await expect(refreshed.locator("[data-contact-summary]")).toContainText("SMS updates: Opted in");
 
     for (const width of [320, 390, 768, 1280]) {
       await page.setViewportSize({ width, height: 900 });
