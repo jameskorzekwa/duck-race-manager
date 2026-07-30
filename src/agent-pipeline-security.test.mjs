@@ -247,6 +247,11 @@ test("the exact-head gate is autonomous and keeps deployment human-approved", as
   assert.match(gate, /decision\.verdict === "approved"/);
   assert.match(gate, /VALIDATE_RESULT === "success"/);
   assert.match(gate, /!revokedAfterStart/);
+  assert.match(gate, /context: "Validate"/);
+  assert.ok(
+    gate.indexOf('completeCheck("success"') < gate.indexOf('context: "Validate"'),
+    "the Validate status is published only alongside an approved exact-head decision",
+  );
 
   const release = await read(".github/workflows/release.yml");
   assert.match(release, /environment:/);

@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      checks: write
+      statuses: write
       issues: write
       pull-requests: write
     steps:
@@ -67,13 +67,10 @@ jobs:
             await github.rest.issues.setLabels({
               owner, repo, issue_number: issueNumber, labels: [...labels, "agent:review"],
             });
-            await github.rest.checks.create({
-              owner, repo, name: "Agent Review / Exact SHA", head_sha: pr.head.sha,
-              status: "completed", conclusion: "failure",
-              external_id: `agent-review-dismissed:${context.runId}`,
-              details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-              output: {
-                title: "Approval was dismissed",
-                summary: "Exact-head approval was revoked. Submit a new approval to rerun Agent Review.",
-              },
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: pr.head.sha,
+              context: "Agent Review / Exact SHA",
+              state: "failure",
+              description: `agent-review-dismissed:${context.runId}`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
             });

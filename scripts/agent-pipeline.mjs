@@ -56,14 +56,17 @@ function pipelinePullProvenance(pr, defaultBranch) {
 }
 
 export async function validExactCheck(github, owner, repo, pr) {
-  const checks = await github.rest.checks.listForRef({
-    owner, repo, ref: pr.head.sha, check_name: "Agent Review / Exact SHA", per_page: 100,
+  // The gate publishes a commit status, not a check run: statuses bind purely
+  // to the SHA, so the merge box counts them for workflow-token-created PRs
+  // that never receive an associated pull_request_target check suite.
+  const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+    owner, repo, ref: pr.head.sha, per_page: 100,
   });
-  const check = checks.data.check_runs
-    .sort((left, right) => Date.parse(right.started_at) - Date.parse(left.started_at))[0];
-  const match = check?.external_id?.match(new RegExp(`^agent-review:${pr.base.sha}:(\\d+)$`));
-  if (check?.status !== "completed" || check.conclusion !== "success"
-      || check.app?.slug !== "github-actions" || !match) return false;
+  const check = statuses
+    .filter((status) => status.context === "Agent Review / Exact SHA")
+    .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
+  const match = check?.description?.match(new RegExp(`^agent-review:${pr.base.sha}:(\\d+)\\b`));
+  if (check?.state !== "success" || check.creator?.id !== 41898282 || !match) return false;
   try {
     const run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: Number(match[1]) })).data;
     if (run.path !== ".github/workflows/agent-review.yml") return false;

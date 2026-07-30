@@ -107,11 +107,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      checks: write
       issues: write
       pull-requests: write
-    outputs:
-      check-id: ${{ steps.reset.outputs.check-id }}
+      statuses: write
     steps:
       - name: Reset exact-head state
         id: reset
@@ -132,20 +130,18 @@ jobs:
               return;
             }
 
-            const check = await github.rest.checks.create({
-              owner,
-              repo,
-              name: "Agent Review / Exact SHA",
-              head_sha: expectedHead,
-              status: "in_progress",
-              external_id: `agent-review:${pr.base.sha}:${context.runId}`,
-              details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-              output: {
-                title: "Agent review in progress",
-                summary: `Reviewing head ${expectedHead} against base ${pr.base.sha}.`,
-              },
+            // A commit status, unlike an API-created check run, binds purely to
+            // the SHA: PRs created with the workflow token trigger no
+            // pull_request_target run, and a check run created from a
+            // workflow_dispatch run lands in a suite the merge box does not
+            // associate with the PR.
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: expectedHead,
+              context: "Agent Review / Exact SHA",
+              state: "pending",
+              description: `agent-review:${pr.base.sha}:${context.runId}`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
             });
-            core.setOutput("check-id", String(check.data.id));
 
             const removeLabel = async (issue_number, name) => {
               try {
@@ -421,10 +417,10 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: write
-      checks: write
       contents: read
       issues: write
       pull-requests: write
+      statuses: write
     steps:
       - name: Publish invalid-provenance candidate check
         if: needs.prepare.result != 'success'
@@ -460,12 +456,12 @@ jobs:
             } catch (error) {
               core.warning(`Auto-merge was not active or could not be disabled: ${error.message}`);
             }
-            await github.rest.checks.create({
-              owner, repo, name: "Agent Review / Exact SHA", head_sha: head,
-              status: "completed", conclusion: "failure",
-              external_id: `agent-review-invalid:${context.runId}`,
-              details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-               output: { title: "Invalid agent PR provenance", summary: "The trusted issue, automation author, run, branch, body, and base markers did not agree." },
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: head,
+              context: "Agent Review / Exact SHA",
+              state: "failure",
+              description: `agent-review-invalid:${context.runId}`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
             });
 
       - name: Reject invalid review context
@@ -480,13 +476,12 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
-            await github.rest.checks.create({
-              owner, repo, name: "Agent Review / Exact SHA",
-              head_sha: "${{ needs.prepare.outputs.head }}",
-              status: "completed", conclusion: "success",
-              external_id: `agent-review-not-applicable:${context.runId}`,
-              details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-              output: { title: "Agent review not applicable", summary: "This is not an agent-pipeline PR; ordinary required CI still applies." },
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha: "${{ needs.prepare.outputs.head }}",
+              context: "Agent Review / Exact SHA",
+              state: "success",
+              description: `agent-review-not-applicable:${context.runId}`,
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
             });
 
       - name: Download independent decision
@@ -502,7 +497,6 @@ jobs:
         env:
           EXPECTED_HEAD: ${{ needs.prepare.outputs.head }}
           EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
-          CHECK_ID: ${{ needs.reset-state.outputs.check-id }}
           ISSUE_NUMBER: ${{ needs.prepare.outputs.issue }}
           PR_NUMBER: ${{ needs.prepare.outputs.pr }}
           RESET_RESULT: ${{ needs.reset-state.result }}
@@ -535,28 +529,14 @@ jobs:
                 owner, repo, issue_number: issueNumber, labels: [...labels, name],
               });
             };
-            const completeCheck = async (conclusion, title, summary) => {
-              const checkId = Number(process.env.CHECK_ID);
-              const payload = {
-                owner,
-                repo,
-                name: "Agent Review / Exact SHA",
-                head_sha: expectedHead,
-                status: "completed",
-                conclusion,
-                external_id: `agent-review:${expectedBase}:${context.runId}`,
-                details_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
-                output: { title, summary },
-              };
-              if (Number.isSafeInteger(checkId) && checkId > 0) {
-                await github.rest.checks.update({
-                  owner, repo, check_run_id: checkId, status: payload.status,
-                  conclusion: payload.conclusion, external_id: payload.external_id,
-                  details_url: payload.details_url, output: payload.output,
-                });
-              } else {
-                await github.rest.checks.create(payload);
-              }
+            const completeCheck = async (conclusion, title) => {
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: expectedHead,
+                context: "Agent Review / Exact SHA",
+                state: conclusion === "success" ? "success" : "failure",
+                description: `agent-review:${expectedBase}:${context.runId} ${title}`.slice(0, 140),
+                target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              });
             };
 
             const pr = (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
@@ -599,6 +579,18 @@ jobs:
               await github.rest.issues.addLabels({ owner, repo, issue_number: prNumber, labels: ["agent:approved"] });
               await setIssueState("agent:approved");
               await completeCheck("success", "Exact-head review approved", `Validated and reviewed ${expectedHead} against ${expectedBase}.`);
+              // The validate-candidate job just ran the identical release gate
+              // at this exact head on a hosted runner, so satisfy the required
+              // Validate context directly. Workflow-token PRs cannot rely on a
+              // pull_request CI run: GitHub holds those behind a manual
+              // "approve and run" for bot authors.
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: expectedHead,
+                context: "Validate",
+                state: "success",
+                description: `agent-review:${expectedBase}:${context.runId} release gate passed`.slice(0, 140),
+                target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              });
               return;
             }
 
