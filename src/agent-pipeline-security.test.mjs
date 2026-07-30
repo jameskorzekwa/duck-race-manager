@@ -14,7 +14,10 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.doesNotMatch(implement, /models: read|OPENCODE_AUTH_CONTENT|GITHUB_TOKEN:/);
   assert.match(implement, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
   assert.match(implement, /openchamber session create/);
-  assert.match(implement, /openai\/gpt-5\.6-sol/);
+  assert.match(implement, /vars\.AGENT_IMPLEMENT_MODEL \|\| 'openai\/gpt-5\.6-sol'/);
+  assert.match(implement, /vars\.AGENT_IMPLEMENT_VARIANT \|\| 'xhigh'/);
+  assert.match(implement, /PIPELINE_IMPLEMENT_MODEL.*=~.*\^\[a-z0-9-\]\+\/\[A-Za-z0-9\._-\]\+\$/);
+  assert.match(implement, /--model "\$PIPELINE_IMPLEMENT_MODEL"/);
   assert.doesNotMatch(implement, /quickducks-local-oauth-model/);
   assert.doesNotMatch(implement, /OPENCODE_ENSEMBLE_TIMEOUT|--dir "\$GITHUB_WORKSPACE"/);
   assert.match(implement, /timeout-minutes: 170/);
@@ -75,7 +78,8 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   assert.doesNotMatch(review, /models: read|OPENCODE_AUTH_CONTENT|GITHUB_TOKEN:/);
   assert.match(review, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
   assert.match(review, /openchamber session create/);
-  assert.match(review, /anthropic\/claude-opus-4-8/);
+  assert.match(review, /vars\.AGENT_REVIEW_MODEL \|\| 'anthropic\/claude-opus-4-8'/);
+  assert.match(review, /--model "\$PIPELINE_REVIEW_MODEL"/);
   assert.match(review, /wait-for-openchamber-session\.mjs/);
   assert.doesNotMatch(review, /openchamber session create[\s\S]*?--wait/);
   assert.match(review, /session-dispatch\.json" 2>&1 \|\| true/);

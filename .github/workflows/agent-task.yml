@@ -302,8 +302,22 @@ jobs:
 
       - name: Run local OAuth implementation lead in OpenChamber
         shell: bash
+        env:
+          # Repository Actions variables select the paid models without a commit.
+          # Only repository admins can set them; the format is validated below
+          # and the model must exist in the local OpenChamber runtime.
+          PIPELINE_IMPLEMENT_MODEL: ${{ vars.AGENT_IMPLEMENT_MODEL || 'openai/gpt-5.6-sol' }}
+          PIPELINE_IMPLEMENT_VARIANT: ${{ vars.AGENT_IMPLEMENT_VARIANT || 'xhigh' }}
         run: |
           set -euo pipefail
+          if ! [[ "$PIPELINE_IMPLEMENT_MODEL" =~ ^[a-z0-9-]+/[A-Za-z0-9._-]+$ ]]; then
+            printf 'AGENT_IMPLEMENT_MODEL %q is not provider/model.\n' "$PIPELINE_IMPLEMENT_MODEL" >&2
+            exit 1
+          fi
+          if ! [[ "$PIPELINE_IMPLEMENT_VARIANT" =~ ^[a-z0-9-]+$ ]]; then
+            printf 'AGENT_IMPLEMENT_VARIANT %q is not a variant name.\n' "$PIPELINE_IMPLEMENT_VARIANT" >&2
+            exit 1
+          fi
           STATE_PATH="$HOME/.local/state/quickducks-agent-runner/active.json" node <<'NODE'
           const fs = require("node:fs");
           const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
@@ -315,9 +329,9 @@ jobs:
             --dir "$PIPELINE_MODEL_DIR" \
             --title "QuickDucks issue #${PIPELINE_ISSUE} implementation" \
             --prompt "Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot at .pipeline/context.json. Follow the pipeline-orchestrator contract and emit exactly one final task marker." \
-            --model openai/gpt-5.6-sol \
+            --model "$PIPELINE_IMPLEMENT_MODEL" \
             --agent pipeline-orchestrator \
-            --variant xhigh \
+            --variant "$PIPELINE_IMPLEMENT_VARIANT" \
             --json \
             > "$RUNNER_TEMP/agent-task/session-dispatch.json" 2>&1 || true
           node "$GITHUB_WORKSPACE/scripts/wait-for-openchamber-session.mjs" \
