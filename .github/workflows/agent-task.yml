@@ -49,7 +49,7 @@ jobs:
             const issueNumber = Number(process.env.ISSUE_NUMBER);
             const trustedUserId = 38769771;
             const stateLabels = [
-              "agent:inbox", "agent:triage", "agent:ready", "agent:running",
+              "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
               "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
               "agent:deployed", "agent:failed",
             ];
@@ -92,7 +92,7 @@ jobs:
               return;
             }
 
-            await setState(issue, "agent:running");
+            await setState(issue, "agent:queued");
             await github.rest.issues.createComment({
               owner, repo, issue_number: issueNumber,
               body: `<!-- agent-pipeline task-run=${context.runId} -->\n[Agent Task run](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})`,
@@ -100,6 +100,53 @@ jobs:
             core.setOutput("base", branch.data.commit.sha);
             core.setOutput("issue", String(issueNumber));
             core.setOutput("skip", "false");
+
+  mark-running:
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    permissions:
+      actions: read
+      issues: write
+    steps:
+      - name: Flip queued to running when the model runner starts
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const states = [
+              "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
+              "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
+              "agent:deployed", "agent:failed",
+            ];
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            // The implement job serializes on the single model runner, so an
+            // issue can sit queued for a long time. Reflect reality: flip the
+            // label only when the runner actually starts the job. Later jobs
+            // write terminal states after implement concludes, so this single
+            // in-progress write cannot overwrite them.
+            for (let attempt = 0; attempt < 680; attempt += 1) {
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id: context.runId, per_page: 100,
+              });
+              const implement = jobs.find((job) => job.name === "implement");
+              if (implement?.status === "completed") return;
+              if (implement?.status === "in_progress") {
+                const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+                const labels = issue.labels.map((label) => label.name).filter((label) => !states.includes(label));
+                if (issue.state === "open") {
+                  await github.rest.issues.setLabels({
+                    owner, repo, issue_number: issueNumber, labels: [...labels, "agent:running"],
+                  });
+                }
+                return;
+              }
+              await wait(30000);
+            }
 
   implement:
     needs: prepare
@@ -565,7 +612,7 @@ jobs:
             const issueNumber = Number(process.env.ISSUE_NUMBER);
             const result = JSON.parse(fs.readFileSync("task-artifact/task-result.json", "utf8"));
             const states = [
-              "agent:inbox", "agent:triage", "agent:ready", "agent:running",
+              "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
               "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
               "agent:deployed", "agent:failed",
             ];
@@ -710,7 +757,7 @@ jobs:
             const { owner, repo } = context.repo;
             const issueNumber = Number(process.env.ISSUE_NUMBER);
             const states = [
-              "agent:inbox", "agent:triage", "agent:ready", "agent:running",
+              "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
               "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
               "agent:deployed", "agent:failed",
             ];
@@ -761,7 +808,7 @@ jobs:
               ? ` <!-- agent-pipeline attempt-digest=${attemptDigest} -->`
               : "";
             const states = [
-              "agent:inbox", "agent:triage", "agent:ready", "agent:running",
+              "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
               "agent:grouped", "agent:blocked", "agent:review", "agent:approved",
               "agent:deployed", "agent:failed",
             ];
