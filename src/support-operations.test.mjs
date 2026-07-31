@@ -177,6 +177,42 @@ test("notification retry creates a durable attempt and queues only its notificat
   assert.doesNotMatch(JSON.stringify(db.batches), /private_token|provider_message_id|error_detail/);
 });
 
+test("SES acceptance is terminal SENT without being called delivered", async () => {
+  const db = makeDb(() => null, () => ({
+    results: [{
+      id: "notification_test",
+      registration_id: "registration_test",
+      notification_type: "HEAT_UPCOMING",
+      status: "SENT",
+      template_version: 1,
+      scheduled_at: null,
+      queued_at: "2026-07-30T00:00:00.000Z",
+      sent_at: "2026-07-30T00:00:01.000Z",
+      terminal_at: null,
+      status_reason: null,
+      last_error_code: null,
+      created_at: "2026-07-30T00:00:00.000Z",
+      first_name: "Synthetic",
+      last_name: "Racer",
+      heat_number: 1,
+      round: "FINAL",
+      attempt_count: 1,
+      last_attempt_status: "SENT",
+      last_attempt_error_code: null,
+    }],
+  }));
+  const response = await handleSupportOperations(
+    new Request("https://quickducks.com/api/v1/staff/support/events/event_test/notifications"),
+    makeEnv(db),
+    admin,
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.notifications[0].status, "SENT");
+  assert.equal(body.notifications[0].terminal, true);
+  assert.equal(body.notifications[0].terminalAt, null);
+});
+
 test("notification cancellation records the reason outside redacted audit details", async () => {
   const commandId = crypto.randomUUID();
   let commandLookups = 0;

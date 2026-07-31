@@ -42,6 +42,7 @@
   "vars": {
     "APP_ORIGIN": "http://localhost:8787",
     "AWS_REGION": "us-east-1",
+    "SES_FROM_ADDRESS": "reminders@quickducks.com",
     "COGNITO_USER_POOL_ID": "us-east-1_local0000",
     "COGNITO_USER_POOL_CLIENT_ID": "localdevclientid",
     "COGNITO_DOMAIN": "http://localhost:8787"
@@ -74,7 +75,20 @@
         "binding": "EMAIL_QUEUE",
         "queue": "quickducks-email-local"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "quickducks-email-local",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 5,
+        "retry_delay": 1,
+        "dead_letter_queue": "quickducks-email-dlq-local"
+      }
     ]
+  },
+  "triggers": {
+    "crons": ["*/1 * * * *"]
   },
   "ratelimits": [
     {

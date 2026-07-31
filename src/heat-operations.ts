@@ -1,5 +1,6 @@
 import type { StaffActor } from "./auth.ts";
 import { hasAnyRole, requireAnyRole } from "./authorization.ts";
+import { HEAT_UPCOMING_NOTIFICATION } from "./email-notifications.ts";
 import { publicDisplayName } from "./race-board.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
@@ -1298,6 +1299,24 @@ const transitionHeat = async (
         requestFingerprint, heatId, eventId, definition.expected, revision,
       ),
       env.DB.prepare(updateSql).bind(...updateArgs),
+      ...(transition === "call" ? [env.DB.prepare(
+        `INSERT OR IGNORE INTO email_notifications
+          (id, event_id, registration_id, heat_id, notification_type, status,
+           template_version, created_by_command_id, scheduled_at)
+         SELECT lower(hex(randomblob(16))), h.event_id, r.id, h.id, ?, 'PENDING', 1, ?, ?
+           FROM heats h
+           JOIN heat_entries he ON he.heat_id = h.id AND he.event_id = h.event_id
+           JOIN race_entries re ON re.id = he.race_entry_id AND re.event_id = h.event_id
+           JOIN registrations r ON r.id = re.registration_id AND r.event_id = h.event_id
+          WHERE h.id = ? AND h.event_id = ? AND h.status = 'CALLING'
+            AND r.status = 'ACTIVE' AND r.email IS NOT NULL
+            AND r.email_notifications_enabled = 1
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.event_id = h.event_id
+                 AND rc.command_type = 'CALL_HEAT' AND rc.result_id = h.id
+            )`,
+      ).bind(HEAT_UPCOMING_NOTIFICATION, commandId, now, heatId, eventId, commandId)] : []),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,

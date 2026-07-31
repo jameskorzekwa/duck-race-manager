@@ -39,6 +39,12 @@ const androidChromeUserAgent = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWe
 const iPhoneUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1";
 const desktopChromeUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 
+test("exports the queue consumer and scheduled outbox alongside fetch", () => {
+  assert.equal(typeof worker.fetch, "function");
+  assert.equal(typeof worker.queue, "function");
+  assert.equal(typeof worker.scheduled, "function");
+});
+
 test("redirects HTTP requests to canonical HTTPS", async () => {
   const response = await worker.fetch(
     new Request("http://quickducks.com/api/v1/events/current"),

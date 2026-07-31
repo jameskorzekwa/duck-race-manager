@@ -384,6 +384,7 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(registrationScript, /publicNamePolicy/);
   assert.match(registrationScript, /Your name will appear publicly as/);
   assert.match(registrationScript, /Your email and phone stay private/);
+  assert.match(registrationScript, /emailNotificationsEnabled: data\.get\("email_notifications_enabled"\) === "on"/);
   assert.doesNotMatch(registrationScript, /duckKeepPreference|duck_keep_preference/);
   assert.match(registrationScript, /\/my-ducks\?registered=/);
   assert.match(registrationScript, /registrationStoreHandoff\(globalThis\.sessionStorage/);

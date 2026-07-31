@@ -9,6 +9,7 @@ import {
   expectNoDocumentOverflow,
   finalizeHeat,
   intakeDuck,
+  localEmailInbox,
   pairDuck,
   registerParticipant,
   seedState,
@@ -89,6 +90,7 @@ test.describe("complete race journey", () => {
       await form.getByLabel("Last name").fill("Racer");
       await form.getByLabel(/Email/).fill("browser.racer@example.test");
       await form.getByLabel("Phone (optional)").fill("+15550200000");
+      await form.getByRole("checkbox", { name: /Send race reminder emails/ }).check();
       await form.getByRole("button", { name: "Register participant" }).click();
       await expect(page).toHaveURL(`${baseUrl}/my-ducks`);
       const registrations = (await client.get(
@@ -96,11 +98,17 @@ test.describe("complete race journey", () => {
       )).body.registrations;
       const firstBody = registrations.find((registration) => registration.email === "browser.racer@example.test");
       expect(firstBody).toBeTruthy();
+      const privateToken = await page.evaluate(() => {
+        const proofs = JSON.parse(localStorage.getItem("quickducks.participant-ownership.v1") || "{}");
+        return Object.values(proofs)[0];
+      });
+      expect(privateToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
       participants.push({
         firstName: "Browser",
         lastName: "Racer",
         registrationId: firstBody.registrationId,
         lookupCode: firstBody.lookupCode,
+        privateToken,
       });
       await expect(page.getByText("Registration saved.")).toBeVisible();
       expect(page.url()).not.toContain("privateToken");
@@ -165,6 +173,15 @@ test.describe("complete race journey", () => {
       });
       await expect(staffPage.getByRole("heading", { name: "Duck #101 paired" })).toBeVisible();
       await expect(staffPage.locator("[data-staff-message]")).toHaveText("Duck paired successfully.");
+      await expect.poll(async () => (await localEmailInbox())
+        .filter((message) => message.to === "browser.racer@example.test").length).toBe(1);
+      const [assignmentReminder] = (await localEmailInbox())
+        .filter((message) => message.to === "browser.racer@example.test");
+      expect((await localEmailInbox()).every((message) => message.to === "browser.racer@example.test")).toBe(true);
+      expect(assignmentReminder.subject).toContain("Duck #101 is assigned to Round One / Heat");
+      expect(assignmentReminder.text).toContain("return to the pond when your heat is called");
+      expect(assignmentReminder.text + assignmentReminder.html).not.toContain(participants[0].privateToken);
+      expect(assignmentReminder.text + assignmentReminder.html).not.toContain(participants[0].lookupCode);
 
       // Pairing seals this duck into a numbered heat bag it never comes out of,
       // so the race flow is not honest without the panel that names the bag.
@@ -289,6 +306,10 @@ test.describe("complete race journey", () => {
         Object.assign(heat, detail.heat);
         await transitionHeat(client, event.id, heat, "ready");
         await transitionHeat(client, event.id, heat, "call");
+        if (detail.roster.some((entry) => entry.duck.visibleNumber === ducks[0].visibleNumber)) {
+          await expect.poll(async () => (await localEmailInbox())
+            .filter((message) => message.to === "browser.racer@example.test").length).toBe(2);
+        }
         await transitionHeat(client, event.id, heat, "start");
         await transitionHeat(client, event.id, heat, "finish");
         // Make the browser-registered participant a winner when its heat comes
@@ -298,6 +319,13 @@ test.describe("complete race journey", () => {
           ?? detail.roster[0];
         await finalizeHeat(client, event.id, heat, [{ raceEntryId: winner.raceEntryId, place: 1 }]);
       }
+      await expect.poll(async () => (await localEmailInbox())
+        .filter((message) => message.to === "browser.racer@example.test").length).toBe(2);
+      const roundOneReminders = (await localEmailInbox())
+        .filter((message) => message.to === "browser.racer@example.test");
+      expect(roundOneReminders.filter((message) => /Round One \/ Heat \d+ is being called/.test(message.subject)))
+        .toHaveLength(1);
+      expect(roundOneReminders.every((message) => !message.text.includes("/r/"))).toBe(true);
     });
 
     let finalDetail;
@@ -309,6 +337,14 @@ test.describe("complete race journey", () => {
       await page.goto("/staff/start-line");
       await page.getByRole("button", { name: "Mark Heat Ready" }).click();
       await page.getByRole("button", { name: "Heat Has Been Announced" }).click();
+      await expect.poll(async () => (await localEmailInbox())
+        .filter((message) => message.to === "browser.racer@example.test").length).toBe(3);
+      const finalReminder = (await localEmailInbox())
+        .filter((message) => message.to === "browser.racer@example.test")
+        .find((message) => message.subject.includes("Final / Heat 1 is being called"));
+      expect(finalReminder).toBeTruthy();
+      expect(finalReminder.text).toContain("Please head back to the pond");
+      expect((await localEmailInbox()).every((message) => message.to === "browser.racer@example.test")).toBe(true);
       await page.getByRole("button", { name: "Start This Heat" }).click();
       await confirmAction(page);
 
@@ -407,6 +443,7 @@ test.describe("complete race journey", () => {
       await page.goto("/");
       await expect(page.getByText(/The next race is being prepared/)).toBeVisible();
       expect((await client.get("/api/v1/staff/events")).body.events).toEqual([]);
+      await expect.poll(async () => (await localEmailInbox()).length).toBe(0);
       await expect(page.getByRole("link", { name: "Staff" })).toBeVisible();
     });
 

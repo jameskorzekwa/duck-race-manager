@@ -48,10 +48,23 @@ test("enforces required names and event email policy", () => {
 test("disables notifications when email is omitted", () => {
   const form = validForm();
   form.delete("email");
+  form.delete("email_notifications_enabled");
   const result = validateRegistration(form, false);
 
   assert.equal(result.value?.email, null);
   assert.equal(result.value?.emailNotificationsEnabled, false);
+});
+
+test("requires an address when race reminder emails are requested", () => {
+  const form = validForm();
+  form.delete("email");
+  const result = validateRegistration(form, false);
+
+  assert.equal(result.value, undefined);
+  assert.equal(
+    result.errors.email_notifications_enabled,
+    "Add an email address before choosing race reminders.",
+  );
 });
 
 test("creates URL-safe private tokens and deterministic hashes", async () => {

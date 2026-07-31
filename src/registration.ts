@@ -76,6 +76,7 @@ export const validateRegistration = (
   const lastName = cleanName(form.get("last_name"));
   const email = cleanOptional(form.get("email"))?.toLowerCase() ?? null;
   const phone = cleanOptional(form.get("phone"));
+  const emailNotificationsRequested = form.get("email_notifications_enabled") === "on";
   const errors: Record<string, string> = {};
 
   if (firstName.length === 0) errors.first_name = "Enter a first name.";
@@ -86,6 +87,9 @@ export const validateRegistration = (
   if (emailRequired && email === null) errors.email = "Email is required for this race.";
   if (email !== null && (email.length > 254 || !emailPattern.test(email))) {
     errors.email = "Enter a valid email address.";
+  }
+  if (emailNotificationsRequested && email === null) {
+    errors.email_notifications_enabled = "Add an email address before choosing race reminders.";
   }
 
   if (phone !== null && phone.length > 32) errors.phone = "Use 32 characters or fewer.";
@@ -99,7 +103,7 @@ export const validateRegistration = (
       lastName,
       email,
       phone,
-      emailNotificationsEnabled: email !== null && form.get("email_notifications_enabled") === "on",
+      emailNotificationsEnabled: emailNotificationsRequested,
     },
   };
 };

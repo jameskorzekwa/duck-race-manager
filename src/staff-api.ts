@@ -7,6 +7,7 @@ import {
   type OperationalRole,
 } from "./authorization.ts";
 import { publicDuckName } from "./duck-name-filter.ts";
+import { HEAT_ASSIGNED_NOTIFICATION } from "./email-notifications.ts";
 import { winnerByTagCandidate, winnerByTagIneligible } from "./heat-operations.ts";
 import { isLookupCode, normalizeLookupCode } from "./participant-qr.ts";
 import { isCommandId } from "./registration.ts";
@@ -761,6 +762,34 @@ const pairDuck = async (
       duck_id: duck.id,
       heat_number: heat?.number ?? null,
     }),
+  ));
+  statements.push(env.DB.prepare(
+    `INSERT OR IGNORE INTO email_notifications
+      (id, event_id, registration_id, heat_id, notification_type, status,
+       template_version, created_by_command_id, scheduled_at)
+     SELECT ?, r.event_id, r.id, h.id, ?, 'PENDING', 1, ?, ?
+       FROM registrations r
+       JOIN race_entries re ON re.registration_id = r.id AND re.event_id = r.event_id
+       JOIN heat_entries he ON he.race_entry_id = re.id AND he.event_id = re.event_id
+       JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+      WHERE r.id = ? AND r.event_id = ? AND r.status = 'ACTIVE'
+        AND r.email IS NOT NULL AND r.email_notifications_enabled = 1
+        AND EXISTS (
+          SELECT 1 FROM race_commands rc
+           WHERE rc.id = ? AND rc.event_id = r.event_id
+             AND rc.command_type = 'ASSIGN_DUCK' AND rc.result_id = ?
+        )
+      ORDER BY CASE h.round WHEN 'FINAL' THEN 0 ELSE 1 END, h.heat_number
+      LIMIT 1`,
+  ).bind(
+    crypto.randomUUID(),
+    HEAT_ASSIGNED_NOTIFICATION,
+    commandId,
+    now,
+    context.registration_id,
+    eventId,
+    commandId,
+    assignmentId,
   ));
 
   try {

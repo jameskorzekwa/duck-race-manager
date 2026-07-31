@@ -739,6 +739,7 @@ export const renderRegistration = (
           <label><span class="label-text" data-email-label>Email (optional)</span><input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>Used only for operational race updates.</span><span class="field-error" data-field-error="email"></span></label>
           <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" maxlength="32" placeholder="(555) 010-2040"><span class="field-error" data-field-error="phone"></span></label>
         </div>
+        <label class="check"><input name="email_notifications_enabled" type="checkbox"><span><strong>Send race reminder emails</strong><br>Receive your duck and heat assignment, plus a reminder when your heat is being called. You can opt out later from your owned My Ducks card.<span class="field-error" data-field-error="email_notifications_enabled"></span></span></label>
         ${turnstileSiteKey !== undefined
           ? `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-size="flexible"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
           : localPreviewWithoutProtection

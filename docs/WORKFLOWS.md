@@ -2901,19 +2901,44 @@ not return `details_json`, contact data, tokens, or provider details.
 
 ### Notification Support
 
-The schema and administrator UI can list notification rows and attempts, retry
-`FAILED` or `RETRY_PENDING` records, and suppress or cancel eligible records.
-Retry creates a durable queue attempt and publishes only the notification ID to
-the configured queue producer.
+Participants can opt in to race reminders on the registration form and can
+change that choice from their owned My Ducks card. Pairing creates one
+`HEAT_ASSIGNED` reminder with the authoritative duck number and Round One heat.
+Moving either a Round One or Final heat to `CALLING` creates one
+`HEAT_UPCOMING` reminder for each currently active, opted-in roster member. The
+messages identify the event, participant, duck number, round, and heat, direct
+the participant back to the pond, and deliberately promise no start time.
+Onsite announcements remain authoritative.
 
-**Deferred and non-operational:** current registration, pairing, heat, and
-result commands never create `email_notifications` rows. `wrangler.jsonc`
-declares only an `EMAIL_QUEUE` producer. There is no Worker queue consumer, SES
-template/send path, delivery callback, or automatic retry processor. Therefore
-no registration, assignment, upcoming-heat, finalist, or result email is
-currently delivered, regardless of the stored email-notification setting.
-Notification support controls operate only on records inserted by some external
-or future process and must not be presented as proof that delivery exists.
+Notification rows are committed in the same D1 batch as the pairing or heat
+command. Queue publication happens after that commit and is isolated from the
+race response. A scheduled bounded outbox scan recovers a failed publication or
+a stale queue-publication claim. Every Cloudflare Queue body is only the durable
+notification ID; it never contains an address, participant name, message body,
+lookup code, private/status/tag token, or race data.
+
+The queue consumer claims a delivery attempt before contacting Amazon SES,
+then reloads the current registration, assignment, and heat. It cancels rather
+than sends after opt-out, address removal, withdrawal/disqualification, event
+deletion, or stale heat state. Duplicate domain commands create no second
+logical row, and duplicate queue delivery after `SENT` makes no second provider
+call. Temporary network, throttling, and provider failures use Queue retry and
+the configured DLQ; permanent request/recipient failures become `FAILED` with
+only an enumerated safe code.
+
+SES acceptance is recorded honestly as `SENT` and is terminal for current
+support counts; it is not called `DELIVERED`. Delivery, bounce, and complaint
+feedback are not currently ingested. Because SES has no application idempotency
+key, a crash after provider acceptance but before D1 persistence is never
+blindly resent: stale `SENDING` is made `FAILED` with
+`DELIVERY_OUTCOME_UNKNOWN` for explicit administrator review/retry. This avoids
+claiming impossible exactly-once delivery.
+
+The administrator UI lists notification rows and attempts, retries `FAILED` or
+`RETRY_PENDING` records, and suppresses or cancels eligible records. Retry
+remains command-idempotent and publishes only the notification ID. Email
+failure never blocks pairing, a heat transition, an onsite announcement, or
+the rest of the race lifecycle.
 
 ## Delete Event (Any State)
 

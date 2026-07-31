@@ -28,6 +28,9 @@ const notificationStatuses = new Set([
 ]);
 
 const terminalNotificationStatuses = new Set([
+  // SES acceptance is the terminal success state until provider feedback is
+  // implemented. It must never be presented as confirmed mailbox delivery.
+  "SENT",
   "DELIVERED",
   "FAILED",
   "BOUNCED",
@@ -123,7 +126,7 @@ const operationalSummary = async (env: Env, eventId: string): Promise<Response> 
     ).bind(eventId).first<Record<string, unknown>>(),
     env.DB.prepare(
       `SELECT COUNT(*) AS total_count,
-              SUM(CASE WHEN status NOT IN ('DELIVERED', 'FAILED', 'BOUNCED', 'COMPLAINED', 'SUPPRESSED', 'CANCELLED') THEN 1 ELSE 0 END) AS nonterminal_count,
+              SUM(CASE WHEN status NOT IN ('SENT', 'DELIVERED', 'FAILED', 'BOUNCED', 'COMPLAINED', 'SUPPRESSED', 'CANCELLED') THEN 1 ELSE 0 END) AS nonterminal_count,
               SUM(CASE WHEN status IN ('FAILED', 'BOUNCED', 'COMPLAINED') THEN 1 ELSE 0 END) AS failed_count,
               SUM(CASE WHEN status = 'RETRY_PENDING' THEN 1 ELSE 0 END) AS retry_pending_count
          FROM email_notifications

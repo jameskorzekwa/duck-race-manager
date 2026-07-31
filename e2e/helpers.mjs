@@ -75,9 +75,9 @@ export const registerParticipant = async (client, eventId, index, overrides = {}
     privateToken,
     firstName,
     lastName,
-    email: `racer${index}@example.test`,
+    email: overrides.email ?? `racer${index}@example.test`,
     phone: `+1555020${String(index).padStart(4, "0")}`,
-    emailNotificationsEnabled: false,
+    emailNotificationsEnabled: overrides.emailNotificationsEnabled ?? false,
     turnstileToken: localPreviewTurnstileToken,
   }, { anonymous: true, label: `register synthetic racer ${index}` });
   return {
@@ -144,6 +144,12 @@ export const rawJson = async (path, { token, method = "GET", body, origin = base
     body: text === "" ? null : JSON.parse(text),
     headers: response.headers,
   };
+};
+
+export const localEmailInbox = async () => {
+  const response = await rawJson("/__local/email-inbox", { origin: null });
+  expect(response.status).toBe(200);
+  return response.body.messages;
 };
 
 // Ends a participant's current duck assignment through the inventory API. The

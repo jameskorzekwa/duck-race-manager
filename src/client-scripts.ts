@@ -354,7 +354,7 @@ form.addEventListener("submit", async (event) => {
     lastName: data.get("last_name"),
     email: data.get("email"),
     phone: data.get("phone"),
-    emailNotificationsEnabled: false,
+    emailNotificationsEnabled: data.get("email_notifications_enabled") === "on",
     turnstileToken,
     clientTimestamp: new Date().toISOString(),
   };

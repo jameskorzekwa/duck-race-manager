@@ -14,6 +14,7 @@
 // origin, so a copy of this module deployed by accident serves nothing.
 import { authenticateStaff } from "./auth.ts";
 import { createWorker } from "./index.ts";
+import { listLocalEmailInbox, type EmailSender } from "./email-notifications.ts";
 import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
 import { escapeHtml } from "./site.ts";
 import type { Env } from "./types.ts";
@@ -300,7 +301,16 @@ const refusal = (env: Env, requestUrl: URL): Response =>
     { status: 500, headers: noStoreHtml },
   );
 
-const worker = createWorker(localAuthenticate, localTokenFetch);
+// Local development exercises the real queue consumer, D1 claims, templates,
+// and status transitions but never contacts AWS. The local-only inbox endpoint
+// below renders accepted rows back from D1 for Playwright and manual previews.
+const localEmailSender: EmailSender = {
+  async send() {
+    return { messageId: `local-${crypto.randomUUID()}` };
+  },
+};
+
+const worker = createWorker(localAuthenticate, localTokenFetch, localEmailSender);
 
 const localWorker: ExportedHandler<Env> = {
   async fetch(request, env, ctx) {
@@ -375,11 +385,29 @@ const localWorker: ExportedHandler<Env> = {
     // and docs/LOCAL_DEVELOPMENT.md says it again.
     if (url.pathname === "/__local/staff" && request.method === "GET") return accountsResponse();
 
+    if (url.pathname === "/__local/email-inbox" && request.method === "GET") {
+      return Response.json({ messages: await listLocalEmailInbox(env) }, {
+        headers: { "cache-control": "no-store" },
+      });
+    }
+
     if (url.pathname.startsWith("/__local/")) {
       return Response.json({ error: "Unknown local development endpoint." }, { status: 404 });
     }
 
     return worker.fetch!(request, env, ctx);
+  },
+  async queue(batch, env, ctx) {
+    if (!isLocalPreviewOrigin(env.APP_ORIGIN ?? "")) {
+      throw new Error("The local email consumer refuses a non-local APP_ORIGIN.");
+    }
+    await worker.queue!(batch, env, ctx);
+  },
+  async scheduled(controller, env, ctx) {
+    if (!isLocalPreviewOrigin(env.APP_ORIGIN ?? "")) {
+      throw new Error("The local email outbox refuses a non-local APP_ORIGIN.");
+    }
+    await worker.scheduled!(controller, env, ctx);
   },
 };
 

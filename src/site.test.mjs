@@ -403,6 +403,10 @@ test("registration uses the responsive Turnstile widget contract", () => {
   const registration = renderRegistration("test-site-key", "REGISTRATION");
 
   assert.match(registration, /class="cf-turnstile"[^>]*data-size="flexible"/);
+  assert.match(registration, /name="email_notifications_enabled" type="checkbox"/);
+  assert.match(registration, /Send race reminder emails/);
+  assert.match(registration, /Receive your duck and heat assignment, plus a reminder when your heat is being called/);
+  assert.match(registration, /opt out later from your owned My Ducks card/);
   assert.match(style, /\.cf-turnstile,\.turnstile-mock \{ width:100%; min-width:0; max-width:100%; \}/);
 });
 

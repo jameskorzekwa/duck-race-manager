@@ -66,6 +66,7 @@ const localOrigin = "http://localhost:8787";
 const localEnv = (database) => ({
   APP_ORIGIN: localOrigin,
   AWS_REGION: "us-east-1",
+  SES_FROM_ADDRESS: "reminders@quickducks.com",
   COGNITO_USER_POOL_ID: "us-east-1_local0000",
   COGNITO_USER_POOL_CLIENT_ID: "localdevclientid",
   COGNITO_DOMAIN: localOrigin,
@@ -102,6 +103,7 @@ test("the deployed configuration never points at the local entry point", () => {
 test("the local configuration is loopback-only and binds no production resource", () => {
   const local = readConfig("wrangler.local.jsonc");
   const production = readConfig("wrangler.jsonc");
+  const example = readConfig("wrangler.example.jsonc");
 
   assert.equal(local.main, "src/local-dev.ts");
   assert.equal(local.vars.APP_ORIGIN, localOrigin);
@@ -116,6 +118,15 @@ test("the local configuration is loopback-only and binds no production resource"
   assert.notEqual(local.d1_databases[0].database_id, production.d1_databases[0].database_id);
   assert.notEqual(local.d1_databases[0].database_name, production.d1_databases[0].database_name);
   assert.notEqual(local.queues.producers[0].queue, production.queues.producers[0].queue);
+  assert.notEqual(local.queues.consumers[0].queue, production.queues.consumers[0].queue);
+  assert.notEqual(local.queues.consumers[0].dead_letter_queue, production.queues.consumers[0].dead_letter_queue);
+  assert.equal(local.queues.consumers[0].queue, local.queues.producers[0].queue);
+  assert.equal(production.queues.consumers[0].queue, production.queues.producers[0].queue);
+  assert.equal(production.queues.consumers[0].dead_letter_queue, "quickducks-email-dlq");
+  assert.equal(production.queues.consumers[0].max_retries, 5);
+  assert.deepEqual(example.queues, production.queues);
+  assert.deepEqual(example.triggers, production.triggers);
+  assert.equal(example.vars.SES_FROM_ADDRESS, production.vars.SES_FROM_ADDRESS);
 
   // The binding *shapes* must still match production, or local behaviour
   // diverges. The rate limiter in particular is read without an undefined guard.
@@ -128,6 +139,7 @@ test("the local configuration is loopback-only and binds no production resource"
     local.queues.producers.map((producer) => producer.binding),
     production.queues.producers.map((producer) => producer.binding),
   );
+  assert.deepEqual(local.triggers, production.triggers);
   assert.deepEqual(local.ratelimits, production.ratelimits);
 });
 
@@ -151,6 +163,18 @@ test("the local entry point refuses a non-loopback configuration", async () => {
     assert.equal(response.status, 500);
     assert.match(await response.text(), /Refusing to run/);
   }
+});
+
+test("the local email handlers refuse a non-local configuration before touching resources", async () => {
+  const nonLocal = { APP_ORIGIN: "https://quickducks.com" };
+  await assert.rejects(
+    localWorker.queue({ messages: [] }, nonLocal, {}),
+    /refuses a non-local APP_ORIGIN/,
+  );
+  await assert.rejects(
+    localWorker.scheduled({}, nonLocal, {}),
+    /refuses a non-local APP_ORIGIN/,
+  );
 });
 
 // Covers the mistake the configuration alone cannot: `wrangler dev --remote`, or
@@ -430,5 +454,17 @@ test("unknown local endpoints do not fall through to the site", async () => {
 
   assert.equal(response.status, 404);
   assert.match((await response.json()).error, /Unknown local development endpoint/);
+  database.close();
+});
+
+test("the local email inbox is local-only and starts empty", async () => {
+  const database = createDatabase();
+  const response = await localWorker.fetch(
+    new Request(`${localOrigin}/__local/email-inbox`),
+    localEnv(database),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { messages: [] });
+  assert.equal(response.headers.get("cache-control"), "no-store");
   database.close();
 });

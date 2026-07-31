@@ -36,6 +36,7 @@ import {
   type PublicRaceStatus,
 } from "./race-status.ts";
 import { handleDuckOperations } from "./duck-operations.ts";
+import { scheduleEmailOutbox } from "./email-notifications.ts";
 import { handleEventOperations } from "./event-operations.ts";
 import { handleHeatOperations } from "./heat-operations.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
@@ -1314,6 +1315,33 @@ const updateMyContact = async (
         commandId,
         registrationId,
       ),
+      // Revoking consent or removing the address cancels every reminder that
+      // has not entered the irreversible delivery claim. The consumer reads the
+      // current registration again immediately before SES for the narrow race
+      // where an already-claimed message overlaps this update.
+      env.DB.prepare(
+        `UPDATE email_notifications
+            SET status = 'CANCELLED', terminal_at = ?,
+                status_reason = 'PARTICIPANT_OPTED_OUT',
+                last_error_code = 'PARTICIPANT_OPTED_OUT', retry_after = NULL,
+                updated_at = ?
+          WHERE registration_id = ?
+            AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING', 'FAILED')
+            AND (? = 0 OR ? IS NULL)
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'UPDATE_PARTICIPANT_CONTACT'
+                 AND rc.result_id = ?
+            )`,
+      ).bind(
+        now,
+        now,
+        registrationId,
+        value.emailNotificationsEnabled ? 1 : 0,
+        value.email,
+        commandId,
+        registrationId,
+      ),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -1728,6 +1756,16 @@ export const handleApi = async (
 ): Promise<Response> => {
   const response = await handleApiRequest(request, env, authenticate);
   const refreshDomains = mutationRefreshDomains(request);
-  if (response.ok && refreshDomains !== null) scheduleRaceUpdate(env, ctx, refreshDomains);
+  if (response.ok && refreshDomains !== null) {
+    scheduleRaceUpdate(env, ctx, refreshDomains);
+    const path = new URL(request.url).pathname;
+    if (
+      request.method === "POST"
+      && (
+        /^\/api\/v1\/staff\/ducks\/[A-Za-z0-9_-]+\/assignments$/.test(path)
+        || /^\/api\/v1\/staff\/events\/[^/]{1,128}\/heats\/[^/]{1,128}\/call$/.test(path)
+      )
+    ) scheduleEmailOutbox(env, ctx);
+  }
   return response;
 };

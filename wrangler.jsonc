@@ -13,6 +13,7 @@
   "vars": {
     "APP_ORIGIN": "https://quickducks.com",
     "AWS_REGION": "us-east-1",
+    "SES_FROM_ADDRESS": "reminders@quickducks.com",
     "COGNITO_USER_POOL_ID": "us-east-1_QuEKwmLhI",
     "COGNITO_USER_POOL_CLIENT_ID": "55o4cn925erp7tr0jv56ad3qh1",
     "COGNITO_DOMAIN": "https://quickducks-staff-106298360125.auth.us-east-1.amazoncognito.com"
@@ -45,7 +46,20 @@
         "binding": "EMAIL_QUEUE",
         "queue": "quickducks-email"
       }
+    ],
+    "consumers": [
+      {
+        "queue": "quickducks-email",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "retry_delay": 60,
+        "dead_letter_queue": "quickducks-email-dlq"
+      }
     ]
+  },
+  "triggers": {
+    "crons": ["*/1 * * * *"]
   },
   "ratelimits": [
     {

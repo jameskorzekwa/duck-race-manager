@@ -1,7 +1,7 @@
 # Local development
 
 Run the whole site — public pages, staff console, race-day stations, live
-updates — on one machine with no network access, and fill it with realistic data
+updates, and reminder-email delivery — on one machine with no network access, and fill it with realistic data
 for any point in the race lifecycle.
 
 ```sh
@@ -39,11 +39,12 @@ devices](#testing-on-other-devices).
 
 ## What makes this work
 
-Only two things in QuickDucks genuinely need the network: Cognito, which
-authenticates staff, and Turnstile, which protects public registration. Local
-development replaces exactly those two and nothing else.
+Three things in QuickDucks genuinely need the network: Cognito, which
+authenticates staff; Turnstile, which protects public registration; and Amazon
+SES, which accepts reminder email. Local development replaces exactly those
+three external calls and nothing else.
 
-`wrangler.local.jsonc` differs from `wrangler.jsonc` in four ways:
+`wrangler.local.jsonc` differs from `wrangler.jsonc` in five ways:
 
 | | Production | Local |
 | --- | --- | --- |
@@ -51,6 +52,7 @@ development replaces exactly those two and nothing else.
 | `APP_ORIGIN` | `https://quickducks.com` | `http://localhost:8787`, or the network address |
 | `COGNITO_DOMAIN` | the Cognito hosted UI | the same origin as `APP_ORIGIN` |
 | `name` / `routes` | `quickducks`, both custom domains | `quickducks-local`, none |
+| email queue / DLQ | `quickducks-email` / `quickducks-email-dlq` | `quickducks-email-local` / `quickducks-email-dlq-local` |
 
 The D1, Durable Object, queue, and rate-limiter bindings are identical, because
 Wrangler simulates all four locally. Do not remove the `ratelimits` block from
@@ -59,11 +61,13 @@ public search, follow, unfollow, duck naming, and self-service delete would thro
 
 `src/local-dev.ts` is never bundled into the deployed Worker — `wrangler.jsonc`
 points `main` at `src/index.ts`, and a test asserts no deployed module imports it.
-It supplies the two seams `createWorker` already accepts:
+It supplies the three seams `createWorker` accepts:
 
 - a **token verifier** that reads a local bearer token instead of validating a
   Cognito JWT against a remote JWKS, and
 - a **token fetch** that answers `/oauth2/token` and `/oauth2/revoke` in process.
+- an **email sender** that accepts the real consumer's rendered message in
+  process instead of contacting SES.
 
 It also serves a stand-in for the Cognito hosted UI at `/oauth2/authorize`, which
 lists the staff accounts in the local database and lets you pick one.
@@ -73,6 +77,12 @@ sets the same `__Host-` cookies, refreshes the same way, and — crucially — s
 requires an **active D1 staff profile with the right roles**. A local token for a
 subject with no profile is refused, exactly as in production. Authorization
 behaviour you observe locally is authorization behaviour you will get deployed.
+The email producer, Queue consumer, D1 claim/attempt states, current-consent
+check, templates, duplicate handling, and scheduled outbox are also the
+production paths. Accepted local messages can be inspected at
+`/__local/email-inbox`; that route is provided only by `src/local-dev.ts` and is
+unreachable in the deployed Worker. Use synthetic addresses and participant
+data even locally.
 
 ### Everything local hangs off one predicate
 
@@ -90,7 +100,11 @@ construction rather than by convention. Three behaviours depend on it:
 3. **Cognito staff provisioning is answered locally**, so adding, deactivating,
    and reactivating staff on `/staff/access` works offline. Every D1 write,
    guard, and audit row for those operations still runs for real; only the
-   identity-provider call is replaced.
+    identity-provider call is replaced.
+4. **SES acceptance is answered locally**, while the real ID-only Queue,
+   current-consent check, template rendering, attempts, and notification states
+   still run. The local queue and scheduled handlers re-check the predicate and
+   throw before touching a resource if a non-local configuration is supplied.
 
 `src/local-preview.test.mjs` and `src/local-dev.test.mjs` pin all of this,
 including that `wrangler.jsonc` still points at `src/index.ts` with an https

@@ -26,6 +26,12 @@ import {
 } from "./client-scripts.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
 import {
+  processEmailQueue,
+  publishPendingEmailNotifications,
+  sesEmailSender,
+  type EmailSender,
+} from "./email-notifications.ts";
+import {
   phaseAllowsRaceStatus,
   phaseShowsMyDucks,
   publicPhaseForRender,
@@ -185,6 +191,7 @@ const staffLandingPages: readonly (readonly [string, readonly OperationalRole[]]
 export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
+  emailSender: EmailSender = sesEmailSender,
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -615,6 +622,12 @@ export const createWorker = (
     // traffic, so it deliberately runs no phase query and renders the minimal
     // Home-and-Staff navigation instead.
     return html(renderNotFound(), 404, true);
+  },
+  async queue(batch, env): Promise<void> {
+    await processEmailQueue(batch, env, emailSender);
+  },
+  async scheduled(_controller, env): Promise<void> {
+    await publishPendingEmailNotifications(env);
   },
 });
 

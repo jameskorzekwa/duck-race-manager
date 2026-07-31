@@ -327,6 +327,34 @@ test("owned contact reads and updates require participant-specific proof", async
     assert.equal(audit.includes(secret), false);
     assert.equal(command.includes(secret), false);
   }
+  database.prepare(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status, queued_at)
+    VALUES ('queued-reminder', 'event-contact', ?, 'HEAT_UPCOMING', 'QUEUED',
+            '2026-07-30T00:00:00.000Z')
+  `).run(first.registrationId);
+  const optedOut = await jsonBody(await api(contactPath(first.registrationId), {
+    method: "PATCH",
+    cookie,
+    headers: proofHeaders(first.privateToken, "https://quickducks.com"),
+    body: {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 1,
+      email: "alpha.new@example.test",
+      phone: "+15550109999",
+      emailNotificationsEnabled: false,
+      smsNotificationsEnabled: true,
+    },
+  }), 200, "opt out with a queued reminder");
+  assert.equal(optedOut.emailNotificationsEnabled, false);
+  assert.equal(optedOut.revision, 2);
+  const cancelledReminder = { ...database.prepare(`
+    SELECT status, terminal_at, status_reason
+      FROM email_notifications WHERE id = 'queued-reminder'
+  `).get() };
+  assert.equal(cancelledReminder.status, "CANCELLED");
+  assert.equal(cancelledReminder.status_reason, "PARTICIPANT_OPTED_OUT");
+  assert.ok(cancelledReminder.terminal_at);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 

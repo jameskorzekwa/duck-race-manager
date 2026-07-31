@@ -2,8 +2,14 @@ import { expect, test } from "@playwright/test";
 
 import {
   baseUrl,
+  bootstrap,
   expectNoDocumentOverflow,
+  intakeDuck,
+  localEmailInbox,
+  pairDuck,
+  registerParticipant,
   seedState,
+  transitionHeat,
   watchBrowserErrors,
 } from "./helpers.mjs";
 
@@ -13,6 +19,7 @@ test.describe("owned My Ducks contact preferences", () => {
   });
 
   test("views edits cancels and retains participant contact on the originating device", async ({ page }, testInfo) => {
+    test.setTimeout(150_000);
     // This suite intentionally exercises several authoritative My Ducks
     // refreshes. Keep its production-equivalent rate-limit budget independent
     // from the search-filtering scenario and from a previous failed retry.
@@ -100,6 +107,53 @@ test.describe("owned My Ducks contact preferences", () => {
       await expectNoDocumentOverflow(page);
       await refreshed.getByRole("button", { name: "Cancel" }).click();
     }
+
+    const { client } = await bootstrap();
+    const event = (await client.get("/api/v1/staff/events")).body.events[0];
+    const owned = (await client.get(
+      `/api/v1/staff/events/${event.id}/registrations?q=${encodeURIComponent("owned.updated@example.test")}`,
+    )).body.registrations.find((candidate) => candidate.email === "owned.updated@example.test");
+    expect(owned).toBeTruthy();
+    const duck = await intakeDuck(client, event.id, 999);
+    await pairDuck(client, event.id, duck, { lookupCode: owned.lookupCode });
+    await expect.poll(async () => (await localEmailInbox())
+      .filter((message) => message.to === "owned.updated@example.test").length).toBe(1);
+
+    // Opting out through the real owned-contact UI prevents the later heat-call
+    // trigger, while retaining the assignment email that was already accepted.
+    await refreshed.getByRole("button", { name: "Edit contact details" }).click();
+    const optOutForm = refreshed.locator("[data-contact-form]");
+    await optOutForm.getByRole("checkbox", {
+      name: "Send operational race updates by email",
+      exact: true,
+    }).uncheck();
+    await optOutForm.getByRole("button", { name: "Save changes" }).click();
+    await expect(refreshed.locator("[data-contact-summary]")).toContainText("Email updates: Not opted in");
+
+    // Round one refuses to start while any submitted participant is still
+    // unpaired, and refuses again while any round-one heat holds fewer than
+    // three ducks. The seed leaves one paired racer and this spec adds the
+    // owned one, so the single heat needs a third paired racer before the
+    // event can legally reach the heat-call trigger under test.
+    const filler = await registerParticipant(client, event.id, 1);
+    const fillerDuck = await intakeDuck(client, event.id, 998);
+    await pairDuck(client, event.id, fillerDuck, filler);
+
+    await client.post(`/api/v1/staff/events/${event.id}/close-registration`, {
+      commandId: crypto.randomUUID(),
+    });
+    await client.post(`/api/v1/staff/events/${event.id}/start-round-one`, {
+      commandId: crypto.randomUUID(),
+    });
+    const heat = (await client.get(`/api/v1/staff/events/${event.id}/heats`)).body.heats[0];
+    await transitionHeat(client, event.id, heat, "ready");
+    await transitionHeat(client, event.id, heat, "call");
+    const support = (await client.get(
+      `/api/v1/staff/support/events/${event.id}/notifications`,
+    )).body.notifications.filter((notification) => notification.registrationId === owned.registrationId);
+    expect(support.map((notification) => notification.type)).toEqual(["HEAT_ASSIGNED"]);
+    expect((await localEmailInbox()).filter((message) => message.to === "owned.updated@example.test"))
+      .toHaveLength(1);
     expect(errors).toEqual([]);
   });
 
