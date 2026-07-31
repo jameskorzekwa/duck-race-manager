@@ -3,6 +3,7 @@ import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
+import { unstartedRoundOneHeatExistsSql, walkUpAdmissionFor } from "./walk-up-admission.ts";
 
 const headers = {
   "cache-control": "no-store",
@@ -134,6 +135,7 @@ interface EventSummaryRow {
   event_duck_count: number;
   round_one_heat_count: number;
   final_heat_count: number;
+  walk_up_admission_allowed: number;
 }
 
 const eventDetail = async (eventId: string, env: Env): Promise<Response> => {
@@ -144,12 +146,20 @@ const eventDetail = async (eventId: string, env: Env): Promise<Response> => {
        (SELECT COUNT(*) FROM registrations WHERE event_id = e.id) AS registration_count,
        (SELECT COUNT(*) FROM event_ducks WHERE event_id = e.id) AS event_duck_count,
        (SELECT COUNT(*) FROM heats WHERE event_id = e.id AND round = 'ROUND_ONE') AS round_one_heat_count,
-       (SELECT COUNT(*) FROM heats WHERE event_id = e.id AND round = 'FINAL') AS final_heat_count
+       (SELECT COUNT(*) FROM heats WHERE event_id = e.id AND round = 'FINAL') AS final_heat_count,
+       CASE WHEN (
+         e.status = 'REGISTRATION_OPEN'
+         AND (e.registration_opens_at IS NULL OR e.registration_opens_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+         AND (e.registration_closes_at IS NULL OR e.registration_closes_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+       ) OR (
+         e.status = 'ROUND_ONE' AND ${unstartedRoundOneHeatExistsSql("e.id")}
+       ) THEN 1 ELSE 0 END AS walk_up_admission_allowed
      FROM events e
      WHERE e.id = ?`,
   ).bind(eventId).first<EventSummaryRow>();
   return json({
     event: eventResponse(event),
+    walkUpAdmission: walkUpAdmissionFor(event.status, summary?.walk_up_admission_allowed === 1),
     summary: {
       registrations: summary?.registration_count ?? 0,
       eventDucks: summary?.event_duck_count ?? 0,

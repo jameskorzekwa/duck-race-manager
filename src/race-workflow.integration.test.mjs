@@ -1456,6 +1456,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0016_locked_final_winner_correction.sql",
     "0017_final_podium_selections.sql",
     "0018_participant_contact_preferences.sql",
+    "0019_round_one_walk_up_admission.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.

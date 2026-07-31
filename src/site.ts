@@ -1222,7 +1222,8 @@ const participantsSurface = (): string => `
           <button class="button secondary" type="submit">List participants</button>
         </form>
         <div class="console-grid wide">
-          <div><details class="operation-card"><summary>Add walk-up participant</summary>
+          <div><details class="operation-card" data-walkup-card><summary>Add walk-up participant</summary>
+            <p class="muted" data-walkup-availability aria-live="polite">Checking walk-up availability…</p>
             <form data-walkup-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
               <div class="field-grid"><label>Email<input name="email" type="email" maxlength="254"></label><label>Phone<input name="phone" type="tel" maxlength="32"></label></div>
@@ -1392,9 +1393,10 @@ export const renderStaffRegistration = (
       <p class="lede">There are two jobs here. Register someone who walks up without a registration, and hand a registered participant the duck they picked.</p>
       <div class="notice"><strong>Pairing order matters.</strong> Let the participant choose a physical duck, scan that duck, then find the participant by their short code or name.</div>
       <div class="console-grid">
-        <article class="operation-card">
+        <article class="operation-card" data-walkup-guide>
           <h2>Someone walked up</h2>
           <p class="muted">They have not registered on their phone. Register them here, then pair them with a duck.</p>
+          <p class="muted">During Round One, this remains available only until the final unstarted heat begins.</p>
           <ol class="staff-steps">
             <li>Open <strong>Add walk-up participant</strong> below.</li>
             <li>Type their first and last name. Email and phone are optional.</li>

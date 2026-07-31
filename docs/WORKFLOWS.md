@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0018_participant_contact_preferences.sql`, browser
+the Worker, D1 migrations through `0019_round_one_walk_up_admission.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -121,6 +121,38 @@ Pairing changes `SUBMITTED` to `ACTIVE`. Reactivation returns a registration to
 Withdrawal and disqualification do not themselves close an assignment or
 remove a heat entry.
 
+### Round One Walk-Ups
+
+**Implemented:** registration staff, race directors, and administrators may
+create a staff walk-up during `ROUND_ONE` while at least one Round One heat has
+never started. `LOADING`, `READY`, and `CALLING` are still unstarted; the cutoff
+is the first committed `START_HEAT` command, not the announcement. Resetting a
+heat that already started does not reopen admission.
+
+Creation remains the existing two-step workflow: save the participant, then
+scan and pair the duck. Pairing places the new racer into the lowest-numbered
+never-started heat with room under the configured heat capacity. If all such
+heats are full, it creates the next locked `LOADING` heat under the existing
+final-capacity limit while the window is still open. It never adds to or changes
+a started roster. A pairing that would exceed the configured final-capacity
+limit is refused rather than changing the configured fill rule.
+
+The final never-started Round One heat cannot start while a committed walk-up is
+still `SUBMITTED` without a heat place. Staff must pair or withdraw that
+participant first. This makes the two possible concurrent orders safe: a heat
+start that commits first closes admission and the walk-up batch creates nothing;
+a walk-up that commits first blocks the cutoff until its normal pairing or
+withdrawal resolves it. Late pairing increments the selected heat revision, so
+a start-line request loaded before the new roster receives `409` and must
+refresh. Once the final unstarted heat starts, creation and pairing independently
+return lifecycle conflicts.
+
+Both participant surfaces obtain the same staff event capability from D1. When
+the cutoff changes, a heat refresh re-fetches that capability and hides the form
+with the explicit closed explanation even when somebody had begun typing. UI
+hiding is convenience only; the API repeats the durable predicate in its atomic
+command batch. Public registration remains limited to `REGISTRATION_OPEN`.
+
 Pairing is also the one-way door between the two ways a participant can leave:
 
 - **Never paired:** delete the registration. It removes the row for real, and it
@@ -214,8 +246,9 @@ The supported complete sequence is:
    any point before round one starts, which splits a folded tail back out and
    names the ducks to take back out of that bag.
 8. The race director starts round one, which locks every round-one roster in the
-   same command; heat runners run heats; result takers finish them and publish
-   one winner per heat.
+   same command. Registration staff may continue admitting and pairing walk-ups
+   only into never-started heats until the final such heat begins. Heat runners
+   run heats; result takers finish them and publish one winner per heat.
 10. Race readers verify automatic finalist promotion and the race director
     starts the final.
 11. Heat runners run the final and a result taker scans each finishing duck and
@@ -2792,9 +2825,11 @@ inventory, scan, and staff-console subscribers to refetch D1-backed APIs. A page
 subscribes only to the domains it can actually repaint. The staff console client
 runs on both the Admin console and the registration desk, so it derives its
 domain list from the surfaces the page in front of it renders and the roles that
-may read them: the desk carries the participants surface only and therefore asks
-for `event`, `staff`, `participants`, and `ducks`, while the Admin console adds
-`heats` and, for an administrator, `support`.
+may read them: the desk carries the participants surface and therefore asks for
+`event`, `staff`, `participants`, and `ducks`; its read-only walk-up capability
+also listens narrowly for `heats` so a cutoff cannot be deferred by a dirty
+form. The Admin console adds its full heat surface and, for an administrator,
+`support`.
 Reconnect uses bounded jitter and triggers an integrity refetch to close the
 missed-signal gap. While disconnected or when WebSocket is unavailable,
 subscribers poll approximately every five seconds; while connected they perform
@@ -2967,9 +3002,9 @@ operation or materially different request returns a conflict. Event and heat
 commands use request fingerprints where needed. Delete event is idempotent once
 its event no longer exists.
 
-Public registration preserves its pending command/private-token pair across a
-network failure and is safe to retry. The staff console generally creates a new
-command ID for each button submission and does not persist that ID in an
+Public registration and staff walk-up registration preserve their pending
+command/private-token pair across a network failure and are safe to retry. The
+staff console generally creates a new command ID for each other button submission and does not persist that ID in an
 offline outbox. If a staff response is lost after a possible save, refresh the
 relevant event, participant, duck, heat, or support view before pressing
 the action again. A state conflict is safer than assuming the first action

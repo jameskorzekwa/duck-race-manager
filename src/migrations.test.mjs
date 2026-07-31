@@ -22,6 +22,7 @@ const migrationNames = [
   "0016_locked_final_winner_correction.sql",
   "0017_final_podium_selections.sql",
   "0018_participant_contact_preferences.sql",
+  "0019_round_one_walk_up_admission.sql",
 ];
 
 const lifecycleStatuses = [
@@ -313,6 +314,96 @@ test("0018 adds private contact proof and SMS consent without breaking older wri
     ).run("not-a-valid-hash", "collection-old-worker"),
     /CHECK constraint failed/,
   );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0019 permits only command-bound pairing into a never-started Round One heat", () => {
+  const database = createDatabase();
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff-walk-up', 'staff-walk-up-sub', 'walk-up@example.com');
+    INSERT INTO events
+      (id, slug, name, timezone, status, round_one_heat_capacity)
+    VALUES ('event-walk-up', 'walk-up-race', 'Walk-up Race', 'UTC', 'ROUND_ONE', 3);
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       created_via, submitted_at, status_changed_at)
+    VALUES
+      ('registration-walk-up', 'event-walk-up', 'Late', 'Racer', 'SUBMITTED',
+       'LATEDUCK', 'private-hash', 'STAFF', '2026-07-30T00:00:00Z', '2026-07-30T00:00:00Z'),
+      ('registration-unbound', 'event-walk-up', 'Other', 'Racer', 'SUBMITTED',
+       'THERDUCK', 'private-hash-2', 'STAFF', '2026-07-30T00:00:00Z', '2026-07-30T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES
+      ('entry-walk-up', 'event-walk-up', 'registration-walk-up'),
+      ('entry-unbound', 'event-walk-up', 'registration-unbound');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck-walk-up', 901, 'IN_USE', '2026-07-30T00:00:00Z');
+    INSERT INTO event_ducks
+      (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck-walk-up', 'event-walk-up', 'duck-walk-up',
+            '2026-07-30T00:00:00Z', 'staff-walk-up');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('assign-walk-up', 'event-walk-up', 'ASSIGN_DUCK', 'assignment-walk-up',
+            '2026-07-30T00:00:00Z', '2026-07-30T00:00:00Z');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES ('assignment-walk-up', 'event-walk-up', 'entry-walk-up',
+            'event-duck-walk-up', 'duck-walk-up', '2026-07-30T00:00:00Z',
+            'staff-walk-up', 'assign-walk-up');
+    INSERT INTO heats
+      (id, event_id, round, heat_number, status, target_size, roster_locked_at,
+       roster_locked_by_staff_profile_id)
+    VALUES
+      ('heat-unstarted', 'event-walk-up', 'ROUND_ONE', 1, 'LOADING', 3,
+       '2026-07-30T00:00:00Z', 'staff-walk-up'),
+      ('heat-planned', 'event-walk-up', 'ROUND_ONE', 2, 'PLANNED', 3, NULL, NULL);
+  `);
+
+  database.exec(`
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number,
+       assignment_source, assigned_at, source_command_id)
+    VALUES ('late-entry', 'event-walk-up', 'heat-unstarted', 'entry-walk-up',
+            'ROUND_ONE', 1, 'PAIRING', '2026-07-30T00:00:00Z', 'assign-walk-up');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number,
+       assignment_source, assigned_at)
+    VALUES ('unbound-entry', 'event-walk-up', 'heat-unstarted', 'entry-unbound',
+            'ROUND_ONE', 2, 'PAIRING', '2026-07-30T00:00:00Z');
+  `), /heat roster is locked/);
+
+  // The old Worker insert shape remains valid on an ordinary unlocked heat.
+  database.exec(`
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number,
+       assignment_source, assigned_at)
+    VALUES ('planned-entry', 'event-walk-up', 'heat-planned', 'entry-unbound',
+            'ROUND_ONE', 1, 'PAIRING', '2026-07-30T00:00:00Z');
+  `);
+
+  database.exec(`
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('start-walk-up', 'event-walk-up', 'START_HEAT', 'heat-unstarted',
+            '2026-07-30T00:01:00Z', '2026-07-30T00:01:00Z');
+    UPDATE heats SET status = 'RUNNING', started_at = '2026-07-30T00:01:00Z'
+     WHERE id = 'heat-unstarted';
+  `);
+  assert.throws(() => database.prepare(`
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number,
+       assignment_source, assigned_at, source_command_id)
+    VALUES (?, ?, ?, ?, 'ROUND_ONE', 2, 'PAIRING', ?, ?)
+  `).run(
+    'after-start', 'event-walk-up', 'heat-unstarted', 'entry-unbound',
+    '2026-07-30T00:02:00Z', 'assign-walk-up',
+  ), /heat roster is locked/);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

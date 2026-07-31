@@ -542,6 +542,16 @@ updates, changes to the entry identity or creation timestamp, and every
 correction at `READY` or later still abort. The migration must remain ahead of
 the Worker release that exposes the extended correction window.
 
+Migration `0019_round_one_walk_up_admission.sql` replaces only the heat-entry
+insert trigger. Its default remains the existing unlocked-`PLANNED` rule. The
+new exception requires a matching `ASSIGN_DUCK` command and assignment in the
+same transaction, a capacity-bounded Round One slot, event status `ROUND_ONE`,
+and a `LOADING`, `READY`, or `CALLING` heat with no historical `START_HEAT`
+command. It is backward compatible with the previous Worker, which never tries
+to add a new racer after Round One starts. Rollback is Worker-only: retain the
+migration and any admitted roster entries; the previous Worker reads and races
+them normally but offers no further Round One walk-ups.
+
 The current Worker sends notification IDs to `quickducks-email` through the
 `EMAIL_QUEUE` producer binding. A queue consumer is not currently declared in
 `wrangler.jsonc`; therefore the DLQ is not connected by the current deployment.
