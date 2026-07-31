@@ -59,7 +59,7 @@ jobs:
             const trustedUserId = 38769771;
             const stateLabels = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
-              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:approved",
+              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:reviewing", "agent:approved",
               "agent:deployed", "agent:failed", "agent:error",
             ];
             const closingIssues = (body) => [...String(body ?? "").matchAll(
@@ -627,7 +627,7 @@ jobs:
             const result = JSON.parse(fs.readFileSync("task-artifact/task-result.json", "utf8"));
             const states = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
-              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:approved",
+              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:reviewing", "agent:approved",
               "agent:deployed", "agent:failed", "agent:error",
             ];
             const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
@@ -788,7 +788,7 @@ jobs:
             const issueNumber = Number(process.env.ISSUE_NUMBER);
             const states = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
-              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:approved",
+              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:reviewing", "agent:approved",
               "agent:deployed", "agent:failed", "agent:error",
             ];
             const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
@@ -839,7 +839,7 @@ jobs:
               : "";
             const states = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
-              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:approved",
+              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:reviewing", "agent:approved",
               "agent:deployed", "agent:failed", "agent:error",
             ];
             const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;

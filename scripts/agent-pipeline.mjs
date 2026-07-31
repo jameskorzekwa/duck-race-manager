@@ -8,6 +8,7 @@ const STATE_LABELS = [
   "agent:blocked",
   "agent:question",
   "agent:review",
+  "agent:reviewing",
   "agent:approved",
   "agent:deployed",
   "agent:failed",
@@ -17,6 +18,27 @@ const STATE_LABELS = [
 export function closingIssueNumbers(body) {
   const matches = [...String(body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)];
   return [...new Set(matches.map((match) => Number(match[1])))];
+}
+
+// A merged candidate is deployed as soon as any successful production release
+// contains its merge commit, even if that release was triggered by a later
+// merge. Exact-SHA matching stranded features at agent:approved forever.
+export async function firstDeployedRelease(github, owner, repo, releaseRuns, mergeSha) {
+  const successes = releaseRuns
+    .filter((run) => run.status === "completed" && run.conclusion === "success")
+    .sort((left, right) => Date.parse(left.created_at) - Date.parse(right.created_at));
+  for (const run of successes) {
+    if (run.head_sha === mergeSha) return run;
+    try {
+      const comparison = await github.rest.repos.compareCommitsWithBasehead({
+        owner, repo, basehead: `${mergeSha}...${run.head_sha}`,
+      });
+      if (["identical", "ahead"].includes(comparison.data.status)) return run;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+  return null;
 }
 
 export const TASK_RETRY_LIMIT = 10;
@@ -413,18 +435,32 @@ export async function reconcileAgentPipeline({ github, context, core }) {
         const releaseRuns = await github.rest.actions.listWorkflowRuns({
           owner, repo, workflow_id: "release.yml", event: "push", per_page: 100,
         });
+        // Settle by ancestry, not by an exact SHA match. When another merge
+        // lands moments later, this PR's own release aborts on the freshness
+        // guard and the *next* release carries its commit to production. The
+        // feature is deployed either way, so the state must follow the code.
+        const deployedRun = await firstDeployedRelease(
+          github, owner, repo, releaseRuns.data.workflow_runs, latest.merge_commit_sha,
+        );
         const runs = releaseRuns.data.workflow_runs
           .filter((run) => run.head_sha === latest.merge_commit_sha)
           .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
-        if (runs.some((run) => run.status !== "completed")) continue;
+        if (!deployedRun && runs.some((run) => run.status !== "completed")) continue;
         const completed = runs.find((run) => run.status === "completed");
-        if (completed?.conclusion === "success") {
+        if (deployedRun) {
           await setState(issue.number, "agent:deployed");
           await commentOnce(
             issue.number,
             `<!-- agent-pipeline deployed=${latest.merge_commit_sha} -->`,
-            `Recovered successful production release for PR #${latest.number}.`,
+            `Released to production by run ${deployedRun.id} (${deployedRun.head_sha.slice(0, 12)}), which carries PR #${latest.number}.`,
           );
+          try {
+            await github.rest.issues.update({
+              owner, repo, issue_number: issue.number, state: "closed", state_reason: "completed",
+            });
+          } catch (error) {
+            if (error.status !== 404) throw error;
+          }
         } else if (completed || Date.now() - Date.parse(latest.merged_at) > 30 * 60 * 1000) {
           await setState(issue.number, "agent:failed");
           await commentOnce(
@@ -472,6 +508,25 @@ export async function reconcileAgentPipeline({ github, context, core }) {
       if (implement?.status === "in_progress") await setState(issue.number, "agent:running");
     } catch (error) {
       if (error.status !== 404) throw error;
+    }
+  }
+
+  // Surface review work the same way implementation work is surfaced: while the
+  // single runner executes an independent review, the board otherwise looks
+  // idle even though the pipeline is busy.
+  const reviewRuns = await github.rest.actions.listWorkflowRuns({
+    owner, repo, workflow_id: "agent-review.yml", per_page: 30,
+  });
+  const reviewActive = reviewRuns.data.workflow_runs.some(
+    (run) => run.status === "in_progress" || run.status === "queued",
+  );
+  for (const issue of await issuesWithLabel("agent:review")) {
+    if (!issuesWithOpenPulls.has(issue.number)) continue;
+    if (reviewActive) await setState(issue.number, "agent:reviewing");
+  }
+  if (!reviewActive) {
+    for (const issue of await issuesWithLabel("agent:reviewing")) {
+      await setState(issue.number, "agent:review");
     }
   }
 

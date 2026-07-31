@@ -53,6 +53,7 @@ Pipeline state is represented by labels:
 | `agent:grouped` | Requirements belong to a canonical active issue |
 | `agent:blocked` | Explicit dependencies or input are outstanding |
 | `agent:question` | Implementation is blocked on a question posted to the issue; any James reply resumes it automatically from the saved partial work |
+| `agent:reviewing` | The single model runner is executing this candidate's independent review |
 | `agent:review` | A PR is under deterministic CI or agent review |
 | `agent:approved` | Independent review passed at the current head |
 | `agent:merge-slot` | The single PR/release allowed in production lane |
