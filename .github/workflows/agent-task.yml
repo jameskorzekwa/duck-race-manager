@@ -101,7 +101,13 @@ jobs:
               return;
             }
 
-            await setState(issue, "agent:queued");
+            // A duplicate dispatch queues behind the issue's active run in the
+            // concurrency group; its prepare must not downgrade the visible
+            // state while an older run is already implementing.
+            const currentLabels = issue.labels.map((label) => typeof label === "string" ? label : label.name);
+            if (!currentLabels.includes("agent:running")) {
+              await setState(issue, "agent:queued");
+            }
             await github.rest.issues.createComment({
               owner, repo, issue_number: issueNumber,
               body: `<!-- agent-pipeline task-run=${context.runId} -->\n[Agent Task run](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})`,

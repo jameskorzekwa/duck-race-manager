@@ -226,6 +226,7 @@ test("queued work is labeled queued until the model runner actually starts", asy
 
   assert.match(prepare, /setState\(issue, "agent:queued"\)/);
   assert.doesNotMatch(prepare, /setState\(issue, "agent:running"\)/);
+  assert.match(prepare, /!currentLabels\.includes\("agent:running"\)/);
   assert.match(markRunning, /implement\?\.status === "in_progress"/);
   assert.match(markRunning, /"agent:running"/);
   assert.match(markRunning, /issues: write/);
