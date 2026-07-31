@@ -218,6 +218,14 @@ test("a blocked implementation can ask James and resume on his reply", async () 
   assert.match(reconciliation, /issuesWithLabel\("agent:question"\)/);
   assert.match(reconciliation, /questionAnswered\(comments\)/);
 
+  // A duplicate dispatch must not clobber an unanswered question, and must
+  // still let the answer through.
+  const prepare = workflow.slice(workflow.indexOf("  prepare:"), workflow.indexOf("  implement:"));
+  assert.match(prepare, /currentLabels\.includes\("agent:question"\)/);
+  assert.match(prepare, /agent-pipeline question=/);
+  assert.match(prepare, /Date\.parse\(comment\.created_at\) > Date\.parse\(lastQuestion\.created_at\)/);
+  assert.match(prepare, /if \(!answered\) \{/);
+
   const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
   assert.match(orchestrator, /PIPELINE_TASK_QUESTION:N/);
   assert.match(orchestrator, /finish every part of the implementation the answer does not affect/);
