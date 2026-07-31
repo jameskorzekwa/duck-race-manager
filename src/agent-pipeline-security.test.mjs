@@ -180,7 +180,7 @@ test("failures retry immediately and only stopped recovery parks at agent:error"
   // Cron is a backstop only: every completed pipeline run sweeps immediately.
   assert.match(reconcile, /workflow_run:/);
   assert.match(reconcile, /workflows: \[Agent Task, Agent Review PR, Release\]/);
-  assert.match(reconcile, /types: \[completed\]/);
+  assert.match(reconcile, /types: \[in_progress, completed\]/);
   assert.match(reconcile, /github\.event_name == 'workflow_run'/);
 
   const implementation = await read("scripts/agent-pipeline.mjs");
