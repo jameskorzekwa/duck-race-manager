@@ -189,6 +189,25 @@ test("staff pairing pairs from a scan or an exact code and always keeps a manual
   assert.match(staffDuckScript, /body\.exactMatch && body\.exactMatch\.assignedDuckNumber === null/);
   assert.match(staffDuckScript, /await pairWithLookupCode\(body\.exactMatch\.lookupCode\)/);
   assert.match(staffDuckScript, /button\.addEventListener\("click", \(\) => renderSelection\(registration\)\)/);
+  // Only an explicit result selection advances the viewport. The review is
+  // complete and confirmation enabled before a single deferred scroll; the
+  // non-actionable confirmation region receives focus without its own scroll.
+  assert.equal(staffDuckScript.match(/scrollToPairingConfirmation\(registration\);/g).length, 1);
+  assert.match(
+    staffDuckScript,
+    /review\.replaceChildren\(\);[\s\S]*?document\.querySelector\("\[data-confirm-pairing\]"\)\.disabled = false;\s*scrollToPairingConfirmation\(registration\);/,
+  );
+  assert.match(
+    staffDuckScript,
+    /pairingConfirmation\.focus\(\{ preventScroll: true \}\);\s*pairingConfirmation\.scrollIntoView\(\{[\s\S]*?block: "nearest",[\s\S]*?inline: "nearest"/,
+  );
+  assert.match(
+    staffDuckScript,
+    /matchMedia\("\(prefers-reduced-motion: reduce\)"\)\.matches \? "auto" : "smooth"/,
+  );
+  assert.match(staffDuckScript, /registrationSearchInput\?\.blur\(\);/);
+  assert.match(staffDuckScript, /if \(selectedRegistration !== registration \|\| workArea\?\.hidden\) return/);
+  assert.match(staffDuckScript, /const clearRegistrationSelection = \(\) => \{\s*cancelPairingSelectionScroll\(\);/);
 
   // A failed scan invites another attempt or a manual search instead of dead-ending.
   assert.match(staffDuckScript, /not a QuickDucks participant code/);
