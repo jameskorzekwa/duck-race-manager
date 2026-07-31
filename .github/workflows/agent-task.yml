@@ -145,7 +145,10 @@ jobs:
     timeout-minutes: 170
     permissions:
       contents: read
-      issues: read
+      # Only to report that implementation started. The model never sees this
+      # token: OpenChamber runs the session in its own long-lived process, not
+      # as a child of this job, and no step passes credentials into it.
+      issues: write
       pull-requests: read
     env:
       EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
@@ -154,6 +157,37 @@ jobs:
       decision: ${{ steps.result.outputs.decision }}
       digest: ${{ steps.result.outputs.digest }}
     steps:
+      # The runner reports its own state the moment it starts. No observer has
+      # to look at the right time, so the label cannot lag behind reality
+      # regardless of which event dispatched this run or how deep the queue is.
+      - name: Report that implementation started
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            const states = [
+              "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
+              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:reviewing",
+              "agent:approved", "agent:deployed", "agent:failed", "agent:error",
+            ];
+            const startable = new Set(["agent:inbox", "agent:triage", "agent:ready", "agent:queued"]);
+            const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+            const current = issue.labels.map((label) => typeof label === "string" ? label : label.name);
+            // Never overwrite a question awaiting an answer or a published
+            // candidate: only a pre-implementation state may become running.
+            if (!current.some((label) => startable.has(label))) {
+              core.info(`Issue #${issueNumber} is not in a startable state; leaving its label alone.`);
+              return;
+            }
+            await github.rest.issues.setLabels({
+              owner, repo, issue_number: issueNumber,
+              labels: [...current.filter((label) => !states.includes(label)), "agent:running"],
+            });
+
       - name: Check out exact trusted base
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

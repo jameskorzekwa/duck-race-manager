@@ -166,6 +166,27 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
   );
 });
 
+test("a starting implementation reports its own running state", async () => {
+  const workflow = await read(".github/workflows/agent-task.yml");
+  const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));
+
+  // The runner reports state itself, so no observer timing can make the label
+  // lag: no polling watcher, and no dependence on a reconciliation sweep.
+  assert.match(implement, /Report that implementation started/);
+  assert.match(implement, /"agent:running"/);
+  assert.doesNotMatch(workflow, /mark-running/);
+  assert.match(implement, /startable = new Set\(\["agent:inbox", "agent:triage", "agent:ready", "agent:queued"\]\)/);
+  assert.match(implement, /if \(!current\.some\(\(label\) => startable\.has\(label\)\)\)/);
+  assert.match(implement, /continue-on-error: true/);
+
+  // The report step is the only write authority the model job holds, and the
+  // model still never receives a token: no step passes one into OpenChamber.
+  assert.match(implement, /issues: write/);
+  assert.doesNotMatch(implement, /contents: write|pull-requests: write|actions: write/);
+  const dispatch = implement.slice(implement.indexOf("Run local OAuth implementation lead"));
+  assert.doesNotMatch(dispatch, /GITHUB_TOKEN|github\.token/);
+});
+
 test("failures retry immediately and only stopped recovery parks at agent:error", async () => {
   const task = await read(".github/workflows/agent-task.yml");
   const publish = task.slice(task.indexOf("  publish:"));
@@ -239,9 +260,11 @@ test("queued work is labeled queued until the model runner actually starts", asy
   assert.match(prepare, /setState\(issue, "agent:queued"\)/);
   assert.doesNotMatch(prepare, /setState\(issue, "agent:running"\)/);
   assert.match(prepare, /!currentLabels\.includes\("agent:running"\)/);
-  // The model job itself must stay token-free, and no per-run watcher job may
+  // The model job may report that it started (issues: write, nothing more) but
+  // must never hand a credential to the model, and no per-run watcher job may
   // return: it cannot outlive a deep runner queue.
-  assert.doesNotMatch(implement, /GITHUB_TOKEN:|issues: write/);
+  assert.doesNotMatch(implement, /GITHUB_TOKEN:/);
+  assert.doesNotMatch(implement, /contents: write|pull-requests: write|actions: write/);
   assert.doesNotMatch(workflow, /mark-running/);
 
   const reconciliation = await read("scripts/agent-pipeline.mjs");
