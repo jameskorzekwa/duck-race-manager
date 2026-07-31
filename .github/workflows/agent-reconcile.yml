@@ -1,9 +1,15 @@
 name: Agent Reconcile
 
+# GitHub's cron silently skips ticks for long stretches, so the schedule is
+# only a backstop: every pipeline run that completes triggers a sweep directly,
+# which is exactly when durable state needs repairing.
 on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+  workflow_run:
+    workflows: [Agent Task, Agent Review PR, Release]
+    types: [completed]
 
 permissions: {}
 
@@ -13,7 +19,7 @@ concurrency:
 
 jobs:
   reconcile:
-    if: github.event_name == 'schedule' || github.actor_id == '38769771'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_run' || github.actor_id == '38769771'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

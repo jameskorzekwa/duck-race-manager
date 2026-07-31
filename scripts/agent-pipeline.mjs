@@ -457,6 +457,24 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     }
   }
 
+  // The queued -> running flip lives here rather than in a per-run watcher
+  // job: a hosted watcher cannot outlive a deep runner queue, and this sweep
+  // now runs on every completed pipeline run as well as the cron backstop.
+  for (const issue of await issuesWithLabel("agent:queued")) {
+    const comments = await commentsFor(issue.number);
+    const taskRuns = markerNumbers(comments, "task-run");
+    if (taskRuns.length === 0) continue;
+    try {
+      const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+        owner, repo, run_id: taskRuns.at(-1), per_page: 100,
+      });
+      const implement = jobs.find((job) => job.name === "implement");
+      if (implement?.status === "in_progress") await setState(issue.number, "agent:running");
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+  }
+
   for (const issue of await issuesWithLabel("agent:question")) {
     if (issuesWithOpenPulls.has(issue.number)) continue;
     const comments = await commentsFor(issue.number);
