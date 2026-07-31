@@ -209,7 +209,13 @@ test("lists events and returns configuration plus operational summary in detail"
   const db = makeDb(
     (sql) => {
       if (sql.includes("AS registration_count")) {
-        return { registration_count: 12, event_duck_count: 10, round_one_heat_count: 2, final_heat_count: 1 };
+        return {
+          registration_count: 12,
+          event_duck_count: 10,
+          round_one_heat_count: 2,
+          final_heat_count: 1,
+          walk_up_admission_allowed: 0,
+        };
       }
       return draftEvent;
     },
@@ -227,12 +233,15 @@ test("lists events and returns configuration plus operational summary in detail"
   );
 
   assert.equal((await list.json()).events[0].revision, 0);
-  assert.deepEqual((await detail.json()).summary, {
+  const detailBody = await detail.json();
+  assert.deepEqual(detailBody.summary, {
     registrations: 12,
     eventDucks: 10,
     roundOneHeats: 2,
     finalHeats: 1,
   });
+  assert.equal(detailBody.walkUpAdmission.allowed, false);
+  assert.match(detailBody.walkUpAdmission.reason, /final unstarted Round One heat/);
 });
 
 test("only an administrator can create an event", async () => {

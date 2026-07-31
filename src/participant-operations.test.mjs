@@ -277,6 +277,16 @@ test("staff walk-up creation is event-guarded, audited, and idempotent", async (
   assert.equal(auditDetails.includes("example.com"), false);
   assert.equal(auditDetails.includes("guardian"), false);
 
+  const changedReplay = await handleParticipantOperations(
+    jsonRequest("https://quickducks.com/api/v1/staff/events/event-open/registrations", "POST", {
+      ...payload,
+      firstName: "Different",
+    }),
+    env,
+    staffActor,
+  );
+  assert.equal(changedReplay.status, 409);
+
   const blocked = await handleParticipantOperations(
     jsonRequest("https://quickducks.com/api/v1/staff/events/event-complete/registrations", "POST", {
       ...payload,
@@ -288,6 +298,114 @@ test("staff walk-up creation is event-guarded, audited, and idempotent", async (
   );
   assert.equal(blocked.status, 409);
   database.close();
+});
+
+test("Round One walk-ups remain atomic through multiple, final, and concurrently started heats", async (context) => {
+  const { database, env, DB } = makeContext();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO events
+      (id, slug, name, event_date, timezone, status, round_one_heat_capacity, final_heat_capacity)
+    VALUES ('event-round', 'round-race', 'Round Race', '2026-08-02', 'UTC', 'ROUND_ONE', 4, 4);
+    INSERT INTO heats
+      (id, event_id, round, heat_number, status, target_size, roster_locked_at,
+       roster_locked_by_staff_profile_id)
+    VALUES
+      ('round-heat-1', 'event-round', 'ROUND_ONE', 1, 'LOADING', 4,
+       '2026-07-30T00:00:00Z', 'staff'),
+      ('round-heat-2', 'event-round', 'ROUND_ONE', 2, 'LOADING', 4,
+       '2026-07-30T00:00:00Z', 'staff'),
+      ('round-heat-3', 'event-round', 'ROUND_ONE', 3, 'LOADING', 4,
+       '2026-07-30T00:00:00Z', 'staff');
+  `);
+  const create = (suffix, commandId = crypto.randomUUID()) => handleParticipantOperations(
+    jsonRequest("https://quickducks.com/api/v1/staff/events/event-round/registrations", "POST", {
+      commandId,
+      privateToken: suffix.repeat(43),
+      firstName: `Late${suffix}`,
+      lastName: "Racer",
+      email: null,
+      phone: null,
+      emailNotificationsEnabled: false,
+      notes: null,
+    }),
+    env,
+    staffActor,
+  );
+
+  const withMultipleRemaining = await create("m");
+  assert.equal(withMultipleRemaining.status, 201, await withMultipleRemaining.clone().text());
+
+  database.exec(`
+    INSERT INTO race_commands (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('start-one', 'event-round', 'START_HEAT', 'round-heat-1',
+            '2026-07-30T00:01:00Z', '2026-07-30T00:01:00Z'),
+           ('start-two', 'event-round', 'START_HEAT', 'round-heat-2',
+            '2026-07-30T00:02:00Z', '2026-07-30T00:02:00Z');
+    UPDATE heats SET status = 'FINALIZED', started_at = '2026-07-30T00:01:00Z',
+                     finalized_at = '2026-07-30T00:02:30Z'
+     WHERE id IN ('round-heat-1', 'round-heat-2');
+  `);
+  const withOneRemaining = await create("n");
+  assert.equal(withOneRemaining.status, 201, await withOneRemaining.clone().text());
+
+  database.exec(`
+    INSERT INTO race_commands (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('start-three', 'event-round', 'START_HEAT', 'round-heat-3',
+            '2026-07-30T00:03:00Z', '2026-07-30T00:03:00Z');
+    UPDATE heats SET status = 'RUNNING', started_at = '2026-07-30T00:03:00Z'
+     WHERE id = 'round-heat-3';
+  `);
+  const beforeLate = {
+    registrations: database.prepare("SELECT COUNT(*) AS count FROM registrations WHERE event_id = 'event-round'").get().count,
+    entries: database.prepare("SELECT COUNT(*) AS count FROM race_entries WHERE event_id = 'event-round'").get().count,
+    commands: database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE event_id = 'event-round'").get().count,
+    audits: database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_id = 'event-round'").get().count,
+  };
+  const closed = await create("p");
+  assert.equal(closed.status, 409);
+  assert.match((await closed.json()).error, /every Round One heat has started/);
+  assert.deepEqual({
+    registrations: database.prepare("SELECT COUNT(*) AS count FROM registrations WHERE event_id = 'event-round'").get().count,
+    entries: database.prepare("SELECT COUNT(*) AS count FROM race_entries WHERE event_id = 'event-round'").get().count,
+    commands: database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE event_id = 'event-round'").get().count,
+    audits: database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE event_id = 'event-round'").get().count,
+  }, beforeLate);
+
+  // Restore exactly one never-started heat, let the preflight observe it, then
+  // make the final start win immediately before the creation batch begins.
+  database.exec(`
+    DELETE FROM race_commands WHERE id = 'start-three';
+    UPDATE heats SET status = 'CALLING', started_at = NULL, finalized_at = NULL
+     WHERE id = 'round-heat-3';
+  `);
+  DB.beforeBatch = () => {
+    database.exec(`
+      INSERT INTO race_commands (id, event_id, command_type, result_id, requested_at, completed_at)
+      VALUES ('start-concurrent', 'event-round', 'START_HEAT', 'round-heat-3',
+              '2026-07-30T00:04:00Z', '2026-07-30T00:04:00Z');
+      UPDATE heats SET status = 'RUNNING', started_at = '2026-07-30T00:04:00Z'
+       WHERE id = 'round-heat-3';
+    `);
+  };
+  const beforeConcurrent = database.prepare(
+    "SELECT COUNT(*) AS count FROM registrations WHERE event_id = 'event-round'",
+  ).get().count;
+  const concurrentCommandId = crypto.randomUUID();
+  const lostRace = await create("q", concurrentCommandId);
+  assert.equal(lostRace.status, 409);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM registrations WHERE event_id = 'event-round'").get().count,
+    beforeConcurrent,
+    "the stale creation leaves no partial participant",
+  );
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE id = ?").get(
+      concurrentCommandId,
+    ).count,
+    0,
+  );
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 test("partial participant edits ignore legacy preference data and omit PII from audit details", async () => {

@@ -15,6 +15,7 @@ import {
   type StaffIdentityProvisioner,
 } from "./staff-access.ts";
 import type { Env } from "./types.ts";
+import { heatHasNeverStartedSql, unstartedRoundOneHeatExistsSql } from "./walk-up-admission.ts";
 
 const headers = {
   "cache-control": "no-store",
@@ -598,11 +599,11 @@ const pairDuck = async (
   if (context === null) {
     return json({ error: "No unpaired participant matches that code in this event." }, 404);
   }
-  // Once racing has started, pairing is a repair and nothing else. Someone with
-  // no heat place cannot be given one: round-one heats are locked, and a new one
-  // could never be started from a lifecycle that has moved past its round.
-  const racingStarted = ["ROUND_ONE", "FINAL"].includes(context.event_status);
-  if (racingStarted && context.existing_heat === null) {
+  // During FINAL, pairing is a repair and nothing else. During ROUND_ONE a
+  // newly admitted walk-up may still be placed, but only into a heat that has
+  // never started; the guarded insert and migration trigger enforce that again
+  // inside the transaction.
+  if (context.event_status === "FINAL" && context.existing_heat === null) {
     return json({
       error: "Racing has started, so a new racer cannot be added. This code has no place in any heat.",
     }, 409);
@@ -673,12 +674,15 @@ const pairDuck = async (
     const [round, number] = context.existing_heat.split(":");
     heat = { round, number: Number(number) };
   } else {
+    const roundOneWalkUp = context.event_status === "ROUND_ONE";
     const existingHeat = await env.DB.prepare(
       `SELECT h.id, h.heat_number, COUNT(he.id) AS entry_count
          FROM heats h
          LEFT JOIN heat_entries he ON he.heat_id = h.id
         WHERE h.event_id = ? AND h.round = 'ROUND_ONE'
-          AND h.status IN ('PLANNED', 'LOADING', 'READY')
+          AND ${roundOneWalkUp
+            ? heatHasNeverStartedSql("h")
+            : "h.status IN ('PLANNED', 'LOADING', 'READY')"}
         GROUP BY h.id
        HAVING COUNT(he.id) < ?
         ORDER BY h.heat_number
@@ -690,6 +694,20 @@ const pairDuck = async (
     }>();
     let heatId: string;
     if (existingHeat === null) {
+      let roundOneStillOpen = false;
+      if (roundOneWalkUp) {
+        const unstarted = await env.DB.prepare(
+          `SELECT 1 AS available FROM events e
+            WHERE e.id = ? AND ${unstartedRoundOneHeatExistsSql("e.id")}
+            LIMIT 1`,
+        ).bind(eventId).first<{ available: number }>();
+        if (unstarted === null) {
+          return json({
+            error: "Walk-up registration has closed because every Round One heat has started.",
+          }, 409);
+        }
+        roundOneStillOpen = true;
+      }
       const last = await env.DB.prepare(
         `SELECT COALESCE(MAX(heat_number), 0) AS last_number,
                 COUNT(*) AS heat_count
@@ -701,18 +719,36 @@ const pairDuck = async (
       }
       heatId = crypto.randomUUID();
       heat = { round: "ROUND_ONE", number: (last?.last_number ?? 0) + 1 };
-      // Guarded creation: no row is inserted once round-one heats reach final
-      // capacity, and the dependent heat-entry insert then fails its foreign
-      // key, rolling the whole pairing batch back.
-      statements.push(env.DB.prepare(
-        `INSERT INTO heats
-          (id, event_id, round, heat_number, status, target_size, source_command_id)
-         SELECT ?, e.id, 'ROUND_ONE', ?, 'PLANNED', e.round_one_heat_capacity, ?
-           FROM events e
-          WHERE e.id = ?
-            AND (SELECT COUNT(*) FROM heats h
-                  WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') < e.final_heat_capacity`,
-      ).bind(heatId, heat.number, commandId, eventId));
+      // Guarded creation: before the round this is the existing PLANNED next-
+      // heat rule. During the walk-up window the same fill rule may create a
+      // locked LOADING heat only while another never-started heat still proves
+      // admission is open. If a concurrent final start wins, this insert
+      // produces no row and the dependent heat-entry foreign key rolls the
+      // whole pairing command back.
+      if (roundOneStillOpen) {
+        statements.push(env.DB.prepare(
+          `INSERT INTO heats
+            (id, event_id, round, heat_number, status, target_size,
+             roster_locked_at, roster_locked_by_staff_profile_id, source_command_id)
+           SELECT ?, e.id, 'ROUND_ONE', ?, 'LOADING', e.round_one_heat_capacity,
+                  ?, ?, ?
+             FROM events e
+            WHERE e.id = ? AND e.status = 'ROUND_ONE'
+              AND ${unstartedRoundOneHeatExistsSql("e.id")}
+              AND (SELECT COUNT(*) FROM heats h
+                    WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') < e.final_heat_capacity`,
+        ).bind(heatId, heat.number, now, actor.id, commandId, eventId));
+      } else {
+        statements.push(env.DB.prepare(
+          `INSERT INTO heats
+            (id, event_id, round, heat_number, status, target_size, source_command_id)
+           SELECT ?, e.id, 'ROUND_ONE', ?, 'PLANNED', e.round_one_heat_capacity, ?
+             FROM events e
+            WHERE e.id = ?
+              AND (SELECT COUNT(*) FROM heats h
+                    WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') < e.final_heat_capacity`,
+        ).bind(heatId, heat.number, commandId, eventId));
+      }
     } else {
       heatId = existingHeat.id;
       heat = { round: "ROUND_ONE", number: existingHeat.heat_number };
@@ -742,6 +778,23 @@ const pairDuck = async (
       commandId,
       eventId,
     ));
+    if (roundOneWalkUp) {
+      // A start-line client that loaded this roster before the walk-up was
+      // paired must lose its stale revision. This update commits in the same
+      // transaction as the new slot, so a refreshed start always sees the
+      // admitted racer and the old start request receives 409.
+      statements.push(env.DB.prepare(
+        `UPDATE heats
+            SET revision = revision + 1, source_command_id = ?, updated_at = ?
+          WHERE id = ? AND event_id = ? AND round = 'ROUND_ONE'
+            AND ${heatHasNeverStartedSql("heats")}
+            AND EXISTS (
+              SELECT 1 FROM heat_entries he
+               WHERE he.heat_id = heats.id AND he.race_entry_id = ?
+                 AND he.source_command_id = ?
+            )`,
+      ).bind(commandId, now, heatId, eventId, context.race_entry_id, commandId));
+    }
   }
 
   statements.push(env.DB.prepare(

@@ -3,6 +3,7 @@ import { hasAnyRole, requireAnyRole } from "./authorization.ts";
 import { publicDisplayName } from "./race-board.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
+import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
 
 const headers = {
   "cache-control": "no-store",
@@ -1098,7 +1099,48 @@ const unpairedRosterSql = `SELECT 1 AS missing
            AND da.race_entry_id = he.race_entry_id
            AND da.valid_to IS NULL
       )
-    LIMIT 1`;
+     LIMIT 1`;
+
+// A staff walk-up admitted during ROUND_ONE is created before their duck is
+// scanned. Earlier heats may continue while the desk completes that flow, but
+// the final never-started heat is the cutoff: starting it must lose to a
+// committed admission that still needs placement. Withdrawal clears the
+// blocker because the registration is no longer SUBMITTED.
+const pendingUnplacedWalkUpExistsSql = (eventExpression: string): string => `EXISTS (
+  SELECT 1
+    FROM registrations pending_registration
+    JOIN race_entries pending_entry
+      ON pending_entry.registration_id = pending_registration.id
+   WHERE pending_registration.event_id = ${eventExpression}
+     AND pending_registration.created_via = 'STAFF'
+     AND pending_registration.status = 'SUBMITTED'
+     AND NOT EXISTS (
+       SELECT 1 FROM heat_entries pending_heat_entry
+        WHERE pending_heat_entry.event_id = pending_registration.event_id
+          AND pending_heat_entry.race_entry_id = pending_entry.id
+          AND pending_heat_entry.round = 'ROUND_ONE'
+     )
+     AND EXISTS (
+       SELECT 1 FROM race_commands pending_command
+        WHERE pending_command.event_id = pending_registration.event_id
+          AND pending_command.command_type = 'CREATE_STAFF_REGISTRATION'
+          AND pending_command.result_id = pending_registration.id
+     )
+)`;
+
+const noOtherUnstartedRoundOneHeatSql = (heatAlias: string): string => `NOT EXISTS (
+  SELECT 1 FROM heats other_unstarted
+   WHERE other_unstarted.event_id = ${heatAlias}.event_id
+     AND other_unstarted.round = 'ROUND_ONE'
+     AND other_unstarted.id != ${heatAlias}.id
+     AND ${heatHasNeverStartedSql("other_unstarted")}
+)`;
+
+const finalUnstartedHeatHasNoPendingWalkUpGuard = (heatAlias: string): string => `AND NOT (
+  ${heatAlias}.round = 'ROUND_ONE'
+  AND ${noOtherUnstartedRoundOneHeatSql(heatAlias)}
+  AND ${pendingUnplacedWalkUpExistsSql(`${heatAlias}.event_id`)}
+)`;
 
 // The single SQL statement of "this heat still has somebody who could win it".
 //
@@ -1196,6 +1238,21 @@ const transitionHeat = async (
     if (ineligibleHeat !== null) return json({ error: NO_ELIGIBLE_RACER_ERROR }, 409);
   }
   if (transition === "start") {
+    if (heat.round === "ROUND_ONE") {
+      const pendingWalkUp = await env.DB.prepare(
+        `SELECT 1 AS pending
+           FROM heats h
+          WHERE h.id = ? AND h.event_id = ? AND h.round = 'ROUND_ONE'
+            AND ${noOtherUnstartedRoundOneHeatSql("h")}
+            AND ${pendingUnplacedWalkUpExistsSql("h.event_id")}
+          LIMIT 1`,
+      ).bind(heatId, eventId).first<{ pending: number }>();
+      if (pendingWalkUp !== null) {
+        return json({
+          error: "A walk-up participant is still waiting for a duck and heat place. Pair or withdraw them before starting the final unstarted Round One heat.",
+        }, 409);
+      }
+    }
     const blockingHeat = await env.DB.prepare(
       `SELECT status
          FROM heats
@@ -1253,7 +1310,8 @@ const transitionHeat = async (
             AND other.status IN ('RUNNING', 'AWAITING_RESULT')
        )
        ${fullyPairedGuard("h.id")}
-       ${eligibleRacerGuard("h.id")}`
+       ${eligibleRacerGuard("h.id")}
+       ${finalUnstartedHeatHasNoPendingWalkUpGuard("h")}`
     : "";
   const updateStartGuard = transition === "start"
     ? `AND NOT EXISTS (
@@ -1262,7 +1320,8 @@ const transitionHeat = async (
             AND other.status IN ('RUNNING', 'AWAITING_RESULT')
        )
        ${fullyPairedGuard("heats.id")}
-       ${eligibleRacerGuard("heats.id")}`
+       ${eligibleRacerGuard("heats.id")}
+       ${finalUnstartedHeatHasNoPendingWalkUpGuard("heats")}`
     : "";
   let updateSql = `UPDATE heats SET status = ?, revision = revision + 1,
       source_command_id = ?, updated_at = ?`;
@@ -1310,7 +1369,7 @@ const transitionHeat = async (
     ]);
   } catch {
     const message = transition === "start"
-      ? "Another heat is running or awaiting its official result, a racer lost their duck, every racer left the race, or this heat changed. Refresh both stations before trying again."
+      ? "Another heat is running or awaiting its official result, a walk-up still needs pairing, a racer lost their duck, every racer left the race, or this heat changed. Refresh both stations before trying again."
       : "The heat transition conflicted with another update. Refresh and try again.";
     return json({ error: message }, 409);
   }

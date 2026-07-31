@@ -15,6 +15,7 @@ import {
   renderStaffRegistration,
   renderStartLine,
 } from "./site.ts";
+import { WALK_UP_ADMISSION_WITHOUT_EVENT } from "./walk-up-admission.ts";
 
 test("staff operations console script is valid, DOM-safe, and covers every operation module", () => {
   assert.doesNotThrow(() => new Function(staffHomeScript));
@@ -618,6 +619,8 @@ test("every form field the console client writes exists on every page that loads
       "data-console-message",
       "data-participant-filter-form",
       "data-walkup-form",
+      "data-walkup-card",
+      "data-walkup-availability",
       "data-walkup-result",
       "data-participant-list",
       "data-participant-detail",
@@ -648,6 +651,58 @@ test("every form field the console client writes exists on every page that loads
     assert.ok(write > 0, heading);
     assert.ok(staffHomeScript.includes(`!${surface}`) || staffHomeScript.includes(`|| !${surface}`), surface);
   }
+});
+
+test("walk-up entry points render authoritative Round One cutoff guidance", () => {
+  for (const markup of [
+    renderStaffHome("Race Director", false, ["RACE_DIRECTOR"]),
+    renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]),
+  ]) {
+    assert.match(markup, /data-walkup-card/);
+    assert.match(markup, /data-walkup-availability aria-live="polite"/);
+    assert.match(markup, /Checking walk-up availability/);
+  }
+  assert.match(
+    renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]),
+    /During Round One, this remains available only until the final unstarted heat begins\./,
+  );
+  assert.ok(staffHomeScript.includes("const renderWalkUpAvailability = (admission) =>"));
+  assert.ok(staffHomeScript.includes("walkUpForm.hidden = !allowed;"));
+  assert.ok(staffHomeScript.includes("if (walkUpGuide) walkUpGuide.hidden = !allowed;"));
+  assert.ok(staffHomeScript.includes("if (!allowed) walkUpCard.open = true;"));
+  assert.match(
+    staffHomeScript,
+    /domains: \["heats"\],\s*root: walkUpAvailability,/,
+    "heat refreshes bypass dirty participant forms only for the read-only cutoff projection",
+  );
+  assert.ok(staffHomeScript.includes("if (!currentWalkUpAdmission.allowed)"));
+
+  // Deleting the event publishes a heat signal too, so this subscriber runs once
+  // more against an event that has just been removed. It must therefore ask the
+  // cutoff projection, which answers "closed" for a missing event, and never the
+  // event detail, which answers 404 — a browser console error on a page that did
+  // nothing wrong, and one the full-race journey counts.
+  const walkUpRefresh = staffHomeScript.match(
+    /domains: \["heats"\],\s*root: walkUpAvailability,\s*refresh: async \(\) => \{[\s\S]*?\n  \},/,
+  );
+  assert.ok(walkUpRefresh, "the console defines the narrow walk-up refresh");
+  assert.match(walkUpRefresh[0], /\/walk-up-admission"/);
+  assert.doesNotMatch(
+    walkUpRefresh[0],
+    /api\("\/api\/v1\/staff\/events\/" \+ encodeURIComponent\(eventId\)\)/,
+    "the cutoff refresh must not reload the event detail, which 404s once the event is deleted",
+  );
+  assert.ok(staffHomeScript.includes(
+    '"/api/v1/staff/events/" + encodeURIComponent(eventId) + "/walk-up-admission"',
+  ));
+
+  // The console's own no-event branch and the server's answer for an event that
+  // no longer exists are one sentence, so this surface cannot show a staffer one
+  // wording while the API reports the other.
+  assert.ok(
+    staffHomeScript.includes(WALK_UP_ADMISSION_WITHOUT_EVENT.reason),
+    "the console's no-event walk-up wording must match the server's",
+  );
 });
 
 test("event creation requires a hinted ducks-per-heat field wired into the create command", () => {

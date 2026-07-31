@@ -248,6 +248,43 @@ const replaceRoster = (env, heatId, revision, raceEntryIds) => handleHeatOperati
   director,
 );
 
+const transitionRoundOneHeat = async (env, database, heatNumber, operation) => {
+  const heat = database.prepare(
+    `SELECT id, revision FROM heats
+      WHERE event_id = 'event_test' AND round = 'ROUND_ONE' AND heat_number = ?`,
+  ).get(heatNumber);
+  const response = await handleHeatOperations(
+    new Request(`https://quickducks.com/api/v1/staff/events/event_test/heats/${heat.id}/${operation}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId: crypto.randomUUID(), revision: heat.revision }),
+    }),
+    env,
+    director,
+  );
+  assert.equal(response.status, 201, `${operation} heat ${heatNumber}: ${await response.clone().text()}`);
+  return response.json();
+};
+
+const createRoundOneWalkUp = (env, suffix) => handleParticipantOperations(
+  new Request("https://quickducks.com/api/v1/staff/events/event_test/registrations", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      commandId: crypto.randomUUID(),
+      privateToken: suffix.repeat(43),
+      firstName: `Walkup${suffix}`,
+      lastName: "Racer",
+      email: null,
+      phone: null,
+      emailNotificationsEnabled: false,
+      notes: null,
+    }),
+  }),
+  env,
+  director,
+);
+
 const heatRow = (database, heatNumber) => database.prepare(
   `SELECT id, revision FROM heats
     WHERE event_id = 'event_test' AND round = 'ROUND_ONE' AND heat_number = ?`,
@@ -522,6 +559,155 @@ test("starting round one locks every roster without a manual lock step", async (
   assert.deepEqual(listed.map((heat) => heat.rosterLocked), [true, true]);
   // Every locked heat is one the round could legally start with.
   for (const heat of listed) assert.ok(heat.rosterSize >= 3);
+});
+
+test("Round One walk-ups pair into the next never-started heat with one or multiple heats remaining", async (context) => {
+  for (const scenario of [
+    { participantCount: 13, suffix: "x", remaining: 2, expectedHeat: 3 },
+    { participantCount: 8, suffix: "y", remaining: 1, expectedHeat: 2 },
+  ]) {
+    const { database, env } = await setup(context, {
+      ducksPerHeat: 5,
+      participantCount: scenario.participantCount,
+    });
+    assert.equal((await lifecycle(env, "close-registration")).status, 201);
+    assert.equal((await lifecycle(env, "start-round-one")).status, 201);
+    const firstRoster = rosterOf(database, 1);
+    for (const operation of ["ready", "call", "start"]) {
+      await transitionRoundOneHeat(env, database, 1, operation);
+    }
+    assert.equal(
+      heatLayout(database).filter((heat) => !["RUNNING", "AWAITING_RESULT", "FINALIZED"].includes(heat.status)).length,
+      scenario.remaining,
+    );
+
+    const admittedResponse = await createRoundOneWalkUp(env, scenario.suffix);
+    assert.equal(admittedResponse.status, 201, await admittedResponse.clone().text());
+    const admitted = await admittedResponse.json();
+
+    let staleFinalStartRevision = null;
+    if (scenario.remaining === 1) {
+      // Remove the unrelated running-heat blocker so the cutoff guard itself is
+      // what refuses the final unstarted heat while this admitted participant
+      // still needs pairing.
+      database.prepare(
+        "UPDATE heats SET status = 'FINALIZED', finalized_at = ? WHERE event_id = 'event_test' AND heat_number = 1",
+      ).run("2026-07-30T00:10:00Z");
+      await transitionRoundOneHeat(env, database, scenario.expectedHeat, "ready");
+      await transitionRoundOneHeat(env, database, scenario.expectedHeat, "call");
+      const finalHeat = database.prepare(
+        "SELECT id, revision FROM heats WHERE event_id = 'event_test' AND heat_number = ?",
+      ).get(scenario.expectedHeat);
+      staleFinalStartRevision = finalHeat.revision;
+      const blockedStart = await handleHeatOperations(
+        new Request(`https://quickducks.com/api/v1/staff/events/event_test/heats/${finalHeat.id}/start`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commandId: crypto.randomUUID(), revision: finalHeat.revision }),
+        }),
+        env,
+        director,
+      );
+      assert.equal(blockedStart.status, 409);
+      assert.match((await blockedStart.json()).error, /walk-up participant is still waiting/i);
+    }
+
+    const targetBeforePair = database.prepare(
+      "SELECT revision FROM heats WHERE event_id = 'event_test' AND heat_number = ?",
+    ).get(scenario.expectedHeat).revision;
+
+    const token = `round-walk-up-token-${scenario.suffix}`;
+    database.prepare(`
+      INSERT INTO ducks
+        (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+      VALUES (?, ?, 'AVAILABLE', '2026-07-30T00:00:00Z', 'GOOD')
+    `).run(`round-walk-up-duck-${scenario.suffix}`, scenario.suffix === "x" ? 991 : 992);
+    database.prepare(
+      "INSERT INTO duck_tags (id, duck_id, token, status) VALUES (?, ?, ?, 'ACTIVE')",
+    ).run(
+      `round-walk-up-tag-${scenario.suffix}`,
+      `round-walk-up-duck-${scenario.suffix}`,
+      token,
+    );
+    const paired = await pair(env, {
+      lookupCode: admitted.registration.lookupCode,
+      token,
+      raceEntryId: admitted.registration.raceEntryId,
+    });
+    assert.equal(paired.heat.number, scenario.expectedHeat);
+    assert.deepEqual(rosterOf(database, 1), firstRoster, "the started roster never changes");
+    assert.equal(
+      database.prepare("SELECT revision FROM heats WHERE event_id = 'event_test' AND heat_number = ?")
+        .get(scenario.expectedHeat).revision,
+      targetBeforePair + 1,
+      "late pairing invalidates a stale start-line revision",
+    );
+    assert.equal(
+      rosterOf(database, scenario.expectedHeat).at(-1).raceEntryId,
+      admitted.registration.raceEntryId,
+    );
+    if (staleFinalStartRevision !== null) {
+      const heat = database.prepare(
+        "SELECT id, revision FROM heats WHERE event_id = 'event_test' AND heat_number = ?",
+      ).get(scenario.expectedHeat);
+      const staleStart = await handleHeatOperations(
+        new Request(`https://quickducks.com/api/v1/staff/events/event_test/heats/${heat.id}/start`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commandId: crypto.randomUUID(), revision: staleFinalStartRevision }),
+        }),
+        env,
+        director,
+      );
+      assert.equal(staleStart.status, 409, "the pre-pairing start revision is stale");
+      const refreshedStart = await handleHeatOperations(
+        new Request(`https://quickducks.com/api/v1/staff/events/event_test/heats/${heat.id}/start`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commandId: crypto.randomUUID(), revision: heat.revision }),
+        }),
+        env,
+        director,
+      );
+      assert.equal(refreshedStart.status, 201, await refreshedStart.clone().text());
+    }
+    assertStructurallySound(database);
+  }
+});
+
+test("a full final unstarted heat opens the next configured heat for a paired walk-up", async (context) => {
+  const { database, env } = await setup(context, { ducksPerHeat: 5, participantCount: 10 });
+  assert.equal((await lifecycle(env, "close-registration")).status, 201);
+  assert.equal((await lifecycle(env, "start-round-one")).status, 201);
+  for (const operation of ["ready", "call", "start"]) {
+    await transitionRoundOneHeat(env, database, 1, operation);
+  }
+  assert.deepEqual(heatLayout(database).map((heat) => heat.size), [5, 5]);
+
+  const admittedResponse = await createRoundOneWalkUp(env, "z");
+  assert.equal(admittedResponse.status, 201, await admittedResponse.clone().text());
+  const admitted = await admittedResponse.json();
+  const token = "round-walk-up-token-z";
+  database.exec(`
+    INSERT INTO ducks
+      (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+    VALUES ('round-walk-up-duck-z', 993, 'AVAILABLE', '2026-07-30T00:00:00Z', 'GOOD');
+    INSERT INTO duck_tags (id, duck_id, token, status)
+    VALUES ('round-walk-up-tag-z', 'round-walk-up-duck-z', '${token}', 'ACTIVE');
+  `);
+  const paired = await pair(env, {
+    lookupCode: admitted.registration.lookupCode,
+    token,
+    raceEntryId: admitted.registration.raceEntryId,
+  });
+  assert.equal(paired.heat.number, 3);
+  assert.deepEqual(heatLayout(database), [
+    { number: 1, status: "RUNNING", targetSize: 5, locked: true, size: 5 },
+    { number: 2, status: "LOADING", targetSize: 5, locked: true, size: 5 },
+    { number: 3, status: "LOADING", targetSize: 5, locked: true, size: 1 },
+  ]);
+  assert.equal(rosterOf(database, 3)[0].raceEntryId, admitted.registration.raceEntryId);
+  assertStructurallySound(database);
 });
 
 test("a merged tail splits back out even when pairing opened a new heat after the close", async (context) => {

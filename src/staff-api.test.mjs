@@ -246,6 +246,28 @@ test("winner-by-tag mutation requires exact Origin before parsing its command", 
   assert.equal(db.statements.length, 0);
 });
 
+test("walk-up admission requires exact Origin for a cookie-authenticated registration actor", async () => {
+  const db = makeDb(() => null);
+  const cookieActor = { ...actor, roles: ["REGISTRATION"], authentication: "cookie" };
+  const request = (origin) => handleApi(
+    new Request("https://quickducks.com/api/v1/staff/events/event_test/registrations", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(origin === null ? {} : { origin }),
+      },
+      body: "{}",
+    }),
+    makeEnv(db),
+    async () => cookieActor,
+  );
+
+  assert.equal((await request(null)).status, 403);
+  assert.equal((await request("https://evil.example")).status, 403);
+  assert.equal((await request("https://quickducks.com")).status, 400);
+  assert.equal(db.statements.length, 0, "Origin denial and malformed input write nothing");
+});
+
 test("staff session revalidation returns authorization state without identity or PII", async () => {
   const response = await handleApi(
     new Request("https://quickducks.com/api/v1/staff/session"),
