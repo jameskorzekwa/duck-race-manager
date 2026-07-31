@@ -155,7 +155,7 @@ jobs:
             }
             const states = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
-              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:approved",
+              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:reviewing", "agent:approved",
               "agent:deployed", "agent:failed", "agent:error",
             ];
             const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
@@ -518,7 +518,7 @@ jobs:
             const expectedBase = process.env.EXPECTED_BASE;
             const stateLabels = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
-              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:approved",
+              "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:reviewing", "agent:approved",
               "agent:deployed", "agent:failed", "agent:error",
             ];
             const removeLabel = async (issue_number, name) => {

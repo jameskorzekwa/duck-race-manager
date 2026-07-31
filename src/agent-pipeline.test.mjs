@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closingIssueNumbers, markerNumbers, questionAnswered, recoverFailedIssue, validExactCheck } from "../scripts/agent-pipeline.mjs";
+import { closingIssueNumbers, firstDeployedRelease, markerNumbers, questionAnswered, recoverFailedIssue, validExactCheck } from "../scripts/agent-pipeline.mjs";
 
 function fakeRecoveryGithub(comments) {
   const actions = { labels: [], comments: [], dispatched: 0 };
@@ -123,4 +123,43 @@ test("validExactCheck accepts trusted-default-branch workflow dispatch", async (
     path: ".github/workflows/agent-review.yml",
   } });
   assert.equal(await validExactCheck(github, "owner", "repo", pr), false);
+});
+
+test("a merge carried to production by a later release still settles as deployed", async () => {
+  const runs = [
+    { id: 1, head_sha: "aaa", status: "completed", conclusion: "failure", created_at: "2026-07-31T20:04:00Z" },
+    { id: 2, head_sha: "bbb", status: "completed", conclusion: "success", created_at: "2026-07-31T20:13:00Z" },
+  ];
+  const github = {
+    rest: {
+      repos: {
+        compareCommitsWithBasehead: async ({ basehead }) => ({
+          data: { status: basehead === "aaa...bbb" ? "ahead" : "diverged" },
+        }),
+      },
+    },
+  };
+
+  const deployed = await firstDeployedRelease(github, "o", "r", runs, "aaa");
+  assert.equal(deployed.id, 2);
+});
+
+test("an unreleased merge does not settle as deployed", async () => {
+  const runs = [
+    { id: 3, head_sha: "ccc", status: "completed", conclusion: "success", created_at: "2026-07-31T19:00:00Z" },
+  ];
+  const github = {
+    rest: {
+      repos: { compareCommitsWithBasehead: async () => ({ data: { status: "diverged" } }) },
+    },
+  };
+
+  assert.equal(await firstDeployedRelease(github, "o", "r", runs, "zzz"), null);
+});
+
+test("an identical release commit settles as deployed", async () => {
+  const runs = [{ id: 4, head_sha: "ddd", status: "completed", conclusion: "success", created_at: "2026-07-31T21:00:00Z" }];
+  const github = { rest: { repos: { compareCommitsWithBasehead: async () => ({ data: { status: "identical" } }) } } };
+
+  assert.equal((await firstDeployedRelease(github, "o", "r", runs, "ddd")).id, 4);
 });
