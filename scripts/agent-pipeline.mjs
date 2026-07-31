@@ -359,6 +359,19 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     if (!needsCi && !needsReview) continue;
 
     const comments = await commentsFor(issueNumber);
+    // A gate that is still waiting for the single model runner has not failed.
+    // Counting sweeps as attempts while reviews queue behind implementations
+    // parked healthy PRs at agent:error, so wait patiently while any dispatched
+    // gate run is queued or in progress.
+    const pendingGate = (await Promise.all(["agent-review.yml", "ci.yml"].map(async (workflowId) => {
+      const runs = await github.rest.actions.listWorkflowRuns({
+        owner, repo, workflow_id: workflowId, per_page: 50,
+      });
+      return runs.data.workflow_runs.some((run) => ["queued", "in_progress", "waiting", "pending", "requested"].includes(run.status)
+        && (workflowId === "ci.yml" ? run.head_branch === pr.head.ref : true));
+    }))).some(Boolean);
+    if (pendingGate) continue;
+
     const recoveryPrefix = `<!-- agent-pipeline gate-recovery=${pr.number}-${pr.head.sha}-`;
     const attempts = comments.filter((comment) => comment.user?.id === 41898282
       && comment.body?.includes(recoveryPrefix)).length;

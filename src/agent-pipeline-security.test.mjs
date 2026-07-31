@@ -151,6 +151,21 @@ test("local model agents deny unspecified and executable tools", async () => {
   assert.equal(config.plugin, undefined);
 });
 
+test("gate recovery waits while a dispatched gate run is still queued", async () => {
+  const implementation = await read("scripts/agent-pipeline.mjs");
+  const lane = implementation.slice(
+    implementation.indexOf("const pendingGate"),
+    implementation.indexOf("const recoveryPrefix"),
+  );
+  assert.match(lane, /"queued", "in_progress", "waiting", "pending", "requested"/);
+  assert.match(lane, /agent-review\.yml/);
+  assert.match(lane, /run\.head_branch === pr\.head\.ref/);
+  assert.ok(
+    implementation.indexOf("const pendingGate") < implementation.indexOf("gate-recovery-exhausted"),
+    "the pending-gate check must run before any attempt is counted",
+  );
+});
+
 test("failures retry immediately and only stopped recovery parks at agent:error", async () => {
   const task = await read(".github/workflows/agent-task.yml");
   const publish = task.slice(task.indexOf("  publish:"));
