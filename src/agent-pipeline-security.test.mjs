@@ -180,7 +180,7 @@ test("failures retry immediately and only stopped recovery parks at agent:error"
   // Cron is a backstop only: every completed pipeline run sweeps immediately.
   assert.match(reconcile, /workflow_run:/);
   assert.match(reconcile, /workflows: \[Agent Task, Agent Review PR, Release\]/);
-  assert.match(reconcile, /types: \[completed\]/);
+  assert.match(reconcile, /types: \[in_progress, completed\]/);
   assert.match(reconcile, /github\.event_name == 'workflow_run'/);
 
   const implementation = await read("scripts/agent-pipeline.mjs");
@@ -217,6 +217,14 @@ test("a blocked implementation can ask James and resume on his reply", async () 
   const reconciliation = await read("scripts/agent-pipeline.mjs");
   assert.match(reconciliation, /issuesWithLabel\("agent:question"\)/);
   assert.match(reconciliation, /questionAnswered\(comments\)/);
+
+  // A duplicate dispatch must not clobber an unanswered question, and must
+  // still let the answer through.
+  const prepare = workflow.slice(workflow.indexOf("  prepare:"), workflow.indexOf("  implement:"));
+  assert.match(prepare, /currentLabels\.includes\("agent:question"\)/);
+  assert.match(prepare, /agent-pipeline question=/);
+  assert.match(prepare, /Date\.parse\(comment\.created_at\) > Date\.parse\(lastQuestion\.created_at\)/);
+  assert.match(prepare, /if \(!answered\) \{/);
 
   const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
   assert.match(orchestrator, /PIPELINE_TASK_QUESTION:N/);

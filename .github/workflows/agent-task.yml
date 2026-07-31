@@ -105,6 +105,28 @@ jobs:
             // concurrency group; its prepare must not downgrade the visible
             // state while an older run is already implementing.
             const currentLabels = issue.labels.map((label) => typeof label === "string" ? label : label.name);
+            // An issue already running must not be downgraded by a duplicate
+            // dispatch, and one awaiting an answer must keep agent:question:
+            // clobbering it silently loses the fact that a question is open.
+            if (currentLabels.includes("agent:question")) {
+              const questionComments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: issueNumber, per_page: 100,
+              });
+              const lastQuestion = questionComments.findLast(
+                (comment) => String(comment.body ?? "").includes("<!-- agent-pipeline question="),
+              );
+              const answered = lastQuestion !== undefined && questionComments.some(
+                (comment) => comment.user?.id === trustedUserId
+                  && Date.parse(comment.created_at) > Date.parse(lastQuestion.created_at),
+              );
+              if (!answered) {
+                core.info("Issue is awaiting an answer; leaving agent:question in place.");
+                core.setOutput("base", branch.data.commit.sha);
+                core.setOutput("issue", String(issueNumber));
+                core.setOutput("skip", "true");
+                return;
+              }
+            }
             if (!currentLabels.includes("agent:running")) {
               await setState(issue, "agent:queued");
             }
