@@ -6,6 +6,10 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_IDLE_GRACE_MS = 30_000;
 const DEFAULT_DISCOVERY_MS = 180_000;
+// A session reporting busy while nothing in the directory changes is a hung
+// provider call, not work. Twenty minutes dwarfs any legitimate single-step
+// silence while costing a fraction of the full polling budget.
+const DEFAULT_STALL_MS = 20 * 60 * 1000;
 const DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 const MAX_CONSECUTIVE_FAILURES = 5;
 
@@ -101,6 +105,7 @@ export async function waitForOpenChamberSession({
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   idleGraceMs = DEFAULT_IDLE_GRACE_MS,
   discoveryMs = DEFAULT_DISCOVERY_MS,
+  stallMs = DEFAULT_STALL_MS,
   abort = abortSessions,
   onSessionResolved,
 }) {
@@ -118,6 +123,8 @@ export async function waitForOpenChamberSession({
   let sessionId = null;
   let idleSince = null;
   let consecutiveFailures = 0;
+  let activitySignature = null;
+  let stallSince = started;
 
   while (now() < deadline) {
     try {
@@ -136,6 +143,22 @@ export async function waitForOpenChamberSession({
         const active = sessions.filter((session) => session?.status?.type !== "idle");
         if (active.length > 0) {
           idleSince = null;
+          // Busy with zero movement anywhere in the directory is a hung
+          // provider call, not work: one such hang held the runner for 2.5
+          // hours while producing zero tokens. Kill it in minutes instead.
+          const signature = JSON.stringify(sessions.map((session) => [
+            session?.id, session?.status?.type, session?.time?.updated,
+            session?.tokens?.input, session?.tokens?.output,
+          ]));
+          if (signature !== activitySignature) {
+            activitySignature = signature;
+            stallSince = now();
+          } else if (now() - stallSince >= stallMs) {
+            await abort({ directory: modelDirectory, sessionIds: active.map((session) => session.id) });
+            const stall = new Error(`Session ${sessionId} stalled: busy for ${Math.round(stallMs / 60000)} minutes with no activity.`);
+            stall.stall = true;
+            throw stall;
+          }
         } else {
           idleSince ??= now();
           // Models are told to end with the marker, but they sometimes place it
@@ -171,6 +194,7 @@ export async function waitForOpenChamberSession({
       }
       consecutiveFailures = 0;
     } catch (error) {
+      if (error.stall === true) throw error;
       consecutiveFailures += 1;
       if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) throw error;
     }

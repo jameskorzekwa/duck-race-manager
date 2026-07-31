@@ -665,6 +665,12 @@ jobs:
                 owner, repo, issue_number: issueNumber,
                 body: `<!-- agent-pipeline run-failed=${context.runId} -->\n${String(result.report).slice(0, 50000)}`,
               });
+              // A failed decision retries immediately, exactly like a crashed
+              // job: the shared policy requeues from the saved seed or parks
+              // the issue at agent:error.
+              const module = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
+              const outcome = await module.recoverFailedIssue({ github, context }, issueNumber);
+              core.info(`Failed decision handled immediately: ${outcome}.`);
             }
 
       - name: Verify publication preconditions and apply patch

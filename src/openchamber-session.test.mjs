@@ -311,6 +311,50 @@ test("cleanup fails closed when a dispatched session vanished", async () => {
   }), []);
 });
 
+test("a busy session with no activity is stalled, aborted, and reported", async () => {
+  const clock = fakeClock();
+  const aborted = [];
+  const frozen = [{ id: "ses_parent", status: { type: "busy" }, time: { updated: 100 }, tokens: { input: 0, output: 0 } }];
+
+  await assert.rejects(waitForOpenChamberSession({
+    directory,
+    timeoutSeconds: 9600,
+    markerPrefix: "PIPELINE_TASK_",
+    run: () => ({ sessions: frozen }),
+    ...clock,
+    pollIntervalMs: 1000,
+    stallMs: 5000,
+    abort: async ({ sessionIds }) => { aborted.push(...sessionIds); return true; },
+  }), /stalled: busy for 0 minutes with no activity/);
+
+  assert.deepEqual(aborted, ["ses_parent"]);
+});
+
+test("token movement resets the stall clock", async () => {
+  const clock = fakeClock();
+  let output = 0;
+  const run = (args) => {
+    if (args[1] === "list") {
+      output += 1;
+      return { sessions: [{ id: "ses_parent", status: { type: output > 3 ? "idle" : "busy" }, tokens: { input: 1, output } }] };
+    }
+    return { messages: [{ completedAt: 9, text: "PIPELINE_TASK_READY:70" }] };
+  };
+
+  const result = await waitForOpenChamberSession({
+    directory,
+    timeoutSeconds: 9600,
+    markerPrefix: "PIPELINE_TASK_",
+    run,
+    ...clock,
+    pollIntervalMs: 1000,
+    stallMs: 2500,
+    idleGraceMs: 5000,
+  });
+
+  assert.equal(result.sessionId, "ses_parent");
+});
+
 test("polling tolerates transient control-plane failures", async () => {
   const clock = fakeClock();
   let call = 0;

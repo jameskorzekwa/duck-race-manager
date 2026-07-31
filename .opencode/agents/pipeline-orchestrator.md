@@ -1,7 +1,7 @@
 ---
 description: Triages trusted QuickDucks issues and coordinates implementation, testing, and review through the GitHub agent pipeline.
 mode: primary
-model: openai/gpt-5.6-sol
+model: anthropic/claude-opus-5
 temperature: 0.1
 steps: 300
 permission:

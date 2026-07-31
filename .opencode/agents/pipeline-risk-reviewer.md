@@ -1,7 +1,7 @@
 ---
 description: Reviews QuickDucks changes for security, privacy, migration, release, and rollback risks without editing files.
 mode: subagent
-model: openai/gpt-5.6-sol
+model: anthropic/claude-sonnet-5
 temperature: 0
 steps: 20
 permission:
