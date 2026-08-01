@@ -86,6 +86,10 @@ jobs:
           fs.writeFileSync("agent-review-base.txt", marker[3]);
           NODE
 
+          if [[ "$(< agent-review-eligible.txt)" != "true" ]]; then
+            exit 0
+          fi
+
           # The marker names the fork point, so it must be a real commit of the
           # default branch that this head descends from. That is provenance and
           # stays true no matter how far main moves ahead; demanding equality
@@ -100,10 +104,6 @@ jobs:
           if [[ "$base_on_main" != "ahead" && "$base_on_main" != "identical" ]]; then
             printf 'Recorded base is not a commit of the default branch.\n' >&2
             exit 1
-          fi
-
-          if [[ "$(< agent-review-eligible.txt)" != "true" ]]; then
-            exit 0
           fi
           issue_number="$(< agent-review-issue.txt)"
           issue_author_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${issue_number}" --jq '.user.id')"
