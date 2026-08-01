@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, questionAnswered, recoverFailedIssue, validExactCheck, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
+import { closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, questionAnswered, recoverFailedIssue, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
 
 function fakeRecoveryGithub(comments) {
   const actions = { labels: [], comments: [], dispatched: 0 };
@@ -35,13 +35,34 @@ test("a fresh failure retries immediately and lands back in the queue path", asy
 
 test("a spent retry budget parks the issue at agent:error", async () => {
   const { github, context, actions } = fakeRecoveryGithub(
-    Array.from({ length: 10 }, (_, index) => ({ body: `<!-- agent-pipeline task-retry=${index + 1} -->` })),
+    Array.from({ length: 5 }, (_, index) => ({ body: `<!-- agent-pipeline task-retry=${index + 1} -->` })),
   );
 
   assert.equal(await recoverFailedIssue({ github, context }, 70), "error");
   assert.ok(actions.comments.some((body) => body.includes("task-exhausted")));
   assert.deepEqual(actions.labels, ["enhancement", "agent:error"]);
   assert.equal(actions.dispatched, 0);
+});
+
+test("the same hosted failures twice stop repair churn even when the patch changes", async () => {
+  const signature = "d".repeat(64);
+  const { github, context, actions } = fakeRecoveryGithub([
+    { body: `<!-- agent-pipeline run-failed=1 --> <!-- agent-pipeline attempt-digest=${"a".repeat(64)} --> <!-- agent-pipeline verification-signature=${signature} -->` },
+    { body: `<!-- agent-pipeline run-failed=2 --> <!-- agent-pipeline attempt-digest=${"b".repeat(64)} --> <!-- agent-pipeline verification-signature=${signature} -->` },
+  ]);
+
+  assert.equal(await recoverFailedIssue({ github, context }, 70), "error");
+  assert.ok(actions.comments.some((body) => body.includes("repeated-verification")));
+  assert.equal(actions.dispatched, 0);
+});
+
+test("verification signatures cover the complete sorted failure index", () => {
+  const first = verificationFailureSignature("Failure index:\n- test B\n- test A\n- test A");
+  const reordered = verificationFailureSignature("Failure index:\n- test A\n- test B");
+
+  assert.match(first, /^[0-9a-f]{64}$/);
+  assert.equal(first, reordered);
+  assert.equal(verificationFailureSignature("plain failure detail"), null);
 });
 
 test("two identical attempts park the issue at agent:error", async () => {
@@ -116,12 +137,13 @@ test("validExactCheck accepts a trusted review after main moves beyond the fork 
             `${reviewedMain}...${currentMain}`,
           ].includes(basehead) ? "ahead" : "diverged" },
         }),
+        getBranch: async () => ({ data: { commit: { sha: currentMain } } }),
       },
     },
   };
   const pr = {
     body: `<!-- agent-pipeline task-run=99 issue=7 base=${fork} -->`,
-    base: { ref: "main", sha: currentMain },
+    base: { ref: "main", sha: fork },
     head: { sha: "d".repeat(40) },
   };
 

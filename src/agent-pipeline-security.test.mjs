@@ -52,6 +52,10 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.match(implement, /--mode idle \\\n\s+--dir "\$previous_dir"/);
   assert.doesNotMatch(verify, /id-token: write|models: read/);
   assert.match(verify, /scripts\/validate-agent-patch\.mjs/);
+  for (const gate of ["dependency audit", "typecheck", "unit and integration tests", "browser integration tests", "Wrangler validation", "local migration validation"]) {
+    assert.match(verify, new RegExp(`run_gate "${gate}"`));
+  }
+  assert.match(verify, /exit "\$status"\n\s+\} 2>&1 \| tee/);
   assert.doesNotMatch(publish, /id-token: write/);
   assert.match(publish, /actions: write/);
   assert.match(publish, /contents: write/);
@@ -59,6 +63,12 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.doesNotMatch(publish, /exchange_github_app_token|api\.opencode\.ai|id-token: write/);
   assert.match(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/);
   assert.match(publish, /attempt-digest=\$\{attemptDigest\}/);
+  assert.match(publish, /verification-signature=\$\{verificationSignature\}/);
+  const failureStep = publish.slice(publish.indexOf("Mark failed implementation or publication"));
+  assert.ok(
+    failureStep.indexOf("const pipeline = await import") < failureStep.indexOf("pipeline.verificationFailureSignature"),
+    "the failure step must import the trusted policy before computing a signature",
+  );
   assert.match(publish, /ATTEMPT_DIGEST: \$\{\{ needs\.implement\.outputs\.digest \}\}/);
   assert.match(publish, /base64 \| tr -d '\\n'/);
   assert.match(publish, /github-actions\[bot\]/);
@@ -297,9 +307,12 @@ test("failures retry immediately and only stopped recovery parks at agent:error"
 
   const implementation = await read("scripts/agent-pipeline.mjs");
   assert.match(implementation, /"agent:error",/);
-  for (const marker of ["task-exhausted", "no-progress", "gate-recovery-exhausted", "orphan-exhausted", "stale-exhausted"]) {
+  for (const marker of ["task-exhausted", "no-progress", "repeated-verification", "gate-recovery-exhausted", "orphan-exhausted", "stale-exhausted"]) {
     assert.match(implementation, new RegExp(marker));
   }
+  const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
+  assert.match(orchestrator, /On a resumed attempt with verification evidence, do not launch specialists/);
+  assert.match(orchestrator, /make the smallest repair that addresses the complete failure index/);
 
   const review = await read(".github/workflows/agent-review.yml");
   assert.match(review, /setIssueState\("agent:error"\);\n\s+await github\.rest\.issues\.createComment\(\{\n\s+owner, repo, issue_number: issueNumber,\n\s+body: `<!-- agent-pipeline review-exhausted/);
@@ -489,7 +502,8 @@ test("reconciliation is deterministic and model-free", async () => {
   assert.match(workflow, /reconcileAgentPipeline/);
   assert.match(implementation, /run\.event !== "workflow_dispatch"/);
   assert.match(implementation, /basehead: `\$\{recordedBase\}\.\.\.\$\{run\.head_sha\}`/);
-  assert.match(implementation, /basehead: `\$\{run\.head_sha\}\.\.\.\$\{pr\.base\.sha\}`/);
+  assert.match(implementation, /getBranch\(\{ owner, repo, branch: pr\.base\.ref \}\)/);
+  assert.match(implementation, /basehead: `\$\{run\.head_sha\}\.\.\.\$\{defaultRef\.data\.commit\.sha\}`/);
   assert.match(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);
   assert.match(implementation, /workflow_id: "agent-review\.yml", ref: defaultBranch/);
 });

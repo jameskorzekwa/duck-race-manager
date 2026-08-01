@@ -583,14 +583,31 @@ jobs:
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/agent-verify"
+          status=0
+          run_gate() {
+            local name="$1"
+            shift
+            printf '===== verification start: %s =====\n' "$name"
+            set +e
+            "$@"
+            local code=$?
+            set -e
+            if (( code == 0 )); then
+              printf '===== verification passed: %s (exit 0) =====\n' "$name"
+            else
+              printf '===== verification failed: %s (exit %s) =====\n' "$name" "$code"
+              status=1
+            fi
+          }
           {
-            npm audit --audit-level=high
-            npm run typecheck
-            npm test
-            npx playwright install --with-deps chromium
-            npm run test:e2e
-            npm run wrangler:validate
-            npm run db:migrate:local
+            run_gate "dependency audit" npm audit --audit-level=high
+            run_gate "typecheck" npm run typecheck
+            run_gate "unit and integration tests" npm test
+            run_gate "Playwright installation" npx playwright install --with-deps chromium
+            run_gate "browser integration tests" npm run test:e2e
+            run_gate "Wrangler validation" npm run wrangler:validate
+            run_gate "local migration validation" npm run db:migrate:local
+            exit "$status"
           } 2>&1 | tee "$RUNNER_TEMP/agent-verify/gate.log"
 
       - name: Summarize verification failure
@@ -861,6 +878,7 @@ jobs:
           script: |
             const fs = require("node:fs");
             const { owner, repo } = context.repo;
+            const pipeline = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
             const issueNumber = Number(process.env.ISSUE_NUMBER);
             const requestedPr = Number(process.env.PR_NUMBER);
             let verification = "";
@@ -875,6 +893,10 @@ jobs:
             const attemptDigest = String(process.env.ATTEMPT_DIGEST ?? "").trim();
             const digestMarker = /^[0-9a-f]{64}$/.test(attemptDigest)
               ? ` <!-- agent-pipeline attempt-digest=${attemptDigest} -->`
+              : "";
+            const verificationSignature = pipeline.verificationFailureSignature(verification);
+            const verificationMarker = verificationSignature
+              ? ` <!-- agent-pipeline verification-signature=${verificationSignature} -->`
               : "";
             const states = [
               "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
@@ -904,7 +926,6 @@ jobs:
               });
             }
             const published = pr?.state === "open" && pr.user?.id === 41898282;
-            const pipeline = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
             const ownsIssue = await pipeline.writeIssueStateIfCurrent(
               { github, context }, issueNumber, published ? "agent:review" : "agent:failed", context.runId,
             );
@@ -915,7 +936,7 @@ jobs:
               owner, repo, issue_number: issueNumber,
               body: published
                 ? `<!-- agent-pipeline gate-dispatch-failed=${context.runId} pr=${pr.number} -->\nCandidate PR #${pr.number} was published, but gate dispatch failed. Reconciliation will recover missing gates. [Agent Task run](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})`
-                : `<!-- agent-pipeline run-failed=${context.runId} -->${digestMarker}\n[Agent Task failed](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})${evidence}`,
+                : `<!-- agent-pipeline run-failed=${context.runId} -->${digestMarker}${verificationMarker}\n[Agent Task failed](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})${evidence}`,
             });
             // Retry immediately instead of waiting for the reconciliation sweep.
             // The shared policy decides: requeue with the saved seed, or park at
