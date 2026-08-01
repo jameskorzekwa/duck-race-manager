@@ -354,6 +354,8 @@ for racing) it keeps the blocked treatment and reasons.
 **Implemented:** every public page derives one phase from the single current
 event, using one lightweight status query per HTML request. The phase drives
 navigation, the home call to action, and what `/register` and `/race` render.
+The `/race` page additionally reads the existing public race-board projection
+for its initial board paint; it never reads a wider result or participant shape.
 
 | Phase | Event state | Navigation | Home CTA |
 | --- | --- | --- | --- |
@@ -370,6 +372,23 @@ is open, even though the navigation does not advertise it then. While the phase
 is Preparing there is no stage, heat, or result to report, so both the
 navigation and a direct `GET /race` keep the page unavailable and the direct
 request returns `303` to `/`. Staff stays in the top navigation in every phase.
+
+When the final has published results, the public result section is titled
+**Winners**. It presents the authoritative finishing order in semantic list
+order, maps first place to a named gold medal, second to silver, and third to
+bronze, and states each ordinal in text so color is never the only rank cue. Each
+published place includes the event's policy-filtered participant display name
+and public duck identity. Missing places are not filled, and no medal is drawn
+for a place that the public projection does not contain. The layered podium
+layout collapses without horizontal overflow on narrow screens, and its brief
+medal effect exists only under `prefers-reduced-motion: no-preference`.
+
+The Worker server-renders those same projected Winners into `/race`; the live
+client replaces them after its authoritative `GET /api/v1/race-board` refresh.
+If JavaScript is unavailable, the published names, duck identities, places, and
+medals therefore remain readable. The fallback adds no contact details, lookup
+codes, private paths or tokens, notes, inventory locations, staff data, or audit
+history.
 
 The home call to action is not in the hero. When a phase has one it is the
 primary action of the "happening now" section, whose title the live client
@@ -1477,6 +1496,11 @@ starting round one does for round one, including the same at-least-one-`ACTIVE`
 rule. A withdrawn or disqualified finalist keeps their slot and their duck in the
 bag, is reported as a readiness note, and blocks nothing.
 
+Before readiness is measured, the `START_FINAL` command re-applies the rule in
+Skipped and Uncontested Round-One Heats, so an unstarted round-one heat that can
+no longer be a contest is settled by that same request rather than left blocking
+the round.
+
 A round-one winner who is later withdrawn or disqualified is never promoted in
 the first place: promotion happens in the same guarded batch that publishes the
 winner, and that batch requires an `ACTIVE` racer. A finalist who leaves after
@@ -1541,6 +1565,78 @@ holds no published place — does not touch it.
 event stays there, with results publicly visible, until an administrator runs
 Delete event.
 
+### Skipped and Uncontested Round-One Heats
+
+**Implemented.** While the event is `ROUND_ONE`, a round-one heat that has never
+started and can no longer be a contest is settled by the application instead of
+by staff. "Never started" means the heat is `LOADING`, `READY`, or `CALLING` and
+has no committed `START_HEAT` command, which is the same predicate walk-up
+admission uses; a heat that was started and then reset keeps its historical
+command and stays in the operators' hands.
+
+Eligibility is the existing rule and nothing new: a racer counts only while their
+registration is `ACTIVE`, so withdrawn and disqualified racers are excluded.
+
+- **No eligible racer left.** The heat is skipped: its status becomes
+  `CANCELLED`, it records no winner, it promotes nobody, and it stops blocking
+  later heats and the final, which already treat `CANCELLED` as settled. The
+  staff finalist verification counts a skipped heat as settled rather than as a
+  round that never finished.
+- **Exactly one eligible racer left.** The heat is resolved automatically: that
+  racer is published as the first-place winner and promoted into the final, with
+  no finish-line scan and no manual winner action. This additionally requires
+  that racer to still hold a current duck assignment and not already stand in the
+  final; otherwise the heat is left alone for staff.
+- **Two or more eligible racers left.** Nothing changes. The heat is run and its
+  winner recorded exactly as before.
+
+Nothing physical moves in either case. Every `heat_entries` row, slot number, and
+duck assignment stays exactly where it was, because each duck is sealed in a
+numbered heat bag that is never re-sorted; withdrawn racers keep riding along in
+the bag and simply cannot win.
+
+The rule is re-applied at two points:
+
+1. Immediately after a committed withdrawal or disqualification, which is the
+   moment a heat can stop being a contest.
+2. At the start of the `START_FINAL` command, before readiness is measured, so a
+   withdrawal whose client never came back cannot leave the round waiting on a
+   heat nobody can run.
+
+Each settlement is its own guarded batch with a server-generated RFC 4122 v4
+command identifier, an audited `ROUND_ONE_HEAT_SKIPPED` or
+`ROUND_ONE_HEAT_RESOLVED_UNCONTESTED` event carrying heat numbers and identifiers
+only, and a guard pinned to the heat revision the planning read saw. A heat that
+moved underneath — started, reset, reactivated back into a contest, or already
+settled by a concurrent request — writes nothing at all rather than half of a
+resolution, so the operation is atomic, idempotent under retries, revision-safe,
+and cannot promote the same racer twice. A settlement that cannot commit never
+replaces the response of the mutation it ran beside.
+
+One exception is carried deliberately, and it is the same one the manual start
+carries: the last never-started round-one heat is not settled while a walk-up
+admitted during `ROUND_ONE` is still waiting for a duck and a heat place, because
+that heat is where the desk has to place them.
+
+Readiness reports pending settlements on the **Start final** transition as an
+informational note rather than a blocker, so an event whose reconciliation was
+interrupted can still be handed forward. The guarded `START_FINAL` command still
+requires a genuinely settled round, so the note can only ever offer the
+transition, never complete one the database refuses.
+
+Settling before the round starts is deliberately **not** implemented. Round-one
+readiness still refuses to start a round that holds a heat with no `ACTIVE` racer
+and still requires at least three entries per heat: a race that does not have
+enough racers should not start at all, and reactivating a racer or reopening
+registration remains the remedy.
+
+Public and staff surfaces reflect both outcomes after their ordinary
+authoritative re-fetches, which the withdrawal already triggers through the
+`participants`, `ducks`, and `heats` live domains. A skipped heat publishes with
+the existing `CANCELLED` heat label ("Not running") and no result; an uncontested
+heat publishes as `FINALIZED` with its one first-place result and its finalist,
+identically to a scanned winner.
+
 ## Participant Corrections and Status Changes
 
 ### Edit Details
@@ -1562,6 +1658,11 @@ Registration staff, race directors, and administrators can withdraw a
 disqualify a `SUBMITTED` or `ACTIVE` registration or reactivate a
 withdrawn/disqualified registration. These
 operations are revision-checked, idempotent, and audited.
+
+A committed withdrawal or disqualification during `ROUND_ONE` re-applies the rule
+in Skipped and Uncontested Round-One Heats to that event, because it is the
+moment a heat can stop being a contest. Reactivation does not, since restoring a
+racer can only ever restore one.
 
 The participant detail pane offers **Withdraw** and **Disqualify** to every
 `SUBMITTED` or `ACTIVE` participant, which is exactly the set the endpoints
@@ -2818,7 +2919,11 @@ event, `/race` has nothing to report, so it redirects to the home page with a
   `ROUND_ONE` round one under way, `FINAL` final under way, and `COMPLETED`
   results official. An unrecognized status falls back to neutral wording
   instead of raw enum text.
-- Ordered round-one and final heats.
+- Ordered round-one and final heats. As soon as the Final exists, its round
+  section precedes every round-one section in visual and DOM reading order; the
+  deterministically numbered round-one heats remain beneath it in their existing
+  order. Before that point, round one keeps its existing order as the only round
+  section.
 - Safe heat status, including calling, running, and awaiting-result emphasis.
 - Policy-filtered participant display names and visible duck numbers. A filtered
   participant-chosen duck name completely replaces the generic `Duck #N` label;
@@ -2826,7 +2931,10 @@ event, `/race` has nothing to report, so it redirects to the home page with a
   detail-link destination and response field do not change.
 - Finalized heat winners moved to the top of their heat roster with an accessible
   gold **Winner** ribbon beside the participant; all non-winners retain slot
-  order. The ordered final podium carries the duck name on the same terms.
+  order. Participant, duck, and official-place values use labelled table columns
+  inside every heat card; long names wrap within their cells and an entry without
+  an official place says **Not placed**. The ordered final podium carries the
+  duck name on the same terms.
 
 Visible duck numbers come only from a current assignment with `valid_to IS
 NULL`; a historical assignment closed by pre-race unassignment is never revived
@@ -3112,19 +3220,45 @@ not return `details_json`, contact data, tokens, or provider details.
 
 ### Notification Support
 
-The schema and administrator UI can list notification rows and attempts, retry
-`FAILED` or `RETRY_PENDING` records, and suppress or cancel eligible records.
-Retry creates a durable queue attempt and publishes only the notification ID to
-the configured queue producer.
+Operational race reminders are sent to a participant only when their current
+registration has both an email address and email updates enabled. Pairing creates
+one `HEAT_ASSIGNED` notification in the same D1 batch as the duck assignment and
+heat place. Moving a Round One or Final heat from `READY` to `CALLING` creates one
+`HEAT_UPCOMING` notification for each eligible opted-in racer on that heat. A
+matching command retry cannot create another logical message.
 
-**Deferred and non-operational:** current registration, pairing, heat, and
-result commands never create `email_notifications` rows. `wrangler.jsonc`
-declares only an `EMAIL_QUEUE` producer. There is no Worker queue consumer, SES
-template/send path, delivery callback, or automatic retry processor. Therefore
-no registration, assignment, upcoming-heat, finalist, or result email is
-currently delivered, regardless of the stored email-notification setting.
-Notification support controls operate only on records inserted by some external
-or future process and must not be presented as proof that delivery exists.
+The mutation publishes only the opaque notification ID to `EMAIL_QUEUE`; no
+name, address, duck number, lookup code, or token enters the queue message. A
+once-per-minute dispatcher recovers a notification committed before queue
+publication. Each durable row records the duck assignment that originated it.
+The consumer reloads the current consent, address, active registration, heat
+place, duck assignment, and heat state from D1 before it renders versioned text
+and HTML and asks SES to send. The originating assignment must still be the
+current one; a legacy row without that proof is cancelled rather than guessed.
+Opt-out, withdrawal, deletion, a changed assignment, or a heat that is no longer
+upcoming cancels stale work without sending. Email failure never rolls back
+pairing or a heat transition, and the onsite announcer remains authoritative.
+
+Each email names the event, participant, current duck number, and Round One or
+Final heat. Assignment mail asks the participant to stay near the pond; upcoming
+mail says the heat is being called and asks them to bring their duck to the pond.
+Both link only to public race status, explain that race progress can change, and
+do not promise a start time. Private status credentials and contact-preference
+credentials are never placed in email storage or reconstructed by the consumer.
+
+SES acceptance records `SENT`. That is the terminal success the current system
+can prove; it is not relabeled `DELIVERED`. SES delivery, bounce, and complaint
+event callbacks remain deferred. Temporary send failures receive bounded queue
+retries, exhausted or permanent failures become `FAILED`, and unexpected queue
+failures reach the configured DLQ. Each active delivery is owned by a unique D1
+claim token rather than a timestamp. If a claim becomes stale, QuickDucks cannot
+distinguish a pre-send Worker stop from SES acceptance followed by a failed D1
+write, so it records `DELIVERY_OUTCOME_UNKNOWN` and never sends or manually
+retries that notification again. This at-most-once recovery policy prefers one
+missed reminder to a duplicate. The administrator UI lists notification rows
+and attempts, retries other `FAILED` or `RETRY_PENDING` records, and can suppress
+or cancel eligible work. All persisted errors are fixed safe codes rather than
+raw provider responses.
 
 ## Delete Event (Any State)
 
@@ -3211,10 +3345,13 @@ External Cognito changes cannot share a D1 transaction. Staff grant and
 lifecycle handlers use compensation as described in the staff-access section
 and return explicit reconciliation errors if compensation also fails.
 
-Queue retry is also split across D1 and Cloudflare Queue. The durable attempt is
-created first. If publish fails, it is marked temporary failure and the
-notification returns to `RETRY_PENDING`; the same command can retry publication.
-This path does not make email delivery operational without a consumer.
+Queue publication is also split across D1 and Cloudflare Queue. Pairing or a heat
+call commits the durable notification with its race command before making a
+best-effort queue send. A failed send records a temporary queue attempt and
+returns the notification to `RETRY_PENDING`; if even that recovery write fails,
+the row remains `PENDING`. The once-per-minute dispatcher rediscovers both states.
+The configured consumer then claims the row and revalidates authoritative race
+and consent state before any SES request.
 
 ### Connectivity Failure
 

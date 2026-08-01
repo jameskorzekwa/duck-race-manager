@@ -269,7 +269,7 @@ test.describe("authoritative live refresh", () => {
     await finalizeHeat(client, seeded.eventId, finalHeat, results);
     await racePage.bringToFront();
     await podiumBoard;
-    await expect(racePage.getByRole("heading", { name: "Official podium" })).toBeVisible();
+    await expect(racePage.getByRole("heading", { name: "Winners" })).toBeVisible();
     await announcerPage.bringToFront();
     await expect(announcerPage.getByRole("heading", { name: "The final is decided" })).toBeVisible();
     await finishPage.bringToFront();
@@ -321,7 +321,7 @@ test.describe("authoritative live refresh", () => {
     await inventoryPage.goto("/staff/inventory");
     await deletePage.goto("/staff");
     await expect(homePage.locator("[data-live-summary-title]")).toHaveText("Harbor Duck Derby");
-    await expect(racePage.getByRole("heading", { name: "Official podium" })).toBeVisible();
+    await expect(racePage.getByRole("heading", { name: "Winners" })).toBeVisible();
     await expect(registrationDesk.locator("[data-participant-list] .result-button").first()).toBeVisible();
     await expect(inventoryPage.getByRole("button", { name: /Duck #101/ })).toBeVisible();
 

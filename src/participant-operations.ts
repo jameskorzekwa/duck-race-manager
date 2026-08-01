@@ -20,6 +20,7 @@ import {
   validateRegistration,
   type RegistrationInput,
 } from "./registration.ts";
+import { reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
 import type { Env } from "./types.ts";
 import {
   unstartedRoundOneHeatExistsSql,
@@ -786,9 +787,17 @@ const changeRegistrationStatus = async (
       return json({ error: "This command identifier was already used for another operation." }, 409);
     }
     const replay = await getRegistration(env, registrationId);
-    return replay === null
-      ? json({ error: "Registration not found." }, 404)
-      : registrationResult(replay, true);
+    if (replay === null) return json({ error: "Registration not found." }, 404);
+    // The status batch and automatic heat settlement are deliberately separate:
+    // a committed withdrawal must survive a failed reconciliation. That also
+    // means the matching client retry is a recovery boundary, not merely a read
+    // of the stored response. Re-run the guarded, idempotent reconciliation
+    // before answering so a request interrupted after its status commit cannot
+    // leave an uncontested or empty heat stuck until somebody starts the final.
+    if (operation !== "reactivate" && replay.event_status === "ROUND_ONE") {
+      await reconcileRoundOneHeats(env, replay.event_id, actor.id);
+    }
+    return registrationResult(replay, true);
   }
 
   const current = await getRegistration(env, registrationId);
@@ -893,9 +902,27 @@ const changeRegistrationStatus = async (
     const replayCommand = await findCommand(env, commandId);
     if (replayCommand?.command_type === configuration.commandType && replayCommand.result_id === registrationId) {
       const replay = await getRegistration(env, registrationId);
-      if (replay !== null) return registrationResult(replay, true);
+      if (replay !== null) {
+        // A concurrent request can have committed this command before the batch
+        // reported its conflict. Give that matching replay the same repair path
+        // as the ordinary early replay above.
+        if (operation !== "reactivate" && replay.event_status === "ROUND_ONE") {
+          await reconcileRoundOneHeats(env, replay.event_id, actor.id);
+        }
+        return registrationResult(replay, true);
+      }
     }
     return json({ error: "Registration status conflicted with another update. Refresh and try again." }, 409);
+  }
+  // The racer who just left may have been the last contest in their heat. This
+  // is the moment that fact becomes true, so it is the moment the rule is
+  // applied: a Round One heat with nobody left to win is skipped, and one with
+  // exactly one racer left sends that duck straight to the final. It runs after
+  // the batch committed, never inside it, so a heat that cannot be settled
+  // leaves this withdrawal exactly as it was recorded. Reactivation is skipped
+  // because putting a racer back can only ever restore a contest.
+  if (operation !== "reactivate" && current.event_status === "ROUND_ONE") {
+    await reconcileRoundOneHeats(env, current.event_id, actor.id);
   }
   const updated = await getRegistration(env, registrationId);
   return updated === null

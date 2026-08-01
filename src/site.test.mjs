@@ -320,6 +320,51 @@ test("the live board exposes a stage chip on every page that renders it", () => 
   assert.equal(renderHome("RACING").includes("data-live-board-content"), false);
 });
 
+test("the race page server-renders authoritative Winners for a scriptless visit", () => {
+  const markup = renderRace("RESULTS", {
+    event: {
+      name: "Community Final",
+      eventDate: "2026-08-01",
+      status: "COMPLETED",
+      currentHeat: null,
+      roundOneHeats: [],
+      finalHeats: [],
+      podium: [
+        { place: 1, participantDisplayName: "Gold <Duck>", duckNumber: 12, duckName: null },
+        { place: 2, participantDisplayName: "Silver & Co.", duckNumber: 7, duckName: "Quack <Attack>" },
+      ],
+    },
+  });
+  const winners = markup.match(/<section class="board-round winners"[\s\S]*?<\/section>/)?.[0];
+
+  assert.ok(winners);
+  assert.match(winners, /<h3 class="winners-title" id="winners-title">Winners<\/h3>/);
+  assert.equal((winners.match(/class="podium-place/g) ?? []).length, 2);
+  assert.match(winners, /podium-gold[^>]*value="1"[\s\S]*Gold medal · 1st place/);
+  assert.match(winners, /podium-silver[^>]*value="2"[\s\S]*Silver medal · 2nd place/);
+  assert.doesNotMatch(winners, /podium-bronze|Bronze medal/);
+  assert.ok(winners.indexOf("Gold medal") < winners.indexOf("Silver medal"));
+  assert.match(winners, /Gold &lt;Duck&gt;/);
+  assert.match(winners, /Silver &amp; Co\./);
+  assert.match(winners, /href="\/duck\/12">Duck #12<\/a>/);
+  assert.match(winners, /href="\/duck\/7">Quack &lt;Attack&gt;<\/a>/);
+  assert.doesNotMatch(winners, /Gold <Duck>|Silver & Co\.|Quack <Attack>/);
+  assert.match(markup, /these Winners are the current official results/);
+});
+
+test("the Race Status hero spans the shell exactly like the home hero", () => {
+  const mainContent = (markup) => markup.match(/<main class="shell">([\s\S]*?)<\/main>/)?.[1] ?? "";
+  const race = mainContent(renderRace("RACING"));
+
+  assert.match(race, /<section class="page-panel race-status-hero" data-race-status-hero>/);
+  assert.match(style, /\.page-panel\.race-status-hero \{ width:100%; max-width:none; margin-right:0; margin-left:0; \}/);
+  // The override belongs only to the Race Status hero. Other panels retain the
+  // shared 49rem measure even though every page embeds the shared stylesheet.
+  for (const markup of [renderHome("RACING"), renderMyDucks("RACING"), renderRegistration(undefined, "RACING"), renderStatus()]) {
+    assert.doesNotMatch(mainContent(markup), /data-race-status-hero|class="[^"]*race-status-hero/);
+  }
+});
+
 test("the how-it-works cards describe the race without linking anywhere", () => {
   const home = renderHome("REGISTRATION");
   const explainers = home.match(/<section id="how-it-works"[\s\S]*?<\/section>/)?.[0];

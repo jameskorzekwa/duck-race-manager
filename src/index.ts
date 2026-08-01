@@ -26,11 +26,18 @@ import {
 } from "./client-scripts.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
 import {
+  dispatchPendingEmailNotifications,
+  handleEmailQueue,
+  sendEmailWithSes,
+  type EmailSender,
+} from "./email-notifications.ts";
+import {
   phaseAllowsRaceStatus,
   phaseShowsMyDucks,
   publicPhaseForRender,
   type PublicPhase,
 } from "./public-phase.ts";
+import { getPublicRaceBoard } from "./race-board.ts";
 import {
   canOpenAdminConsole,
   faviconSvg,
@@ -185,6 +192,7 @@ const staffLandingPages: readonly (readonly [string, readonly OperationalRole[]]
 export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
+  emailSender: EmailSender = sendEmailWithSes,
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -359,7 +367,18 @@ export const createWorker = (
       if (!phaseAllowsRaceStatus(phase)) {
         return new Response(null, { status: 303, headers: { ...securityHeaders, location: "/" } });
       }
-      return html(renderRace(phase), 200, true);
+      // Preserve the client-refetched live board while giving a scriptless
+      // results visit the same authoritative public Winners projection. A
+      // transient failure here degrades only the initial board paint; the page
+      // and its live client remain available, just as they were before this
+      // resilient fallback existed.
+      let initialBoard: Awaited<ReturnType<typeof getPublicRaceBoard>> | undefined;
+      try {
+        initialBoard = await getPublicRaceBoard(env);
+      } catch {
+        initialBoard = undefined;
+      }
+      return html(renderRace(phase, initialBoard), 200, true);
     }
     // My Ducks exists only once there is a public race to have ducks in. Before
     // registration opens the nav does not offer it, so a visitor who reaches it
@@ -616,6 +635,12 @@ export const createWorker = (
     // traffic, so it deliberately runs no phase query and renders the minimal
     // Home-and-Staff navigation instead.
     return html(renderNotFound(), 404, true);
+  },
+  async queue(batch, env): Promise<void> {
+    await handleEmailQueue(batch, env, emailSender);
+  },
+  async scheduled(_controller, env, ctx): Promise<void> {
+    ctx.waitUntil(dispatchPendingEmailNotifications(env));
   },
 });
 

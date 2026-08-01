@@ -15,6 +15,7 @@ import {
   type StaffIdentityProvisioner,
 } from "./staff-access.ts";
 import type { Env } from "./types.ts";
+import { publishEmailNotification } from "./email-notifications.ts";
 import { heatHasNeverStartedSql, unstartedRoundOneHeatExistsSql } from "./walk-up-admission.ts";
 
 const headers = {
@@ -236,6 +237,7 @@ interface StaffDuckRow {
   first_name: string | null;
   last_name: string | null;
   email: string | null;
+  email_notifications_enabled: number;
   phone: string | null;
   lookup_code: string | null;
   registration_status: string | null;
@@ -252,6 +254,7 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
             ed.event_id, da.race_entry_id, re.duck_name,
             r.id AS registration_id,
             r.first_name, r.last_name, r.email, r.phone, r.lookup_code,
+            r.email_notifications_enabled,
             r.status AS registration_status
        FROM duck_tags dt
        JOIN ducks d ON d.id = dt.duck_id
@@ -1084,7 +1087,15 @@ const pairDuck = async (
                WHERE he.race_entry_id = re.id
                ORDER BY CASE h.round WHEN 'FINAL' THEN 0 ELSE 1 END, h.heat_number
                LIMIT 1
-            ) AS existing_heat
+             ) AS existing_heat,
+            (
+              SELECT h.id
+                FROM heat_entries he
+                JOIN heats h ON h.id = he.heat_id
+               WHERE he.race_entry_id = re.id
+               ORDER BY CASE h.round WHEN 'FINAL' THEN 0 ELSE 1 END, h.heat_number
+               LIMIT 1
+             ) AS existing_heat_id
        FROM registrations r
        JOIN race_entries re ON re.registration_id = r.id
        JOIN events e ON e.id = r.event_id
@@ -1099,6 +1110,7 @@ const pairDuck = async (
   ).bind(eventId, lookupCode).first<PairingContext & {
     event_status: string;
     existing_heat: string | null;
+    existing_heat_id: string | null;
   }>();
   if (context === null) {
     return json({ error: "No unpaired participant matches that code in this event." }, 404);
@@ -1174,9 +1186,11 @@ const pairDuck = async (
   // race entry, and the duck is resolved through whichever assignment is
   // currently open, so a new assignment is the whole repair.
   let heat: { round: string; number: number } | null = null;
+  let assignedHeatId: string | null = null;
   if (typeof context.existing_heat === "string") {
     const [round, number] = context.existing_heat.split(":");
     heat = { round, number: Number(number) };
+    assignedHeatId = context.existing_heat_id;
   } else {
     const roundOneWalkUp = context.event_status === "ROUND_ONE";
     const existingHeat = await env.DB.prepare(
@@ -1257,6 +1271,7 @@ const pairDuck = async (
       heatId = existingHeat.id;
       heat = { round: "ROUND_ONE", number: existingHeat.heat_number };
     }
+    assignedHeatId = heatId;
     // Guarded slot: the slot number is recomputed inside the atomic batch and
     // becomes NULL when the heat is already full, so the NOT NULL constraint
     // aborts the transaction instead of overfilling a heat that a concurrent
@@ -1301,6 +1316,37 @@ const pairDuck = async (
     }
   }
 
+  // The notification row is part of the same authoritative command as the
+  // assignment and heat slot. Contact details never enter the queue payload;
+  // the consumer rechecks the current address, consent, assignment, and heat.
+  // Re-pairing into an existing slot is harmless because the schema permits one
+  // HEAT_ASSIGNED message for this participant and heat.
+  const notificationId = assignedHeatId === null ? null : crypto.randomUUID();
+  if (notificationId !== null) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO email_notifications
+        (id, event_id, registration_id, heat_id, duck_assignment_id,
+         notification_type, status,
+         template_version, created_by_command_id, scheduled_at, updated_at)
+       SELECT ?, r.event_id, r.id, h.id, ?, 'HEAT_ASSIGNED', 'PENDING', 1, ?, ?, ?
+         FROM registrations r
+         JOIN race_entries re ON re.registration_id = r.id
+         JOIN heat_entries he ON he.race_entry_id = re.id
+         JOIN heats h ON h.id = he.heat_id AND h.event_id = r.event_id
+        WHERE r.id = ? AND h.id = ? AND r.status = 'ACTIVE'
+          AND r.email IS NOT NULL AND r.email_notifications_enabled = 1
+       ON CONFLICT DO NOTHING`,
+    ).bind(
+      notificationId,
+      assignmentId,
+      commandId,
+      now,
+      now,
+      context.registration_id,
+      assignedHeatId,
+    ));
+  }
+
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
@@ -1325,6 +1371,8 @@ const pairDuck = async (
   } catch {
     return json({ error: "Pairing conflicted with another update. Refresh and try again." }, 409);
   }
+
+  if (notificationId !== null) await publishEmailNotification(env, notificationId);
 
   return pairingResponse(
     assignmentId,

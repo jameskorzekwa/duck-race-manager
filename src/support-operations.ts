@@ -28,6 +28,10 @@ const notificationStatuses = new Set([
 ]);
 
 const terminalNotificationStatuses = new Set([
+  // SES SendEmail acceptance is the terminal state this application can prove.
+  // Delivery/bounce callbacks are not implemented, so it is never relabeled as
+  // DELIVERED merely to make the support count look complete.
+  "SENT",
   "DELIVERED",
   "FAILED",
   "BOUNCED",
@@ -123,7 +127,7 @@ const operationalSummary = async (env: Env, eventId: string): Promise<Response> 
     ).bind(eventId).first<Record<string, unknown>>(),
     env.DB.prepare(
       `SELECT COUNT(*) AS total_count,
-              SUM(CASE WHEN status NOT IN ('DELIVERED', 'FAILED', 'BOUNCED', 'COMPLAINED', 'SUPPRESSED', 'CANCELLED') THEN 1 ELSE 0 END) AS nonterminal_count,
+              SUM(CASE WHEN status NOT IN ('SENT', 'DELIVERED', 'FAILED', 'BOUNCED', 'COMPLAINED', 'SUPPRESSED', 'CANCELLED') THEN 1 ELSE 0 END) AS nonterminal_count,
               SUM(CASE WHEN status IN ('FAILED', 'BOUNCED', 'COMPLAINED') THEN 1 ELSE 0 END) AS failed_count,
               SUM(CASE WHEN status = 'RETRY_PENDING' THEN 1 ELSE 0 END) AS retry_pending_count
          FROM email_notifications
@@ -399,7 +403,8 @@ const retryNotification = async (
          SELECT ?, n.event_id, 'RETRY_NOTIFICATION', n.id, ?, ?
            FROM email_notifications n
           WHERE n.id = ? AND n.event_id = ?
-            AND n.status IN ('FAILED', 'RETRY_PENDING')`,
+            AND n.status IN ('FAILED', 'RETRY_PENDING')
+            AND COALESCE(n.last_error_code, '') != 'DELIVERY_OUTCOME_UNKNOWN'`,
       ).bind(commandId, now, now, notificationId, eventId),
       env.DB.prepare(
         `UPDATE email_notifications
@@ -407,6 +412,7 @@ const retryNotification = async (
                 last_error_code = NULL, retry_after = NULL, updated_at = ?
           WHERE id = ? AND event_id = ?
             AND status IN ('FAILED', 'RETRY_PENDING')
+            AND COALESCE(last_error_code, '') != 'DELIVERY_OUTCOME_UNKNOWN'
             AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'RETRY_NOTIFICATION')`,
       ).bind(now, notificationId, eventId, commandId),
       env.DB.prepare(
