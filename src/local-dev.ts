@@ -13,6 +13,12 @@
 // a private network address over https — and the request arrived on that same
 // origin, so a copy of this module deployed by accident serves nothing.
 import { authenticateStaff } from "./auth.ts";
+import {
+  dispatchPendingEmailNotifications,
+  handleEmailQueue,
+  type EmailSender,
+  type OutboundEmail,
+} from "./email-notifications.ts";
 import { createWorker } from "./index.ts";
 import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
 import { escapeHtml } from "./site.ts";
@@ -22,6 +28,15 @@ export { RaceUpdates } from "./live-updates.ts";
 
 const accessTokenPrefix = "localdev-";
 const refreshTokenPrefix = "localdevr-";
+const localEmails: (OutboundEmail & { sentAt: string })[] = [];
+
+// Local development remains fully offline. The queue consumer exercises the
+// production claim, rendering, status, and attempt code, while this final seam
+// retains synthetic messages in memory for browser tests and local inspection.
+const localEmailSender: EmailSender = async (email) => {
+  localEmails.push({ ...email, sentAt: new Date().toISOString() });
+  return { providerMessageId: `local-${crypto.randomUUID()}` };
+};
 
 const noStoreHtml = {
   "cache-control": "no-store",
@@ -375,11 +390,27 @@ const localWorker: ExportedHandler<Env> = {
     // and docs/LOCAL_DEVELOPMENT.md says it again.
     if (url.pathname === "/__local/staff" && request.method === "GET") return accountsResponse();
 
+    if (url.pathname === "/__local/emails" && request.method === "GET") {
+      return Response.json({ emails: localEmails }, {
+        headers: { "cache-control": "no-store", "x-robots-tag": "noindex, nofollow" },
+      });
+    }
+    if (url.pathname === "/__local/emails" && request.method === "DELETE") {
+      localEmails.length = 0;
+      return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+    }
+
     if (url.pathname.startsWith("/__local/")) {
       return Response.json({ error: "Unknown local development endpoint." }, { status: 404 });
     }
 
     return worker.fetch!(request, env, ctx);
+  },
+  async queue(batch, env): Promise<void> {
+    await handleEmailQueue(batch, env, localEmailSender);
+  },
+  async scheduled(_controller, env, ctx): Promise<void> {
+    ctx.waitUntil(dispatchPendingEmailNotifications(env));
   },
 };
 
