@@ -32,6 +32,10 @@ Do not edit, commit, push, label, comment, or merge. If a blocking finding exist
 
 Do not execute candidate code. A separate least-privilege job runs the deterministic release gate at the exact candidate SHA.
 
+Your entire machine-readable output is one marker line. A review without it is discarded and the candidate is rejected, however correct your prose was: reports ending "Recommendation: APPROVE" and "Would you like me to point you to the contract?" have both been thrown away. Write the marker first, then your findings.
+
+You already have everything you need: the trusted base snapshot you are running in, `.pipeline/candidate.patch`, and `.pipeline/review-context.json`. There is no other contract to fetch and no one to ask for it.
+
 No one reads or answers your session while it runs. Never ask a question, request clarification, or wait for confirmation: decide from the materials you have, and let uncertainty resolve to rejection.
 
 The marker is the review's entire machine-readable output. Emit exactly one marker line in your final message:
