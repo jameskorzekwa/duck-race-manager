@@ -221,6 +221,17 @@ test("the review pins the head, tolerates base drift, and rejects conflicts", as
   assert.match(gate, /pr\.mergeable === null/);
   assert.match(gate, /pr\.mergeable === false/);
   assert.match(gate, /Conflicts with the default branch/);
+
+  // The decision script reads pr.body before it records state. Declaring pr
+  // after that read is a temporal dead zone: the step throws ReferenceError
+  // before any verdict is written, so every gate fails and no candidate can
+  // ever merge -- while the logs still show the expected text, because a
+  // github-script block echoes its own source.
+  const decision = gate.slice(gate.indexOf("Record exact-head decision"));
+  const declared = decision.indexOf("let pr = ");
+  const firstRead = decision.indexOf("const candidateRun = ");
+  assert.ok(declared >= 0 && firstRead >= 0, "the decision script must fetch pr and read pr.body");
+  assert.ok(declared < firstRead, "pr must be fetched before anything reads it");
 });
 
 test("the reviewer contract comes from trusted main, and a missing marker rejects", async () => {

@@ -559,6 +559,7 @@ jobs:
                 if (error.status !== 404) throw error;
               }
             };
+            let pr = (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
             // This candidate may only write its issue's state while it is still
             // the newest run that claimed the issue: a review finishing after a
             // fresh implementation was dispatched must not relabel live work.
@@ -595,7 +596,7 @@ jobs:
             // so a candidate that is merely behind main is still safe to merge,
             // and every merge moves main -- pinning the base would invalidate
             // every other in-flight review each time one candidate landed.
-            let pr = (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
+            pr = (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
             if (pr.state !== "open" || pr.head.sha !== expectedHead) {
               await completeCheck("failure", "Stale review context", `Live PR is ${pr.head.sha}; expected ${expectedHead}.`);
               core.setFailed(`Stale gate: live PR head is ${pr.head.sha}, expected ${expectedHead}.`);
