@@ -1432,6 +1432,11 @@ starting round one does for round one, including the same at-least-one-`ACTIVE`
 rule. A withdrawn or disqualified finalist keeps their slot and their duck in the
 bag, is reported as a readiness note, and blocks nothing.
 
+Before readiness is measured, the `START_FINAL` command re-applies the rule in
+Skipped and Uncontested Round-One Heats, so an unstarted round-one heat that can
+no longer be a contest is settled by that same request rather than left blocking
+the round.
+
 A round-one winner who is later withdrawn or disqualified is never promoted in
 the first place: promotion happens in the same guarded batch that publishes the
 winner, and that batch requires an `ACTIVE` racer. A finalist who leaves after
@@ -1496,6 +1501,78 @@ holds no published place — does not touch it.
 event stays there, with results publicly visible, until an administrator runs
 Delete event.
 
+### Skipped and Uncontested Round-One Heats
+
+**Implemented.** While the event is `ROUND_ONE`, a round-one heat that has never
+started and can no longer be a contest is settled by the application instead of
+by staff. "Never started" means the heat is `LOADING`, `READY`, or `CALLING` and
+has no committed `START_HEAT` command, which is the same predicate walk-up
+admission uses; a heat that was started and then reset keeps its historical
+command and stays in the operators' hands.
+
+Eligibility is the existing rule and nothing new: a racer counts only while their
+registration is `ACTIVE`, so withdrawn and disqualified racers are excluded.
+
+- **No eligible racer left.** The heat is skipped: its status becomes
+  `CANCELLED`, it records no winner, it promotes nobody, and it stops blocking
+  later heats and the final, which already treat `CANCELLED` as settled. The
+  staff finalist verification counts a skipped heat as settled rather than as a
+  round that never finished.
+- **Exactly one eligible racer left.** The heat is resolved automatically: that
+  racer is published as the first-place winner and promoted into the final, with
+  no finish-line scan and no manual winner action. This additionally requires
+  that racer to still hold a current duck assignment and not already stand in the
+  final; otherwise the heat is left alone for staff.
+- **Two or more eligible racers left.** Nothing changes. The heat is run and its
+  winner recorded exactly as before.
+
+Nothing physical moves in either case. Every `heat_entries` row, slot number, and
+duck assignment stays exactly where it was, because each duck is sealed in a
+numbered heat bag that is never re-sorted; withdrawn racers keep riding along in
+the bag and simply cannot win.
+
+The rule is re-applied at two points:
+
+1. Immediately after a committed withdrawal or disqualification, which is the
+   moment a heat can stop being a contest.
+2. At the start of the `START_FINAL` command, before readiness is measured, so a
+   withdrawal whose client never came back cannot leave the round waiting on a
+   heat nobody can run.
+
+Each settlement is its own guarded batch with a server-generated RFC 4122 v4
+command identifier, an audited `ROUND_ONE_HEAT_SKIPPED` or
+`ROUND_ONE_HEAT_RESOLVED_UNCONTESTED` event carrying heat numbers and identifiers
+only, and a guard pinned to the heat revision the planning read saw. A heat that
+moved underneath — started, reset, reactivated back into a contest, or already
+settled by a concurrent request — writes nothing at all rather than half of a
+resolution, so the operation is atomic, idempotent under retries, revision-safe,
+and cannot promote the same racer twice. A settlement that cannot commit never
+replaces the response of the mutation it ran beside.
+
+One exception is carried deliberately, and it is the same one the manual start
+carries: the last never-started round-one heat is not settled while a walk-up
+admitted during `ROUND_ONE` is still waiting for a duck and a heat place, because
+that heat is where the desk has to place them.
+
+Readiness reports pending settlements on the **Start final** transition as an
+informational note rather than a blocker, so an event whose reconciliation was
+interrupted can still be handed forward. The guarded `START_FINAL` command still
+requires a genuinely settled round, so the note can only ever offer the
+transition, never complete one the database refuses.
+
+Settling before the round starts is deliberately **not** implemented. Round-one
+readiness still refuses to start a round that holds a heat with no `ACTIVE` racer
+and still requires at least three entries per heat: a race that does not have
+enough racers should not start at all, and reactivating a racer or reopening
+registration remains the remedy.
+
+Public and staff surfaces reflect both outcomes after their ordinary
+authoritative re-fetches, which the withdrawal already triggers through the
+`participants`, `ducks`, and `heats` live domains. A skipped heat publishes with
+the existing `CANCELLED` heat label ("Not running") and no result; an uncontested
+heat publishes as `FINALIZED` with its one first-place result and its finalist,
+identically to a scanned winner.
+
 ## Participant Corrections and Status Changes
 
 ### Edit Details
@@ -1517,6 +1594,11 @@ Registration staff, race directors, and administrators can withdraw a
 disqualify a `SUBMITTED` or `ACTIVE` registration or reactivate a
 withdrawn/disqualified registration. These
 operations are revision-checked, idempotent, and audited.
+
+A committed withdrawal or disqualification during `ROUND_ONE` re-applies the rule
+in Skipped and Uncontested Round-One Heats to that event, because it is the
+moment a heat can stop being a contest. Reactivation does not, since restoring a
+racer can only ever restore one.
 
 The participant detail pane offers **Withdraw** and **Disqualify** to every
 `SUBMITTED` or `ACTIVE` participant, which is exactly the set the endpoints

@@ -1106,7 +1106,7 @@ const unpairedRosterSql = `SELECT 1 AS missing
 // the final never-started heat is the cutoff: starting it must lose to a
 // committed admission that still needs placement. Withdrawal clears the
 // blocker because the registration is no longer SUBMITTED.
-const pendingUnplacedWalkUpExistsSql = (eventExpression: string): string => `EXISTS (
+export const pendingUnplacedWalkUpExistsSql = (eventExpression: string): string => `EXISTS (
   SELECT 1
     FROM registrations pending_registration
     JOIN race_entries pending_entry
@@ -1128,7 +1128,7 @@ const pendingUnplacedWalkUpExistsSql = (eventExpression: string): string => `EXI
      )
 )`;
 
-const noOtherUnstartedRoundOneHeatSql = (heatAlias: string): string => `NOT EXISTS (
+export const noOtherUnstartedRoundOneHeatSql = (heatAlias: string): string => `NOT EXISTS (
   SELECT 1 FROM heats other_unstarted
    WHERE other_unstarted.event_id = ${heatAlias}.event_id
      AND other_unstarted.round = 'ROUND_ONE'
@@ -2859,6 +2859,7 @@ const finalistRows = (
 interface VerificationRow {
   round_one_heats: number;
   finalized_round_one_heats: number;
+  skipped_round_one_heats: number;
   published_winners: number;
   final_heat_count: number;
   finalist_count: number;
@@ -2873,6 +2874,11 @@ const verificationSummary = async (env: Env, eventId: string): Promise<Record<st
     `SELECT
        (SELECT COUNT(*) FROM heats WHERE event_id = ? AND round = 'ROUND_ONE') AS round_one_heats,
        (SELECT COUNT(*) FROM heats WHERE event_id = ? AND round = 'ROUND_ONE' AND status = 'FINALIZED') AS finalized_round_one_heats,
+       -- A skipped heat is settled, not missing. It holds no racer who could
+       -- ever have won it, so it publishes no winner and promotes nobody, and
+       -- counting it as unfinished would report a correctly settled round as
+       -- unverified forever.
+       (SELECT COUNT(*) FROM heats WHERE event_id = ? AND round = 'ROUND_ONE' AND status = 'CANCELLED') AS skipped_round_one_heats,
        (SELECT COUNT(*) FROM heat_results hr JOIN heats h ON h.id = hr.heat_id
          WHERE hr.event_id = ? AND h.round = 'ROUND_ONE' AND hr.status = 'FINALIZED' AND hr.place = 1) AS published_winners,
        (SELECT COUNT(*) FROM heats WHERE event_id = ? AND round = 'FINAL') AS final_heat_count,
@@ -2892,10 +2898,11 @@ const verificationSummary = async (env: Env, eventId: string): Promise<Record<st
               WHERE hr.event_id = finalist.event_id AND hr.race_entry_id = finalist.race_entry_id
                 AND h.round = 'ROUND_ONE' AND hr.status = 'FINALIZED' AND hr.place = 1
            )) AS invalid_finalists`,
-  ).bind(eventId, eventId, eventId, eventId, eventId, eventId, eventId).first<VerificationRow>();
+  ).bind(eventId, eventId, eventId, eventId, eventId, eventId, eventId, eventId).first<VerificationRow>();
   const summary = row ?? {
     round_one_heats: 0,
     finalized_round_one_heats: 0,
+    skipped_round_one_heats: 0,
     published_winners: 0,
     final_heat_count: 0,
     finalist_count: 0,
@@ -2904,12 +2911,15 @@ const verificationSummary = async (env: Env, eventId: string): Promise<Record<st
   };
   return {
     verified: summary.round_one_heats > 0
-      && summary.round_one_heats === summary.finalized_round_one_heats
+      && summary.round_one_heats === summary.finalized_round_one_heats + summary.skipped_round_one_heats
       && summary.final_heat_count === 1
       && summary.published_winners === summary.finalist_count
       && summary.missing_winners === 0
       && summary.invalid_finalists === 0,
     roundOneHeats: summary.round_one_heats,
+    // Deliberately not projected as its own field. A skipped heat changes only
+    // whether the round counts as settled, and every existing consumer of this
+    // payload reads the shape it already had.
     finalizedRoundOneHeats: summary.finalized_round_one_heats,
     publishedWinners: summary.published_winners,
     finalHeatCount: summary.final_heat_count,
