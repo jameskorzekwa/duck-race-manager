@@ -338,6 +338,19 @@ test("the race page server-renders authoritative Winners for a scriptless visit"
   assert.match(markup, /these Winners are the current official results/);
 });
 
+test("the Race Status hero spans the shell exactly like the home hero", () => {
+  const mainContent = (markup) => markup.match(/<main class="shell">([\s\S]*?)<\/main>/)?.[1] ?? "";
+  const race = mainContent(renderRace("RACING"));
+
+  assert.match(race, /<section class="page-panel race-status-hero" data-race-status-hero>/);
+  assert.match(style, /\.page-panel\.race-status-hero \{ width:100%; max-width:none; margin-right:0; margin-left:0; \}/);
+  // The override belongs only to the Race Status hero. Other panels retain the
+  // shared 49rem measure even though every page embeds the shared stylesheet.
+  for (const markup of [renderHome("RACING"), renderMyDucks("RACING"), renderRegistration(undefined, "RACING"), renderStatus()]) {
+    assert.doesNotMatch(mainContent(markup), /data-race-status-hero|class="[^"]*race-status-hero/);
+  }
+});
+
 test("the how-it-works cards describe the race without linking anywhere", () => {
   const home = renderHome("REGISTRATION");
   const explainers = home.match(/<section id="how-it-works"[\s\S]*?<\/section>/)?.[0];

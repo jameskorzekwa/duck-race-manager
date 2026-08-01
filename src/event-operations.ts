@@ -2,6 +2,7 @@ import type { StaffActor } from "./auth.ts";
 import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
+import { autoResolvableRoundOneHeatSql, reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
 import type { Env } from "./types.ts";
 import { unstartedRoundOneHeatExistsSql, walkUpAdmissionFor } from "./walk-up-admission.ts";
 
@@ -721,6 +722,7 @@ interface ReadinessStats {
   locked_heat_count: number;
   round_one_unready_heat_count: number;
   round_one_unfinished_heat_count: number;
+  round_one_auto_resolvable_heat_count: number;
   round_one_finalized_heat_count: number;
   round_one_missing_result_count: number;
   final_heat_count: number;
@@ -785,9 +787,19 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
            AND h.status NOT IN ('PLANNED', 'LOADING', 'READY')) AS round_one_unready_heat_count,
+       -- A heat that can no longer be a contest is not a heat anybody is waiting
+       -- for. Starting the final settles it in the same request, so reporting it
+       -- as unfinished would disable the only control that fixes it and leave an
+       -- event whose withdrawal reconciliation was interrupted permanently
+       -- stuck. The guarded START_FINAL command still demands a genuinely
+       -- settled round, so this can only ever offer the transition, never
+       -- complete one the database refuses.
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
-           AND h.status NOT IN ('FINALIZED', 'CANCELLED')) AS round_one_unfinished_heat_count,
+           AND h.status NOT IN ('FINALIZED', 'CANCELLED')
+           AND NOT ${autoResolvableRoundOneHeatSql("h")}) AS round_one_unfinished_heat_count,
+       (SELECT COUNT(*) FROM heats h
+         WHERE h.event_id = e.id AND ${autoResolvableRoundOneHeatSql("h")}) AS round_one_auto_resolvable_heat_count,
        (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
            AND h.status = 'FINALIZED') AS round_one_finalized_heat_count,
@@ -1172,6 +1184,19 @@ const inactiveRosterNote = (
   : `${entryCount} racers on ${pluralRoster} are withdrawn or disqualified. Those ducks stay in `
     + "their heat bags and race as normal, but cannot be recorded as winners.");
 
+// Also purely informational, and deliberately stated before the operator
+// presses the button rather than discovered afterwards: these heats never
+// started and can no longer produce a contest, so starting the final settles
+// them in the same request. Nothing physical moves, which is the part a staffer
+// standing over a table of numbered bags needs to hear.
+const autoResolvableHeatNote = (heatCount: number): string => (heatCount === 1
+  ? "1 round-one heat can no longer be a contest. Starting the final settles it automatically: "
+    + "a heat with nobody left to win is skipped with no winner, and a heat with one racer left "
+    + "sends that duck straight to the final. Every duck stays in its bag."
+  : `${heatCount} round-one heats can no longer be a contest. Starting the final settles them `
+    + "automatically: a heat with nobody left to win is skipped with no winner, and a heat with "
+    + "one racer left sends that duck straight to the final. Every duck stays in its bag.");
+
 const readinessFor = (
   event: EventRow,
   stats: ReadinessStats,
@@ -1230,6 +1255,9 @@ const readinessFor = (
     case "start-final":
       if (stats.round_one_finalized_heat_count === 0) blockers.push("At least one round-one heat must be finalized.");
       if (stats.round_one_unfinished_heat_count > 0) blockers.push("Every round-one heat must be finalized or cancelled.");
+      if (stats.round_one_auto_resolvable_heat_count > 0) {
+        notes.push(autoResolvableHeatNote(stats.round_one_auto_resolvable_heat_count));
+      }
       if (stats.round_one_missing_result_count > 0) blockers.push("Every finalized round-one heat needs a winning result.");
       if (stats.final_heat_count === 0 || stats.final_entry_count === 0) blockers.push("Create the final and promote finalists first.");
       if (stats.final_ineligible_heat_count > 0) {
@@ -1877,6 +1905,15 @@ const runLifecycleCommand = async (
     && await hasCompletedLifecycleTransition(eventId, definition, fingerprint, env)
   ) {
     return lifecycleResponse(event, definition, false, false);
+  }
+  // Race progression is reconciled here, before readiness is measured. A
+  // withdrawal settles its own heats, but the request that would have done it
+  // can be lost — a retried client, a closed laptop, a dropped connection — and
+  // the round would then wait forever on a heat nobody can run. Re-applying the
+  // rule at the transition out of `ROUND_ONE` is what makes that unrecoverable
+  // state impossible, and it is free when there is nothing to settle.
+  if (definition.action === "start-final" && event.status === "ROUND_ONE") {
+    await reconcileRoundOneHeats(env, eventId, actor.id);
   }
   const stats = await getReadinessStats(eventId, env);
   if (stats === null) return json({ error: "Event readiness could not be calculated." }, 409);

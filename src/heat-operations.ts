@@ -2,6 +2,7 @@ import type { StaffActor } from "./auth.ts";
 import { hasAnyRole, requireAnyRole } from "./authorization.ts";
 import { publicDisplayName } from "./race-board.ts";
 import { isCommandId } from "./registration.ts";
+import { publishEmailNotification } from "./email-notifications.ts";
 import type { Env } from "./types.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
 
@@ -1106,7 +1107,7 @@ const unpairedRosterSql = `SELECT 1 AS missing
 // the final never-started heat is the cutoff: starting it must lose to a
 // committed admission that still needs placement. Withdrawal clears the
 // blocker because the registration is no longer SUBMITTED.
-const pendingUnplacedWalkUpExistsSql = (eventExpression: string): string => `EXISTS (
+export const pendingUnplacedWalkUpExistsSql = (eventExpression: string): string => `EXISTS (
   SELECT 1
     FROM registrations pending_registration
     JOIN race_entries pending_entry
@@ -1128,7 +1129,7 @@ const pendingUnplacedWalkUpExistsSql = (eventExpression: string): string => `EXI
      )
 )`;
 
-const noOtherUnstartedRoundOneHeatSql = (heatAlias: string): string => `NOT EXISTS (
+export const noOtherUnstartedRoundOneHeatSql = (heatAlias: string): string => `NOT EXISTS (
   SELECT 1 FROM heats other_unstarted
    WHERE other_unstarted.event_id = ${heatAlias}.event_id
      AND other_unstarted.round = 'ROUND_ONE'
@@ -1278,6 +1279,19 @@ const transitionHeat = async (
     }
   }
 
+  const upcomingRecipients = transition === "call"
+    ? (await env.DB.prepare(
+      `SELECT r.id AS registration_id
+         FROM heat_entries he
+         JOIN race_entries re ON re.id = he.race_entry_id AND re.event_id = he.event_id
+         JOIN registrations r ON r.id = re.registration_id AND r.event_id = he.event_id
+        WHERE he.event_id = ? AND he.heat_id = ?
+          AND r.status = 'ACTIVE'
+        ORDER BY he.slot_number`,
+    ).bind(eventId, heatId).all<{ registration_id: string }>()).results
+      .filter((recipient) => typeof recipient.registration_id === "string")
+    : [];
+
   const now = new Date().toISOString();
   const commandLockGuard = transition === "lock"
     ? `AND h.roster_locked_at IS NULL
@@ -1340,8 +1354,8 @@ const transitionHeat = async (
     ${updateLockGuard} ${updateStartGuard}`;
   updateArgs.push(heatId, eventId, definition.expected, revision);
 
-  try {
-    await env.DB.batch([
+  const notificationIds = upcomingRecipients.map(() => crypto.randomUUID());
+  const statements: D1PreparedStatement[] = [
       env.DB.prepare(
         `INSERT INTO race_commands
           (id, event_id, command_type, result_id, requested_at, completed_at,
@@ -1357,6 +1371,31 @@ const transitionHeat = async (
         requestFingerprint, heatId, eventId, definition.expected, revision,
       ),
       env.DB.prepare(updateSql).bind(...updateArgs),
+  ];
+  for (const [index, recipient] of upcomingRecipients.entries()) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO email_notifications
+        (id, event_id, registration_id, heat_id, duck_assignment_id,
+         notification_type, status,
+         template_version, created_by_command_id, scheduled_at, updated_at)
+       SELECT ?, r.event_id, r.id, h.id, da.id,
+              'HEAT_UPCOMING', 'PENDING', 1, ?, ?, ?
+         FROM registrations r
+         JOIN race_entries re ON re.registration_id = r.id AND re.event_id = r.event_id
+         JOIN heat_entries he ON he.race_entry_id = re.id AND he.event_id = r.event_id
+         JOIN heats h ON h.id = he.heat_id AND h.event_id = r.event_id
+         JOIN events e ON e.id = h.event_id
+         JOIN duck_assignments da
+           ON da.race_entry_id = re.id AND da.event_id = r.event_id AND da.valid_to IS NULL
+        WHERE r.id = ? AND h.id = ? AND h.status = 'CALLING'
+          AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
+            OR (h.round = 'FINAL' AND e.status = 'FINAL'))
+          AND r.status = 'ACTIVE' AND r.email IS NOT NULL
+          AND r.email_notifications_enabled = 1
+       ON CONFLICT DO NOTHING`,
+    ).bind(notificationIds[index], commandId, now, now, recipient.registration_id, heatId));
+  }
+  statements.push(
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -1366,13 +1405,16 @@ const transitionHeat = async (
         crypto.randomUUID(), eventId, commandId, definition.audit, heatId, now,
         JSON.stringify({ staff_profile_id: actor.id, from: definition.expected, to: definition.next }),
       ),
-    ]);
+  );
+  try {
+    await env.DB.batch(statements);
   } catch {
     const message = transition === "start"
       ? "Another heat is running or awaiting its official result, a walk-up still needs pairing, a racer lost their duck, every racer left the race, or this heat changed. Refresh both stations before trying again."
       : "The heat transition conflicted with another update. Refresh and try again.";
     return json({ error: message }, 409);
   }
+  await Promise.all(notificationIds.map((notificationId) => publishEmailNotification(env, notificationId)));
   const updated = await getHeatSummary(env, eventId, heatId);
   return json({ heat: updated === null ? null : heatSummary(updated), replayed: false }, 201);
 };
@@ -2859,6 +2901,7 @@ const finalistRows = (
 interface VerificationRow {
   round_one_heats: number;
   finalized_round_one_heats: number;
+  skipped_round_one_heats: number;
   published_winners: number;
   final_heat_count: number;
   finalist_count: number;
@@ -2873,6 +2916,11 @@ const verificationSummary = async (env: Env, eventId: string): Promise<Record<st
     `SELECT
        (SELECT COUNT(*) FROM heats WHERE event_id = ? AND round = 'ROUND_ONE') AS round_one_heats,
        (SELECT COUNT(*) FROM heats WHERE event_id = ? AND round = 'ROUND_ONE' AND status = 'FINALIZED') AS finalized_round_one_heats,
+       -- A skipped heat is settled, not missing. It holds no racer who could
+       -- ever have won it, so it publishes no winner and promotes nobody, and
+       -- counting it as unfinished would report a correctly settled round as
+       -- unverified forever.
+       (SELECT COUNT(*) FROM heats WHERE event_id = ? AND round = 'ROUND_ONE' AND status = 'CANCELLED') AS skipped_round_one_heats,
        (SELECT COUNT(*) FROM heat_results hr JOIN heats h ON h.id = hr.heat_id
          WHERE hr.event_id = ? AND h.round = 'ROUND_ONE' AND hr.status = 'FINALIZED' AND hr.place = 1) AS published_winners,
        (SELECT COUNT(*) FROM heats WHERE event_id = ? AND round = 'FINAL') AS final_heat_count,
@@ -2892,10 +2940,11 @@ const verificationSummary = async (env: Env, eventId: string): Promise<Record<st
               WHERE hr.event_id = finalist.event_id AND hr.race_entry_id = finalist.race_entry_id
                 AND h.round = 'ROUND_ONE' AND hr.status = 'FINALIZED' AND hr.place = 1
            )) AS invalid_finalists`,
-  ).bind(eventId, eventId, eventId, eventId, eventId, eventId, eventId).first<VerificationRow>();
+  ).bind(eventId, eventId, eventId, eventId, eventId, eventId, eventId, eventId).first<VerificationRow>();
   const summary = row ?? {
     round_one_heats: 0,
     finalized_round_one_heats: 0,
+    skipped_round_one_heats: 0,
     published_winners: 0,
     final_heat_count: 0,
     finalist_count: 0,
@@ -2904,12 +2953,15 @@ const verificationSummary = async (env: Env, eventId: string): Promise<Record<st
   };
   return {
     verified: summary.round_one_heats > 0
-      && summary.round_one_heats === summary.finalized_round_one_heats
+      && summary.round_one_heats === summary.finalized_round_one_heats + summary.skipped_round_one_heats
       && summary.final_heat_count === 1
       && summary.published_winners === summary.finalist_count
       && summary.missing_winners === 0
       && summary.invalid_finalists === 0,
     roundOneHeats: summary.round_one_heats,
+    // Deliberately not projected as its own field. A skipped heat changes only
+    // whether the round counts as settled, and every existing consumer of this
+    // payload reads the shape it already had.
     finalizedRoundOneHeats: summary.finalized_round_one_heats,
     publishedWinners: summary.published_winners,
     finalHeatCount: summary.final_heat_count,

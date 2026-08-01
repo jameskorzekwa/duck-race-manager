@@ -11,8 +11,8 @@
 | Database | Cloudflare D1 `quickducks-prod` | Wrangler and `db/migrations` |
 | Live refresh fan-out | Durable Object class `RaceUpdates`, binding `RACE_UPDATES` | Wrangler class migration and Worker deployment |
 | Public search limit | Workers binding `PUBLIC_SEARCH_RATE_LIMITER` | `wrangler.jsonc` |
-| Email producer | Cloudflare Queue `quickducks-email` | Wrangler and `EMAIL_QUEUE` binding |
-| Email dead-letter queue | Cloudflare Queue `quickducks-email-dlq` | Wrangler; connect when a queue consumer is deployed |
+| Email queue | Cloudflare Queue `quickducks-email` | Wrangler producer/consumer and `EMAIL_QUEUE` binding |
+| Email dead-letter queue | Cloudflare Queue `quickducks-email-dlq` | Wrangler consumer retry exhaustion |
 | Staff identity | Cognito user pool `quickducks-staff` in `us-east-1` | CloudFormation |
 | Transactional email identity | Amazon SES identity `quickducks.com` in `us-east-1` | CloudFormation plus DNS |
 | Worker AWS identity | IAM user `quickducks-worker-ses` | Application CloudFormation stack; bootstrap-owned permissions boundary; key stored as Worker secrets |
@@ -81,8 +81,8 @@ critical known vulnerabilities. The TypeScript command performs a no-emit
 strict check. The test command runs every `src/*.test.mjs` file. The Wrangler
 validation script discovers every non-example `wrangler*.json`,
 `wrangler*.jsonc`, or `wrangler*.toml` outside generated directories and
-dry-runs each entry without uploading it; currently only `wrangler.jsonc`
-matches. The D1 command applies
+dry-runs each entry without uploading it; the production and isolated local
+configurations both match. The D1 command applies
 every migration to a fresh local D1 database, which catches SQL ordering and
 schema errors without contacting production.
 
@@ -554,13 +554,44 @@ to add a new racer after Round One starts. Rollback is Worker-only: retain the
 migration and any admitted roster entries; the previous Worker reads and races
 them normally but offers no further Round One walk-ups.
 
-The current Worker sends notification IDs to `quickducks-email` through the
-`EMAIL_QUEUE` producer binding. A queue consumer is not currently declared in
-`wrangler.jsonc`; therefore the DLQ is not connected by the current deployment.
-When a consumer handler is implemented, add a `queues.consumers` entry with
-`dead_letter_queue: "quickducks-email-dlq"`, retry limits, and tests in the same
-change. Do not claim email delivery is operational until that consumer and SES
-send path pass an end-to-end test.
+The Worker sends only opaque notification IDs to `quickducks-email` through the
+`EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
+with five bounded queue attempts and `quickducks-email-dlq` attached. A one-minute
+cron republishes durable `PENDING` work and queue-publication failures, closing
+the D1-commit/queue-publication gap without putting email delivery inside a race
+control request. Queue duplicates are expected and safe: a D1 claim and the
+logical-message unique index prevent an ordinary duplicate delivery from
+sending twice. Migration `0021_email_delivery_claim.sql` adds the nullable,
+unique token used to own an active delivery claim; it remains compatible with
+the previous Worker. A stale claim is terminally recorded as
+`DELIVERY_OUTCOME_UNKNOWN` and is not automatically or manually retried, because
+it may represent SES acceptance followed by a failed D1 finalization. This
+at-most-once recovery policy can miss a reminder after a pre-send Worker stop,
+but cannot duplicate a message whose post-send persistence was ambiguous.
+
+The consumer signs a structured SES v2 `SendEmail` request with the Worker's
+encrypted AWS key. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
+`race@quickducks.com`; it remains under the verified `quickducks.com` identity.
+Current consent, address, assignment, and heat state are loaded only after the
+opaque ID is received. Migration `0020_email_notification_assignment.sql` adds
+a nullable assignment reference so the previous Worker remains deployable; new
+notifications pin their originating assignment, while null legacy work and any
+replacement mismatch are cancelled instead of being rendered with a different
+duck. Automatic invocation logs remain disabled, and raw SES responses,
+recipient addresses, rendered bodies, and credentials must not be logged or
+persisted as errors. SES acceptance is recorded honestly as `SENT`;
+delivery/bounce/complaint callbacks are not currently implemented.
+
+After deployment, use a synthetic controlled registration to opt into email,
+pair it, and call its heat. Confirm the support view reaches `SENT` for the
+assignment and upcoming notification and that the controlled mailbox receives
+the expected text. Do not use participant data for this canary. Inspect the main
+queue and DLQ metrics for retries. If sending misbehaves, pause the queue
+consumer first (or remove its consumer binding in a reviewed Worker rollback),
+then revoke the Worker SES key if containment requires it. Retain D1 notification
+and attempt history plus queue/DLQ messages for diagnosis; already accepted
+email cannot be recalled, and replaying a DLQ must pass the same current-state
+checks as ordinary delivery.
 
 ### Durable Object Live Refresh
 
@@ -884,8 +915,12 @@ A Worker rollback does not roll back D1, Durable Object class migrations,
 queues, bindings, secrets, DNS, Cognito, IAM, or SES. Every rollback target must
 therefore be from a deployment at or after `RaceUpdates` migration `v1`, retain
 the recorded class lifecycle, and operate correctly with the current D1 schema.
-If no such target exists, fix forward. Never select a pre-migration Worker or
-code that cannot operate on the current schemas.
+While the email consumer and cron bindings are active, the target must also
+export compatible `queue` and `scheduled` handlers; do not roll directly to a
+pre-email Worker. Pause or remove the consumer through a reviewed deployment
+before selecting such a target, then restore it only after a compatible forward
+release. If no compatible target exists, fix forward. Never select code that
+cannot operate on the current schemas and bindings.
 
 If live updates fail while HTTP and D1 remain healthy, do not restore D1 or
 alter race rows. Disconnected clients continue their five-second polling
