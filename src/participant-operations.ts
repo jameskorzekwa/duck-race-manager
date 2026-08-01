@@ -20,6 +20,7 @@ import {
   validateRegistration,
   type RegistrationInput,
 } from "./registration.ts";
+import { reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
 import type { Env } from "./types.ts";
 import {
   unstartedRoundOneHeatExistsSql,
@@ -896,6 +897,16 @@ const changeRegistrationStatus = async (
       if (replay !== null) return registrationResult(replay, true);
     }
     return json({ error: "Registration status conflicted with another update. Refresh and try again." }, 409);
+  }
+  // The racer who just left may have been the last contest in their heat. This
+  // is the moment that fact becomes true, so it is the moment the rule is
+  // applied: a Round One heat with nobody left to win is skipped, and one with
+  // exactly one racer left sends that duck straight to the final. It runs after
+  // the batch committed, never inside it, so a heat that cannot be settled
+  // leaves this withdrawal exactly as it was recorded. Reactivation is skipped
+  // because putting a racer back can only ever restore a contest.
+  if (operation !== "reactivate" && current.event_status === "ROUND_ONE") {
+    await reconcileRoundOneHeats(env, current.event_id, actor.id);
   }
   const updated = await getRegistration(env, registrationId);
   return updated === null
