@@ -3954,7 +3954,7 @@ const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = nu
     "fetch",
     "globalThis",
     "location",
-    `${liveRuntimeHelpersScript}${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell, liveHeatCard };`,
+    `${liveRuntimeHelpersScript}${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveRenderBoard, liveBoardDuckCell, liveHeatCard };`,
   )(
     document,
     fetchStub,
@@ -4091,7 +4091,7 @@ test("live board entries link a visible duck number and stay plain text when una
 
   const placed = api.liveBoardDuckCell({ participantDisplayName: "Jamie R.", duckNumber: 4, place: 1 });
   assert.equal(placed.children[0].href, "/duck/4");
-  assert.equal(nodeText(placed), "Duck #4 · 1st place");
+  assert.equal(nodeText(placed), "Duck #4", "place belongs to its own aligned cell");
 
   // No duck assigned means no link at all, not an empty or dead one.
   const pending = api.liveBoardDuckCell({ participantDisplayName: "Jamie R.", duckNumber: null, place: null });
@@ -4111,12 +4111,71 @@ test("official heat winners render an accessible gold text marker beside the par
       { participantDisplayName: "Donald M.", duckNumber: 5, duckName: null, place: null },
     ],
   }, null);
-  const winnerRow = card.children.find((child) => child.className === "board-entry");
+  const table = card.children.find((child) => child.className === "board-table");
+  const winnerRow = table.children[1].children[0];
   const participant = winnerRow.children[0];
   assert.equal(participant.className, "board-participant");
-  assert.equal(participant.children[1].textContent, "Winner");
-  assert.equal(participant.children[1].className, "winner-ribbon");
+  assert.equal(participant.children[0].children[1].textContent, "Winner");
+  assert.equal(participant.children[0].children[1].className, "winner-ribbon");
   assert.equal(nodeText(participant), "Daisy D.Winner");
+  assert.deepEqual(winnerRow.children.map((cell) => Object.keys(cell.dataset)[0]), [
+    "boardParticipant",
+    "boardDuck",
+    "boardPlace",
+  ]);
+  assert.equal(nodeText(winnerRow.children[2]), "1st place");
+  assert.equal(nodeText(table.children[1].children[1].children[2]), "Not placed");
+});
+
+test("the board creates and updates the Final ahead of ordered Round One heat sections", () => {
+  const { api, nodes } = liveDuckPage();
+  const entry = (name, duckNumber, place = null) => ({
+    participantDisplayName: name,
+    duckNumber,
+    duckName: null,
+    place,
+  });
+  const roundOneHeats = [
+    { round: "ROUND_ONE", number: 1, status: "FINALIZED", roster: [entry("Daisy D.", 1, 1)] },
+    { round: "ROUND_ONE", number: 2, status: "FINALIZED", roster: [entry("Donald M.", 2, 1)] },
+  ];
+  const board = (finalHeats) => ({
+    event: {
+      name: "Harbor Duck Derby",
+      status: finalHeats.length === 0 ? "ROUND_ONE" : "FINAL",
+      currentHeat: null,
+      roundOneHeats,
+      finalHeats,
+      podium: [],
+    },
+  });
+  const content = nodes["[data-live-board-content]"];
+
+  api.liveRenderBoard(board([]));
+  assert.deepEqual(content.children.map((section) => section.dataset.boardRound), ["ROUND_ONE"]);
+  assert.deepEqual(
+    content.children[0].children[1].children.map((card) => card.children[0].textContent),
+    ["Round one · Heat 1", "Round one · Heat 2"],
+  );
+
+  const finalHeat = {
+    round: "FINAL",
+    number: 1,
+    status: "RUNNING",
+    roster: [entry("Daisy D.", 1), entry("Donald M.", 2)],
+  };
+  api.liveRenderBoard(board([finalHeat]));
+  assert.deepEqual(content.children.map((section) => section.dataset.boardRound), ["FINAL", "ROUND_ONE"]);
+  assert.deepEqual(content.children.map((section) => section.children[0].textContent), ["Final", "Round one"]);
+  assert.deepEqual(
+    content.children[1].children[1].children.map((card) => card.dataset.boardHeat),
+    ["1", "2"],
+  );
+
+  api.liveRenderBoard(board([{ ...finalHeat, status: "FINALIZED", roster: [entry("Daisy D.", 1, 1)] }]));
+  assert.deepEqual(content.children.map((section) => section.dataset.boardRound), ["FINAL", "ROUND_ONE"]);
+  const finalTable = content.children[0].children[1].children[0].children[2];
+  assert.equal(nodeText(finalTable.children[1].children[0].children[2]), "1st place");
 });
 
 test("a board entry replaces its generic label with the chosen duck name", () => {
@@ -4133,7 +4192,8 @@ test("a board entry replaces its generic label with the chosen duck name", () =>
   assert.equal(named.children[0].href, "/duck/128");
   assert.equal(nodeText(named), "Sir Quacks-a-Lot");
 
-  // A placed entry keeps the chosen name and official place.
+  // A placed entry keeps the chosen name; the official place renders in the
+  // adjacent table cell instead of being folded into this identity cell.
   assert.equal(
     nodeText(api.liveBoardDuckCell({
       participantDisplayName: "Jamie R.",
@@ -4141,7 +4201,7 @@ test("a board entry replaces its generic label with the chosen duck name", () =>
       duckName: "Bubbles",
       place: 1,
     })),
-    "Bubbles · 1st place",
+    "Bubbles",
   );
 
   // A suppressed, cleared, or absent name simply leaves the number.

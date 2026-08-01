@@ -2267,19 +2267,29 @@ const liveRaceFacts = (container, status, includeParticipant) => {
 };
 
 // A board entry links to the public duck detail view whenever it actually shows
-// a duck number. Entries still waiting for a duck keep plain pending text.
+// a duck number. Entries still waiting for a duck keep plain pending text. The
+// official place has its own table cell so every participant, duck, and place
+// stays in the same semantic and visual column.
 //
 const liveBoardDuckName = (entry) =>
   typeof entry.duckName === "string" && entry.duckName.length > 0 ? entry.duckName : null;
 
 const liveBoardDuckCell = (entry) => {
-  const cell = liveText("span", "");
+  const cell = liveText("td", "", "board-duck");
+  cell.dataset.boardDuck = "";
   const link = duckDetailLink(document, entry.duckNumber, liveBoardDuckName(entry));
   if (link === null) cell.textContent = "Duck number pending";
   else cell.append(link);
-  if (entry.place !== null) {
-    cell.append(liveText("span", " · " + livePlaceLabel(entry.place) + " place"));
-  }
+  return cell;
+};
+
+const liveBoardPlaceCell = (entry) => {
+  const cell = liveText(
+    "td",
+    entry.place === null ? "Not placed" : livePlaceLabel(entry.place) + " place",
+    "board-place",
+  );
+  cell.dataset.boardPlace = "";
   return cell;
 };
 
@@ -2312,27 +2322,49 @@ const liveDuckDetailFacts = (container, status) => {
 const liveHeatCard = (heat, currentHeat) => {
   const isCurrent = currentHeat && currentHeat.round === heat.round && currentHeat.number === heat.number;
   const card = liveText("article", "", "board-heat" + (isCurrent ? " current" : ""));
+  card.dataset.boardHeat = String(heat.number);
+  const heading = liveText("h4", liveRoundLabel(heat.round) + " · Heat " + heat.number);
+  heading.id = "board-" + heat.round.toLowerCase().replaceAll("_", "-") + "-heat-" + heat.number;
+  card.setAttribute("aria-labelledby", heading.id);
   card.append(
-    liveText("h4", liveRoundLabel(heat.round) + " · Heat " + heat.number),
+    heading,
     liveText("p", liveHeatStatus(heat.status), isCurrent ? "status-chip ready" : "status-chip"),
   );
   if (heat.roster.length === 0) {
     card.append(liveText("p", "Roster not posted yet.", "muted"));
   } else {
-    for (const entry of heat.roster) {
-      const row = liveText("p", "", "board-entry");
-      const participant = liveText("span", "", "board-participant");
-      participant.append(liveText("span", entry.participantDisplayName));
-      if (entry.place === 1) participant.append(liveText("span", "Winner", "winner-ribbon"));
-      row.append(participant, liveBoardDuckCell(entry));
-      card.append(row);
+    const table = liveText("table", "", "board-table");
+    table.setAttribute("aria-labelledby", heading.id);
+    const head = liveText("thead", "");
+    const headingRow = liveText("tr", "");
+    for (const label of ["Participant", "Duck", "Place"]) {
+      const column = liveText("th", label);
+      column.setAttribute("scope", "col");
+      headingRow.append(column);
     }
+    head.append(headingRow);
+    const body = liveText("tbody", "");
+    for (const entry of heat.roster) {
+      const row = liveText("tr", "", "board-entry");
+      row.dataset.boardEntry = "";
+      const participant = liveText("td", "", "board-participant");
+      participant.dataset.boardParticipant = "";
+      const participantContent = liveText("span", "", "board-participant-content");
+      participantContent.append(liveText("span", entry.participantDisplayName));
+      if (entry.place === 1) participantContent.append(liveText("span", "Winner", "winner-ribbon"));
+      participant.append(participantContent);
+      row.append(participant, liveBoardDuckCell(entry), liveBoardPlaceCell(entry));
+      body.append(row);
+    }
+    table.append(head, body);
+    card.append(table);
   }
   return card;
 };
 
 const liveRound = (label, heats, currentHeat) => {
   const section = liveText("section", "", "board-round");
+  section.dataset.boardRound = label === "Final" ? "FINAL" : "ROUND_ONE";
   section.append(liveText("h3", label));
   const grid = liveText("div", "", "board-grid");
   for (const heat of heats) grid.append(liveHeatCard(heat, currentHeat));
@@ -2377,8 +2409,8 @@ const liveRenderBoard = (board) => {
     podium.append(places);
     liveBoardContent.append(podium);
   }
-  if (event.roundOneHeats.length > 0) liveBoardContent.append(liveRound("Round one", event.roundOneHeats, event.currentHeat));
   if (event.finalHeats.length > 0) liveBoardContent.append(liveRound("Final", event.finalHeats, event.currentHeat));
+  if (event.roundOneHeats.length > 0) liveBoardContent.append(liveRound("Round one", event.roundOneHeats, event.currentHeat));
   if (event.roundOneHeats.length === 0 && event.finalHeats.length === 0) {
     liveBoardContent.append(liveText("p", "Participants can still use this page before heats are made.", "empty-state"));
   }

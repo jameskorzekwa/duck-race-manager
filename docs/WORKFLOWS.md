@@ -2773,7 +2773,11 @@ event, `/race` has nothing to report, so it redirects to the home page with a
   `ROUND_ONE` round one under way, `FINAL` final under way, and `COMPLETED`
   results official. An unrecognized status falls back to neutral wording
   instead of raw enum text.
-- Ordered round-one and final heats.
+- Ordered round-one and final heats. As soon as the Final exists, its round
+  section precedes every round-one section in visual and DOM reading order; the
+  deterministically numbered round-one heats remain beneath it in their existing
+  order. Before that point, round one keeps its existing order as the only round
+  section.
 - Safe heat status, including calling, running, and awaiting-result emphasis.
 - Policy-filtered participant display names and visible duck numbers. A filtered
   participant-chosen duck name completely replaces the generic `Duck #N` label;
@@ -2781,7 +2785,10 @@ event, `/race` has nothing to report, so it redirects to the home page with a
   detail-link destination and response field do not change.
 - Finalized heat winners moved to the top of their heat roster with an accessible
   gold **Winner** ribbon beside the participant; all non-winners retain slot
-  order. The ordered final podium carries the duck name on the same terms.
+  order. Participant, duck, and official-place values use labelled table columns
+  inside every heat card; long names wrap within their cells and an entry without
+  an official place says **Not placed**. The ordered final podium carries the
+  duck name on the same terms.
 
 Visible duck numbers come only from a current assignment with `valid_to IS
 NULL`; a historical assignment closed by pre-race unassignment is never revived
