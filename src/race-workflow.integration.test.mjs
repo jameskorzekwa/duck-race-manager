@@ -718,15 +718,21 @@ test("scanned podium places are least-privileged, validated, and cleared by a re
   assert.deepEqual(podiumBefore, [{ race_entry_id: first.raceEntryId, place: 1 }]);
 
   // Recording and clearing a podium place are result operations, so they are
-  // held to exactly the roles publishing a result is held to.
+  // held to exactly the roles publishing a result is held to. That set is now
+  // every race-day role rather than the result taker alone, so stripping this
+  // staffer back to the desk roles is what it takes to be refused: the
+  // registration desk and the duck manager are not at the water and cannot read
+  // a heat at all.
   database.exec("DELETE FROM staff_role_assignments WHERE staff_profile_id = 'staff' AND role = 'RESULT_TAKER'");
   database.exec("DELETE FROM staff_role_assignments WHERE staff_profile_id = 'staff' AND role = 'RACE_DIRECTOR'");
+  database.exec("DELETE FROM staff_role_assignments WHERE staff_profile_id = 'staff' AND role = 'HEAT_RUNNER'");
   const secondScan = await jsonBody(
     await api(`/api/v1/staff/ducks/${second.tagToken}`, { token: staffToken }),
     200,
     "inspect without result roles",
   );
-  // A heat runner sees no result action at all, in either round.
+  // The desk roles still reach a duck's page, and still see no result action on
+  // it in either round.
   assert.equal(secondScan.winnerAction, null);
   const deniedRecord = await post(`/api/v1/staff/ducks/${second.tagToken}/heat-winner`, {
     commandId: crypto.randomUUID(),

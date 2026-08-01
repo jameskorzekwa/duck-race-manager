@@ -357,13 +357,18 @@ test.describe("a round-one heat nobody can win", () => {
     await expect(markWinner).toBeVisible();
     await markWinner.click();
     await confirmAction(page, "Mark winner");
-    // The heat is settled, so the page no longer offers the action. (The
-    // "Official winner saved" line is deliberately not asserted: the publication
-    // signals a live refresh that repaints this page's message line straight
-    // away, which is existing behaviour of the round-one publish flow and not
-    // what this spec is about.)
+    // Publishing a round-one winner hands the staffer back to the station that
+    // owns the rest of the heat, with the acknowledgement for what they just
+    // recorded and the reminder about the finalists bag. The heat is settled, so
+    // the duck page's action is gone with it.
+    await expect(page).toHaveURL(/\/staff\/finish-line$/);
+    const recorded = page.locator("[data-finish-recorded]");
+    await expect(recorded).toBeVisible();
+    await expect(recorded).toContainText(
+      `Duck #${racers[0].visibleNumber} is the official Heat ${running.number} winner.`,
+    );
+    await expect(recorded).toContainText("Then put the winning duck in the finalists bag.");
     await expect(markWinner).toHaveCount(0);
-    await expect(winnerAction).not.toContainText("Nobody in Heat");
 
     const published = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${running.id}`, {
       token: admin.token,

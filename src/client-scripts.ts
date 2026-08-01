@@ -2949,6 +2949,8 @@ const finishSubmit = document.querySelector("[data-submit-result]");
 const finishMessage = document.querySelector("[data-station-message]");
 const finishNfcButton = document.querySelector("[data-start-nfc]");
 const finishIneligible = document.querySelector("[data-finish-ineligible]");
+const finishCallout = document.querySelector("[data-finish-callout]");
+const finishRecorded = document.querySelector("[data-finish-recorded]");
 let finishEvent = null;
 let finishHeat = null;
 let finishRosterEntries = [];
@@ -3058,6 +3060,28 @@ const FINISH_NO_ELIGIBLE_MESSAGE = "Nobody in this heat can win:"
   + " every racer in it is withdrawn or disqualified, so no result can be recorded."
   + " Every duck stays in its bag."
   + " Ask the race director to reactivate a racer, then this station can take the result.";
+// The one instruction a result taker acts on once a round-one heat is finished
+// and still needs its winner, said identically in the callout and on the message
+// line so the two can never drift.
+//
+// It names NFC only. The permanent tag is what opens the duck's inspection page,
+// and offering a second technology in the same breath is what made the sentence
+// easy to skim past at the water's edge. Nothing here disables QR: a QR tag that
+// resolves to the same permanent URL still opens the same page, and every other
+// surface that mentions QR is unchanged.
+const FINISH_WINNER_SCAN_INSTRUCTION = "Heat finished. Scan the winning duck's permanent NFC tag"
+  + " to open its inspection page and select it as the winner.";
+// Said in the same prominent block, because the bag is the part that is
+// forgotten: the winner has to be findable again when the final is loaded, and
+// a duck put back in its round-one bag is a duck nobody can produce for the
+// final.
+const FINISH_FINALISTS_BAG_INSTRUCTION = "Then put the winning duck in the finalists bag.";
+// The fallback names itself a last resort in its own heading rather than
+// relying on where it sits or what colour it is, so the warning survives a
+// screen reader, a narrow phone, and a stylesheet that never loaded.
+const FINISH_MANUAL_LAST_RESORT_HEADING = "Last resort: only if the tag cannot be scanned";
+const FINISH_MANUAL_LAST_RESORT_NOTE = "Scanning the winning duck's own permanent NFC tag is how a winner"
+  + " is recorded. Use this only when that duck's tag cannot be scanned at all.";
 const finishSubmitBlocked = (busy) => {
   const required = finishRequiredPlaces();
   return busy || finishHeat === null || finishHeat.status !== "AWAITING_RESULT"
@@ -3066,6 +3090,35 @@ const finishSubmitBlocked = (busy) => {
     // thing that publishes it. Hidden already; disabled as well, because hidden
     // is a paint and this is the guard.
     || finishPodiumScanned();
+};
+// Re-arm the controls that only exist between repaints: the last-resort manual
+// winner button, and the scanned podium's Clear and Publish buttons. Every one
+// of them is built by a repaint and takes its disabled state from the busy flags
+// of the paint that created it.
+//
+// That is not enough on its own, because a command repaints while it is still in
+// flight — it awaits finishLoad before releasing finishCommandBusy — so the very
+// paint that introduces the finished heat's fallback necessarily builds it
+// disabled. By the time the flag clears, finishRenderKey already matches the
+// state that was just loaded, so the next load returns early and no later
+// repaint ever arrives to arm the control. That left "Record selected duck as
+// winner" permanently dead after Mark heat finished, unless something unrelated
+// happened to change the render key.
+//
+// So busy is applied as the live state it is, rather than as a property frozen
+// at paint time. This reads the flags itself instead of taking a parameter,
+// because the scan and command flags are set independently and a control must
+// stay disabled while either one is still held.
+const finishSyncBusyControls = () => {
+  const busy = finishScanBusy || finishCommandBusy;
+  if (finishCallout) {
+    for (const control of finishCallout.querySelectorAll("[data-finish-manual-submit]")) {
+      control.disabled = busy;
+    }
+  }
+  for (const control of finishSelections.querySelectorAll("[data-podium-clear], [data-publish-podium]")) {
+    control.disabled = busy;
+  }
 };
 const finishSetScanBusy = (busy) => {
   finishScanBusy = busy;
@@ -3079,6 +3132,9 @@ const finishSetScanBusy = (busy) => {
   finishNfcButton.disabled = busy;
   for (const control of finishSelections.querySelectorAll("button")) control.disabled = busy;
   finishSubmit.disabled = finishSubmitBlocked(busy);
+  // Last, and from the combined flags: the loop above would otherwise re-enable
+  // a podium control that a command, not a scan, is still holding.
+  finishSyncBusyControls();
 };
 // Take one scanned duck back off the podium. The place reopens immediately and
 // the next scan of the duck that actually finished there can take it.
@@ -3114,6 +3170,7 @@ const finishClearPodiumPlace = async (placement, button) => {
     }
   } finally {
     finishCommandBusy = false;
+    finishSyncBusyControls();
     endBusy();
     finishSubscription?.resume();
   }
@@ -3160,6 +3217,7 @@ const finishPublishScannedPodium = async (button) => {
     }
   } finally {
     finishCommandBusy = false;
+    finishSyncBusyControls();
     endBusy();
     finishSubscription?.resume();
   }
@@ -3194,6 +3252,188 @@ const finishRenderScannedPodium = (focusedRaceEntry) => {
     publish.addEventListener("click", () => finishPublishScannedPodium(publish));
     finishSelections.append(publish);
   }
+};
+// Record a winner chosen from the dropdown instead of scanned.
+//
+// It deliberately posts the same command to the same guarded endpoint the
+// reviewed station form already uses, with the same heat revision and a fresh
+// RFC 4122 v4 command id, so a manual winner and a scanned one are the same
+// write: same role check, same result validation, same idempotent replay, same
+// audit event, and the same promotion of the winner into the final. There is no
+// second, weaker way to publish a result, which is the whole point of routing it
+// here rather than giving the fallback an endpoint of its own.
+const finishRecordManualWinner = async (select, button) => {
+  if (!finishEvent || !finishHeat) return;
+  const raceEntryId = select.value;
+  if (!raceEntryId) {
+    finishMessage.textContent = "Choose the winning duck before recording it.";
+    select.focus();
+    return;
+  }
+  // Re-read from the roster this paint was built from. A control painted before
+  // a withdrawal must not be able to submit the racer who has just left, and a
+  // race entry that is not in this heat's roster at all is refused here before
+  // it is refused again by the server.
+  const entry = finishRosterEntries.find((item) => item.raceEntryId === raceEntryId);
+  if (!entry || !rosterEntryEligible(entry) || !entry.duck) {
+    finishMessage.textContent = "That duck can no longer be recorded as this heat's winner."
+      + " Check the roster and choose again.";
+    finishRenderCallout();
+    return;
+  }
+  const heatNumber = finishHeat.number;
+  const duckLabel = "Duck #" + entry.duck.visibleNumber;
+  const who = entry.participant.firstName + " " + entry.participant.lastName;
+  if (!await appConfirm(
+    "Record " + duckLabel + " (" + who + ") as the official Heat " + heatNumber + " winner?"
+      + " Use this only because that duck's tag could not be scanned. This publishes immediately.",
+    { danger: true, confirmLabel: "Record winner" },
+  )) return;
+  button.disabled = true;
+  finishCommandBusy = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  finishMessage.textContent = "Recording the official winner…";
+  try {
+    await finishApi("/api/v1/staff/events/" + encodeURIComponent(finishEvent.id)
+      + "/heats/" + encodeURIComponent(finishHeat.id) + "/results/finalize", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        revision: finishHeat.revision,
+        results: [{ raceEntryId: raceEntryId, place: 1 }],
+      }),
+    });
+    finishSelected = [];
+    finishClearIneligible();
+    // The same acknowledgement a scanned winner lands on, written before the
+    // repaint moves this station to the next heat so the staffer still reads
+    // what they just recorded — and the same finalists-bag reminder, because a
+    // manually recorded winner has to reach that bag exactly like a scanned one.
+    if (finishRecorded) {
+      finishRecorded.hidden = false;
+      finishRecorded.replaceChildren(
+        finishText("strong", "Official winner saved"),
+        finishText("p", duckLabel + " is the official Heat " + heatNumber + " winner. "
+          + FINISH_FINALISTS_BAG_INSTRUCTION),
+      );
+    }
+    await finishLoad();
+  } catch (error) {
+    if (error.message === "signed-out") return;
+    // Nothing was published, so the station stays exactly where it is with an
+    // error a staffer can act on, and the control is armed again.
+    if (error.reason === FINISH_DUCK_NOT_ELIGIBLE) finishShowIneligible(error);
+    else finishMessage.textContent = error.message;
+    button.disabled = false;
+  } finally {
+    finishCommandBusy = false;
+    finishSyncBusyControls();
+    endBusy();
+    finishSubscription?.resume();
+  }
+};
+
+// The last-resort manual selector, rendered inside the callout so the scan
+// instruction and its fallback are one workflow rather than two competing ones.
+//
+// The dropdown can only ever offer this heat's own eligible racers: it is built
+// from finishRosterEntries — the authoritative roster for the heat this station
+// is showing — filtered by the same eligibility predicate the roster markers and
+// the required-place count already use, and it is rebuilt on every repaint, so a
+// racer who withdraws while it is on screen leaves the list without a reload.
+// Entries with no duck assigned are left out because there is no duck to record.
+// All of that is convenience: the request goes to the guarded endpoint, which
+// refuses a cross-heat, ineligible, or stale selection regardless of what this
+// control offers.
+const finishRenderManualFallback = () => {
+  const eligible = finishEligibleEntries().filter((entry) => Boolean(entry.duck));
+  if (eligible.length === 0) return;
+  const fallback = finishText("div", "", "station-fallback");
+  fallback.dataset.finishManual = "true";
+  const heading = finishText("strong", FINISH_MANUAL_LAST_RESORT_HEADING);
+  heading.id = "finish-manual-warning";
+  const label = finishText("label", "Winning duck");
+  label.htmlFor = "finish-manual-select";
+  const select = document.createElement("select");
+  select.id = "finish-manual-select";
+  select.dataset.finishManualSelect = "true";
+  select.setAttribute("aria-describedby", "finish-manual-warning");
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Choose the winning duck";
+  select.append(placeholder);
+  for (const entry of eligible) {
+    const option = document.createElement("option");
+    option.value = entry.raceEntryId;
+    option.textContent = "Duck #" + entry.duck.visibleNumber + " · "
+      + entry.participant.firstName + " " + entry.participant.lastName;
+    select.append(option);
+  }
+  const record = finishText("button", "Record selected duck as winner", "button secondary station-control");
+  record.type = "button";
+  record.dataset.finishManualSubmit = "true";
+  record.disabled = finishScanBusy || finishCommandBusy;
+  record.addEventListener("click", () => finishRecordManualWinner(select, record));
+  fallback.append(
+    heading,
+    finishText("p", FINISH_MANUAL_LAST_RESORT_NOTE),
+    label,
+    select,
+    record,
+  );
+  finishCallout.append(fallback);
+};
+
+// The prominent workflow for a finished round-one heat that still needs its
+// winner. It is deliberately a separate region from the message line: the
+// message line is overwritten by every scan, every refusal, and every repaint,
+// which is exactly how the instruction became easy to miss.
+//
+// It is shown only while there is actually a winner to record. A heat that is
+// still running has not finished, a settled heat has its result, and a heat
+// nobody can win already has the no-winner sentence to say instead — none of
+// those may be told to go and scan a winning duck.
+const finishRenderCallout = () => {
+  if (!finishCallout) return;
+  const needsWinner = finishHeat !== null
+    && finishHeat.round === "ROUND_ONE"
+    && finishHeat.status === "AWAITING_RESULT"
+    && finishRequiredPlaces() > 0;
+  finishCallout.replaceChildren();
+  finishCallout.hidden = !needsWinner;
+  if (!needsWinner) return;
+  finishCallout.append(
+    finishText("strong", FINISH_WINNER_SCAN_INSTRUCTION),
+    finishText("p", FINISH_FINALISTS_BAG_INSTRUCTION),
+  );
+  finishRenderManualFallback();
+};
+// The acknowledgement for a winner recorded on the duck's own inspection page,
+// which sends the staffer back here afterwards. Both parameters are validated as
+// plain small integers before anything is rendered, and both are facts already
+// printed on the duck and shown on every public board, so nothing private can
+// travel in the URL even if one is hand-edited.
+//
+// The banner reports what that page already committed; the authoritative
+// current/next-heat state underneath it comes from finishLoad, never from the
+// query string.
+const finishShowRecorded = () => {
+  if (!finishRecorded) return;
+  const parameters = new URLSearchParams(location.search);
+  if (parameters.get("recorded") !== "heat-winner") return;
+  const duckNumber = parameters.get("duck") || "";
+  const heatNumber = parameters.get("heat") || "";
+  // Drop the parameters either way, so a reload or a shared link can never
+  // reassert an acknowledgement for a result this station did not just take.
+  history.replaceState(null, "", location.pathname);
+  if (!/^[0-9]{1,9}$/.test(duckNumber) || !/^[0-9]{1,9}$/.test(heatNumber)) return;
+  finishRecorded.hidden = false;
+  finishRecorded.replaceChildren(
+    finishText("strong", "Official winner saved"),
+    finishText("p", "Duck #" + duckNumber + " is the official Heat " + heatNumber + " winner. "
+      + FINISH_FINALISTS_BAG_INSTRUCTION),
+  );
 };
 const finishRenderSelections = () => {
   const focusedRaceEntry = finishSelections.contains(document.activeElement)
@@ -3391,14 +3631,19 @@ const finishRender = (event, detail) => {
         finishMessage.textContent = finishRequiredPlaces() === 0
           ? FINISH_NO_ELIGIBLE_MESSAGE
           : finishHeat.round === "ROUND_ONE"
-            ? "Heat finished. Scan the winning duck's permanent NFC or QR tag to open its inspection page."
+            ? FINISH_WINNER_SCAN_INSTRUCTION
             : "Heat finished. Scan each finishing duck's tag and choose its place, or select every place here"
               + " and submit once.";
       } catch (error) {
         if (error.message !== "signed-out") finishMessage.textContent = error.message;
         button.disabled = false;
       } finally {
+        // The repaint that just introduced this heat's winner workflow ran while
+        // this flag was still held, so the fallback it built is disabled. Arming
+        // it here is the only chance: the render key already matches, so no
+        // further repaint is coming.
         finishCommandBusy = false;
+        finishSyncBusyControls();
         endBusy();
         finishSubscription?.resume();
       }
@@ -3424,7 +3669,8 @@ const finishRender = (event, detail) => {
     // from the only staffer standing in it.
     finishMessage.textContent = FINISH_NO_ELIGIBLE_MESSAGE;
   } else if (finishHeat.round === "ROUND_ONE") {
-    finishMessage.textContent = "Scan the winning duck's permanent NFC or QR tag. Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner.";
+    finishMessage.textContent = FINISH_WINNER_SCAN_INSTRUCTION
+      + " Its inspection page will offer Mark Duck as Heat " + finishHeat.number + " Winner.";
   } else if (scannedPodium) {
     const remaining = finishRequiredPlaces() - podiumTakenPlacements(finishPodium).length;
     finishMessage.textContent = remaining <= 0
@@ -3433,9 +3679,10 @@ const finishRender = (event, detail) => {
         + (remaining === 1 ? "" : "s") + " still to record.";
   } else {
     finishMessage.textContent = "Scan each finishing duck's permanent NFC or QR tag and choose its place on the"
-      + " duck's page, or select " + finishRequiredPlaces() + " distinct duck"
-      + (finishRequiredPlaces() === 1 ? "" : "s") + " here and review every place before submitting.";
+        + " duck's page, or select " + finishRequiredPlaces() + " distinct duck"
+        + (finishRequiredPlaces() === 1 ? "" : "s") + " here and review every place before submitting.";
   }
+  finishRenderCallout();
   finishRenderSelections();
 };
 const finishEmpty = (message) => {
@@ -3456,6 +3703,7 @@ const finishEmpty = (message) => {
   finishScanForm.hidden = true;
   finishSelections.hidden = true;
   finishSubmit.hidden = true;
+  finishRenderCallout();
   finishRenderSelections();
   finishMessage.textContent = "This station will keep checking for a running heat.";
 };
@@ -3536,7 +3784,11 @@ finishSubmit.addEventListener("click", async () => {
     // dropped selection cannot leave an armed submit behind.
     finishRenderSelections();
   } finally {
+    // Every command releases the flag the same way, including this one. Whether
+    // its own repaint can currently introduce a busy-painted control is a fact
+    // about how many heats a round has, not a property worth relying on.
     finishCommandBusy = false;
+    finishSyncBusyControls();
     endBusy();
     finishSubscription?.resume();
   }
@@ -3564,6 +3816,9 @@ if ("NDEFReader" in globalThis) {
   });
   finishNfcButton.addEventListener("click", finishStartNfcScan);
 }
+// Read once, before the first load paints, so the acknowledgement is already on
+// screen while the authoritative current/next-heat state is still being fetched.
+finishShowRecorded();
 if (finishRoot) {
   finishSubscription = globalThis.quickDucksLive.subscribe({
     domains: ["event", "participants", "ducks", "heats"],
@@ -7605,13 +7860,27 @@ const renderWinnerAction = (data, heatHasNoEligibleRacer = false) => {
           revision: candidate.revision,
         }),
       });
-      winnerSuccess = {
-        title: "Official winner saved",
-        detail: "Duck #" + data.duck.visibleNumber + " is the official Heat " + candidate.heatNumber + " winner.",
-      };
-      await load();
+      // The winner is published, so the staffer belongs back at the station that
+      // owns the rest of this heat — the next heat, its roster, and its finish
+      // button — rather than parked on the duck they happened to scan.
+      //
+      // Only a committed publish reaches this line. Every failure and every
+      // conflict throws out of fetchJson into the catch below, which stays on
+      // this page, re-enables the button, and shows the server's own actionable
+      // error; nothing on the failing path navigates or claims success.
+      //
+      // The destination is a fixed same-origin path built here, never a value
+      // taken from the response or from this page's own URL, so it cannot become
+      // an open redirect. The two parameters only acknowledge what was saved:
+      // the duck number and the heat number, both already printed on the duck
+      // and shown on every public board. The finish line re-fetches the
+      // authoritative state it renders underneath the acknowledgement.
       pageTitle.textContent = "Duck #" + data.duck.visibleNumber + " won Heat " + candidate.heatNumber;
-      message.textContent = "Official winner saved. Live race screens have been notified.";
+      message.textContent = "Official winner saved. Returning to the finish line…";
+      location.assign("/staff/finish-line?recorded=heat-winner"
+        + "&duck=" + encodeURIComponent(data.duck.visibleNumber)
+        + "&heat=" + encodeURIComponent(candidate.heatNumber));
+      return;
     } catch (error) {
       if (error.message !== "signed-out") {
         button.disabled = false;

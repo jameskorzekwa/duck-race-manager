@@ -8,7 +8,7 @@ import {
   handleApi,
 } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
-import { hasAnyRole, type OperationalRole } from "./authorization.ts";
+import { hasAnyRole, winnerRecordingRoles, type OperationalRole } from "./authorization.ts";
 import {
   announcerScript,
   appDatePickerScript,
@@ -158,8 +158,14 @@ const stationPages = new Map<string, StationPage>([
     name: "announcer",
     render: (displayName, isSystemAdmin, roles, phase) => renderAnnouncer(displayName, true, isSystemAdmin, roles, phase),
   }],
+  // The station is admitted to exactly the roles that may record a heat winner,
+  // by sharing their one list rather than restating it. Gating this page more
+  // tightly than the commands behind it only produced a 403 for somebody the API
+  // would have accepted; gating it more loosely would hand the desk roles a
+  // station whose first two reads 403 on open. That is the same set as
+  // `raceReadRoles` in `heat-operations.ts`, which is what makes it openable.
   ["/staff/finish-line", {
-    roles: ["RESULT_TAKER", "RACE_DIRECTOR"],
+    roles: winnerRecordingRoles,
     name: "finish-line",
     render: (displayName, isSystemAdmin, roles, phase) => renderFinishLine(displayName, true, isSystemAdmin, roles, phase),
   }],

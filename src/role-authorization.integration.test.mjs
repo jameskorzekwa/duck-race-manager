@@ -575,22 +575,33 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     ), 201, `heat runner repeats ${transition} after admin reset`);
     revision = result.heat.revision;
   }
-  assert.equal((await post(actors.heats, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish`, {
-    commandId: command(), revision,
-  })).status, 403);
+  // Starting a heat is still start-line work and a result taker has no business
+  // in it. Marking one finished is the other way round: it is the first step of
+  // taking the result, pressed at the finish line by whoever watched the heat
+  // end, so it follows the winner commands and the heat runner may press it.
   assert.equal((await post(actors.results, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/start`, {
     commandId: command(), revision,
   })).status, 403);
+  assert.equal((await post(actors.none, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish`, {
+    commandId: command(), revision,
+  })).status, 403, "a roleless actor finishes nothing");
 
   let finished = await json(await post(
-    actors.results,
+    actors.heats,
     `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish`,
     { commandId: command(), revision },
-  ), 201, "result taker finishes round-one heat");
+  ), 201, "heat runner finishes round-one heat");
   assert.equal((await api(
-    actors.heats,
+    actors.none,
     `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish-scan?value=101`,
   )).status, 403);
+  // The lookup the finish line performs before it can offer a duck as a result
+  // follows the station, so every operational role reaches it.
+  const heatRunnerScan = await json(await api(
+    actors.heats,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish-scan?value=101`,
+  ), 200, "heat runner validates finish-line duck");
+  assert.equal(heatRunnerScan.selection.raceEntryId, raceEntryId);
   const selectedWinner = await json(await api(
     actors.results,
     `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish-scan?value=101`,
@@ -613,10 +624,10 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     revision: finished.heat.revision,
   };
   assert.equal((await post(
-    actors.registration,
+    actors.none,
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
     winnerPayload,
-  )).status, 403);
+  )).status, 403, "a roleless actor cannot publish a scanned winner");
   const finalized = await json(await post(
     actors.results,
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
@@ -633,11 +644,40 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
     { ...winnerPayload, raceEntryId: "forged-entry" },
   )).status, 409);
-  assert.equal((await post(
-    actors.results,
-    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/finalize`,
-    { commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }] },
-  )).status, 403);
+  // Recording a round-one winner without a tag is the finish line's last-resort
+  // fallback for a duck whose tag will not scan, so it is authorized exactly
+  // like the scanned path above rather than being reserved for a race director:
+  // whoever was standing at the water when the heat ended may record what they
+  // saw. None of these callers is refused on permission any more. What stops
+  // them is the lifecycle check every result path shares, because the scan above
+  // already settled this heat — so a widened role still cannot overwrite a
+  // published result.
+  for (const [label, settledActor] of [
+    ["announcer", actors.announcer],
+    ["heat runner", actors.heats],
+    ["result taker", actors.results],
+  ]) {
+    assert.equal((await post(
+      settledActor,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/finalize`,
+      { commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }] },
+    )).status, 409, `${label} is refused a settled heat on lifecycle, not on role`);
+  }
+  // The widening stops at the race-day roles. The registration desk and the duck
+  // manager are not on the water, cannot read a heat at all, and are still
+  // refused on permission before any state is read — as is an account with no
+  // operational role. The untagged path is not a weaker way in.
+  for (const [label, deniedActor] of [
+    ["registration", actors.registration],
+    ["duck manager", actors.ducks],
+    ["roleless actor", actors.none],
+  ]) {
+    assert.equal((await post(
+      deniedActor,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/finalize`,
+      { commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }] },
+    )).status, 403, `${label} cannot record a round-one winner manually`);
+  }
   assert.equal(JSON.stringify(finalized).includes("daisy@example.com"), false);
   assert.equal((await post(actors.results, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/correct`, {
     commandId: command(), revision: finalized.heat.revision, reason: "Neighbor denial", results: [{ raceEntryId, place: 1 }],
@@ -685,7 +725,12 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     revision: finished.heat.revision,
     place: 1,
   };
-  for (const actorName of ["registration", "heats", "announcer"]) {
+  // Recording a podium place and taking one back off an unpublished podium are
+  // both part of taking the result, so they carry the same widened role set as
+  // the round-one winner above: the race-day roles, and nobody else. These
+  // callers are all refused before any state is read, which is why they leave
+  // the podium empty for the publish that follows.
+  for (const actorName of ["registration", "ducks", "none"]) {
     assert.equal(
       (await post(actors[actorName], `/api/v1/staff/ducks/${duckOneToken}/heat-winner`, podiumPayload)).status,
       403,

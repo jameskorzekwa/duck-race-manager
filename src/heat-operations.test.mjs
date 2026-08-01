@@ -198,6 +198,145 @@ const startedRoundHarness = async (database) => {
   };
 };
 
+// The finish line's last-resort manual winner selector.
+//
+// A duck whose permanent tag will not scan still has to be recordable, and the
+// person holding it is whoever was standing at the water when the heat ended
+// rather than a race director who may be anywhere on the bank. Recording that
+// winner without a tag is therefore authorized exactly like scanning one — the
+// same race-day roles — and nothing else about it is weaker: the same roster
+// membership check, the same eligibility rule, the same revision guard, the
+// same idempotent replay, the same audit event, and the same promotion into
+// the final.
+test("a result taker records a round-one winner manually when the tag cannot be scanned", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  const { env } = await startedRoundHarness(database);
+  const resultTaker = { ...actor, displayName: "Result Taker", roles: ["RESULT_TAKER"] };
+  const duckManager = { ...actor, displayName: "Duck Manager", roles: ["DUCK_MANAGER"] };
+  const handleAs = (who, request) => handleHeatOperations(request, env, who);
+  const finalizePath = (heatId) => `/api/v1/staff/events/event/heats/${heatId}/results/finalize`;
+
+  const runHeat = async (heatId) => {
+    let revision = database.prepare("SELECT revision FROM heats WHERE id = ?").get(heatId).revision;
+    for (const step of ["ready", "call", "start"]) {
+      const response = await handleAs(actor, jsonRequest(
+        `/api/v1/staff/events/event/heats/${heatId}/${step}`,
+        "POST",
+        { commandId: commandId(), revision },
+      ));
+      assert.equal(response.status, 201, `${step}: ${JSON.stringify(await response.clone().json())}`);
+      revision = (await response.json()).heat.revision;
+    }
+    // Finishing is already a result-taker action, so the same station that will
+    // record the winner is the one that marks the race over.
+    const finished = await handleAs(resultTaker, jsonRequest(
+      `/api/v1/staff/events/event/heats/${heatId}/finish`,
+      "POST",
+      { commandId: commandId(), revision },
+    ));
+    assert.equal(finished.status, 201, JSON.stringify(await finished.clone().json()));
+    return (await finished.json()).heat.revision;
+  };
+
+  const revision = await runHeat("heat-1");
+
+  // A duck from another heat can never be this heat's winner, however it was
+  // chosen. `entry-4` races in heat 2.
+  const crossHeat = await handleAs(resultTaker, jsonRequest(
+    finalizePath("heat-1"),
+    "POST",
+    { commandId: commandId(), revision, results: [{ raceEntryId: "entry-4", place: 1 }] },
+  ));
+  assert.equal(crossHeat.status, 422);
+  assert.match((await crossHeat.json()).error, /participant on this heat roster/i);
+
+  // Neither can a racer who has left the race, and the refusal carries the same
+  // stable reason and the same named selections the scanned path reports, so the
+  // station can drop exactly that duck and stay armed.
+  database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-2'");
+  const withdrawn = await handleAs(resultTaker, jsonRequest(
+    finalizePath("heat-1"),
+    "POST",
+    { commandId: commandId(), revision, results: [{ raceEntryId: "entry-2", place: 1 }] },
+  ));
+  assert.equal(withdrawn.status, 422);
+  const withdrawnBody = await withdrawn.json();
+  assert.equal(withdrawnBody.reason, FINISH_DUCK_INELIGIBLE_REASON);
+  assert.deepEqual(withdrawnBody.ineligibleRaceEntryIds, ["entry-2"]);
+
+  // Widening this path to every race-day role must not widen it to everybody.
+  // The duck manager is not at the water's edge, cannot read this heat at all,
+  // and is still refused before any state is read.
+  const deniedDuckManager = await handleAs(duckManager, jsonRequest(
+    finalizePath("heat-1"),
+    "POST",
+    { commandId: commandId(), revision, results: [{ raceEntryId: "entry-1", place: 1 }] },
+  ));
+  assert.equal(deniedDuckManager.status, 403);
+  assert.equal(
+    database.prepare("SELECT status FROM heats WHERE id = 'heat-1'").get().status,
+    "AWAITING_RESULT",
+    "every refusal above wrote nothing",
+  );
+
+  // A stale revision is refused exactly as it is for a scanned winner.
+  const stale = await handleAs(resultTaker, jsonRequest(
+    finalizePath("heat-1"),
+    "POST",
+    { commandId: commandId(), revision: revision + 5, results: [{ raceEntryId: "entry-1", place: 1 }] },
+  ));
+  assert.equal(stale.status, 409);
+
+  const manualCommandId = commandId();
+  const manualBody = {
+    commandId: manualCommandId,
+    revision,
+    results: [{ raceEntryId: "entry-1", place: 1 }],
+  };
+  const recorded = await handleAs(resultTaker, jsonRequest(finalizePath("heat-1"), "POST", manualBody));
+  const recordedBody = await recorded.json();
+  assert.equal(recorded.status, 201, JSON.stringify(recordedBody));
+  assert.equal(recordedBody.heat.status, "FINALIZED");
+  assert.deepEqual(recordedBody.results.map((result) => result.place), [1]);
+
+  // Same idempotency as every other significant mutation: the retry replays the
+  // published result rather than writing a second one.
+  const replay = await handleAs(resultTaker, jsonRequest(finalizePath("heat-1"), "POST", manualBody));
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).replayed, true);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-1' AND status = 'FINALIZED'",
+  ).get().count, 1);
+
+  // Same command history and the same redacted audit event a scanned winner
+  // writes, attributed to the staffer who actually recorded it.
+  assert.equal(database.prepare(
+    `SELECT COUNT(*) AS count FROM race_commands
+      WHERE id = ? AND command_type = 'FINALIZE_HEAT_RESULT' AND actor_staff_profile_id = 'staff'`,
+  ).get(manualCommandId).count, 1);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM audit_events WHERE command_id = ? AND action = 'HEAT_RESULT_FINALIZED'",
+  ).get(manualCommandId).count, 1);
+
+  // And the same promotion: once every round-one heat is settled, the final
+  // exists and the manually recorded winner is in it beside the other one.
+  const secondRevision = await runHeat("heat-2");
+  const secondWinner = await handleAs(resultTaker, jsonRequest(
+    finalizePath("heat-2"),
+    "POST",
+    { commandId: commandId(), revision: secondRevision, results: [{ raceEntryId: "entry-4", place: 1 }] },
+  ));
+  assert.equal(secondWinner.status, 201, JSON.stringify(await secondWinner.clone().json()));
+  const finalists = database.prepare(
+    `SELECT he.race_entry_id FROM heat_entries he
+       JOIN heats h ON h.id = he.heat_id
+      WHERE h.event_id = 'event' AND h.round = 'FINAL'
+      ORDER BY he.slot_number`,
+  ).all().map((row) => row.race_entry_id);
+  assert.deepEqual(finalists, ["entry-1", "entry-4"]);
+});
+
 test("heat operations cover the paired-heat lifecycle, results, corrections, and verification", async () => {
   const database = createDatabase();
   seedRace(database);
@@ -2866,7 +3005,10 @@ test("the finish-line ineligible outcome is refused to roles that may not take r
   database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-2'");
   const env = { APP_ORIGIN: "https://quickducks.com", DB: d1(database) };
 
-  for (const roles of [["ANNOUNCER"], ["HEAT_RUNNER"], ["REGISTRATION"], ["DUCK_MANAGER"], []]) {
+  // The desk roles are not on the water and cannot read a heat at all, and an
+  // account with no operational role is still nobody. Widening the winner
+  // commands to the race-day roles did not make this lookup a way in for them.
+  for (const roles of [["REGISTRATION"], ["DUCK_MANAGER"], []]) {
     const reader = { ...actor, isSystemAdmin: false, roles };
     const scan = await handleHeatOperations(new Request(
       "https://quickducks.com/api/v1/staff/events/event/heats/heat-1/finish-scan?value=2",
@@ -2880,10 +3022,13 @@ test("the finish-line ineligible outcome is refused to roles that may not take r
     assert.equal(confirm.status, 403, roles.join(",") || "no roles");
   }
 
-  // A result taker gets the expected-outcome answer, and an administrator
-  // passes the same check implicitly.
+  // Every race-day role that may record a winner gets the expected-outcome
+  // answer instead, because this lookup is the step before that command and has
+  // to follow it. An administrator passes the same check implicitly.
   for (const permitted of [
     { ...actor, isSystemAdmin: false, roles: ["RESULT_TAKER"] },
+    { ...actor, isSystemAdmin: false, roles: ["ANNOUNCER"] },
+    { ...actor, isSystemAdmin: false, roles: ["HEAT_RUNNER"] },
     { ...actor, isSystemAdmin: true, roles: [] },
   ]) {
     const scan = await handleHeatOperations(new Request(

@@ -375,18 +375,33 @@ test("gates focused station pages by operational role", async () => {
   assert.match(anonymous.headers.get("location") ?? "", /returnTo=%2Fstaff%2Fstart-line/);
 
   const heatStart = await page(actor(["HEAT_RUNNER"]), "/staff/start-line");
-  const heatFinish = await page(actor(["HEAT_RUNNER"]), "/staff/finish-line");
   assert.equal(heatStart.status, 200);
   assert.match(await heatStart.text(), /Prepare the next heat/);
-  assert.equal(heatFinish.status, 403);
-  // Each station role opens exactly its own station.
+  // Each station role opens exactly its own station, with one deliberate
+  // exception below: the finish line.
   assert.equal((await page(actor(["HEAT_RUNNER"]), "/staff/announcer")).status, 403);
 
   const announcerStation = await page(actor(["ANNOUNCER"]), "/staff/announcer");
   assert.equal(announcerStation.status, 200);
   assert.match(await announcerStation.text(), /Read this out loud/);
   assert.equal((await page(actor(["ANNOUNCER"]), "/staff/start-line")).status, 403);
-  assert.equal((await page(actor(["ANNOUNCER"]), "/staff/finish-line")).status, 403);
+
+  // The finish line is the exception, because recording a heat winner is open to
+  // every race-day role. Whoever is standing at the water when a heat ends is the
+  // only person who saw which duck arrived first, and that is not reliably the
+  // one staffer holding RESULT_TAKER — so the station that records it opens for
+  // all of them rather than sending them to find somebody else. It stays the
+  // result taker's station in the staff nav; this is only who it will admit.
+  for (const roles of [["ANNOUNCER"], ["HEAT_RUNNER"], ["RESULT_TAKER"]]) {
+    assert.equal((await page(actor(roles), "/staff/finish-line")).status, 200, roles.join(","));
+  }
+  // The set stops exactly where the heat reads it depends on stop. This station
+  // fetches the heat list and heat detail the moment it opens, so admitting a
+  // role that those reads refuse would hand somebody a station that instantly
+  // 403s — which is the defect this widening exists to remove, not to move.
+  for (const roles of [[], ["REGISTRATION"], ["DUCK_MANAGER"]]) {
+    assert.equal((await page(actor(roles), "/staff/finish-line")).status, 403, roles.join(",") || "no roles");
+  }
 
   const anonymousAnnouncer = await page(null, "/staff/announcer");
   assert.equal(anonymousAnnouncer.status, 303);

@@ -1,5 +1,5 @@
 import type { StaffActor } from "./auth.ts";
-import { hasAnyRole, requireAnyRole } from "./authorization.ts";
+import { hasAnyRole, requireAnyRole, winnerRecordingRoles } from "./authorization.ts";
 import { publicDisplayName } from "./race-board.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
@@ -1735,14 +1735,24 @@ const finalizeResultSet = async (
     resultRoster(env, eventId, heatId),
   ]);
   if (context === null) return json({ error: "Heat not found." }, 404);
-  // Deliberately still round one only. The final has always accepted a typed
-  // duck number at the finish-line station, and scanning a place is an added
-  // way to record the podium rather than a replacement for that station, so
-  // tightening this here would take away a working race-day path that nothing
-  // about the new flow makes unsafe.
-  if (context.round === "ROUND_ONE" && tagToken === null && !hasAnyRole(actor, ["RACE_DIRECTOR"])) {
-    return json({ error: "Scan the winning duck's permanent tag to publish a round-one winner." }, 403);
-  }
+  // A round-one winner recorded without a tag used to be refused unless the
+  // actor was a RACE_DIRECTOR, which made the untagged path a director-only
+  // correction rather than a finish-line fallback. That is the wrong shape for
+  // the duck whose tag will not scan: the person holding it is whoever was
+  // standing at the water when the heat ended, and telling them to fetch a
+  // director is how a heat stalls with a crowd waiting.
+  //
+  // Both ways of recording the same winner are therefore authorized
+  // identically. `handleHeatOperations` gates `/results/finalize` and
+  // `/ducks/{token}/heat-winner` on exactly the same role set —
+  // `winnerRecordingRoles`, the race-day roles that can already read a heat,
+  // with an administrator passing implicitly —
+  // so the scanned winner and the manually selected one are one authorization
+  // decision made in one place, and there is no second, weaker way in. Nothing
+  // else is relaxed: the result validation, the eligibility guard counted
+  // inside the write, the revision check, the command idempotency, the audit
+  // event, and the promotion into the final below are all shared, so a manual
+  // winner is the same write as a scanned one in every other respect.
   if (context.status !== "AWAITING_RESULT" || context.revision !== revision) {
     return json({ error: "The heat is not awaiting this result revision." }, 409);
   }
@@ -2946,7 +2956,10 @@ export const handleHeatOperations = async (
   const url = new URL(request.url);
   const winnerByTagMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]{22,128})\/heat-winner$/);
   if (winnerByTagMatch !== null && request.method === "POST") {
-    const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+    // The scanned half of recording a winner. It shares `winnerRecordingRoles`
+    // with `/results/finalize` below so a scanned winner and a manually
+    // selected one are the same write under the same role check.
+    const denied = requireAnyRole(actor, winnerRecordingRoles);
     if (denied !== null) return denied;
     return finalizeWinnerByTag(request, env, actor, winnerByTagMatch[1]);
   }
@@ -2984,7 +2997,9 @@ export const handleHeatOperations = async (
     return denied ?? announcerRoster(env, eventId, heatId);
   }
   if (operation === "/finish-scan" && request.method === "GET") {
-    const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+    // The lookup the finish line performs before it can offer a duck as a
+    // result. It follows the station and the commands it feeds.
+    const denied = requireAnyRole(actor, winnerRecordingRoles);
     return denied ?? finishScan(url, env, eventId, heatId);
   }
   if (operation === "/roster" && request.method === "PUT") {
@@ -2993,12 +3008,19 @@ export const handleHeatOperations = async (
     return updateRoster(request, env, actor, eventId, heatId);
   }
   if (operation === "/results/finalize" && request.method === "POST") {
-    const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+    // Publishing a result, including the finish line's last-resort manual
+    // winner. Reopening, correcting, and resetting one stay with the race
+    // director below: taking a result and undoing an official one are
+    // different decisions.
+    const denied = requireAnyRole(actor, winnerRecordingRoles);
     if (denied !== null) return denied;
     return finalizeResults(request, env, actor, eventId, heatId);
   }
   if (operation === "/podium-place/clear" && request.method === "POST") {
-    const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+    // Taking a scanned duck back off a podium that has not been published yet.
+    // It undoes a selection, never an official result, so it belongs with
+    // recording rather than with correction.
+    const denied = requireAnyRole(actor, winnerRecordingRoles);
     if (denied !== null) return denied;
     return clearFinalPodiumPlace(request, env, actor, eventId, heatId);
   }
@@ -3019,9 +3041,12 @@ export const handleHeatOperations = async (
   }
   const transition = operation.match(/^\/(lock|ready|call|start|finish)$/)?.[1] as TransitionName | undefined;
   if (transition !== undefined && request.method === "POST") {
-    const roles = transition === "finish"
-      ? ["RESULT_TAKER", "RACE_DIRECTOR"] as const
-      : ["HEAT_RUNNER", "RACE_DIRECTOR"] as const;
+    // Marking a heat finished is the first step of recording its result and it
+    // is pressed at the water's edge, on the finish-line station, by whoever
+    // watched the heat end. It follows the winner commands rather than the
+    // start-line transitions above it, so every role the station now admits can
+    // use the one button that station leads with.
+    const roles = transition === "finish" ? winnerRecordingRoles : ["HEAT_RUNNER", "RACE_DIRECTOR"] as const;
     const denied = requireAnyRole(actor, roles);
     if (denied !== null) return denied;
     return transitionHeat(request, env, actor, eventId, heatId, transition);

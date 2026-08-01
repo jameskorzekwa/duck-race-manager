@@ -122,13 +122,26 @@ test.describe("race edge cases", () => {
     // race, and every control that does so lives inside the Admin view, so a
     // race director opens it exactly as an administrator does. `is_system_admin`
     // remains an account type, and it alone unlocks Support and Access.
+    //
+    // `navigation` and `opens` are deliberately not the same list for the finish
+    // line. Recording a heat winner is open to every race-day role — see
+    // `winnerRecordingRoles` — because whoever is standing at the water when a
+    // heat ends is the only person who saw which duck arrived first, and that is
+    // not reliably the one staffer holding `RESULT_TAKER`. So the station that
+    // records a winner admits the announcer and the heat runner too, rather than
+    // sending them off to find somebody else with the next heat already forming
+    // up behind them. The nav still answers "which station is yours" and keeps
+    // offering the finish line only to the result taker and the race director,
+    // so the widening changes who is admitted without changing whose station it
+    // is. The registration desk and the duck manager are not on the water, cannot
+    // read a heat at all, and are still refused.
     const matrix = [
       {
         role: "ANNOUNCER",
         landing: "/staff/announcer",
         heading: "Read this out loud",
         navigation: ["Announcer"],
-        opens: ["Announcer"],
+        opens: ["Announcer", "Finish line"],
         adminView: false,
       },
       {
@@ -136,7 +149,7 @@ test.describe("race edge cases", () => {
         landing: "/staff/start-line",
         heading: "Prepare the next heat",
         navigation: ["Start line"],
-        opens: ["Start line"],
+        opens: ["Start line", "Finish line"],
         adminView: false,
       },
       {

@@ -395,6 +395,46 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .station-ineligible > * + * { margin-top:.5rem; }
 .station-ineligible strong { display:block; font-size:clamp(1.35rem,6vw,2.1rem); line-height:1.08; overflow-wrap:anywhere; }
 .station-ineligible p { font-size:clamp(1rem,3.6vw,1.25rem); font-weight:850; overflow-wrap:anywhere; }
+/* The finish line's primary instruction, and the acknowledgement a staffer
+   lands on when the duck's inspection page sends them back. Both are sized like
+   .station-ineligible on purpose: they are read at arm's length, outdoors, by
+   somebody holding a wet duck, so they are the loudest thing on the station
+   after the heat title. Colour is never the only cue — each carries its own
+   heading text — and every value clamps and wraps so neither can overflow a
+   narrow screen. */
+.station-callout { margin:1.2rem 0; padding:clamp(1rem,3.5vw,1.5rem); border:5px solid #7b5600; border-radius:.9rem; background:#fff1a8; box-shadow:6px 6px 0 var(--ink); }
+.station-callout > * { margin-bottom:0; }
+.station-callout > * + * { margin-top:.5rem; }
+.station-callout strong { display:block; font-size:clamp(1.3rem,5.4vw,2rem); line-height:1.1; overflow-wrap:anywhere; }
+.station-callout p { font-size:clamp(1rem,3.6vw,1.25rem); font-weight:850; overflow-wrap:anywhere; }
+.station-recorded { margin:1.2rem 0; padding:clamp(1rem,3.5vw,1.5rem); border:5px solid #1d6b3a; border-radius:.9rem; background:#d9f5df; box-shadow:6px 6px 0 var(--ink); }
+.station-recorded > * { margin-bottom:0; }
+.station-recorded > * + * { margin-top:.5rem; }
+.station-recorded strong { display:block; font-size:clamp(1.3rem,5.4vw,2rem); line-height:1.1; overflow-wrap:anywhere; }
+.station-recorded p { font-size:clamp(1rem,3.6vw,1.25rem); font-weight:850; overflow-wrap:anywhere; }
+/* The last-resort manual winner selector, nested inside .station-callout so the
+   scan instruction and its fallback read as one workflow rather than as two
+   competing ways to do the same job. It is deliberately quieter than the
+   instruction above it — smaller heading, plain surface — because it must never
+   look like the normal path. It never relies on being quiet to say so: its own
+   heading names it a last-resort control in words, so the warning survives
+   without colour, without CSS, and for a screen reader. The select and the
+   button keep the full station touch target, and everything wraps rather than
+   overflowing a narrow screen.
+
+   That heading text lives in client-scripts.ts and never here. This stylesheet
+   is inlined into every rendered page, so quoting the callout's own sentences
+   in a comment puts a second copy of them on every page that must not say them
+   at all — which is what site.test.mjs pins when it asserts the finish line
+   ships these regions empty. Describe the copy here; never reproduce it. */
+.station-fallback { padding:clamp(.8rem,3vw,1.1rem); border:3px solid var(--ink); border-radius:.7rem; background:#fffdf2; }
+.station-fallback > * { margin-bottom:0; }
+.station-fallback > * + * { margin-top:.6rem; }
+.station-callout .station-fallback strong { font-size:clamp(1.05rem,3.8vw,1.35rem); }
+.station-callout .station-fallback p { font-size:clamp(.95rem,3.2vw,1.1rem); font-weight:800; }
+.station-fallback label { display:block; font-size:clamp(.95rem,3.2vw,1.1rem); font-weight:900; }
+.station-fallback select { display:block; box-sizing:border-box; max-width:100%; width:100%; min-height:4rem; margin-top:.35rem; padding:.75rem .9rem; border:3px solid var(--ink); border-radius:.6rem; background:#fff; color:inherit; font:inherit; font-size:clamp(1rem,3.6vw,1.25rem); font-weight:800; }
+.station-fallback .button { box-sizing:border-box; width:100%; }
 .podium { display:grid; gap:.65rem; margin:1rem 0; }
 .podium-place { padding:.8rem 1rem; border:3px solid var(--ink); border-radius:.75rem; background:var(--yellow); font-size:1.1rem; font-weight:950; }
 .station-panel h1 { max-width:none; }
@@ -1055,6 +1095,13 @@ const staffNavLinks: readonly StaffNavLink[] = [
   { href: "/staff/registration", label: "Registration", access: { anyOf: ["REGISTRATION", "RACE_DIRECTOR"] } },
   { href: "/staff/announcer", label: "Announcer", access: { anyOf: ["ANNOUNCER", "RACE_DIRECTOR"] } },
   { href: "/staff/start-line", label: "Start line", access: { anyOf: ["HEAT_RUNNER", "RACE_DIRECTOR"] } },
+  // The nav answers "which station is yours", not "which page would admit you".
+  // Recording a heat winner is open to every operational role — see
+  // `winnerRecordingRoles` — so this page admits more actors than this link
+  // offers it to, and that gap is deliberate. The finish line is still the
+  // result taker's station; the widened authorization exists so that whoever is
+  // standing there when a tag will not scan is not blocked, not to make the
+  // finish line every role's advertised destination.
   { href: "/staff/finish-line", label: "Finish line", access: { anyOf: ["RESULT_TAKER", "RACE_DIRECTOR"] } },
   {
     href: "/staff/inventory",
@@ -1550,6 +1597,8 @@ export const renderFinishLine = (
     ${staffNav(isSystemAdmin, roles, "/staff/finish-line")}
     <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
     <p class="lede" data-station-event>Finding a running heat.</p>
+    <section class="station-recorded" data-finish-recorded hidden aria-live="polite" aria-label="Recorded winner"></section>
+    <section class="station-callout" data-finish-callout hidden aria-live="polite" aria-label="How to record this heat's winner"></section>
     <h2 data-station-heat>No heat selected</h2><dl class="facts compact-facts" data-station-facts></dl>
     <h3>Authoritative roster</h3><ul class="station-roster" data-station-roster><li>Waiting for the official roster.</li></ul>
     <div class="station-action" data-finish-action></div>
