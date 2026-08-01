@@ -698,24 +698,34 @@ export async function queueNextApproved({ github, context, core }) {
     return;
   }
   await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["agent:merge-slot"] });
+  let merged = false;
   try {
     // The workflow token may not arm native auto-merge (FORBIDDEN), and both
     // required contexts are already green statuses by the time a PR is
     // admitted here, so merge directly at the exact reviewed head. Branch
     // protection still applies: an unsatisfied requirement fails the merge and
     // releases the slot for the next reconciliation pass.
-    await github.rest.pulls.merge({
+    const result = await github.rest.pulls.merge({
       owner, repo, pull_number: pr.number,
       merge_method: "merge",
       sha: pr.head.sha,
     });
+    if (!result.data.merged) throw new Error(`GitHub did not merge PR #${pr.number}: ${result.data.message}`);
+    merged = true;
+    // GITHUB_TOKEN-authored merges intentionally do not trigger push workflows.
+    // Dispatch the release explicitly while the merge slot remains locked.
+    await github.rest.actions.createWorkflowDispatch({
+      owner, repo, workflow_id: "release.yml", ref: defaultBranch,
+    });
   } catch (error) {
-    try {
-      await github.rest.issues.removeLabel({
-        owner, repo, issue_number: pr.number, name: "agent:merge-slot",
-      });
-    } catch (removeError) {
-      if (removeError.status !== 404) throw removeError;
+    if (!merged) {
+      try {
+        await github.rest.issues.removeLabel({
+          owner, repo, issue_number: pr.number, name: "agent:merge-slot",
+        });
+      } catch (removeError) {
+        if (removeError.status !== 404) throw removeError;
+      }
     }
     throw error;
   }
