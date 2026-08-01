@@ -666,9 +666,15 @@ jobs:
             ];
             const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
             const labels = issue.labels.map((label) => label.name).filter((label) => !states.includes(label));
-            const setState = (state) => github.rest.issues.setLabels({
-              owner, repo, issue_number: issueNumber, labels: [...labels, state],
-            });
+            const pipeline = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
+            // Only the newest run that claimed this issue may write its state.
+            const setState = async (state) => {
+              const wrote = await pipeline.writeIssueStateIfCurrent(
+                { github, context }, issueNumber, state, context.runId,
+              );
+              if (!wrote) core.info(`A newer run owns issue #${issueNumber}; not writing ${state}.`);
+              return wrote;
+            };
             const [related] = result.decision.numbers ?? [];
             if (result.issue !== issueNumber || result.baseSha !== process.env.EXPECTED_BASE) {
               throw new Error("Task result does not match this trusted run.");
@@ -716,17 +722,16 @@ jobs:
                 body: `<!-- agent-pipeline question=${context.runId} -->\nThe implementation is blocked on the question below. Reply to this issue with the answer and the pipeline resumes automatically from the work completed so far.\n\n${question}`,
               });
             } else {
-              await setState("agent:failed");
               await github.rest.issues.createComment({
                 owner, repo, issue_number: issueNumber,
                 body: `<!-- agent-pipeline run-failed=${context.runId} -->\n${String(result.report).slice(0, 50000)}`,
               });
               // A failed decision retries immediately, exactly like a crashed
-              // job: the shared policy requeues from the saved seed or parks
-              // the issue at agent:error.
-              const module = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
-              const outcome = await module.recoverFailedIssue({ github, context }, issueNumber);
-              core.info(`Failed decision handled immediately: ${outcome}.`);
+              // job, but only while this run still owns the issue.
+              if (await setState("agent:failed")) {
+                const outcome = await pipeline.recoverFailedIssue({ github, context }, issueNumber);
+                core.info(`Failed decision handled immediately: ${outcome}.`);
+              }
             }
 
       - name: Verify publication preconditions and apply patch
@@ -899,9 +904,13 @@ jobs:
               });
             }
             const published = pr?.state === "open" && pr.user?.id === 41898282;
-            await github.rest.issues.setLabels({
-              owner, repo, issue_number: issueNumber, labels: [...labels, published ? "agent:review" : "agent:failed"],
-            });
+            const pipeline = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
+            const ownsIssue = await pipeline.writeIssueStateIfCurrent(
+              { github, context }, issueNumber, published ? "agent:review" : "agent:failed", context.runId,
+            );
+            if (!ownsIssue) {
+              core.info(`A newer run owns issue #${issueNumber}; recording the outcome without changing its state.`);
+            }
             await github.rest.issues.createComment({
               owner, repo, issue_number: issueNumber,
               body: published
@@ -911,8 +920,7 @@ jobs:
             // Retry immediately instead of waiting for the reconciliation sweep.
             // The shared policy decides: requeue with the saved seed, or park at
             // agent:error when the budget is spent or no progress was made.
-            if (!published) {
-              const module = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
-              const outcome = await module.recoverFailedIssue({ github, context }, issueNumber);
+            if (!published && ownsIssue) {
+              const outcome = await pipeline.recoverFailedIssue({ github, context }, issueNumber);
               core.info(`Failed attempt handled immediately: ${outcome}.`);
             }

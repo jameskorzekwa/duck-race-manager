@@ -166,6 +166,55 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
   );
 });
 
+test("a candidate behind main is merged forward instead of re-implemented", async () => {
+  const reconcile = await read(".github/workflows/agent-reconcile.yml");
+  const refresh = reconcile.slice(reconcile.indexOf("  refresh-candidates:"), reconcile.indexOf("  reconcile:"));
+
+  // Deterministic and model-free: a plain merge, never a model session.
+  assert.match(refresh, /git merge --no-edit "origin\/\$\{DEFAULT_BRANCH\}"/);
+  assert.doesNotMatch(refresh, /openchamber|self-hosted/);
+
+  // Only bot-authored pipeline candidates, and only when actually behind.
+  assert.match(refresh, /select\(\.author\.login == "app\/github-actions"\)/);
+  assert.match(refresh, /startswith\("opencode\/"\)/);
+  assert.match(refresh, /\[\[ "\$base" == "\$main_sha" \]\] && continue/);
+
+  // The refreshed diff is re-checked, the provenance marker is rewritten by
+  // this trusted job, stale approval is cleared, and both gates re-run.
+  assert.match(refresh, /validate-agent-patch\.mjs "\$PWD" "\$main_sha" HEAD/);
+  assert.match(refresh, /agent-pipeline task-run=/);
+  assert.match(refresh, /--remove-label agent:approved/);
+  assert.match(refresh, /gh workflow run ci\.yml --ref "\$branch"/);
+  assert.match(refresh, /gh workflow run agent-review\.yml --ref "\$DEFAULT_BRANCH" -f pr="\$number"/);
+
+  // A real conflict falls back to re-implementation from the saved patch.
+  assert.match(refresh, /git merge --abort/);
+  assert.match(refresh, /gh workflow run agent-task\.yml --ref "\$DEFAULT_BRANCH" -f issue="\$issue"/);
+});
+
+test("the reviewer contract comes from trusted main, and a missing marker rejects", async () => {
+  const review = await read(".github/workflows/agent-review.yml");
+
+  // Agent contracts are control plane: a reviewer fix must reach candidates
+  // that were built before it landed.
+  assert.match(review, /git fetch --quiet origin \$\{\{ github\.event\.repository\.default_branch \}\}/);
+  assert.match(review, /rm -rf "\$model_dir\/\.opencode"/);
+  assert.match(review, /git -C trusted archive FETCH_HEAD \.opencode/);
+  assert.ok(
+    review.indexOf('rm -rf "$model_dir/.opencode"') > review.indexOf('git -C trusted archive "${{ needs.prepare.outputs.base }}"'),
+    "the trusted contract must overwrite the snapshot's, not precede it",
+  );
+
+  // A completed review without a marker is a rejection, not infrastructure.
+  const gate = review.slice(review.indexOf("  gate:"), review.indexOf("  queue-merge:"));
+  assert.match(gate, /const infrastructureFailure = process\.env\.RESET_RESULT !== "success"\n\s+\|\| process\.env\.REVIEW_RESULT !== "success";/);
+  assert.doesNotMatch(gate, /infrastructureFailure = [\s\S]{0,200}decision\.exitStatus !== 0/);
+
+  const reviewer = await read(".opencode/agents/pipeline-reviewer.md");
+  assert.match(reviewer, /Write the marker first/);
+  assert.match(reviewer, /There is no other contract to fetch/);
+});
+
 test("a starting implementation reports its own running state", async () => {
   const workflow = await read(".github/workflows/agent-task.yml");
   const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));
@@ -391,7 +440,10 @@ test("model budgets let a full feature finish inside each job timeout", async ()
 test("reconciliation is deterministic and model-free", async () => {
   const workflow = await read(".github/workflows/agent-reconcile.yml");
   const implementation = await read("scripts/agent-pipeline.mjs");
-  assert.doesNotMatch(workflow, /models: read|id-token: write|opencode/);
+  // Model-free means it never invokes a model or claims the model runner;
+  // the opencode/ branch prefix is candidate naming, not model execution.
+  assert.doesNotMatch(workflow, /models: read|id-token: write/);
+  assert.doesNotMatch(workflow, /openchamber|runs-on: \[self-hosted/);
   assert.match(workflow, /reconcileAgentPipeline/);
   assert.match(implementation, /run\.event === "workflow_dispatch"/);
   assert.match(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);
