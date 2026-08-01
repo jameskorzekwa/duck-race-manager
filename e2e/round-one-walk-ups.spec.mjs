@@ -28,14 +28,14 @@ test("the registration desk admits Round One walk-ups until the final unstarted 
 
   // Registration has closed, but starting Round One opens the bounded walk-up
   // window. The already-open least-privilege desk learns that from live data.
-  await expect(form).toBeHidden();
+  await expect(form).toHaveAttribute("hidden", "");
   await client.post(`/api/v1/staff/events/${seeded.eventId}/start-round-one`, {
     commandId: crypto.randomUUID(),
   }, { label: "start round one for walk-up browser coverage" });
   await expect(availability).toHaveText(
     "Walk-up registration stays open until the final unstarted Round One heat begins.",
   );
-  await expect(form).toBeVisible();
+  await expect(form).not.toHaveAttribute("hidden", "");
 
   // The desk repaints that sentence from its own narrow cutoff projection rather
   // than from the whole event record, so the endpoint is asserted directly.

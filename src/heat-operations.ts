@@ -1777,12 +1777,12 @@ const finalizeResultSet = async (
     resultRoster(env, eventId, heatId),
   ]);
   if (context === null) return json({ error: "Heat not found." }, 404);
-  // Deliberately still round one only. The final has always accepted a typed
-  // duck number at the finish-line station, and scanning a place is an added
-  // way to record the podium rather than a replacement for that station, so
-  // tightening this here would take away a working race-day path that nothing
-  // about the new flow makes unsafe.
-  if (context.round === "ROUND_ONE" && tagToken === null && !hasAnyRole(actor, ["RACE_DIRECTOR"])) {
+  // The finish line's explicit last-resort selector is the same result-station
+  // operation as scanning the permanent tag. Keep both paths on the existing
+  // RESULT_TAKER/RACE_DIRECTOR boundary; this does not broaden heat reads,
+  // station access, duck inspection, or any other result operation.
+  if (context.round === "ROUND_ONE" && tagToken === null
+    && !hasAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"])) {
     return json({ error: "Scan the winning duck's permanent tag to publish a round-one winner." }, 403);
   }
   if (context.status !== "AWAITING_RESULT" || context.revision !== revision) {
@@ -2482,7 +2482,9 @@ const finalizeWinnerByTag = async (
     || candidate.heatId !== heatId
     || candidate.raceEntryId !== raceEntryId
     || candidate.revision !== revision
-  ) return json({ error: "This duck is not the current winner candidate for that heat revision." }, 409);
+  ) return json({
+    error: "This duck is not the current winner candidate for that heat revision. Refresh this inspection page and scan the current winner candidate.",
+  }, 409);
 
   return finalizeResultSet(env, actor, eventId, heatId, commandId, revision, results, token);
 };
