@@ -3183,10 +3183,12 @@ test("the live board renders the stage chip from the public board status only", 
   assert.match(liveScript, /liveBoardSummary\.textContent = liveStageSummary\(/);
   // The stage never depends on anything beyond the public projection.
   assert.doesNotMatch(liveScript, /event\.(?:email|phone|lookupCode|privateToken|staff)/);
-  // Heat and podium rendering stays intact underneath the stage.
+  // Heat rendering stays intact under the stage, and the finale above it is the
+  // renamed Winners section rather than the podium heading it replaced.
   assert.match(liveScript, /liveRound\("Round one", event\.roundOneHeats, event\.currentHeat\)/);
   assert.match(liveScript, /liveRound\("Final", event\.finalHeats, event\.currentHeat\)/);
-  assert.match(liveScript, /liveText\("h3", "Official podium"\)/);
+  assert.match(liveScript, /liveText\("h3", "Winners", "winners-title"\)/);
+  assert.doesNotMatch(liveScript, /Official podium/);
 });
 
 test("station state helpers prioritize unpublished results and stable render keys", () => {

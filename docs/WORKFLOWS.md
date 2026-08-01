@@ -309,6 +309,8 @@ for racing) it keeps the blocked treatment and reasons.
 **Implemented:** every public page derives one phase from the single current
 event, using one lightweight status query per HTML request. The phase drives
 navigation, the home call to action, and what `/register` and `/race` render.
+The `/race` page additionally reads the existing public race-board projection
+for its initial board paint; it never reads a wider result or participant shape.
 
 | Phase | Event state | Navigation | Home CTA |
 | --- | --- | --- | --- |
@@ -325,6 +327,23 @@ is open, even though the navigation does not advertise it then. While the phase
 is Preparing there is no stage, heat, or result to report, so both the
 navigation and a direct `GET /race` keep the page unavailable and the direct
 request returns `303` to `/`. Staff stays in the top navigation in every phase.
+
+When the final has published results, the public result section is titled
+**Winners**. It presents the authoritative finishing order in semantic list
+order, maps first place to a named gold medal, second to silver, and third to
+bronze, and states each ordinal in text so color is never the only rank cue. Each
+published place includes the event's policy-filtered participant display name
+and public duck identity. Missing places are not filled, and no medal is drawn
+for a place that the public projection does not contain. The layered podium
+layout collapses without horizontal overflow on narrow screens, and its brief
+medal effect exists only under `prefers-reduced-motion: no-preference`.
+
+The Worker server-renders those same projected Winners into `/race`; the live
+client replaces them after its authoritative `GET /api/v1/race-board` refresh.
+If JavaScript is unavailable, the published names, duck identities, places, and
+medals therefore remain readable. The fallback adds no contact details, lookup
+codes, private paths or tokens, notes, inventory locations, staff data, or audit
+history.
 
 The home call to action is not in the hero. When a phase has one it is the
 primary action of the "happening now" section, whose title the live client
