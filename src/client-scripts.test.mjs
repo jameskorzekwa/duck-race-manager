@@ -815,6 +815,11 @@ const confirmationCallsites = [
       + " That place goes back to being open for the next duck scanned.",
     { danger: true, confirmLabel: "Clear " + podiumPlaceLabel(place) },
   )) return;`],
+  [staffDuckScript, `if (!await appConfirm(
+    "Emergency replacement: replace " + participantName + "'s " + oldDuckLabel + " with " + newDuckLabel
+      + "? Confirm this is a last resort for a lost or damaged duck. The old duck tag will stop representing this participant.",
+    { danger: true, confirmLabel: "Replace duck" },
+  )) return;`],
   [finishLineScript, `if (!await appConfirm(
     "Clear " + label + " from Duck #" + placement.visibleNumber + "? That place goes back to being open"
       + " for the next duck scanned.",
@@ -860,9 +865,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
   // mutations use the shared confirmation dialog.
   assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 10);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
-  // The staff duck scan confirms name moderation, round-one winner
-  // publication, and both directions of a final podium place.
-  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 4);
+  // The staff duck scan confirms name moderation, round-one winner,
+  // both directions of a final podium place, and emergency replacement.
+  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 5);
   // My Ducks has exactly one destructive action: self-service deletion.
   assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The dialog is defined once, by the one bundle every page loads first, so

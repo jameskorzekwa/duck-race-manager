@@ -37,7 +37,7 @@ not authorized.
 
 | Capability | Required regular-staff role | System administrator |
 | --- | --- | --- |
-| Participant list/detail/search, walk-up, edits, withdrawal, scan-first search and pairing | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
+| Participant list/detail/search, walk-up, edits, withdrawal, scan-first pairing, and emergency in-race duck replacement | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Delete a never-paired registration | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Set or clear a participant's duck name | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Participant disqualification/reactivation | `RACE_DIRECTOR` | Yes |
@@ -197,8 +197,8 @@ it rather than an exception to it.
 > duck out of one, and never reorders the ducks inside one, because the ducks in
 > a bag are indistinguishable without scanning every one of them.
 >
-> The one physical change QuickDucks may cause is moving **one whole bag into
-> another whole bag**, which needs no searching at all. That happens in exactly
+> The one routine physical change QuickDucks may cause is moving **one whole bag
+> into another whole bag**, which needs no searching at all. That happens in exactly
 > two places, both of them before any roster is locked: closing registration
 > pours a round-one tail heat that is too short to race into the heat before it,
 > and reopening registration takes it back out again.
@@ -207,11 +207,17 @@ it rather than an exception to it.
 > moved into which and the numbers on the ducks that moved, and the Admin view
 > shows it as an explicit physical instruction — *"Pour the Heat 5 bag into the
 > Heat 4 bag"* — that stays on screen until a person acknowledges it.
+>
+> Emergency replacement is the explicit non-routine exception: staff already
+> know which duck is lost or damaged, scan its spare replacement, and preserve
+> the existing bag/slot rather than searching, sorting, or rebuilding a roster.
 
 Two consequences follow, and they are what the rest of this document relies on:
 
 - Withdrawal, disqualification, reactivation, unassignment, deleting a duck, and
   every result correction move no duck and no heat entry at all.
+- Emergency replacement changes which physical duck represents one race entry,
+  but never changes that race entry's heat, slot, advancement, or result rows.
 - The pairing screen names a bag at pairing time and is honest about how firm
   that answer is: while the event is `REGISTRATION_OPEN` the whole bag can still
   be folded, and it says so; from `REGISTRATION_CLOSED` onwards nothing can move
@@ -220,6 +226,45 @@ Two consequences follow, and they are what the rest of this document relies on:
 
 QuickDucks records no bag placement and no physical-location confirmation. It
 states the instruction; carrying it out is an operator step.
+
+### Emergency In-Race Duck Replacement
+
+**Implemented:** during `ROUND_ONE` or `FINAL`, registration staff, race
+directors, and administrators may scan an active, physically eligible, unpaired
+inventory duck and use it as an emergency replacement. This is repeatedly
+labelled as a **last resort for a lost or damaged duck** and is separate from
+routine pairing. The operator searches only the active, already-paired racers
+eligible in the current round, reviews the participant, old and new duck
+numbers, both round assignments, heat status, slot, advancement, and recorded
+place, chooses whether the old duck is lost or damaged, and confirms a read-back
+that names the participant and both ducks.
+
+One atomic command closes exactly the assignment shown in that read-back,
+marks the old duck `MISSING` or `DAMAGED`, reserves the replacement when needed,
+and creates the participant's sole current assignment to the replacement. The
+closed assignment and inventory/audit events preserve the history without
+putting contact details, lookup codes, tag tokens, notes, or locations in the
+replacement projection or audit detail. The participant's registration and race
+entry revisions advance; heat rosters do not. Existing Round One and Final heat
+entries, slot numbers, promotions, and published results are unchanged. A
+provisional Final podium selection follows the current assignment so a partly
+scanned podium cannot retain the old duck.
+
+The replacement command binds the event status and revision, applicable heat
+and revision, registration and race-entry revisions, old assignment and duck
+revision, replacement duck revision and reservation, incident type, and an RFC
+4122 v4 command ID. Matching retries replay the saved response. Changed command
+material, an already-paired spare, an ineligible participant, stale context, or
+a concurrent pairing/replacement commits nothing and returns a conflict. Cookie
+mutations still require the exact application Origin.
+
+Closing the old assignment immediately makes its permanent tag read-only as a
+duck record: it no longer resolves to the participant and cannot offer or record
+a later race result. The replacement's permanent tag resolves through the new
+current assignment and uses the ordinary inspection and finish-line result
+rules. Physically putting the replacement duck in the participant's existing
+bag or race position is an operator step; QuickDucks never rewrites or
+rebalances the started roster.
 
 ### Heat
 

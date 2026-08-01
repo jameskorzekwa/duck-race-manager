@@ -7885,8 +7885,22 @@ const heatBagNumber = document.querySelector("[data-heat-bag-number]");
 const heatBagDuck = document.querySelector("[data-heat-bag-duck]");
 const heatBagNote = document.querySelector("[data-heat-bag-note]");
 const pairingConfirmation = document.querySelector("[data-pairing-confirmation]");
+const replacementWork = document.querySelector("[data-replacement-work]");
+const replacementSearchForm = document.querySelector("[data-replacement-search]");
+const replacementSearchInput = document.querySelector("[data-replacement-search-input]");
+const replacementResults = document.querySelector("[data-replacement-results]");
+const replacementSearchStatus = document.querySelector("[data-replacement-search-status]");
+const replacementReview = document.querySelector("[data-replacement-review]");
+const replacementConfirmation = document.querySelector("[data-replacement-confirmation]");
+const confirmReplacement = document.querySelector("[data-confirm-replacement]");
 let currentEvent = null;
 let selectedRegistration = null;
+let selectedReplacement = null;
+let replacementCommandId = null;
+let replacementSuccess = null;
+let replacementConflictMessage = null;
+let replacementSearchSequence = 0;
+let replacementSearchTimer = null;
 let staffDuckBusy = 0;
 let staffDuckSubscription = null;
 let justPairedCode = null;
@@ -8340,10 +8354,16 @@ const showInspection = (data) => {
   // publishes the signal. Keep confirming the staff member's own action rather
   // than silently replacing it with a generic inspection view.
   const confirmed = justPairedCode !== null && participant.lookupCode === justPairedCode;
-  pageTitle.textContent = confirmed
+  const replaced = replacementSuccess !== null
+    && replacementSuccess.newDuck?.visibleNumber === data.duck.visibleNumber;
+  pageTitle.textContent = replaced
+    ? "Duck #" + data.duck.visibleNumber + " replaced Duck #" + replacementSuccess.oldDuck.visibleNumber
+    : confirmed
     ? "Duck #" + data.duck.visibleNumber + " paired"
     : "Inspect Duck #" + data.duck.visibleNumber;
-  message.textContent = confirmed
+  message.textContent = replaced
+    ? "Emergency replacement saved. The participant kept every heat slot and recorded result; the old duck tag is no longer theirs."
+    : confirmed
     ? "Duck paired successfully."
     : "This duck is already paired. Review the assignment below.";
   if (winnerFailure !== null) message.textContent = winnerFailure;
@@ -8355,6 +8375,18 @@ const showInspection = (data) => {
   if (!data.assignment.active) addFact("Assignment", "closed");
   if (participant.email) addFact("Email", participant.email);
   if (participant.phone) addFact("Phone", participant.phone);
+  if (replaced) {
+    addFact("Emergency replacement", "Duck #" + replacementSuccess.oldDuck.visibleNumber
+      + " → Duck #" + replacementSuccess.newDuck.visibleNumber);
+    if (replacementSuccess.roundOneHeat) addFact(
+      "Round One place kept",
+      "Heat " + replacementSuccess.roundOneHeat.number + " · Slot " + replacementSuccess.roundOneHeat.slotNumber,
+    );
+    if (replacementSuccess.finalHeat) addFact(
+      "Final place kept",
+      "Heat " + replacementSuccess.finalHeat.number + " · Slot " + replacementSuccess.finalHeat.slotNumber,
+    );
+  }
   showDuckNameModeration(participant);
 };
 
@@ -8445,6 +8477,212 @@ const pairWithLookupCode = async (lookupCode) => {
     staffDuckSubscription?.resume();
   }
 };
+
+const replacementParticipantName = (candidate) =>
+  candidate.participant.firstName + " " + candidate.participant.lastName;
+
+const replacementHeatLabel = (heat) => {
+  if (!heat) return "Not assigned";
+  const round = heat.round === "FINAL" ? "Final" : "Round One";
+  const status = String(heat.status || "").replaceAll("_", " ").toLowerCase();
+  return round + " · Heat " + heat.number + " · Slot " + heat.slotNumber
+    + (status ? " · " + status : "")
+    + (heat.place ? " · Place " + heat.place + " recorded" : "");
+};
+
+const selectedReplacementIncident = () =>
+  document.querySelector('[data-replacement-incident]:checked')?.value || null;
+
+const updateReplacementConfirmation = () => {
+  if (confirmReplacement) confirmReplacement.disabled = !selectedReplacement || !selectedReplacementIncident();
+};
+
+const clearReplacementSelection = () => {
+  selectedReplacement = null;
+  replacementCommandId = null;
+  if (replacementReview) replacementReview.replaceChildren(
+    text("p", "Choose one paired participant to review their duck, round, heat, and race progress.", "muted"),
+  );
+  for (const input of document.querySelectorAll("[data-replacement-incident]")) input.checked = false;
+  updateReplacementConfirmation();
+};
+
+const renderReplacementSelection = (candidate) => {
+  selectedReplacement = candidate;
+  replacementCommandId = null;
+  replacementConflictMessage = null;
+  replacementReview.replaceChildren(
+    text("h3", replacementParticipantName(candidate)),
+    text("p", "Current duck: Duck #" + candidate.currentAssignment.duckNumber),
+    text("p", "Replacement duck: Duck #" + currentReplacementDuck.visibleNumber),
+    text("p", "Round One: " + replacementHeatLabel(candidate.roundOneHeat), "muted"),
+    text("p", "Final: " + replacementHeatLabel(candidate.finalHeat), "muted"),
+  );
+  updateReplacementConfirmation();
+  requestAnimationFrame(() => {
+    if (selectedReplacement !== candidate || replacementWork?.hidden) return;
+    replacementConfirmation?.focus({ preventScroll: true });
+    replacementConfirmation?.scrollIntoView({
+      behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      block: "nearest",
+    });
+  });
+};
+
+const replacementRow = (candidate) => {
+  const button = text("button", "", "result-button");
+  button.type = "button";
+  button.append(
+    text("strong", replacementParticipantName(candidate) + " · Duck #" + candidate.currentAssignment.duckNumber),
+    text("span", replacementHeatLabel(candidate.currentHeat), "muted"),
+  );
+  button.addEventListener("click", () => renderReplacementSelection(candidate));
+  return button;
+};
+
+const setReplacementSearchStatus = (value, isError = false) => {
+  if (!replacementSearchStatus) return;
+  replacementSearchStatus.className = isError ? "error-text" : "muted";
+  replacementSearchStatus.textContent = value;
+};
+
+const runReplacementSearch = async (rawQuery) => {
+  if (!currentEvent || !replacementResults || !replacementSearchForm) return;
+  const query = String(rawQuery == null ? "" : rawQuery).trim();
+  const sequence = ++replacementSearchSequence;
+  clearReplacementSelection();
+  try {
+    const parameters = new URLSearchParams({ eventId: currentEvent.id, q: query });
+    const body = await fetchJson("/api/v1/staff/registrations/replacement-search?" + parameters);
+    if (sequence !== replacementSearchSequence) return;
+    replacementResults.replaceChildren(...body.candidates.map(replacementRow));
+    if (body.candidates.length === 0) {
+      setReplacementSearchStatus(query
+        ? "No eligible paired participant matches that search."
+        : "No paired participant is eligible for replacement in this round.");
+    } else if (body.truncated) {
+      setReplacementSearchStatus("Showing the first " + body.candidates.length + " eligible participants. Type to narrow the list.");
+    } else {
+      setReplacementSearchStatus(body.candidates.length === 1
+        ? "1 eligible paired participant."
+        : body.candidates.length + " eligible paired participants.");
+    }
+  } catch (error) {
+    if (sequence !== replacementSearchSequence || error.message === "signed-out") return;
+    replacementResults.replaceChildren();
+    setReplacementSearchStatus(error.message, true);
+  }
+};
+
+let currentReplacementDuck = null;
+
+const showReplacement = (data) => {
+  pageTitle.textContent = "Emergency replacement with Duck #" + data.duck.visibleNumber;
+  addFact("Replacement duck", "#" + data.duck.visibleNumber);
+  addFact("Inventory", data.duck.inventoryStatus.replaceAll("_", " ").toLowerCase());
+  if (!replacementWork || !data.permissions?.replace) {
+    message.textContent = "This staff role can inspect this duck but cannot perform an emergency replacement.";
+    return;
+  }
+  if (!data.emergencyReplacementEligible) {
+    message.textContent = "This duck is not eligible to replace a participant's duck.";
+    return;
+  }
+  currentReplacementDuck = data.duck;
+  replacementWork.hidden = false;
+  replacementWork.querySelector("[data-replacement-duck]").textContent =
+    "Duck #" + data.duck.visibleNumber + " is unpaired and will become the participant's only active duck.";
+  message.textContent = replacementConflictMessage
+    || "Last resort only: find the participant whose duck is lost or damaged, then review every race detail.";
+  void runReplacementSearch(replacementSearchInput?.value || "");
+};
+
+if (replacementSearchInput && replacementSearchForm) {
+  const submitReplacementSearch = () => {
+    clearTimeout(replacementSearchTimer);
+    replacementSearchInput.blur();
+    void runReplacementSearch(replacementSearchInput.value);
+  };
+  replacementSearchInput.addEventListener("input", () => {
+    clearTimeout(replacementSearchTimer);
+    replacementSearchTimer = setTimeout(() => {
+      void runReplacementSearch(replacementSearchInput.value);
+    }, 250);
+  });
+  replacementSearchForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitReplacementSearch();
+  });
+}
+
+for (const input of document.querySelectorAll("[data-replacement-incident]")) {
+  input.addEventListener("change", () => {
+    replacementCommandId = null;
+    updateReplacementConfirmation();
+  });
+}
+
+if (confirmReplacement) confirmReplacement.addEventListener("click", async () => {
+  const candidate = selectedReplacement;
+  const incidentType = selectedReplacementIncident();
+  if (!candidate || !incidentType || !currentEvent || !currentReplacementDuck) return;
+  const participantName = replacementParticipantName(candidate);
+  const oldDuckLabel = "Duck #" + candidate.currentAssignment.duckNumber;
+  const newDuckLabel = "Duck #" + currentReplacementDuck.visibleNumber;
+  if (!await appConfirm(
+    "Emergency replacement: replace " + participantName + "'s " + oldDuckLabel + " with " + newDuckLabel
+      + "? Confirm this is a last resort for a lost or damaged duck. The old duck tag will stop representing this participant.",
+    { danger: true, confirmLabel: "Replace duck" },
+  )) return;
+  confirmReplacement.disabled = true;
+  replacementCommandId ??= crypto.randomUUID();
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  message.textContent = "Saving the emergency replacement…";
+  try {
+    const result = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/replacement", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: replacementCommandId,
+        eventId: currentEvent.id,
+        raceEntryId: candidate.raceEntryId,
+        expectedAssignmentId: candidate.currentAssignment.id,
+        expectedReplacementReservationId: currentReplacementDuck.reservationId,
+        expectedEventStatus: candidate.event.status,
+        expectedEventRevision: candidate.event.revision,
+        expectedHeatId: candidate.currentHeat.id,
+        expectedHeatRevision: candidate.currentHeat.revision,
+        expectedRegistrationRevision: candidate.registrationRevision,
+        expectedRaceEntryRevision: candidate.raceEntryRevision,
+        expectedCurrentDuckRevision: candidate.currentAssignment.duckRevision,
+        expectedReplacementDuckRevision: currentReplacementDuck.revision,
+        incidentType,
+      }),
+    });
+    replacementSuccess = result;
+    replacementConflictMessage = null;
+    replacementCommandId = null;
+    selectedReplacement = null;
+    await load();
+  } catch (error) {
+    if (error.message !== "signed-out") {
+      if (error.status === 409) {
+        replacementCommandId = null;
+        clearReplacementSelection();
+        replacementConflictMessage = error.message + " Authoritative pairing and heat details have been refreshed.";
+        await load();
+      } else {
+        message.textContent = error.message + " You can retry this same confirmation safely.";
+        confirmReplacement.disabled = false;
+      }
+    }
+  } finally {
+    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
+    endBusy();
+    staffDuckSubscription?.resume();
+  }
+});
 
 const qrLaunch = document.querySelector("[data-qr-launch]");
 const qrPanel = document.querySelector("[data-qr-scanner]");
@@ -8739,6 +8977,10 @@ if (registrationSearchInput && registrationSearchForm) {
 }
 
 const showPairing = (data) => {
+  if (currentEvent && ["ROUND_ONE", "FINAL"].includes(currentEvent.status)) {
+    showReplacement(data);
+    return;
+  }
   pageTitle.textContent = "Pair Duck #" + data.duck.visibleNumber;
   addFact("Duck", "#" + data.duck.visibleNumber);
   addFact("Inventory", data.duck.inventoryStatus.replaceAll("_", " ").toLowerCase());
@@ -8786,6 +9028,8 @@ const load = async () => {
     summary.replaceChildren();
     qrStop(false);
     if (workArea) workArea.hidden = true;
+    if (replacementWork) replacementWork.hidden = true;
+    currentReplacementDuck = null;
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
     renderWinnerAction(duck, heatHasNoEligibleRacer);
@@ -8798,6 +9042,13 @@ const load = async () => {
         currentEvent = null;
         summary.replaceChildren();
         if (workArea) workArea.hidden = true;
+        if (replacementWork) replacementWork.hidden = true;
+        currentReplacementDuck = null;
+        clearReplacementSelection();
+        replacementSearchSequence += 1;
+        clearTimeout(replacementSearchTimer);
+        replacementResults?.replaceChildren();
+        setReplacementSearchStatus("");
         registrationSearchSequence += 1;
         clearTimeout(registrationSearchTimer);
         registrationResults?.replaceChildren();
