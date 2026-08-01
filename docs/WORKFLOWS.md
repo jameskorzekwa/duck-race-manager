@@ -44,6 +44,7 @@ not authorized.
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Duck inventory intake, deletion, assignment, unassignment, and reservation | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open a staff duck inspection | `REGISTRATION`, `DUCK_MANAGER`, `RESULT_TAKER`, or `RACE_DIRECTOR`; projection stays role-narrow | Yes |
+| Emergency replacement of a lost or damaged duck during `ROUND_ONE` or `FINAL` | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/inventory` | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/registration` | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
@@ -1893,8 +1894,12 @@ assignment, an eligible inventory state, and no reservation for another event.
 
 The two racing statuses are what make repairing a deleted duck possible: a
 participant whose duck was deleted is `SUBMITTED` with no open assignment, which
-is exactly the state pairing already expects, so replacing their duck is the
-ordinary scan-first command and not a separate workflow.
+is exactly the state pairing already expects, so restoring that participant is
+the ordinary scan-first command and not a separate workflow.
+
+A participant who still holds an open assignment is a different case, because
+pairing requires an unpaired registration and will not touch theirs. Losing or
+damaging a duck mid-race is handled by Emergency Duck Replacement below.
 
 Staff search accepts an empty query, an exact normalized code, or a
 case-insensitive name or contact substring. Opening the pairing work area
@@ -1909,6 +1914,65 @@ well-formed lookup code that equals an unpaired returned registration's code.
 The console pairs that match directly instead of rendering a single-row list.
 Submitting with Enter prevents native form navigation and blurs the search field
 before the request so a mobile keyboard closes.
+
+### Emergency Duck Replacement
+
+**Implemented:** the last-resort repair for a duck that is lost or damaged while
+the race is running. It is deliberately not routine pairing, and the station says
+so before, during, and at the moment of confirmation.
+
+Once the event is `ROUND_ONE` or `FINAL` there is no routine pairing left to
+offer for a spare, so scanning an unpaired duck opens the replacement flow
+instead of the pairing dead end. The actor needs `REGISTRATION` or
+`RACE_DIRECTOR`, which administrators pass implicitly; a staffer holding only
+some other operational role gets the inspection and no replacement controls.
+
+1. Staff scan a spare duck that has no current assignment.
+2. The station identifies itself as a last resort for a lost or damaged duck and
+   offers a participant search that lists **paired** racers — the inverse of the
+   pairing queue — through
+   `GET /api/v1/staff/registrations/search?...&paired=true`. Each row carries the
+   participant, their current duck number, and their round and heat, which is the
+   context that prevents replacing the wrong pairing.
+3. Selecting a row shows a readback naming the participant, the duck being taken
+   out, and the duck going in. Nothing is confirmable until a row is selected.
+4. Confirming opens the shared dialog, which repeats the last-resort warning and
+   names both duck numbers.
+
+`POST /api/v1/staff/ducks/<tag-token>/replacements` takes
+`{ commandId, eventId, raceEntryId, currentAssignmentId }` with an RFC 4122 v4
+command ID. One batch closes the old assignment with end reason
+`EMERGENCY_REPLACEMENT` and opens the new one; the command row is
+`REPLACE_DUCK` and the redacted audit event is `DUCK_REPLACED`, recording the
+previous and replacement duck identifiers and the previous assignment. The prior
+association is preserved as closed history rather than deleted, so a published
+result keeps pointing at the assignment that actually earned it.
+
+The close happens before the open on purpose. `duck_assignments_active_entry_idx`
+admits one open assignment per race entry and
+`duck_assignments_active_duck_idx` one per duck, so the database — not a
+preflight check — is what guarantees the scanned duck becomes the participant's
+sole active duck. The open is guarded on the row the close just ended, so a
+concurrent replacement or pairing rolls the whole batch back and the participant
+can never come out holding two ducks or none.
+
+The participant's heat entry, slot, advancement, and recorded results are
+untouched, because a heat entry names the race entry and the duck is resolved
+through whichever assignment is currently open. Started rosters are never
+rebalanced or rewritten. Scanning the replacement's permanent tag then resolves
+to that participant and permits the ordinary inspection and winner workflow;
+scanning the duck it replaced finds no open assignment, so it offers no winner
+action and cannot record a later result for them.
+
+Replacement is refused, without partial changes, when the scanned duck is
+already paired, is reserved for another event, or is not in an eligible
+inventory state; when the participant is missing, ineligible, or not in a
+running event; and when the named assignment is no longer the open one. That
+last case is the stale-browser guard: the station holds the assignment it read
+at selection time, so a pairing repaired elsewhere in the meantime returns `409`
+with "That participant's pairing has changed. Refresh and scan again." rather
+than moving a duck. A matching retry of the same command ID replays; reusing
+that ID for different material returns `409`.
 
 ### Participant QR Codes
 

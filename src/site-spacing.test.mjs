@@ -85,8 +85,10 @@ test("pairing, readiness, inventory, and staff-role renderers expose spacing hoo
   const homeMarkup = renderStaffHome("Administrator", true, []);
   const css = stylesheetFrom(homeMarkup);
 
-  // One work area now: pairing. The disposition work area went with returns.
-  assert.equal((duckMarkup.match(/class="work-area"/g) ?? []).length, 1);
+  // Two work areas: pairing, and the emergency replacement of a lost or
+  // damaged duck once a round is running. The disposition work area went with
+  // returns.
+  assert.equal((duckMarkup.match(/class="work-area"/g) ?? []).length, 2);
   assert.match(
     renderStaffInventory("Duck Manager", "https://quickducks.com"),
     /class="operation-card inventory-detail-panel"[^>]*data-inventory-detail hidden/,

@@ -1708,6 +1708,19 @@ export const renderStaffDuck = (
         <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
         <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
       </section>` : ""}
+      ${canPair ? `<section class="work-area" data-replacement-work hidden>
+        <div class="notice" data-replacement-warning><strong>Last resort — lost or damaged duck only.</strong> This is not routine pairing. Use it only when a duck that is already racing is lost or damaged and cannot continue. It moves a participant who is already racing onto this duck.</div>
+        <div class="privacy"><strong>Current event</strong><span data-replacement-event></span></div>
+        <form method="post" action="/staff" data-replacement-search>
+          <label>Find the racing participant by code, name, phone, or email<input name="query" type="search" enterkeyhint="search" autocomplete="off" maxlength="80" placeholder="ABCD2345, Jamie Rivera, 555-0100, or name@example.com" data-replacement-search-input><span>Only participants who already have a duck are listed. Check the duck number, round, and heat before you continue.</span></label>
+          <button class="button secondary" type="submit">Find racing participant</button>
+        </form>
+        <p class="muted" data-replacement-search-status aria-live="polite">Loading participants who already have a duck…</p>
+        <div class="result-list" data-replacement-results></div>
+        <div class="pairing-review" data-replacement-review><p class="muted">Choose the participant whose duck was lost or damaged.</p></div>
+        <p class="notice" data-replacement-readback aria-live="polite" hidden></p>
+        <button class="button danger" type="button" data-confirm-replacement disabled>Replace this participant's duck</button>
+      </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/staff-duck.js" defer></script>
       ${staffFooter(displayName)}

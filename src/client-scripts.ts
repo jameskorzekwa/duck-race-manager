@@ -7255,6 +7255,10 @@ let selectedRegistration = null;
 let staffDuckBusy = 0;
 let staffDuckSubscription = null;
 let justPairedCode = null;
+// The replacement a staffer just committed on this duck, kept so the live
+// refresh that the replacement itself publishes keeps confirming their action
+// instead of repainting it as an ordinary inspection.
+let justReplaced = null;
 let winnerSuccess = null;
 
 const text = (tag, value, className) => {
@@ -7681,12 +7685,20 @@ const showInspection = (data) => {
   // publishes the signal. Keep confirming the staff member's own action rather
   // than silently replacing it with a generic inspection view.
   const confirmed = justPairedCode !== null && participant.lookupCode === justPairedCode;
-  pageTitle.textContent = confirmed
-    ? "Duck #" + data.duck.visibleNumber + " paired"
-    : "Inspect Duck #" + data.duck.visibleNumber;
-  message.textContent = confirmed
-    ? "Duck paired successfully."
-    : "This duck is already paired. Review the assignment below.";
+  // A replacement publishes the same signal, so the refresh that follows it
+  // must keep naming both ducks rather than quietly becoming an inspection of
+  // the duck that just arrived.
+  const replaced = justReplaced !== null && participant.lookupCode === justReplaced.lookupCode;
+  pageTitle.textContent = replaced
+    ? "Duck #" + data.duck.visibleNumber + " replaced Duck #" + justReplaced.previousDuckNumber
+    : confirmed
+      ? "Duck #" + data.duck.visibleNumber + " paired"
+      : "Inspect Duck #" + data.duck.visibleNumber;
+  message.textContent = replaced
+    ? justReplaced.message
+    : confirmed
+      ? "Duck paired successfully."
+      : "This duck is already paired. Review the assignment below.";
   addFact("Duck", "#" + data.duck.visibleNumber);
   addFact("Inventory", data.duck.inventoryStatus.replaceAll("_", " ").toLowerCase());
   if (participant.firstName) addFact("Participant", participant.firstName + " " + participant.lastName);
@@ -8048,6 +8060,213 @@ if (registrationSearchInput && registrationSearchForm) {
   });
 }
 
+// Emergency replacement is the last-resort repair for a duck that was lost or
+// damaged after the race started. Ordinary pairing is closed by then, so a
+// spare scanned during ROUND_ONE or FINAL lands here instead of the pairing
+// dead end. Nothing in this block decides eligibility: the paired list and the
+// guarded server command remain the only authorities on what may be replaced.
+const replacementWork = document.querySelector("[data-replacement-work]");
+const replacementSearchForm = document.querySelector("[data-replacement-search]");
+const replacementSearchInput = replacementSearchForm?.querySelector("[data-replacement-search-input]") || null;
+const replacementResults = document.querySelector("[data-replacement-results]");
+const replacementSearchStatus = document.querySelector("[data-replacement-search-status]");
+const replacementReview = document.querySelector("[data-replacement-review]");
+const replacementReadback = document.querySelector("[data-replacement-readback]");
+let replacementSelection = null;
+let replacementDuckNumber = null;
+let replacementSearchSequence = 0;
+let replacementSearchTimer = null;
+
+const replacementHeatLabel = (heat) => heat
+  ? (heat.round === "FINAL" ? "Final" : "Round one") + " \u00b7 Heat " + heat.number
+  : "No heat assigned";
+
+const setReplacementStatus = (value, isError) => {
+  if (!replacementSearchStatus) return;
+  replacementSearchStatus.className = isError ? "error-text" : "muted";
+  replacementSearchStatus.textContent = value;
+};
+
+const clearReplacementSelection = () => {
+  replacementSelection = null;
+  const confirm = document.querySelector("[data-confirm-replacement]");
+  if (confirm) confirm.disabled = true;
+  if (replacementReadback) {
+    replacementReadback.hidden = true;
+    replacementReadback.textContent = "";
+  }
+  replacementReview?.replaceChildren(
+    text("p", "Choose the participant whose duck was lost or damaged.", "muted"),
+  );
+};
+
+// The readback names the participant and both duck numbers, so a staffer
+// confirms the exact pairing they are ending rather than a row position.
+const replacementReadbackText = (registration) =>
+  "Replace Duck #" + registration.assignedDuckNumber + " with Duck #" + replacementDuckNumber
+  + " for " + registration.firstName + " " + registration.lastName
+  + " (" + registration.lookupCode + "), " + replacementHeatLabel(registration.heat);
+
+const renderReplacementSelection = (registration) => {
+  replacementSelection = registration;
+  replacementReview?.replaceChildren(
+    text("h3", registration.firstName + " " + registration.lastName),
+    text("p", "Lookup code " + registration.lookupCode, "muted"),
+    text("p", "Currently racing Duck #" + registration.assignedDuckNumber, "muted"),
+    text("p", replacementHeatLabel(registration.heat), "muted"),
+  );
+  if (replacementReadback) {
+    replacementReadback.textContent = "Last resort: " + replacementReadbackText(registration)
+      + ". Duck #" + registration.assignedDuckNumber + " stops being their race tag.";
+    replacementReadback.hidden = false;
+  }
+  const confirm = document.querySelector("[data-confirm-replacement]");
+  if (confirm) confirm.disabled = false;
+};
+
+const replacementRow = (registration) => {
+  const button = text("button", "", "result-button");
+  button.type = "button";
+  button.append(
+    text("strong", registration.firstName + " " + registration.lastName + " \u00b7 " + registration.lookupCode),
+    text("span", "Duck #" + registration.assignedDuckNumber + " \u00b7 " + replacementHeatLabel(registration.heat), "muted"),
+  );
+  button.addEventListener("click", () => renderReplacementSelection(registration));
+  return button;
+};
+
+const runReplacementSearch = async (rawQuery) => {
+  if (!currentEvent || !replacementResults) return;
+  const query = String(rawQuery == null ? "" : rawQuery).trim();
+  const sequence = ++replacementSearchSequence;
+  clearReplacementSelection();
+  try {
+    const parameters = new URLSearchParams({ eventId: currentEvent.id, q: query, paired: "true" });
+    const body = await fetchJson("/api/v1/staff/registrations/search?" + parameters);
+    if (sequence !== replacementSearchSequence) return;
+    if (replacementSearchForm && globalThis.quickDucksLive.isDirty(replacementSearchForm)) {
+      globalThis.quickDucksLive.markClean(replacementSearchForm);
+    }
+    replacementResults.replaceChildren(...body.registrations.map(replacementRow));
+    setReplacementStatus(body.registrations.length === 0
+      ? "No participant who already has a duck matches that search."
+      : "Last resort only. Pick the participant whose duck was lost or damaged.");
+  } catch (error) {
+    if (sequence !== replacementSearchSequence) return;
+    if (error.message !== "signed-out") {
+      replacementResults.replaceChildren();
+      setReplacementStatus(error.message, true);
+    }
+  }
+};
+
+const queueReplacementSearch = () => {
+  if (!replacementSearchInput) return;
+  clearTimeout(replacementSearchTimer);
+  replacementSearchTimer = setTimeout(
+    () => { void runReplacementSearch(replacementSearchInput.value); },
+    registrationSearchDebounceMs,
+  );
+};
+
+const submitReplacementSearch = () => {
+  if (!replacementSearchInput) return;
+  clearTimeout(replacementSearchTimer);
+  replacementSearchInput.blur();
+  void runReplacementSearch(replacementSearchInput.value);
+};
+
+if (replacementSearchInput && replacementSearchForm) {
+  replacementSearchInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    submitReplacementSearch();
+  });
+  replacementSearchInput.addEventListener("input", queueReplacementSearch);
+  replacementSearchInput.addEventListener("search", queueReplacementSearch);
+  replacementSearchForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitReplacementSearch();
+  });
+}
+
+const submitReplacement = async () => {
+  if (!replacementSelection || !currentEvent) return { ok: false };
+  const registration = replacementSelection;
+  if (!await appConfirm(
+    "Last resort for a lost or damaged duck. " + replacementReadbackText(registration)
+      + ". Duck #" + registration.assignedDuckNumber + " will no longer be their race tag.",
+    { danger: true, confirmLabel: "Replace Duck #" + registration.assignedDuckNumber },
+  )) return { ok: false, cancelled: true };
+  staffDuckBusy += 1;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
+  message.textContent = "Replacing this participant's duck\u2026";
+  try {
+    const result = await fetchJson("/api/v1/staff/ducks/" + encodeURIComponent(token) + "/replacements", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: currentEvent.id,
+        raceEntryId: registration.raceEntryId,
+        currentAssignmentId: registration.assignmentId,
+      }),
+    });
+    if (replacementWork) replacementWork.hidden = true;
+    summary.replaceChildren();
+    addFact("Duck", "#" + result.duck.visibleNumber);
+    addFact("Replaced duck", "#" + result.previousDuck.visibleNumber);
+    addFact("Participant", result.participant.firstName + " " + result.participant.lastName);
+    addFact("Heat bag", replacementHeatLabel(result.heat));
+    pageTitle.textContent = "Duck #" + result.duck.visibleNumber + " replaced Duck #" + result.previousDuck.visibleNumber;
+    const saved = result.replayed
+      ? "This replacement was already saved."
+      : "Replacement saved. Put Duck #" + result.duck.visibleNumber
+        + " into the same heat bag and take Duck #" + result.previousDuck.visibleNumber + " out of the race.";
+    message.textContent = saved;
+    justReplaced = {
+      lookupCode: result.participant.lookupCode,
+      previousDuckNumber: result.previousDuck.visibleNumber,
+      message: saved,
+    };
+    replacementSelection = null;
+    globalThis.quickDucksLive.markClean(root);
+    return { ok: true };
+  } catch (error) {
+    if (error.message === "signed-out") return { ok: false, signedOut: true };
+    setReplacementStatus(error.message, true);
+    message.textContent = error.message;
+    return { ok: false, error: error.message };
+  } finally {
+    staffDuckBusy = Math.max(0, staffDuckBusy - 1);
+    endBusy();
+    staffDuckSubscription?.resume();
+  }
+};
+
+const confirmReplacementButton = document.querySelector("[data-confirm-replacement]");
+if (confirmReplacementButton) confirmReplacementButton.addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  const outcome = await submitReplacement();
+  if (!outcome.ok && !outcome.signedOut && replacementSelection !== null) button.disabled = false;
+});
+
+const showEmergencyReplacement = (data) => {
+  if (!replacementWork) {
+    message.textContent = "This staff role can inspect this duck but cannot pair it.";
+    return;
+  }
+  replacementDuckNumber = data.duck.visibleNumber;
+  pageTitle.textContent = "Emergency replacement \u00b7 Duck #" + data.duck.visibleNumber;
+  message.textContent = "Last resort for a lost or damaged duck. This is not routine pairing."
+    + " Choose the participant whose duck failed, then confirm the readback.";
+  replacementWork.hidden = false;
+  const eventName = document.querySelector("[data-replacement-event]");
+  if (eventName) eventName.textContent = currentEvent.name;
+  void runReplacementSearch(replacementSearchInput?.value || "");
+};
+
 const showPairing = (data) => {
   pageTitle.textContent = "Pair Duck #" + data.duck.visibleNumber;
   addFact("Duck", "#" + data.duck.visibleNumber);
@@ -8058,6 +8277,14 @@ const showPairing = (data) => {
   }
   if (!workArea || !qrLaunch) {
     message.textContent = "This staff role can inspect this duck but cannot pair it.";
+    return;
+  }
+  // Once a round is running there is no routine pairing left to offer for a
+  // spare, so the only legitimate reason to scan one is that a racing duck was
+  // lost or damaged. The server repeats both checks on the command itself.
+  if (currentEvent && ["ROUND_ONE", "FINAL"].includes(currentEvent.status)
+    && data.permissions && data.permissions.replace) {
+    showEmergencyReplacement(data);
     return;
   }
   if (!currentEvent || !["REGISTRATION_OPEN", "REGISTRATION_CLOSED"].includes(currentEvent.status)) {
@@ -8093,6 +8320,7 @@ const load = async () => {
     summary.replaceChildren();
     qrStop(false);
     if (workArea) workArea.hidden = true;
+    if (replacementWork) replacementWork.hidden = true;
     if (duck.assignment) showInspection(duck);
     else showPairing(duck);
     renderWinnerAction(duck, heatHasNoEligibleRacer);
@@ -8104,11 +8332,18 @@ const load = async () => {
         currentEvent = null;
         summary.replaceChildren();
         if (workArea) workArea.hidden = true;
+        if (replacementWork) replacementWork.hidden = true;
         registrationSearchSequence += 1;
         clearTimeout(registrationSearchTimer);
         registrationResults?.replaceChildren();
         setRegistrationStatus("");
         document.querySelector("[data-pairing-review]")?.replaceChildren();
+        replacementSelection = null;
+        replacementSearchSequence += 1;
+        clearTimeout(replacementSearchTimer);
+        replacementResults?.replaceChildren();
+        setReplacementStatus("");
+        replacementReview?.replaceChildren();
       }
       message.textContent = error.message;
     }
@@ -8128,7 +8363,8 @@ staffDuckSubscription = globalThis.quickDucksLive.subscribe({
   domains: ["event", "participants", "ducks", "heats"],
   root,
   refresh: load,
-  isBlocked: () => staffDuckBusy > 0 || selectedRegistration !== null || qrScanning,
+  isBlocked: () => staffDuckBusy > 0 || selectedRegistration !== null
+    || replacementSelection !== null || qrScanning,
 });
 `;
 

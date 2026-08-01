@@ -224,7 +224,12 @@ test("staff pairing pairs from a scan or an exact code and always keeps a manual
   assert.match(staffDuckScript, /qrMessage\.textContent = qrCameraProblem\(error\);\s*staffDuckSubscription\?\.resume\(\)/);
   assert.match(staffDuckScript, /qrVideo\.srcObject = qrStream;\s*\/\/ Permission has settled[\s\S]*?qrStarting = false;\s*qrScheduleHiddenStop\(\);\s*await qrVideo\.play\(\)/);
   assert.match(staffDuckScript, /\} catch \(error\) \{\s*if \(qrStarting \|\| qrScanning\) return;\s*if \(error\.message !== "signed-out"\)/);
-  assert.match(staffDuckScript, /isBlocked: \(\) => staffDuckBusy > 0 \|\| selectedRegistration !== null \|\| qrScanning/);
+  // A half-finished emergency replacement is user input too, so a live refresh
+  // may not repaint it out from under the staff member either.
+  assert.match(
+    staffDuckScript,
+    /isBlocked: \(\) => staffDuckBusy > 0 \|\| selectedRegistration !== null\s*\|\| replacementSelection !== null \|\| qrScanning/,
+  );
 
   // Scanning is a convenience over the code, never a new source of truth.
   assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
@@ -242,7 +247,13 @@ test("the pairing search lists the unpaired by default and puts the keyboard awa
   );
   // An empty query is sent as an empty query rather than suppressed.
   assert.match(staffDuckScript, /new URLSearchParams\(\{ eventId: currentEvent\.id, q: query \}\)/);
-  assert.equal(staffDuckScript.match(/registrations\/search\?/g).length, 1);
+  // Two searches now share the endpoint: the unpaired pairing queue, and the
+  // already-paired list the emergency replacement flow picks from.
+  assert.equal(staffDuckScript.match(/registrations\/search\?/g).length, 2);
+  assert.match(
+    staffDuckScript,
+    /new URLSearchParams\(\{ eventId: currentEvent\.id, q: query, paired: "true" \}\)/,
+  );
   // Automatic list loads must not mark an already-clean form clean: markClean
   // resumes live subscriptions and would recursively queue the duck load.
   assert.match(
@@ -806,6 +817,14 @@ const confirmationCallsites = [
     { danger: true, confirmLabel: "Publish podium" },
   )) return;`],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
+  // Emergency replacement is the one destructive action on the scan station
+  // that ends a pairing somebody is actively racing, so its confirmation must
+  // name the participant and both duck numbers rather than a generic warning.
+  [staffDuckScript, `if (!await appConfirm(
+    "Last resort for a lost or damaged duck. " + replacementReadbackText(registration)
+      + ". Duck #" + registration.assignedDuckNumber + " will no longer be their race tag.",
+    { danger: true, confirmLabel: "Replace Duck #" + registration.assignedDuckNumber },
+  )) return { ok: false, cancelled: true };`],
   [participantScript, `  const confirmed = await appConfirm(
     "Delete the registration for " + participantDisplayName(registration)
     + "? It will be removed from the race and cannot be brought back.",
@@ -830,8 +849,9 @@ test("every confirmation callsite preserves its warning and returns before mutat
   assert.equal((staffHomeScript.match(/\bappConfirm\(/g) ?? []).length, 10);
   assert.equal((staffAccessScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The staff duck scan confirms name moderation, round-one winner
-  // publication, and both directions of a final podium place.
-  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 4);
+  // publication, both directions of a final podium place, and the emergency
+  // replacement of a lost or damaged duck.
+  assert.equal((staffDuckScript.match(/\bappConfirm\(/g) ?? []).length, 5);
   // My Ducks has exactly one destructive action: self-service deletion.
   assert.equal((participantScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // The dialog is defined once, by the one bundle every page loads first, so

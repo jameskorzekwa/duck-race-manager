@@ -309,6 +309,10 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
   return json({
     permissions: {
       pair: hasAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]),
+      // Emergency replacement reuses the pairing grant because it is a pairing
+      // repair. The scan station still only offers it for an unpaired spare
+      // while a round is running, and the command re-checks both.
+      replace: hasAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]),
     },
     duck: {
       id: duck.duck_id,
@@ -344,6 +348,10 @@ export const REGISTRATION_SEARCH_LIMIT = 100;
 const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
   const eventId = url.searchParams.get("eventId")?.trim() ?? "";
   const query = url.searchParams.get("q")?.trim() ?? "";
+  // Opt-in only, and off by default. The unpaired working queue below is what
+  // every existing caller reads; emergency replacement is the one screen that
+  // needs the opposite set, so it has to ask for it by name.
+  const pairedOnly = url.searchParams.get("paired") === "true";
   if (eventId.length === 0 || query.length > 80) {
     return json({ error: "An event and a search of at most 80 characters are required." }, 400);
   }
@@ -353,21 +361,31 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
   // This endpoint feeds one screen: a staff member holding a duck that needs a
   // participant. An empty query is therefore a listing of everyone still
   // waiting for a duck, and typing narrows that same list; `? = ''` turns the
-  // match group off for the listing without a second statement. A participant
-  // who already holds a duck is excluded here, in SQL, so no browser filter and
-  // no future caller can surface one.
+  // match group off for the listing without a second statement. Which side of
+  // the pairing line a row must be on is decided here, in SQL, from a fixed
+  // internal fragment, so no browser filter and no caller-supplied value can
+  // widen it. Without the explicit opt-in above it stays the unpaired queue.
   const results = await env.DB.prepare(
     `SELECT r.id AS registration_id, re.id AS race_entry_id,
             r.first_name, r.last_name, r.email, r.phone,
             r.lookup_code, r.status,
-            d.visible_number
+            d.visible_number,
+            da.id AS assignment_id,
+            (
+              SELECT h.round || ':' || h.heat_number
+                FROM heat_entries he
+                JOIN heats h ON h.id = he.heat_id
+               WHERE he.race_entry_id = re.id
+               ORDER BY CASE h.round WHEN 'FINAL' THEN 0 ELSE 1 END, h.heat_number
+               LIMIT 1
+            ) AS current_heat
        FROM registrations r
        JOIN race_entries re ON re.registration_id = r.id
        LEFT JOIN duck_assignments da
          ON da.race_entry_id = re.id AND da.valid_to IS NULL
        LEFT JOIN ducks d ON d.id = da.duck_id
       WHERE r.event_id = ?
-        AND da.id IS NULL
+        AND ${pairedOnly ? "da.id IS NOT NULL" : "da.id IS NULL"}
         AND (
            ? = ''
            OR r.lookup_code = ? COLLATE NOCASE
@@ -403,13 +421,18 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
     lookup_code: string;
     status: string;
     visible_number: number | null;
+    assignment_id: string | null;
+    current_heat: string | null;
   }>();
 
-  // Belt and braces on top of `da.id IS NULL`: a row that still reports a duck
-  // number never reaches the response, whatever the join returned.
-  const unpaired = results.results.filter((row) => row.visible_number === null);
-  const truncated = unpaired.length > REGISTRATION_SEARCH_LIMIT;
-  const registrations = unpaired.slice(0, REGISTRATION_SEARCH_LIMIT).map((row) => ({
+  // Belt and braces on top of the pairing filter: a row whose duck number
+  // disagrees with the list that was asked for never reaches the response,
+  // whatever the join returned.
+  const scoped = results.results.filter((row) =>
+    pairedOnly ? row.visible_number !== null : row.visible_number === null
+  );
+  const truncated = scoped.length > REGISTRATION_SEARCH_LIMIT;
+  const registrations = scoped.slice(0, REGISTRATION_SEARCH_LIMIT).map((row) => ({
     registrationId: row.registration_id,
     raceEntryId: row.race_entry_id,
     firstName: row.first_name,
@@ -419,15 +442,21 @@ const searchRegistrations = async (url: URL, env: Env): Promise<Response> => {
     lookupCode: row.lookup_code,
     status: row.status,
     assignedDuckNumber: row.visible_number,
+    // Only the replacement list carries the pairing it would end. The default
+    // queue keeps exactly the shape its callers already read.
+    ...(pairedOnly
+      ? { assignmentId: row.assignment_id, heat: heatFromPair(row.current_heat) }
+      : {}),
   }));
 
   // A query that is exactly one participant's lookup code identifies a single
   // person with no ambiguity, so the staff console pairs it directly instead of
   // rendering a one-item list to click through. Anything else, including a
   // partial code, stays a normal search. This only reports the match; the
-  // pairing command still performs every authorization and state check. Because
-  // the list is unpaired-only, an already-paired code reports nothing here and
-  // the console says so instead of firing a command that would be rejected.
+  // pairing command still performs every authorization and state check. The
+  // match is drawn from the same filtered list, so a code outside the list that
+  // was asked for reports nothing here and the console says so instead of
+  // firing a command that would be rejected.
   const exactMatch = isLookupCode(exactCode)
     ? registrations.find((registration) => registration.lookupCode.toUpperCase() === exactCode) ?? null
     : null;
@@ -831,6 +860,316 @@ const pairDuck = async (
   );
 };
 
+// Emergency replacement is the last-resort repair for a duck that was lost or
+// damaged mid-race. It deliberately never touches a roster: `heat_entries`
+// names the race entry, and every duck is resolved through whichever
+// assignment is currently open, so closing the old assignment and opening a new
+// one inside a single batch carries the participant's heat slot, advancement,
+// and already recorded places over to the replacement duck without rebalancing
+// or rewriting a started heat. The prior pairing survives in `duck_assignments`
+// as a closed row, which is the history mechanism this schema already has.
+const EMERGENCY_REPLACEMENT_REASON = "EMERGENCY_REPLACEMENT";
+
+interface ReplacementContext {
+  event_id: string;
+  event_status: string;
+  registration_id: string;
+  race_entry_id: string;
+  first_name: string;
+  last_name: string;
+  lookup_code: string;
+  assignment_id: string;
+  previous_duck_id: string;
+  previous_visible_number: number;
+  current_heat: string | null;
+}
+
+const heatFromPair = (value: string | null): { round: string; number: number } | null => {
+  if (typeof value !== "string") return null;
+  const [round, number] = value.split(":");
+  return { round, number: Number(number) };
+};
+
+const replacementResponse = (
+  assignmentId: string,
+  duckNumber: number,
+  previousDuckNumber: number,
+  context: {
+    first_name: string;
+    last_name: string;
+    lookup_code: string;
+  },
+  heat: { round: string; number: number } | null,
+  replayed: boolean,
+): Response => json({
+  assignmentId,
+  replayed,
+  duck: { visibleNumber: duckNumber },
+  // The readback the confirmation names is the whole point of the flow, so the
+  // response repeats both duck identities rather than only the new one.
+  previousDuck: { visibleNumber: previousDuckNumber },
+  participant: {
+    firstName: context.first_name,
+    lastName: context.last_name,
+    lookupCode: context.lookup_code,
+  },
+  heat,
+}, replayed ? 200 : 201);
+
+const replaceDuck = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  token: string,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  if (payload === null) return json({ error: "A valid JSON request is required." }, 400);
+  const commandId = payload.commandId;
+  const eventId = payload.eventId;
+  const raceEntryId = payload.raceEntryId;
+  const currentAssignmentId = payload.currentAssignmentId;
+  const identifier = /^[A-Za-z0-9_-]{1,128}$/;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || typeof eventId !== "string" || !identifier.test(eventId)
+    || typeof raceEntryId !== "string" || !identifier.test(raceEntryId)
+    || typeof currentAssignmentId !== "string" || !identifier.test(currentAssignmentId)
+  ) {
+    return json({
+      error: "Command, event, participant, and the current pairing are required.",
+    }, 400);
+  }
+
+  // A matching retry replays. The same command identifier presented with any
+  // other material matches nothing here, falls through, and collides with the
+  // `race_commands` primary key inside the batch, which is the 409 below.
+  const replay = await env.DB.prepare(
+    `SELECT da.id AS assignment_id, d.visible_number,
+            prev.visible_number AS previous_visible_number,
+            r.first_name, r.last_name, r.lookup_code,
+            (
+              SELECT h.round || ':' || h.heat_number
+                FROM heat_entries he
+                JOIN heats h ON h.id = he.heat_id
+               WHERE he.race_entry_id = da.race_entry_id
+               ORDER BY CASE h.round WHEN 'FINAL' THEN 0 ELSE 1 END, h.heat_number
+               LIMIT 1
+            ) AS current_heat
+       FROM race_commands c
+       JOIN duck_assignments da ON da.id = c.result_id
+       JOIN ducks d ON d.id = da.duck_id
+       JOIN duck_tags dt ON dt.duck_id = d.id AND dt.token = ?
+       JOIN race_entries re ON re.id = da.race_entry_id
+       JOIN registrations r ON r.id = re.registration_id
+       JOIN duck_assignments old ON old.id = ?
+       JOIN ducks prev ON prev.id = old.duck_id
+      WHERE c.id = ? AND c.command_type = 'REPLACE_DUCK'
+        AND c.event_id = ?
+        AND da.race_entry_id = ?
+        AND old.race_entry_id = da.race_entry_id
+        AND old.valid_to IS NOT NULL
+      LIMIT 1`,
+  ).bind(token, currentAssignmentId, commandId, eventId, raceEntryId).first<{
+    assignment_id: string;
+    visible_number: number;
+    previous_visible_number: number;
+    first_name: string;
+    last_name: string;
+    lookup_code: string;
+    current_heat: string | null;
+  }>();
+  if (replay !== null) {
+    return replacementResponse(
+      replay.assignment_id,
+      replay.visible_number,
+      replay.previous_visible_number,
+      replay,
+      heatFromPair(replay.current_heat),
+      true,
+    );
+  }
+
+  const duck = await env.DB.prepare(
+    `SELECT d.id, d.visible_number, d.inventory_status,
+            da.id AS active_assignment_id
+       FROM duck_tags dt
+       JOIN ducks d ON d.id = dt.duck_id
+       LEFT JOIN duck_assignments da
+         ON da.duck_id = d.id AND da.valid_to IS NULL
+      WHERE dt.token = ? AND dt.status = 'ACTIVE'
+      LIMIT 1`,
+  ).bind(token).first<{
+    id: string;
+    visible_number: number;
+    inventory_status: string;
+    active_assignment_id: string | null;
+  }>();
+  if (duck === null) return json({ error: "This tag is not an active race duck." }, 404);
+  // The replacement must be a spare. Taking a duck that is already racing would
+  // strand its own participant, so it is refused rather than chained.
+  if (duck.active_assignment_id !== null) {
+    return json({ error: "This duck is already paired, so it cannot be a replacement." }, 409);
+  }
+
+  // The participant must still hold exactly the pairing the staff member was
+  // looking at. A duck deleted, unpaired, or already replaced since the browser
+  // read it fails closed here instead of replacing the wrong pairing.
+  const context = await env.DB.prepare(
+    `SELECT e.id AS event_id, e.status AS event_status,
+            r.id AS registration_id, re.id AS race_entry_id,
+            r.first_name, r.last_name, r.lookup_code,
+            da.id AS assignment_id,
+            da.duck_id AS previous_duck_id,
+            pd.visible_number AS previous_visible_number,
+            (
+              SELECT h.round || ':' || h.heat_number
+                FROM heat_entries he
+                JOIN heats h ON h.id = he.heat_id
+               WHERE he.race_entry_id = re.id
+               ORDER BY CASE h.round WHEN 'FINAL' THEN 0 ELSE 1 END, h.heat_number
+               LIMIT 1
+            ) AS current_heat
+       FROM race_entries re
+       JOIN registrations r ON r.id = re.registration_id
+       JOIN events e ON e.id = re.event_id
+       JOIN duck_assignments da
+         ON da.race_entry_id = re.id AND da.valid_to IS NULL
+       JOIN ducks pd ON pd.id = da.duck_id
+      WHERE re.event_id = ?
+        AND re.id = ?
+        AND da.id = ?
+        AND r.status = 'ACTIVE'
+        AND e.status IN ('ROUND_ONE', 'FINAL')
+      LIMIT 1`,
+  ).bind(eventId, raceEntryId, currentAssignmentId).first<ReplacementContext>();
+  if (context === null) {
+    return json({
+      error: "That participant's pairing has changed. Refresh and scan again.",
+    }, 409);
+  }
+
+  const reservation = await env.DB.prepare(
+    `SELECT id, event_id
+       FROM event_ducks
+      WHERE duck_id = ? AND released_at IS NULL
+      LIMIT 1`,
+  ).bind(duck.id).first<{ id: string; event_id: string }>();
+  if (reservation !== null && reservation.event_id !== eventId) {
+    return json({ error: "This duck is reserved for another event." }, 409);
+  }
+  const eligibleInventoryStatuses = reservation === null
+    ? ["AVAILABLE"]
+    : ["AVAILABLE", "RESERVED_FOR_EVENT"];
+  if (!eligibleInventoryStatuses.includes(duck.inventory_status)) {
+    return json({ error: "This duck is not available to be a replacement." }, 409);
+  }
+
+  const now = new Date().toISOString();
+  const assignmentId = crypto.randomUUID();
+  const eventDuckId = reservation?.id ?? crypto.randomUUID();
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `INSERT INTO race_commands
+        (id, event_id, command_type, result_id, requested_at, completed_at)
+       VALUES (?, ?, 'REPLACE_DUCK', ?, ?, ?)`,
+    ).bind(commandId, eventId, assignmentId, now, now),
+  ];
+  if (reservation === null) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO event_ducks
+        (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(eventDuckId, eventId, duck.id, now, actor.id));
+  }
+  // Close first, then open. The order matters: `duck_assignments_active_entry_idx`
+  // admits one open row per race entry, so opening first would abort every
+  // replacement rather than only the conflicting ones.
+  statements.push(env.DB.prepare(
+    `UPDATE duck_assignments
+        SET valid_to = ?, end_reason = ?, ended_by_staff_profile_id = ?
+      WHERE id = ? AND event_id = ? AND race_entry_id = ?
+        AND valid_to IS NULL`,
+  ).bind(now, EMERGENCY_REPLACEMENT_REASON, actor.id, currentAssignmentId, eventId, raceEntryId));
+  // Guarded open: this produces a row only because the statement above closed
+  // that exact assignment. If a concurrent replacement or pairing closed it
+  // first and opened its own, the partial unique index rejects the second open
+  // row and the whole batch rolls back, so the participant can never come out
+  // of this holding two ducks or none.
+  statements.push(env.DB.prepare(
+    `INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?
+       FROM duck_assignments old
+      WHERE old.id = ? AND old.event_id = ? AND old.race_entry_id = ?
+        AND old.valid_to IS NOT NULL
+        AND old.end_reason = ?`,
+  ).bind(
+    assignmentId,
+    eventId,
+    raceEntryId,
+    eventDuckId,
+    duck.id,
+    now,
+    actor.id,
+    commandId,
+    currentAssignmentId,
+    eventId,
+    raceEntryId,
+    EMERGENCY_REPLACEMENT_REASON,
+  ));
+  statements.push(env.DB.prepare(
+    `UPDATE ducks
+        SET inventory_status = 'IN_USE', inventory_status_changed_at = ?,
+            updated_at = ?, revision = revision + 1
+      WHERE id = ?`,
+  ).bind(now, now, duck.id));
+  // The replaced duck goes back to the event's spare pool. Recording it as lost
+  // or damaged is a separate inventory judgement this command deliberately does
+  // not invent on the staff member's behalf.
+  statements.push(env.DB.prepare(
+    `UPDATE ducks
+        SET inventory_status = 'RESERVED_FOR_EVENT', inventory_status_changed_at = ?,
+            updated_at = ?, revision = revision + 1
+      WHERE id = ?`,
+  ).bind(now, now, context.previous_duck_id));
+  statements.push(env.DB.prepare(
+    `INSERT INTO audit_events
+      (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
+     VALUES (?, ?, ?, 'DUCK_REPLACED', 'DUCK_ASSIGNMENT', ?, 'STAFF', ?, ?)`,
+  ).bind(
+    crypto.randomUUID(),
+    eventId,
+    commandId,
+    assignmentId,
+    now,
+    JSON.stringify({
+      staff_profile_id: actor.id,
+      registration_id: context.registration_id,
+      race_entry_id: context.race_entry_id,
+      previous_assignment_id: currentAssignmentId,
+      previous_duck_id: context.previous_duck_id,
+      replacement_duck_id: duck.id,
+      reason: EMERGENCY_REPLACEMENT_REASON,
+    }),
+  ));
+
+  try {
+    await env.DB.batch(statements);
+  } catch {
+    return json({ error: "Replacement conflicted with another update. Refresh and try again." }, 409);
+  }
+
+  return replacementResponse(
+    assignmentId,
+    duck.visible_number,
+    context.previous_visible_number,
+    context,
+    heatFromPair(context.current_heat),
+    false,
+  );
+};
+
 
 export const handleStaffApi = async (
   request: Request,
@@ -858,6 +1197,15 @@ export const handleStaffApi = async (
     const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
     if (denied !== null) return denied;
     return pairDuck(request, env, actor, assignmentMatch[1]);
+  }
+
+  // Emergency replacement is a pairing repair, so it carries exactly the
+  // pairing roles rather than a wider race-day grant.
+  const replacementMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)\/replacements$/);
+  if (replacementMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
+    return replaceDuck(request, env, actor, replacementMatch[1]);
   }
 
   const duckMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
