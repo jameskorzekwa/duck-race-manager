@@ -483,7 +483,11 @@ test.describe("staff roles and the Admin views", () => {
     // Deleting the event out from under an open console makes its in-flight
     // event-scoped refetches 404. That is the deletion working, and the console
     // recovering from it is the behaviour under test, so those are the only
-    // browser errors this page is allowed to produce.
-    expect(errors.filter((error) => !error.includes("404 (Not Found)"))).toEqual([]);
+    // browser errors this page is allowed to produce. Depending on which
+    // event-scoped request loses the race, fetchJson reports either the HTTP
+    // status or the server's exact message.
+    expect(errors.filter((error) =>
+      !error.includes("404 (Not Found)") && error !== "pageerror: Event not found."
+    )).toEqual([]);
   });
 });

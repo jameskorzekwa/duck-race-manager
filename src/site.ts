@@ -128,6 +128,7 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .search-message { margin:.9rem 0 0; }
 .my-ducks-search > .privacy { margin-top:1.5rem; }
 .page-panel { max-width:49rem; margin:2rem auto 5rem; padding:clamp(1.2rem,5vw,3rem); border:3px solid var(--ink); border-radius:1.5rem; background:var(--paper); box-shadow:8px 8px 0 var(--ink); }
+.page-panel.race-status-hero { width:100%; max-width:none; margin-right:0; margin-left:0; }
 .page-panel > .duck-mark { float:right; width:8rem; color:var(--water-dark); }
 .page-title { max-width:12ch; font-size:clamp(2.7rem,10vw,5.4rem); }
 .muted { color:var(--muted); line-height:1.55; }
@@ -371,8 +372,16 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .board-heat { padding:1rem; border:3px solid var(--ink); border-radius:.85rem; background:var(--paper); }
 .board-heat.current { background:#fff1a8; box-shadow:4px 4px 0 var(--ink); }
 .board-heat h4 { margin:.1rem 0 .4rem; font-size:1.2rem; }
-.board-entry { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.4rem 1rem; margin:.35rem 0 0; padding:.45rem .6rem; border-left:.35rem solid var(--water); background:#fff; font-weight:800; }
-.board-participant { display:inline-flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
+.board-table { width:100%; min-width:0; border-spacing:0 .35rem; table-layout:fixed; }
+.board-table th { padding:0 .55rem .15rem; color:var(--muted); font-size:.7rem; font-weight:950; letter-spacing:.06em; text-align:left; text-transform:uppercase; }
+.board-table th:nth-child(1) { width:44%; }
+.board-table th:nth-child(2) { width:34%; }
+.board-table th:nth-child(3) { width:22%; }
+.board-entry > * { min-width:0; padding:.5rem .55rem; background:#fff; font-weight:800; overflow-wrap:anywhere; vertical-align:top; }
+.board-entry > :first-child { border-left:.35rem solid var(--water); border-radius:.35rem 0 0 .35rem; }
+.board-entry > :last-child { border-radius:0 .35rem .35rem 0; }
+.board-participant-content { display:flex; min-width:0; flex-wrap:wrap; align-items:center; gap:.4rem; }
+.board-duck,.board-duck a,.board-place { min-width:0; overflow-wrap:anywhere; }
 .winner-ribbon { display:inline-flex; align-items:center; padding:.2rem .5rem; border:2px solid #7b5600; border-radius:999px; background:#f4c542; color:#3d2b00; font-size:.7rem; font-weight:950; letter-spacing:.06em; line-height:1.2; text-transform:uppercase; }
 .winner-action { margin:0 0 1.4rem; padding:1rem; border:3px solid #7b5600; border-radius:1rem; background:#fff1a8; box-shadow:5px 5px 0 var(--ink); }
 .winner-action > * { margin-bottom:0; }
@@ -640,7 +649,7 @@ export const renderRace = (phase: PublicPhase = "PREPARING"): string => page({
   phase,
   liveNav: true,
   content: `
-    <section class="page-panel">
+    <section class="page-panel race-status-hero" data-race-status-hero>
       ${duck()}
       <p class="eyebrow">Live race status</p>
       <h1 class="page-title">Race status</h1>
