@@ -2,6 +2,7 @@ import type { StaffActor } from "./auth.ts";
 import { hasAnyRole, requireAnyRole } from "./authorization.ts";
 import { publicDisplayName } from "./race-board.ts";
 import { isCommandId } from "./registration.ts";
+import { publishEmailNotification } from "./email-notifications.ts";
 import type { Env } from "./types.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
 
@@ -1278,6 +1279,19 @@ const transitionHeat = async (
     }
   }
 
+  const upcomingRecipients = transition === "call"
+    ? (await env.DB.prepare(
+      `SELECT r.id AS registration_id
+         FROM heat_entries he
+         JOIN race_entries re ON re.id = he.race_entry_id AND re.event_id = he.event_id
+         JOIN registrations r ON r.id = re.registration_id AND r.event_id = he.event_id
+        WHERE he.event_id = ? AND he.heat_id = ?
+          AND r.status = 'ACTIVE'
+        ORDER BY he.slot_number`,
+    ).bind(eventId, heatId).all<{ registration_id: string }>()).results
+      .filter((recipient) => typeof recipient.registration_id === "string")
+    : [];
+
   const now = new Date().toISOString();
   const commandLockGuard = transition === "lock"
     ? `AND h.roster_locked_at IS NULL
@@ -1340,8 +1354,8 @@ const transitionHeat = async (
     ${updateLockGuard} ${updateStartGuard}`;
   updateArgs.push(heatId, eventId, definition.expected, revision);
 
-  try {
-    await env.DB.batch([
+  const notificationIds = upcomingRecipients.map(() => crypto.randomUUID());
+  const statements: D1PreparedStatement[] = [
       env.DB.prepare(
         `INSERT INTO race_commands
           (id, event_id, command_type, result_id, requested_at, completed_at,
@@ -1357,6 +1371,29 @@ const transitionHeat = async (
         requestFingerprint, heatId, eventId, definition.expected, revision,
       ),
       env.DB.prepare(updateSql).bind(...updateArgs),
+  ];
+  for (const [index, recipient] of upcomingRecipients.entries()) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO email_notifications
+        (id, event_id, registration_id, heat_id, notification_type, status,
+         template_version, created_by_command_id, scheduled_at, updated_at)
+       SELECT ?, r.event_id, r.id, h.id, 'HEAT_UPCOMING', 'PENDING', 1, ?, ?, ?
+         FROM registrations r
+         JOIN race_entries re ON re.registration_id = r.id AND re.event_id = r.event_id
+         JOIN heat_entries he ON he.race_entry_id = re.id AND he.event_id = r.event_id
+         JOIN heats h ON h.id = he.heat_id AND h.event_id = r.event_id
+         JOIN events e ON e.id = h.event_id
+         JOIN duck_assignments da
+           ON da.race_entry_id = re.id AND da.event_id = r.event_id AND da.valid_to IS NULL
+        WHERE r.id = ? AND h.id = ? AND h.status = 'CALLING'
+          AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
+            OR (h.round = 'FINAL' AND e.status = 'FINAL'))
+          AND r.status = 'ACTIVE' AND r.email IS NOT NULL
+          AND r.email_notifications_enabled = 1
+       ON CONFLICT DO NOTHING`,
+    ).bind(notificationIds[index], commandId, now, now, recipient.registration_id, heatId));
+  }
+  statements.push(
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -1366,13 +1403,16 @@ const transitionHeat = async (
         crypto.randomUUID(), eventId, commandId, definition.audit, heatId, now,
         JSON.stringify({ staff_profile_id: actor.id, from: definition.expected, to: definition.next }),
       ),
-    ]);
+  );
+  try {
+    await env.DB.batch(statements);
   } catch {
     const message = transition === "start"
       ? "Another heat is running or awaiting its official result, a walk-up still needs pairing, a racer lost their duck, every racer left the race, or this heat changed. Refresh both stations before trying again."
       : "The heat transition conflicted with another update. Refresh and try again.";
     return json({ error: message }, 409);
   }
+  await Promise.all(notificationIds.map((notificationId) => publishEmailNotification(env, notificationId)));
   const updated = await getHeatSummary(env, eventId, heatId);
   return json({ heat: updated === null ? null : heatSummary(updated), replayed: false }, 201);
 };

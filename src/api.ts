@@ -1315,6 +1315,26 @@ const updateMyContact = async (
         registrationId,
       ),
       env.DB.prepare(
+        `UPDATE email_notifications
+            SET status = 'CANCELLED', terminal_at = ?,
+                status_reason = 'EMAIL_NOT_OPTED_IN', retry_after = NULL,
+                last_error_code = NULL, updated_at = ?
+          WHERE registration_id = ? AND ? = 0
+            AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'UPDATE_PARTICIPANT_CONTACT'
+                 AND rc.result_id = ?
+            )`,
+      ).bind(
+        now,
+        now,
+        registrationId,
+        value.emailNotificationsEnabled ? 1 : 0,
+        commandId,
+        registrationId,
+      ),
+      env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
            actor_type, occurred_at, details_json)

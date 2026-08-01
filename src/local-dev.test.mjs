@@ -66,6 +66,7 @@ const localOrigin = "http://localhost:8787";
 const localEnv = (database) => ({
   APP_ORIGIN: localOrigin,
   AWS_REGION: "us-east-1",
+  EMAIL_FROM_ADDRESS: "race@quickducks.local",
   COGNITO_USER_POOL_ID: "us-east-1_local0000",
   COGNITO_USER_POOL_CLIENT_ID: "localdevclientid",
   COGNITO_DOMAIN: localOrigin,
@@ -116,6 +117,8 @@ test("the local configuration is loopback-only and binds no production resource"
   assert.notEqual(local.d1_databases[0].database_id, production.d1_databases[0].database_id);
   assert.notEqual(local.d1_databases[0].database_name, production.d1_databases[0].database_name);
   assert.notEqual(local.queues.producers[0].queue, production.queues.producers[0].queue);
+  assert.notEqual(local.queues.consumers[0].queue, production.queues.consumers[0].queue);
+  assert.notEqual(local.queues.consumers[0].dead_letter_queue, production.queues.consumers[0].dead_letter_queue);
 
   // The binding *shapes* must still match production, or local behaviour
   // diverges. The rate limiter in particular is read without an undefined guard.
@@ -128,6 +131,8 @@ test("the local configuration is loopback-only and binds no production resource"
     local.queues.producers.map((producer) => producer.binding),
     production.queues.producers.map((producer) => producer.binding),
   );
+  assert.equal(local.queues.consumers.length, production.queues.consumers.length);
+  assert.deepEqual(local.triggers, production.triggers);
   assert.deepEqual(local.ratelimits, production.ratelimits);
 });
 
@@ -260,6 +265,18 @@ test("the bootstrap endpoint refuses a cross-origin browser request", async () =
 
   assert.equal(response.status, 403);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_profiles").get().count, 0);
+  database.close();
+});
+
+test("the synthetic local mailbox refuses cross-origin reads", async () => {
+  const database = createDatabase();
+  const response = await localWorker.fetch(
+    new Request(`${localOrigin}/__local/emails`, {
+      headers: { origin: "https://evil.example" },
+    }),
+    localEnv(database),
+  );
+  assert.equal(response.status, 403);
   database.close();
 });
 
