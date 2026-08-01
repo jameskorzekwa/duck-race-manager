@@ -186,6 +186,7 @@ const consoleParts = {
   participantIsCurrentlyPaired: fromConsole(/const participantIsCurrentlyPaired = \(registration\) =>[\s\S]*?;\n/),
   participantPairedDuckNumber: fromConsole(/const participantPairedDuckNumber = \(registration\) => \{[\s\S]*?\n\};/),
   participantDuckFact: fromConsole(/const participantDuckFact = \(registration\) => \{[\s\S]*?\n\};/),
+  participantHeatFact: fromConsole(/const participantHeatFact = \(registration\) => \{[\s\S]*?\n\};/),
   participantUndeletableReason: fromConsole(/const participantUndeletableReason = \(registration\) => \{[\s\S]*?\n\};/),
   PARTICIPANT_DELETABLE_EVENT_STATUSES: fromConsole(/const PARTICIPANT_DELETABLE_EVENT_STATUSES = \[[\s\S]*?\n\];/),
   participantEventBlocksDeletion: fromConsole(/const participantEventBlocksDeletion = \(\) => [\s\S]*?;\n/),
@@ -1089,7 +1090,19 @@ const registrationDetail = (overrides = {}) => {
   // fixture has a heat and an unpaired one does not. The one interesting
   // mismatch — paired with no heat yet — is stated explicitly by the test that
   // wants it, exactly like the deletable/currentlyPaired mismatch above.
-  return { currentlyPaired: paired, deletable: !paired, heatAssignmentPending: !paired, ...merged };
+  //
+  // `heatAssignments` is the same fact stated positively, and the server derives
+  // both from the same `heat_entries` rows, so the two can never disagree here
+  // either: a paired fixture holds exactly the one round-one place pairing gives
+  // it. A finalist holding two places at once is the interesting case, so the
+  // test that wants it says so.
+  return {
+    currentlyPaired: paired,
+    deletable: !paired,
+    heatAssignmentPending: !paired,
+    heatAssignments: paired ? [{ round: "ROUND_ONE", heatNumber: 3, status: "PLANNED" }] : [],
+    ...merged,
+  };
 };
 
 const participantDetailHarness = ({
@@ -1132,6 +1145,7 @@ const participantDetailHarness = ({
       "participantIsCurrentlyPaired",
       "participantPairedDuckNumber",
       "participantDuckFact",
+      "participantHeatFact",
       "PARTICIPANT_DELETABLE_EVENT_STATUSES",
       "participantEventBlocksDeletion",
       "participantUndeletableReason",
@@ -1400,6 +1414,73 @@ test("a projection without the new booleans renders the safe side of both questi
   // The Duck fact degrades with it rather than throwing and dropping the rest
   // of the panel, and it never claims the duck was handed back.
   assert.deepEqual(malformed.facts.find(([label]) => label === "Duck"), ["Duck", "Paired"]);
+});
+
+// The heat fact is the race context the panel exists to give a staffer holding a
+// duck, so every branch is asserted as rendered text rather than through the
+// helper alone: a bare number, a blank, or a pair of places in the wrong order
+// all send a real duck to the wrong bank of the pond.
+const heatFact = (harness) => harness.facts.filter(([label]) => label === "Heat").at(-1);
+
+test("the participant panel names the round and heat of the duck's place", () => {
+  // Paired into a numbered bag: both the round and the heat, never a lone
+  // number that a final would make ambiguous.
+  const assigned = participantDetailHarness();
+  assigned.renderParticipantDetail(registrationDetail());
+  assert.deepEqual(heatFact(assigned), ["Heat", "Round One · Heat 3"]);
+
+  // Never in a heat at all. The field states it rather than going blank, which
+  // `showFacts` would otherwise render as the generic "None".
+  const unassigned = participantDetailHarness();
+  unassigned.renderParticipantDetail(registrationDetail({ assignment: null }));
+  assert.deepEqual(heatFact(unassigned), ["Heat", "Not assigned to a heat"]);
+
+  // Advanced: two real places at once. The final is the live one, so it is named
+  // first and marked, and the round-one heat is kept as where the duck came
+  // from rather than dropped.
+  const advanced = participantDetailHarness();
+  advanced.renderParticipantDetail(registrationDetail({
+    heatAssignments: [
+      { round: "ROUND_ONE", heatNumber: 3, status: "FINALIZED" },
+      { round: "FINAL", heatNumber: 1, status: "CALLING" },
+    ],
+  }));
+  assert.deepEqual(heatFact(advanced), ["Heat", "Final · Heat 1 (current) · advanced from Round One · Heat 3"]);
+  // Whichever order the projection arrives in, the applicable place leads.
+  const reversed = participantDetailHarness();
+  reversed.renderParticipantDetail(registrationDetail({
+    heatAssignments: [
+      { round: "FINAL", heatNumber: 1, status: "CALLING" },
+      { round: "ROUND_ONE", heatNumber: 3, status: "FINALIZED" },
+    ],
+  }));
+  assert.deepEqual(heatFact(reversed), ["Heat", "Final · Heat 1 (current) · advanced from Round One · Heat 3"]);
+});
+
+test("the heat fact degrades instead of throwing and taking the panel with it", () => {
+  // A Worker serving the projection from before this field existed.
+  const legacy = participantDetailHarness({ canDirectRace: true });
+  legacy.renderParticipantDetail({
+    ...registrationDetail({ status: "ACTIVE" }),
+    heatAssignments: undefined,
+  });
+  assert.deepEqual(heatFact(legacy), ["Heat", "Not assigned to a heat"]);
+  // The controls after the fact list still rendered, which is the whole point.
+  assert.deepEqual(legacy.actionLabels(), ["Withdraw", "Disqualify"]);
+
+  // Malformed entries are ignored rather than rendered as "Heat undefined".
+  const malformed = participantDetailHarness({ canDirectRace: true });
+  malformed.renderParticipantDetail(registrationDetail({
+    status: "ACTIVE",
+    heatAssignments: [null, { round: "ROUND_ONE" }, { round: "FINAL", heatNumber: "1" }],
+  }));
+  assert.deepEqual(heatFact(malformed), ["Heat", "Not assigned to a heat"]);
+  assert.deepEqual(malformed.actionLabels(), ["Withdraw", "Disqualify"]);
+
+  // A paired participant whose duck has no bag yet is not claimed to have one.
+  const pending = participantDetailHarness();
+  pending.renderParticipantDetail(registrationDetail({ heatAssignments: [], heatAssignmentPending: true }));
+  assert.deepEqual(heatFact(pending), ["Heat", "Not assigned to a heat"]);
 });
 
 test("the participant panel shows the stored duck name and whether it is already hidden", () => {

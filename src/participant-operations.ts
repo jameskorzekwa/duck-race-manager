@@ -94,6 +94,10 @@ interface RegistrationRow {
   duck_visible_number: number | null;
   is_deletable: number;
   heat_assignment_pending: number;
+  round_one_heat_number: number | null;
+  round_one_heat_status: string | null;
+  final_heat_number: number | null;
+  final_heat_status: string | null;
 }
 
 const registrationSelect = `
@@ -120,7 +124,40 @@ const registrationSelect = `
          -- reason on a race-day panel is a lie a staffer acts on.
          (NOT EXISTS (
             SELECT 1 FROM heat_entries he WHERE he.race_entry_id = re.id
-          )) AS heat_assignment_pending
+          )) AS heat_assignment_pending,
+         -- Which numbered heat this entry actually holds a place in, per round.
+         -- heat_assignment_pending above only answers "is there a bag at all";
+         -- the staff panel also has to name it, and a bare number would be
+         -- ambiguous once a finalist holds a place in two different rounds at
+         -- once.
+         --
+         -- These are deliberately correlated scalar subqueries rather than a
+         -- join. This SELECT is shared verbatim by listRegistrations, and a
+         -- heat_entries join in the outer FROM would emit one row per heat
+         -- place — two for every promoted finalist — silently duplicating and
+         -- reordering the participant list that the registration desk pages
+         -- through. A scalar subquery yields exactly one value per registration,
+         -- so the list keeps one row per participant no matter how far anyone
+         -- has advanced.
+         --
+         -- A race entry can hold at most one place per round, so LIMIT 1 is a
+         -- guard rather than a choice between candidates.
+         (SELECT h.heat_number FROM heat_entries he
+            JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+           WHERE he.race_entry_id = re.id AND h.round = 'ROUND_ONE'
+           LIMIT 1) AS round_one_heat_number,
+         (SELECT h.status FROM heat_entries he
+            JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+           WHERE he.race_entry_id = re.id AND h.round = 'ROUND_ONE'
+           LIMIT 1) AS round_one_heat_status,
+         (SELECT h.heat_number FROM heat_entries he
+            JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+           WHERE he.race_entry_id = re.id AND h.round = 'FINAL'
+           LIMIT 1) AS final_heat_number,
+         (SELECT h.status FROM heat_entries he
+            JOIN heats h ON h.id = he.heat_id AND h.event_id = he.event_id
+           WHERE he.race_entry_id = re.id AND h.round = 'FINAL'
+           LIMIT 1) AS final_heat_status
     FROM registrations r
     JOIN events e ON e.id = r.event_id
     JOIN race_entries re ON re.registration_id = r.id
@@ -181,6 +218,34 @@ const registrationJson = (row: RegistrationRow): Record<string, unknown> => ({
   // described as sealed in a heat bag: a paired participant with no heat place
   // has a duck in their hands and no bag to put it in yet.
   heatAssignmentPending: row.heat_assignment_pending === 1,
+  // The heat places themselves, so a staff panel can name the bag instead of
+  // only knowing one exists. Always ordered Round One first, then Final, so the
+  // console never has to sort a projection to render it in race order.
+  //
+  // A promoted finalist legitimately holds two places at once. Both are listed
+  // rather than collapsed to one, because a staffer mid-race needs to know which
+  // Round One heat the duck came out of *and* which Final bag it is in now.
+  //
+  // Round, heat number, and heat status only: this adds no participant contact
+  // detail, lookup code, token, note, inventory location, or audit history to a
+  // projection that is already gated behind the same REGISTRATION/RACE_DIRECTOR
+  // access as the rest of this file.
+  //
+  // `!= null` rather than `!== null` on purpose: a row that never carried these
+  // columns reports `undefined`, and the honest reading of "this projection
+  // cannot tell me" is "no place listed" rather than a place with no number.
+  heatAssignments: [
+    ...(row.round_one_heat_number == null ? [] : [{
+      round: "ROUND_ONE",
+      heatNumber: row.round_one_heat_number,
+      status: row.round_one_heat_status,
+    }]),
+    ...(row.final_heat_number == null ? [] : [{
+      round: "FINAL",
+      heatNumber: row.final_heat_number,
+      status: row.final_heat_status,
+    }]),
+  ],
 });
 
 const eventJson = (row: EventRow | RegistrationRow): Record<string, unknown> => ({

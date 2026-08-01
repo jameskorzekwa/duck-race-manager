@@ -232,6 +232,110 @@ test("staff can filter an event registration list and inspect assignment detail"
   database.close();
 });
 
+// The staff panel has to name the bag a duck is in, so the projection carries
+// the heat places themselves rather than only the "is there one" boolean.
+//
+// The load-bearing risk is not the value but the cardinality: `registrationSelect`
+// is shared verbatim with the participant list, and a finalist holds a place in
+// two rounds at once. Reading those places with a join would emit two rows for
+// that one participant and quietly corrupt every list the registration desk
+// pages through, so this test asserts the list stays one row per registration
+// with its contact details intact while the same entry holds two heat places.
+test("the registration projection names every heat place without duplicating the list", async (context) => {
+  const { database, env } = makeContext();
+  context.after(() => database.close());
+
+  // Both heats are created unlocked, because `heat_entries_insert_unlocked`
+  // admits a roster row only while its heat is PLANNED and unlocked — the same
+  // gate the real pairing and promotion commands write through. They are moved
+  // to the statuses a mid-race console would see only afterwards.
+  database.exec(`
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-round-one-3', 'event-open', 'ROUND_ONE', 3, 'PLANNED', 3),
+           ('heat-final-1', 'event-open', 'FINAL', 1, 'PLANNED', 3);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry-one', 'event-open', 'heat-round-one-3', 'entry-one', 'ROUND_ONE', 1,
+            'PAIRING', '2026-07-25T00:00:00Z');
+  `);
+
+  const detail = async (registrationId) => {
+    const response = await handleParticipantOperations(
+      new Request(`https://quickducks.com/api/v1/staff/registrations/${registrationId}`),
+      env,
+      staffActor,
+    );
+    const body = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(body));
+    return body.registration;
+  };
+
+  // Paired into a numbered round-one bag: the round and the heat number, taken
+  // from the heat row rather than counted by anything.
+  const paired = await detail("registration-one");
+  assert.deepEqual(paired.heatAssignments, [
+    { round: "ROUND_ONE", heatNumber: 3, status: "PLANNED" },
+  ]);
+  assert.equal(paired.heatAssignmentPending, false);
+
+  // Never in a heat at all. The two answers stay consistent: no places listed is
+  // exactly the state `heatAssignmentPending` reports, because the server
+  // derives both from the same `heat_entries` rows.
+  const unassigned = await detail("registration-two");
+  assert.deepEqual(unassigned.heatAssignments, []);
+  assert.equal(unassigned.heatAssignmentPending, true);
+
+  // Advance that participant exactly as winning a round-one heat does: the
+  // round-one heat is published, and a promotion row puts the same race entry
+  // into the final. Both places are real and both survive.
+  database.exec(`
+    UPDATE heats
+       SET status = 'FINALIZED', started_at = '2026-07-25T01:00:00Z',
+           finalized_at = '2026-07-25T01:05:00Z'
+     WHERE id = 'heat-round-one-3';
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry-one-final', 'event-open', 'heat-final-1', 'entry-one', 'FINAL', 1,
+            'WINNER_PROMOTION', '2026-07-25T01:06:00Z');
+    UPDATE heats SET status = 'CALLING' WHERE id = 'heat-final-1';
+  `);
+
+  const advanced = await detail("registration-one");
+  // Always round-one first, so the console renders race order without sorting.
+  assert.deepEqual(advanced.heatAssignments, [
+    { round: "ROUND_ONE", heatNumber: 3, status: "FINALIZED" },
+    { round: "FINAL", heatNumber: 1, status: "CALLING" },
+  ]);
+  assert.equal(advanced.heatAssignmentPending, false);
+  // Round, heat number, and status only — this adds nothing about the duck, the
+  // participant, or where anything is stored.
+  for (const assignment of advanced.heatAssignments) {
+    assert.deepEqual(Object.keys(assignment), ["round", "heatNumber", "status"]);
+  }
+
+  // The regression this projection could most easily cause. The same SELECT
+  // serves the list, and the participant above now holds two heat places.
+  const list = await handleParticipantOperations(
+    new Request("https://quickducks.com/api/v1/staff/events/event-open/registrations"),
+    env,
+    staffActor,
+  );
+  const listBody = await list.json();
+  assert.equal(list.status, 200, JSON.stringify(listBody));
+  assert.deepEqual(
+    listBody.registrations.map((registration) => registration.registrationId),
+    ["registration-one", "registration-two"],
+    "a race entry with two heat places must still be one row in the list",
+  );
+  // The rest of the row is untouched by the addition, contact details included.
+  assert.equal(listBody.registrations[0].phone, "555-0100");
+  assert.equal(listBody.registrations[0].email, "daisy@example.com");
+  assert.deepEqual(listBody.registrations[0].heatAssignments, advanced.heatAssignments);
+  assert.deepEqual(listBody.registrations[1].heatAssignments, []);
+
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("staff walk-up creation is event-guarded, audited, and idempotent", async () => {
   const { database, env } = makeContext();
   const commandId = crypto.randomUUID();
