@@ -72,6 +72,6 @@ test("reconciliation reads attempt digests and stops only on repeats", () => {
   assert.equal(attemptDigests(repeated).at(-1), attemptDigests(repeated).at(-2));
 });
 
-test("automatic retries iterate well past the old three-attempt ceiling", () => {
-  assert.ok(TASK_RETRY_LIMIT >= 10, `expected room to iterate, got ${TASK_RETRY_LIMIT}`);
+test("automatic retries allow repair but stop before ten full model reruns", () => {
+  assert.equal(TASK_RETRY_LIMIT, 5);
 });

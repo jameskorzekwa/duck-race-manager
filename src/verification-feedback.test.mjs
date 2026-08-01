@@ -43,6 +43,28 @@ test("a Playwright failure survives the local Worker request log", () => {
   assert.doesNotMatch(summary, /\[WebServer\]/);
 });
 
+test("all failed gate identities survive even when an earlier gate is noisy", () => {
+  const log = [
+    "===== verification start: unit and integration tests =====",
+    "✖ failing tests:",
+    "✖ the unit regression",
+    ...Array.from({ length: 100 }, (_, index) => `assertion detail ${index}`),
+    "===== verification failed: unit and integration tests (exit 1) =====",
+    "===== verification start: browser integration tests =====",
+    "  1) e2e/live-refresh.spec.mjs:25:3 › authoritative live refresh › refreshes every open view",
+    "    Error: expect(received).toEqual(expected)",
+    "===== verification failed: browser integration tests (exit 1) =====",
+  ].join("\n");
+
+  const summary = summarizeVerificationFailure(log, { maxCharacters: 1000 });
+
+  assert.ok(summary.startsWith("Failure index (all failed gates):"));
+  assert.match(summary, /the unit regression/);
+  assert.match(summary, /live-refresh\.spec\.mjs:25:3/);
+  assert.match(summary, /===== unit and integration tests =====/);
+  assert.match(summary, /===== browser integration tests =====/);
+});
+
 test("a Playwright run summary anchors the excerpt when no entry is printed", () => {
   const log = [
     "[WebServer] [wrangler:info] GET / 200 OK (1ms)",

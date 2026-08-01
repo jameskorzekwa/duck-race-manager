@@ -18,6 +18,13 @@ const FAILURE_ANCHORS = [
 // The local Worker logs one line per request and dwarfs the browser failure it
 // surrounds, which is how a Playwright excerpt became unusable noise.
 const NOISE = /\[WebServer\]/;
+const GATE_START = /^===== verification start: (.+) =====$/;
+const GATE_END = /^===== verification (passed|failed): (.+) \(exit \d+\) =====$/;
+const FAILURE_IDENTITY = [
+  /^\s*\u2716 (?!failing tests:).+/i,
+  /^\s*\d+\)\s+\S+.*\u203a/,
+  /^\s*(?:error TS\d+:|npm error\b|Error:).*/i,
+];
 
 // Hosted verification output is untrusted candidate-derived text. Neutralize
 // pipeline markers so it can never forge durable state in an issue comment.
@@ -38,6 +45,39 @@ export function summarizeVerificationFailure(log, {
   const lines = String(log ?? "").split(/\r?\n/)
     .filter((line) => !NOISE.test(line))
     .map((line) => clip(neutralizeMarkers(redactE2eOutput(line))));
+  const identities = [...new Set(lines.filter((line) => FAILURE_IDENTITY.some((pattern) => pattern.test(line))))];
+  const sections = [];
+  let current;
+  for (const line of lines) {
+    const start = line.match(GATE_START);
+    if (start) {
+      current = { name: start[1], lines: [] };
+      continue;
+    }
+    const end = line.match(GATE_END);
+    if (end && current?.name === end[2]) {
+      if (end[1] === "failed") sections.push(current);
+      current = undefined;
+      continue;
+    }
+    if (current) current.lines.push(line);
+  }
+  if (sections.length > 0) {
+    const index = identities.length > 0
+      ? `Failure index (all failed gates):\n${identities.map((line) => `- ${line.trim()}`).join("\n")}\n\n`
+      : "";
+    const perSection = Math.max(500, Math.floor((maxCharacters - index.length) / sections.length));
+    const details = sections.map(({ name, lines: sectionLines }) => {
+      const start = FAILURE_ANCHORS.reduce(
+        (found, anchor) => (found >= 0 ? found : sectionLines.findIndex((line) => anchor.test(line))),
+        -1,
+      );
+      const selected = start >= 0 ? sectionLines.slice(start) : sectionLines.slice(-tailLines);
+      const text = selected.join("\n").trim();
+      return `===== ${name} =====\n${text.length > perSection ? `${text.slice(0, perSection)}\n[section truncated]` : text}`;
+    }).join("\n\n");
+    return `${index}${details}`.slice(0, maxCharacters).trim();
+  }
   const start = FAILURE_ANCHORS.reduce(
     (found, anchor) => (found >= 0 ? found : lines.findIndex((line) => anchor.test(line))),
     -1,

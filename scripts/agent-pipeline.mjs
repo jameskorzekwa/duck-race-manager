@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const STATE_LABELS = [
   "agent:inbox",
   "agent:triage",
@@ -68,7 +70,7 @@ export async function writeIssueStateIfCurrent({ github, context }, issueNumber,
   return true;
 }
 
-export const TASK_RETRY_LIMIT = 10;
+export const TASK_RETRY_LIMIT = 5;
 
 // An agent:question issue resumes when James replies after the latest posted
 // question. Automation comments never count as an answer.
@@ -86,6 +88,22 @@ export function questionAnswered(comments, trustedUserId = 38769771) {
 export function attemptDigests(comments) {
   return comments.flatMap(({ body }) => [...String(body ?? "")
     .matchAll(/<!-- agent-pipeline attempt-digest=([0-9a-f]{64}) -->/g)]
+    .map((match) => match[1]));
+}
+
+export function verificationFailureSignature(summary) {
+  const identities = [...new Set(String(summary ?? "").split(/\r?\n/)
+    .filter((line) => line.startsWith("- "))
+    .map((line) => line.slice(2).trim())
+    .filter(Boolean))]
+    .sort();
+  if (identities.length === 0) return null;
+  return createHash("sha256").update(identities.join("\n")).digest("hex");
+}
+
+export function verificationSignatures(comments) {
+  return comments.flatMap(({ body }) => [...String(body ?? "")
+    .matchAll(/<!-- agent-pipeline verification-signature=([0-9a-f]{64}) -->/g)]
     .map((match) => match[1]));
 }
 
@@ -191,6 +209,15 @@ export async function recoverFailedIssue({ github, context }, issueNumber) {
     await commentOnce(
       `<!-- agent-pipeline no-progress=${digests.at(-1).slice(0, 12)} -->`,
       "Two consecutive attempts produced an identical patch, so automatic retries stopped. Add a clarifying comment and rerun Agent Task to resume.",
+    );
+    await setState("agent:error");
+    return "error";
+  }
+  const verification = verificationSignatures(comments);
+  if (verification.length >= 2 && verification.at(-1) === verification.at(-2)) {
+    await commentOnce(
+      `<!-- agent-pipeline repeated-verification=${verification.at(-1).slice(0, 12)} -->`,
+      "Two consecutive repairs produced the same hosted verification failures, so automatic retries stopped.",
     );
     await setState("agent:error");
     return "error";
