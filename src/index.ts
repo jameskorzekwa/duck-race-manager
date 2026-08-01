@@ -26,6 +26,10 @@ import {
 } from "./client-scripts.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
 import {
+  dispatchPendingEmailNotifications,
+  handleEmailQueue,
+} from "./email-notifications.ts";
+import {
   phaseAllowsRaceStatus,
   phaseShowsMyDucks,
   publicPhaseForRender,
@@ -615,6 +619,12 @@ export const createWorker = (
     // traffic, so it deliberately runs no phase query and renders the minimal
     // Home-and-Staff navigation instead.
     return html(renderNotFound(), 404, true);
+  },
+  async queue(batch, env): Promise<void> {
+    await handleEmailQueue(batch, env);
+  },
+  async scheduled(_controller, env, ctx): Promise<void> {
+    ctx.waitUntil(dispatchPendingEmailNotifications(env));
   },
 });
 

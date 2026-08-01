@@ -11,8 +11,8 @@
 | Database | Cloudflare D1 `quickducks-prod` | Wrangler and `db/migrations` |
 | Live refresh fan-out | Durable Object class `RaceUpdates`, binding `RACE_UPDATES` | Wrangler class migration and Worker deployment |
 | Public search limit | Workers binding `PUBLIC_SEARCH_RATE_LIMITER` | `wrangler.jsonc` |
-| Email producer | Cloudflare Queue `quickducks-email` | Wrangler and `EMAIL_QUEUE` binding |
-| Email dead-letter queue | Cloudflare Queue `quickducks-email-dlq` | Wrangler; connect when a queue consumer is deployed |
+| Email queue | Cloudflare Queue `quickducks-email` | Wrangler producer/consumer and `EMAIL_QUEUE` binding |
+| Email dead-letter queue | Cloudflare Queue `quickducks-email-dlq` | Wrangler consumer retry exhaustion |
 | Staff identity | Cognito user pool `quickducks-staff` in `us-east-1` | CloudFormation |
 | Transactional email identity | Amazon SES identity `quickducks.com` in `us-east-1` | CloudFormation plus DNS |
 | Worker AWS identity | IAM user `quickducks-worker-ses` | Application CloudFormation stack; bootstrap-owned permissions boundary; key stored as Worker secrets |
@@ -552,13 +552,34 @@ to add a new racer after Round One starts. Rollback is Worker-only: retain the
 migration and any admitted roster entries; the previous Worker reads and races
 them normally but offers no further Round One walk-ups.
 
-The current Worker sends notification IDs to `quickducks-email` through the
-`EMAIL_QUEUE` producer binding. A queue consumer is not currently declared in
-`wrangler.jsonc`; therefore the DLQ is not connected by the current deployment.
-When a consumer handler is implemented, add a `queues.consumers` entry with
-`dead_letter_queue: "quickducks-email-dlq"`, retry limits, and tests in the same
-change. Do not claim email delivery is operational until that consumer and SES
-send path pass an end-to-end test.
+The Worker sends only opaque notification IDs to `quickducks-email` through the
+`EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
+with five bounded queue attempts and `quickducks-email-dlq` attached. A one-minute
+cron republishes durable `PENDING` work and queue-publication failures, closing
+the D1-commit/queue-publication gap without putting email delivery inside a race
+control request. Queue duplicates are expected and safe: a D1 claim and the
+logical-message unique index prevent an ordinary duplicate delivery from
+sending twice.
+
+The consumer signs a structured SES v2 `SendEmail` request with the Worker's
+encrypted AWS key. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
+`race@quickducks.com`; it remains under the verified `quickducks.com` identity.
+Current consent, address, assignment, and heat state are loaded only after the
+opaque ID is received. Automatic invocation logs remain disabled, and raw SES
+responses, recipient addresses, rendered bodies, and credentials must not be
+logged or persisted as errors. SES acceptance is recorded honestly as `SENT`;
+delivery/bounce/complaint callbacks are not currently implemented.
+
+After deployment, use a synthetic controlled registration to opt into email,
+pair it, and call its heat. Confirm the support view reaches `SENT` for the
+assignment and upcoming notification and that the controlled mailbox receives
+the expected text. Do not use participant data for this canary. Inspect the main
+queue and DLQ metrics for retries. If sending misbehaves, pause the queue
+consumer first (or remove its consumer binding in a reviewed Worker rollback),
+then revoke the Worker SES key if containment requires it. Retain D1 notification
+and attempt history plus queue/DLQ messages for diagnosis; already accepted
+email cannot be recalled, and replaying a DLQ must pass the same current-state
+checks as ordinary delivery.
 
 ### Durable Object Live Refresh
 
