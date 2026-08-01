@@ -166,6 +166,29 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
   );
 });
 
+test("the reviewer contract comes from trusted main, and a missing marker rejects", async () => {
+  const review = await read(".github/workflows/agent-review.yml");
+
+  // Agent contracts are control plane: a reviewer fix must reach candidates
+  // that were built before it landed.
+  assert.match(review, /git fetch --quiet origin \$\{\{ github\.event\.repository\.default_branch \}\}/);
+  assert.match(review, /rm -rf "\$model_dir\/\.opencode"/);
+  assert.match(review, /git -C trusted archive FETCH_HEAD \.opencode/);
+  assert.ok(
+    review.indexOf('rm -rf "$model_dir/.opencode"') > review.indexOf('git -C trusted archive "${{ needs.prepare.outputs.base }}"'),
+    "the trusted contract must overwrite the snapshot's, not precede it",
+  );
+
+  // A completed review without a marker is a rejection, not infrastructure.
+  const gate = review.slice(review.indexOf("  gate:"), review.indexOf("  queue-merge:"));
+  assert.match(gate, /const infrastructureFailure = process\.env\.RESET_RESULT !== "success"\n\s+\|\| process\.env\.REVIEW_RESULT !== "success";/);
+  assert.doesNotMatch(gate, /infrastructureFailure = [\s\S]{0,200}decision\.exitStatus !== 0/);
+
+  const reviewer = await read(".opencode/agents/pipeline-reviewer.md");
+  assert.match(reviewer, /Write the marker first/);
+  assert.match(reviewer, /There is no other contract to fetch/);
+});
+
 test("a starting implementation reports its own running state", async () => {
   const workflow = await read(".github/workflows/agent-task.yml");
   const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));
