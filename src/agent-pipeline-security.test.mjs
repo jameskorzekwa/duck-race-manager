@@ -166,6 +166,32 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
   );
 });
 
+test("a candidate behind main is merged forward instead of re-implemented", async () => {
+  const reconcile = await read(".github/workflows/agent-reconcile.yml");
+  const refresh = reconcile.slice(reconcile.indexOf("  refresh-candidates:"), reconcile.indexOf("  reconcile:"));
+
+  // Deterministic and model-free: a plain merge, never a model session.
+  assert.match(refresh, /git merge --no-edit "origin\/\$\{DEFAULT_BRANCH\}"/);
+  assert.doesNotMatch(refresh, /openchamber|self-hosted/);
+
+  // Only bot-authored pipeline candidates, and only when actually behind.
+  assert.match(refresh, /select\(\.author\.login == "app\/github-actions"\)/);
+  assert.match(refresh, /startswith\("opencode\/"\)/);
+  assert.match(refresh, /\[\[ "\$base" == "\$main_sha" \]\] && continue/);
+
+  // The refreshed diff is re-checked, the provenance marker is rewritten by
+  // this trusted job, stale approval is cleared, and both gates re-run.
+  assert.match(refresh, /validate-agent-patch\.mjs "\$PWD" "\$main_sha" HEAD/);
+  assert.match(refresh, /agent-pipeline task-run=/);
+  assert.match(refresh, /--remove-label agent:approved/);
+  assert.match(refresh, /gh workflow run ci\.yml --ref "\$branch"/);
+  assert.match(refresh, /gh workflow run agent-review\.yml --ref "\$DEFAULT_BRANCH" -f pr="\$number"/);
+
+  // A real conflict falls back to re-implementation from the saved patch.
+  assert.match(refresh, /git merge --abort/);
+  assert.match(refresh, /gh workflow run agent-task\.yml --ref "\$DEFAULT_BRANCH" -f issue="\$issue"/);
+});
+
 test("the reviewer contract comes from trusted main, and a missing marker rejects", async () => {
   const review = await read(".github/workflows/agent-review.yml");
 
@@ -414,7 +440,10 @@ test("model budgets let a full feature finish inside each job timeout", async ()
 test("reconciliation is deterministic and model-free", async () => {
   const workflow = await read(".github/workflows/agent-reconcile.yml");
   const implementation = await read("scripts/agent-pipeline.mjs");
-  assert.doesNotMatch(workflow, /models: read|id-token: write|opencode/);
+  // Model-free means it never invokes a model or claims the model runner;
+  // the opencode/ branch prefix is candidate naming, not model execution.
+  assert.doesNotMatch(workflow, /models: read|id-token: write/);
+  assert.doesNotMatch(workflow, /openchamber|runs-on: \[self-hosted/);
   assert.match(workflow, /reconcileAgentPipeline/);
   assert.match(implementation, /run\.event === "workflow_dispatch"/);
   assert.match(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);
