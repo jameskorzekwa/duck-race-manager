@@ -277,12 +277,13 @@ test("a deployed-but-untagged release is claimed by the next commit instead of d
   }, () => ({ status: 0, error: new Error("spawn failed") })), /could not determine whether release tag/);
 });
 
-test("release workflow safely handles main and explicit tag push sources", () => {
+test("release workflow safely handles main dispatches and explicit push sources", () => {
   const trigger = releaseWorkflow.slice(
     releaseWorkflow.indexOf("on:"),
     releaseWorkflow.indexOf("permissions: {}"),
   );
   assert.match(trigger, /push:\n\s+branches:\n\s+- main\n\s+tags:\n\s+- "v\*\.\*\.\*"/);
+  assert.match(trigger, /workflow_dispatch:/);
   assert.doesNotMatch(releaseWorkflow, /workflow_run/);
   assert.equal(releaseWorkflow.match(/fetch-depth: 0/g)?.length, 2);
   assert.equal(releaseWorkflow.match(/fetch-tags: true/g)?.length, 2);
@@ -290,7 +291,7 @@ test("release workflow safely handles main and explicit tag push sources", () =>
   assert.equal(releaseWorkflow.match(/ref: \$\{\{ github\.sha \}\}/g)?.length, 2);
 
   for (const sourceGate of [
-    '[[ "$EVENT_NAME" != "push" ]]',
+    '[[ "$EVENT_NAME" != "push" && "$EVENT_NAME" != "workflow_dispatch" ]]',
     '[[ ! "$EVENT_SHA" =~ ^[0-9a-f]{40}$ ]]',
     '[[ "$REF_TYPE" == "branch" ]]',
     '[[ "$REF_NAME" != "$DEFAULT_BRANCH" ]]',

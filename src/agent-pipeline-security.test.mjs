@@ -509,8 +509,9 @@ test("reconciliation is deterministic and model-free", async () => {
   assert.match(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);
   assert.match(implementation, /workflow_id: "agent-review\.yml", ref: defaultBranch/);
   assert.match(implementation, /workflow_id: "release\.yml", ref: defaultBranch/);
+  const queue = implementation.slice(implementation.indexOf("export async function queueNextApproved"));
   assert.ok(
-    implementation.indexOf("github.rest.pulls.merge") < implementation.indexOf('workflow_id: "release.yml"'),
+    queue.indexOf("github.rest.pulls.merge") < queue.lastIndexOf('workflow_id: "release.yml"'),
     "the exact-head merge must complete before its release is dispatched",
   );
 });
