@@ -115,11 +115,14 @@ function pipelinePullProvenance(pr, defaultBranch) {
     && linked.length === 1
     && Number(branch[1]) === linked[0]
     && marker[1] === branch[2]
-    && marker[2] === branch[1]
-    && marker[3] === pr.base.sha;
+    && marker[2] === branch[1];
 }
 
 export async function validExactCheck(github, owner, repo, pr) {
+  const recordedBase = (pr.body ?? "").match(
+    /<!-- agent-pipeline task-run=\d+ issue=\d+ base=([0-9a-f]{40}) -->/,
+  )?.[1];
+  if (!recordedBase) return false;
   // The gate publishes a commit status, not a check run: statuses bind purely
   // to the SHA, so the merge box counts them for workflow-token-created PRs
   // that never receive an associated pull_request_target check suite.
@@ -129,15 +132,23 @@ export async function validExactCheck(github, owner, repo, pr) {
   const check = statuses
     .filter((status) => status.context === "Agent Review / Exact SHA")
     .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at))[0];
-  const match = check?.description?.match(new RegExp(`^agent-review:${pr.base.sha}:(\\d+)\\b`));
+  const match = check?.description?.match(new RegExp(`^agent-review:${recordedBase}:(\\d+)\\b`));
   if (check?.state !== "success" || check.creator?.id !== 41898282 || !match) return false;
   try {
     const run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: Number(match[1]) })).data;
     if (run.path !== ".github/workflows/agent-review.yml") return false;
     if (["pull_request_target", "pull_request_review"].includes(run.event)) return true;
-    return run.event === "workflow_dispatch"
-      && run.head_branch === pr.base.ref
-      && run.head_sha === pr.base.sha;
+    if (run.event !== "workflow_dispatch" || run.head_branch !== pr.base.ref) return false;
+    const [forkToReview, reviewToCurrent] = await Promise.all([
+      github.rest.repos.compareCommitsWithBasehead({
+        owner, repo, basehead: `${recordedBase}...${run.head_sha}`,
+      }),
+      github.rest.repos.compareCommitsWithBasehead({
+        owner, repo, basehead: `${run.head_sha}...${pr.base.sha}`,
+      }),
+    ]);
+    return [forkToReview.data.status, reviewToCurrent.data.status]
+      .every((status) => ["identical", "ahead"].includes(status));
   } catch (error) {
     if (error.status === 404) return false;
     throw error;
@@ -256,9 +267,8 @@ export async function reconcileAgentPipeline({ github, context, core }) {
       if (!labelNames(pr).has("agent:approved")) {
         await removeLabel(pr.number, "agent:merge-slot");
       } else {
-        const defaultRef = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
         const exactCheckValid = await validExactCheck(github, owner, repo, pr);
-        if (defaultRef.data.commit.sha !== pr.base.sha || !exactCheckValid) {
+        if (!exactCheckValid) {
           try {
             await github.graphql(`
               mutation($pullRequestId: ID!) {
@@ -277,7 +287,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
           await commentOnce(
             issueNumber,
             `<!-- agent-pipeline stale-approval=${pr.head.sha} -->`,
-            `PR #${pr.number} lost exact-head/base approval and was removed from the merge lane.`,
+            `PR #${pr.number} lost exact-head/provenance approval and was removed from the merge lane.`,
           );
         }
       }
@@ -300,9 +310,12 @@ export async function reconcileAgentPipeline({ github, context, core }) {
       const runs = releaseRuns.data.workflow_runs
         .filter((run) => run.head_sha === pr.merge_commit_sha)
         .sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
-      const active = runs.find((run) => run.status !== "completed");
+      const active = releaseRuns.data.workflow_runs.find((run) => run.status !== "completed");
       const completed = runs.find((run) => run.status === "completed");
-      if (!active && completed?.conclusion === "success") {
+      const deployedRun = await firstDeployedRelease(
+        github, owner, repo, releaseRuns.data.workflow_runs, pr.merge_commit_sha,
+      );
+      if (!active && deployedRun) {
         await removeLabel(pr.number, "agent:merge-slot");
         await setState(issueNumber, "agent:deployed");
         await commentOnce(
@@ -634,10 +647,9 @@ export async function queueNextApproved({ github, context, core }) {
   }
   const pr = (await github.rest.pulls.get({ owner, repo, pull_number: candidate.number })).data;
   const defaultBranch = context.payload.repository.default_branch;
-  const defaultRef = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
   const exactCheckValid = await validExactCheck(github, owner, repo, pr);
   const provenanceValid = pipelinePullProvenance(pr, defaultBranch);
-  if (!provenanceValid || defaultRef.data.commit.sha !== pr.base.sha || !exactCheckValid) {
+  if (!provenanceValid || !exactCheckValid) {
     try {
       await github.rest.issues.removeLabel({
         owner, repo, issue_number: pr.number, name: "agent:approved",
@@ -654,7 +666,7 @@ export async function queueNextApproved({ github, context, core }) {
         owner, repo, issue_number: linked[0], labels: [...labels, "agent:failed"],
       });
     }
-    core.warning(`PR #${pr.number} lost exact-head/base approval and was not queued.`);
+    core.warning(`PR #${pr.number} lost exact-head/provenance approval and was not queued.`);
     return;
   }
   await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ["agent:merge-slot"] });

@@ -87,39 +87,49 @@ test("markerNumbers extracts comma-separated machine state", () => {
   assert.deepEqual(markerNumbers(comments, "canonical-issue"), []);
 });
 
-test("validExactCheck accepts trusted-default-branch workflow dispatch", async () => {
+test("validExactCheck accepts a trusted review after main moves beyond the fork point", async () => {
+  const fork = "a".repeat(40);
+  const reviewedMain = "b".repeat(40);
+  const currentMain = "c".repeat(40);
   const github = {
     paginate: async (fn, args) => (await fn(args)).data,
     rest: {
+      actions: {
+        getWorkflowRun: async () => ({ data: {
+          event: "workflow_dispatch",
+          head_branch: "main",
+          head_sha: reviewedMain,
+          path: ".github/workflows/agent-review.yml",
+        } }),
+      },
       repos: {
         listCommitStatusesForRef: async () => ({ data: [{
           context: "Agent Review / Exact SHA",
           creator: { id: 41898282 },
           state: "success",
-          description: "agent-review:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:123 Exact-head review approved",
+          description: `agent-review:${fork}:123 Exact-head review approved`,
           created_at: "2026-07-28T12:00:00Z",
         }] }),
-      },
-      actions: {
-        getWorkflowRun: async () => ({ data: {
-          event: "workflow_dispatch",
-          head_branch: "main",
-          head_sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          path: ".github/workflows/agent-review.yml",
-        } }),
+        compareCommitsWithBasehead: async ({ basehead }) => ({
+          data: { status: [
+            `${fork}...${reviewedMain}`,
+            `${reviewedMain}...${currentMain}`,
+          ].includes(basehead) ? "ahead" : "diverged" },
+        }),
       },
     },
   };
   const pr = {
-    base: { ref: "main", sha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-    head: { sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+    body: `<!-- agent-pipeline task-run=99 issue=7 base=${fork} -->`,
+    base: { ref: "main", sha: currentMain },
+    head: { sha: "d".repeat(40) },
   };
 
   assert.equal(await validExactCheck(github, "owner", "repo", pr), true);
   github.rest.actions.getWorkflowRun = async () => ({ data: {
     event: "workflow_dispatch",
     head_branch: "feature",
-    head_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    head_sha: reviewedMain,
     path: ".github/workflows/agent-review.yml",
   } });
   assert.equal(await validExactCheck(github, "owner", "repo", pr), false);
