@@ -157,12 +157,13 @@ export async function validExactCheck(github, owner, repo, pr) {
     if (run.path !== ".github/workflows/agent-review.yml") return false;
     if (["pull_request_target", "pull_request_review"].includes(run.event)) return true;
     if (run.event !== "workflow_dispatch" || run.head_branch !== pr.base.ref) return false;
+    const defaultRef = await github.rest.repos.getBranch({ owner, repo, branch: pr.base.ref });
     const [forkToReview, reviewToCurrent] = await Promise.all([
       github.rest.repos.compareCommitsWithBasehead({
         owner, repo, basehead: `${recordedBase}...${run.head_sha}`,
       }),
       github.rest.repos.compareCommitsWithBasehead({
-        owner, repo, basehead: `${run.head_sha}...${pr.base.sha}`,
+        owner, repo, basehead: `${run.head_sha}...${defaultRef.data.commit.sha}`,
       }),
     ]);
     return [forkToReview.data.status, reviewToCurrent.data.status]

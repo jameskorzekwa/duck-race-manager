@@ -137,12 +137,13 @@ test("validExactCheck accepts a trusted review after main moves beyond the fork 
             `${reviewedMain}...${currentMain}`,
           ].includes(basehead) ? "ahead" : "diverged" },
         }),
+        getBranch: async () => ({ data: { commit: { sha: currentMain } } }),
       },
     },
   };
   const pr = {
     body: `<!-- agent-pipeline task-run=99 issue=7 base=${fork} -->`,
-    base: { ref: "main", sha: currentMain },
+    base: { ref: "main", sha: fork },
     head: { sha: "d".repeat(40) },
   };
 

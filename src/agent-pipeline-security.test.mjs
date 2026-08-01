@@ -502,7 +502,8 @@ test("reconciliation is deterministic and model-free", async () => {
   assert.match(workflow, /reconcileAgentPipeline/);
   assert.match(implementation, /run\.event !== "workflow_dispatch"/);
   assert.match(implementation, /basehead: `\$\{recordedBase\}\.\.\.\$\{run\.head_sha\}`/);
-  assert.match(implementation, /basehead: `\$\{run\.head_sha\}\.\.\.\$\{pr\.base\.sha\}`/);
+  assert.match(implementation, /getBranch\(\{ owner, repo, branch: pr\.base\.ref \}\)/);
+  assert.match(implementation, /basehead: `\$\{run\.head_sha\}\.\.\.\$\{defaultRef\.data\.commit\.sha\}`/);
   assert.match(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);
   assert.match(implementation, /workflow_id: "agent-review\.yml", ref: defaultBranch/);
 });
