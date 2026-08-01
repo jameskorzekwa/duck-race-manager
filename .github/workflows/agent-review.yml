@@ -44,6 +44,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
           set -euo pipefail
@@ -57,7 +58,7 @@ jobs:
 
           const event = JSON.parse(fs.readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
           const pr = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/agent-review-pr.json`, "utf8"));
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, `base=${pr.base.sha}\nhead=${pr.head.sha}\npr=${pr.number}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `head=${pr.head.sha}\npr=${pr.number}\n`);
           const branchMatch = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
           const eligible = pr.head.repo.full_name === process.env.GITHUB_REPOSITORY
             && pr.head.repo.id === pr.base.repo.id
@@ -66,6 +67,7 @@ jobs:
             && branchMatch !== null;
           fs.writeFileSync("agent-review-eligible.txt", String(eligible));
           if (!eligible) {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `base=${pr.base.sha}\n`);
             fs.appendFileSync(process.env.GITHUB_OUTPUT, "eligible=false\n");
             fs.appendFileSync(process.env.GITHUB_OUTPUT, "issue=\n");
             process.exit(0);
@@ -75,13 +77,30 @@ jobs:
           const issues = [...new Set(matches.map((match) => match[1]))];
           const marker = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
           if (issues.length !== 1 || issues[0] !== branchMatch[1] || !marker
-              || marker[1] !== branchMatch[2] || marker[2] !== branchMatch[1]
-              || marker[3] !== pr.base.sha) {
+              || marker[1] !== branchMatch[2] || marker[2] !== branchMatch[1]) {
             throw new Error("Agent PR provenance, issue, branch, and base markers must agree exactly.");
           }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `base=${marker[3]}\n`);
           fs.writeFileSync("agent-review-issue.txt", issues[0]);
           fs.writeFileSync("agent-review-run.txt", marker[1]);
+          fs.writeFileSync("agent-review-base.txt", marker[3]);
           NODE
+
+          # The marker names the fork point, so it must be a real commit of the
+          # default branch that this head descends from. That is provenance and
+          # stays true no matter how far main moves ahead; demanding equality
+          # with the live base would instead force a rewrite on every push.
+          base_sha="$(< agent-review-base.txt)"
+          head_sha="$(jq -r .head.sha "$RUNNER_TEMP/agent-review-pr.json")"
+          if [[ "$(gh api "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" --jq '.status')" != "ahead" ]]; then
+            printf 'Candidate head does not descend from its recorded base.\n' >&2
+            exit 1
+          fi
+          base_on_main="$(gh api "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${DEFAULT_BRANCH}" --jq '.status')"
+          if [[ "$base_on_main" != "ahead" && "$base_on_main" != "identical" ]]; then
+            printf 'Recorded base is not a commit of the default branch.\n' >&2
+            exit 1
+          fi
 
           if [[ "$(< agent-review-eligible.txt)" != "true" ]]; then
             exit 0
@@ -571,10 +590,27 @@ jobs:
               });
             };
 
-            const pr = (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
-            if (pr.state !== "open" || pr.head.sha !== expectedHead || pr.base.sha !== expectedBase) {
-              await completeCheck("failure", "Stale review context", `Live PR is ${pr.head.sha}/${pr.base.sha}; expected ${expectedHead}/${expectedBase}.`);
-              core.setFailed(`Stale gate: live PR is ${pr.head.sha}/${pr.base.sha}, expected ${expectedHead}/${expectedBase}.`);
+            // The head is pinned exactly: what was reviewed is what merges. The
+            // base is deliberately not pinned. Branch protection is not strict,
+            // so a candidate that is merely behind main is still safe to merge,
+            // and every merge moves main -- pinning the base would invalidate
+            // every other in-flight review each time one candidate landed.
+            let pr = (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
+            if (pr.state !== "open" || pr.head.sha !== expectedHead) {
+              await completeCheck("failure", "Stale review context", `Live PR is ${pr.head.sha}; expected ${expectedHead}.`);
+              core.setFailed(`Stale gate: live PR head is ${pr.head.sha}, expected ${expectedHead}.`);
+              return;
+            }
+
+            // Being behind main is fine; conflicting with it is not. GitHub
+            // computes mergeability lazily, so give it a moment to answer.
+            for (let attempt = 0; pr.mergeable === null && attempt < 5; attempt += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 3000));
+              pr = (await github.rest.pulls.get({ owner, repo, pull_number: prNumber })).data;
+            }
+            if (pr.mergeable === false) {
+              await completeCheck("failure", "Conflicts with the default branch");
+              core.setFailed("Candidate conflicts with the default branch; reconciliation will merge it forward.");
               return;
             }
 
