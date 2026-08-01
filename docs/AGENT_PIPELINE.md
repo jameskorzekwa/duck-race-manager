@@ -194,6 +194,15 @@ does not call a model. It:
 - Repairs labels when PR, workflow, and deployment state proves the transition.
 - Advances the oldest approved PR after the production lane is free.
 
+A candidate whose base has moved is behind, not invalid. Reconciliation merges
+the default branch forward into it with a deterministic, model-free job, re-runs
+`validate-agent-patch` against the new base, rewrites the provenance marker,
+clears any stale approval, and re-dispatches both gates, so the exact-SHA
+guarantee is rebuilt at the new head instead of being bypassed. Only a genuine
+merge conflict returns the work to the model, which resumes from its saved
+patch. Re-implementation is the fallback, never the routine response to an
+unrelated merge.
+
 An interrupted model turn is restarted from issue, branch, PR, and check state;
 it is never resumed as if a provider call were exactly-once.
 
