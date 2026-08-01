@@ -397,6 +397,22 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .station-ineligible p { font-size:clamp(1rem,3.6vw,1.25rem); font-weight:850; overflow-wrap:anywhere; }
 .podium { display:grid; gap:.65rem; margin:1rem 0; }
 .podium-place { padding:.8rem 1rem; border:3px solid var(--ink); border-radius:.75rem; background:var(--yellow); font-size:1.1rem; font-weight:950; }
+.winners { position:relative; margin-top:1.5rem; padding:clamp(1rem,4vw,1.7rem); border:4px solid var(--ink); border-radius:1.2rem; background:linear-gradient(180deg,#fff3bd 0%,var(--paper) 62%); box-shadow:7px 7px 0 var(--ink); }
+.winners-title { margin-bottom:.15rem; font-size:clamp(2.1rem,8vw,3.4rem); line-height:.95; letter-spacing:.005em; overflow-wrap:anywhere; }
+.winners-note { margin:0 0 1rem; color:#3d5361; font-weight:800; line-height:1.45; overflow-wrap:anywhere; }
+.winners .podium { grid-template-columns:repeat(auto-fit,minmax(min(100%,13rem),1fr)); align-items:end; gap:.75rem; margin:0; padding:0; list-style:none; }
+.winners .podium-place { display:flex; min-width:0; align-items:center; gap:.85rem; padding:.85rem 1rem; border:3px solid var(--ink); border-radius:.9rem; background:#fff; box-shadow:4px 4px 0 var(--ink); font-size:1rem; font-weight:800; }
+.winners .podium-medal { display:grid; flex:none; width:3rem; height:3rem; place-items:center; border:3px solid var(--ink); border-radius:50%; background:var(--cream); font-size:1.35rem; font-weight:950; }
+.winners .podium-detail { display:grid; min-width:0; gap:.15rem; }
+.winners .podium-detail > * { min-width:0; margin:0; overflow-wrap:anywhere; }
+.winners .podium-rank { color:var(--water-dark); font-size:.76rem; font-weight:950; letter-spacing:.09em; line-height:1.35; text-transform:uppercase; }
+.winners .podium-name { font-size:clamp(1.15rem,4.4vw,1.7rem); line-height:1.15; letter-spacing:.005em; }
+.winners .podium-duck { font-weight:850; }
+.winners .podium-gold { background:#fff8dc; }
+.winners .podium-gold .podium-medal { width:3.9rem; height:3.9rem; background:linear-gradient(160deg,#ffe27a,#e2a614); font-size:1.75rem; }
+.winners .podium-gold .podium-name { font-size:clamp(1.4rem,5.6vw,2.2rem); }
+.winners .podium-silver .podium-medal { width:3.45rem; height:3.45rem; background:linear-gradient(160deg,#f4f6f8,#b4bec6); font-size:1.55rem; }
+.winners .podium-bronze .podium-medal { background:linear-gradient(160deg,#f2bd8c,#bc7833); }
 .station-panel h1 { max-width:none; }
 .station-panel h2 { font-size:clamp(2rem,8vw,4rem); }
 .station-control { min-height:4rem; padding:1rem 1.3rem; font-size:clamp(1.15rem,4vw,1.45rem); }
@@ -447,6 +463,8 @@ li.ineligible,.data-card.ineligible { border-color:#9f261c; background:#fff3f1; 
 @media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 17rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .hero h1 { font-size:clamp(1.7rem,8.9vw,2.3rem); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck-scene { --duck-center:50%; right:50%; bottom:4rem; width:13.5rem; } .hero-duck { --duck-lift:-.75rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
 @media (prefers-reduced-motion:no-preference) { .button,.result-button { transition:transform 80ms ease-out,box-shadow 80ms ease-out,filter 80ms ease-out,background-color 80ms ease-out; } .hero-duck { animation:duck-bob 2.8s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-bob { 0%,100% { transform:translateY(var(--duck-lift)); } 50% { transform:translateY(calc(var(--duck-lift) - 7px)); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
 @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } .hero-water::before { background-position:-2.5rem 0; } }
+@media (min-width:44rem) { .winners .podium-place { flex-direction:column; padding-top:1.1rem; text-align:center; } .winners .podium-detail { justify-items:center; } .winners .podium-gold { padding-bottom:3.4rem; } .winners .podium-silver { padding-bottom:2.2rem; } .winners .podium-bronze { padding-bottom:1.3rem; } }
+@media (prefers-reduced-motion:no-preference) { .winners .podium-gold .podium-medal { animation:winner-medal-glow 2.6s ease-in-out infinite; } @keyframes winner-medal-glow { 0%,100% { box-shadow:0 0 0 0 rgba(226,166,20,0); } 50% { box-shadow:0 0 0 .45rem rgba(226,166,20,.3); } } }
 `;
 
 interface PageOptions {
@@ -517,6 +535,7 @@ const liveBoard = (): string => `
     <h2 class="live-board-title" id="live-board-title" data-live-board-title>Checking the race…</h2>
     <p class="lede" data-live-board-summary>Loading the latest official race information.</p>
     <p class="message-line muted" data-live-board-error role="alert" hidden></p>
+    <noscript><p class="empty-state" data-live-board-noscript>This race board, including the Winners podium and its gold, silver, and bronze medals, is drawn in your browser. Turn JavaScript on to read the official heats and results here.</p></noscript>
     <div data-live-board-content><p class="empty-state">The board will appear here when race information is available.</p></div>
   </section>`;
 

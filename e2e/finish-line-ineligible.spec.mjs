@@ -247,7 +247,7 @@ test.describe("a withdrawn duck at the finish line", () => {
     await adminContext.close();
 
     await page.goto("/race");
-    await expect(page.getByRole("heading", { name: "Official podium" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Winners" })).toBeVisible();
     await expect(page.getByText("Results official", { exact: true })).toBeVisible();
     const board = await rawJson("/api/v1/race-board");
     expect(board.body.event.podium.map((entry) => entry.place)).toEqual([1, 2]);
