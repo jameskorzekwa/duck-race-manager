@@ -1222,16 +1222,44 @@ test("unknown, unpaired, and out-of-event duck numbers are indistinguishable 404
   }
 });
 
-test("non-canonical duck numbers never reach the database", async () => {
-  for (const value of ["0", "012", "1234567890", "00"]) {
-    const db = duckNumberDb();
+test("the missing-duck live probe stays successful and returns only the public projection", async () => {
+  for (const [label, db] of [
+    ["unpaired or unknown number", duckNumberDb({ row: null })],
+    ["no current public event", duckNumberDb({ event: null })],
+  ]) {
     const response = await handleApi(
-      new Request(`https://quickducks.com/api/v1/ducks/number/${value}`),
+      new Request("https://quickducks.com/api/v1/ducks/number/9999?probe=1"),
       makeEnv(db),
     );
+    assert.equal(response.status, 200, label);
+    assert.deepEqual(await response.json(), { raceStatus: null }, label);
+  }
 
-    assert.equal(response.status, 404, value);
-    assert.equal(db.statements.length, 0, `${value} must not query D1`);
+  const resolved = await handleApi(
+    new Request("https://quickducks.com/api/v1/ducks/number/128?probe=1"),
+    makeEnv(duckNumberDb()),
+  );
+  const body = await resolved.json();
+  assert.equal(resolved.status, 200);
+  assert.equal(body.raceStatus.duck.visibleNumber, 128);
+  assert.equal(body.raceStatus.participantDisplayName, "Daisy D.");
+  assert.equal("email" in body.raceStatus, false);
+  assert.equal("lookupCode" in body.raceStatus, false);
+  assert.equal("tagToken" in body.raceStatus, false);
+});
+
+test("non-canonical duck numbers never reach the database", async () => {
+  for (const value of ["0", "012", "1234567890", "00"]) {
+    for (const search of ["", "?probe=1"]) {
+      const db = duckNumberDb();
+      const response = await handleApi(
+        new Request(`https://quickducks.com/api/v1/ducks/number/${value}${search}`),
+        makeEnv(db),
+      );
+
+      assert.equal(response.status, 404, `${value}${search}`);
+      assert.equal(db.statements.length, 0, `${value}${search} must not query D1`);
+    }
   }
 });
 

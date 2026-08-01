@@ -242,8 +242,8 @@ test("staff pairing pairs from a scan or an exact code and always keeps a manual
   assert.match(staffDuckScript, /const qrStop = \(resumeRefresh = true\)[\s\S]*?staffDuckSubscription\?\.resume\(\)/);
   assert.match(staffDuckScript, /qrMessage\.textContent = qrCameraProblem\(error\);\s*staffDuckSubscription\?\.resume\(\)/);
   assert.match(staffDuckScript, /qrVideo\.srcObject = qrStream;\s*\/\/ Permission has settled[\s\S]*?qrStarting = false;\s*qrScheduleHiddenStop\(\);\s*await qrVideo\.play\(\)/);
-  assert.match(staffDuckScript, /\} catch \(error\) \{\s*if \(qrStarting \|\| qrScanning\) return;\s*if \(error\.message !== "signed-out"\)/);
-  assert.match(staffDuckScript, /isBlocked: \(\) => staffDuckBusy > 0 \|\| selectedRegistration !== null \|\| qrScanning/);
+  assert.match(staffDuckScript, /\} catch \(error\) \{\s*if \(qrStarting \|\| qrScanning\) return;\s*if \(!staffDuckRequest\.isCurrent\(request\)\) return;\s*if \(error\.message !== "signed-out"\)/);
+  assert.match(staffDuckScript, /isBlocked: \(\) => staffDuckBusy > 0 \|\| qrScanning/);
 
   // Scanning is a convenience over the code, never a new source of truth.
   assert.doesNotMatch(staffDuckScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
@@ -1035,7 +1035,7 @@ test("spoofed Android user agent without Web NFC keeps the station shut and call
 
   new Function(
     "document", "navigator", "window", "isSecureContext", "fetch", "location", "globalThis", "Option",
-    staffInventoryScript,
+    `${liveRuntimeHelpersScript}${staffInventoryScript}`,
   )(
     document,
     { userAgent: androidChromeUserAgent },
@@ -1709,9 +1709,9 @@ test("no browser client renders ambient freshness or connection-status chatter",
 test("hard failures stay visible through error-only lines and station message lines", () => {
   // Stations keep their own actionable operational message line.
   assert.match(startLineScript, /data-station-message/);
-  assert.match(startLineScript, /if \(error\.message !== "signed-out"\) startMessage\.textContent = error\.message;/);
+  assert.match(startLineScript, /if \(startRequest\.isCurrent\(request\) && error\.message !== "signed-out"\) startMessage\.textContent = error\.message;/);
   assert.match(finishLineScript, /data-station-message/);
-  assert.match(finishLineScript, /if \(error\.message !== "signed-out"\) finishMessage\.textContent = error\.message;/);
+  assert.match(finishLineScript, /if \(finishRequest\.isCurrent\(request\) && error\.message !== "signed-out"\) finishMessage\.textContent = error\.message;/);
   assert.match(staffInventoryScript, /data-intake-message/);
 
   // The public board and My Ducks have no other message surface, so each keeps a
@@ -1861,6 +1861,7 @@ const homeHarness = (route) => {
   const subscriptions = [];
   const cleaned = [];
   const live = {
+    beginBusy() { return () => {}; },
     markClean(root) { cleaned.push(root); },
     subscribe(subscriber) {
       subscriptions.push(subscriber);
@@ -1868,7 +1869,7 @@ const homeHarness = (route) => {
     },
   };
 
-  new Function("document", "fetch", "FormData", "globalThis", searchScript)(
+  new Function("document", "fetch", "FormData", "globalThis", liveRuntimeHelpersScript + searchScript)(
     document,
     fetchStub,
     QuickFormData,
@@ -2121,7 +2122,7 @@ const myDucksHarness = (route, search = "", confirmResult = true, localStorage) 
     "appConfirm",
     // `duckDetailLink` ships in live-ui.js, which every page loads first, so the
     // page client receives it from the shared classic scope.
-    [duckDetailHelpersScript, participantScript].join("\n"),
+    [liveRuntimeHelpersScript, duckDetailHelpersScript, participantScript].join("\n"),
   )(
     document,
     { search, pathname: "/my-ducks", hash: "", origin: "https://quickducks.com" },
@@ -2958,7 +2959,7 @@ const duckPageHarness = (route, pathname, inMyDucks = false) => {
     "appConfirm",
     // `duckDetailLink` ships in live-ui.js, which every page loads first, so the
     // page client receives it from the shared classic scope.
-    [duckDetailHelpersScript, participantScript].join("\n"),
+    [liveRuntimeHelpersScript, duckDetailHelpersScript, participantScript].join("\n"),
   )(
     document,
     { search: "", pathname, hash: "", origin: "https://quickducks.com" },
@@ -3066,7 +3067,7 @@ test("a page without a follow container holds no follow subscription at all", as
     "appConfirm",
     // `duckDetailLink` ships in live-ui.js, which every page loads first, so the
     // page client receives it from the shared classic scope.
-    [duckDetailHelpersScript, participantScript].join("\n"),
+    [liveRuntimeHelpersScript, duckDetailHelpersScript, participantScript].join("\n"),
   )(
     document,
     { search: "", pathname: "/", hash: "", origin: "https://quickducks.com" },
@@ -3196,13 +3197,21 @@ test("station state helpers prioritize unpublished results and stable render key
 
 test("live runtime helpers coalesce refreshes and switch fake poll timers", async () => {
   const helpers = new Function(
-    `${liveRuntimeHelpersScript}; return { livePollDelay, liveReconnectDelay, liveParseRefreshSignal, liveSignalMatches, liveCreateRefreshQueue, liveCreatePollScheduler, liveCreateHub };`,
+    `${liveRuntimeHelpersScript}; return { livePollDelay, liveReconnectDelay, liveParseRefreshSignal, liveSignalMatches, liveCreateLatestRequest, liveCreateRefreshQueue, liveCreatePollScheduler, liveCreateHub };`,
   )();
   assert.equal(helpers.livePollDelay(false), 5000);
   assert.equal(helpers.livePollDelay(true), 30000);
   assert.equal(helpers.liveReconnectDelay(0, 0), 800);
   assert.equal(helpers.liveReconnectDelay(0, 1), 1200);
   assert.equal(helpers.liveReconnectDelay(8, 1), 15000);
+
+  const latest = helpers.liveCreateLatestRequest();
+  const old = latest.begin();
+  const current = latest.begin();
+  assert.equal(latest.isCurrent(old), false);
+  assert.equal(latest.isCurrent(current), true);
+  latest.invalidate();
+  assert.equal(latest.isCurrent(current), false);
 
   let release;
   let refreshes = 0;
@@ -3239,6 +3248,33 @@ test("live runtime helpers coalesce refreshes and switch fake poll timers", asyn
   hidden = true;
   scheduler.schedule(true);
   assert.equal(timers.size, 0);
+});
+
+test("secondary live projections retire responses that predate newer state", () => {
+  // Follow state has two independent readers on a duck page: collection
+  // presence and the duck-specific control. Starting the mutation invalidates
+  // both, and the duck response must hold its own latest-request token.
+  assert.match(participantScript, /const participantFollowRequest = liveCreateLatestRequest\(\)/);
+  assert.match(participantScript, /participantFollowRequest\.invalidate\(\);\s*participantRequest\.invalidate\(\);/);
+  assert.match(participantScript, /const request = participantFollowRequest\.begin\(\);[\s\S]*?!participantFollowRequest\.isCurrent\(request\)/);
+
+  assert.match(searchScript, /const statusSearchRequest = liveCreateLatestRequest\(\)/);
+  assert.match(searchScript, /statusSearchRequest\.invalidate\(\);[\s\S]*?quickDucksLive\.markClean\(searchForm\)/);
+  assert.match(searchScript, /const request = statusSearchRequest\.begin\(\);[\s\S]*?!statusSearchRequest\.isCurrent\(request\)/);
+
+  // The Admin event detail and the narrow heat subscriber both render walk-up
+  // admission. They share one generation guard, so neither can overwrite the
+  // other with a response from an older lifecycle/heat snapshot.
+  assert.match(staffHomeScript, /const walkUpAdmissionRequest = liveCreateLatestRequest\(\)/);
+  assert.match(staffHomeScript, /currentEventDetail = detail;[\s\S]*?walkUpAdmissionRequest\.invalidate\(\);\s*renderWalkUpAvailability/);
+  assert.match(staffHomeScript, /const request = walkUpAdmissionRequest\.begin\(\);[\s\S]*?walkUpAdmissionRequest\.isCurrent\(request\)/);
+});
+
+test("an authoritative empty race board leaves the server-only Race Status route", () => {
+  assert.match(
+    liveScript,
+    /if \(!board\.event && location\.pathname === "\/race"\)[\s\S]*?liveInvalidatePage\(\);[\s\S]*?location\.replace\("\/"\);/,
+  );
 });
 
 const makeLiveHarness = () => {
@@ -3483,7 +3519,7 @@ test("a subscriber blocked by an abandoned edit recovers after five minutes", as
   assert.equal(refreshes, 3, "an abandoned edit must stop blocking after five minutes");
 });
 
-test("purge and staff deactivation clear rendered private data before navigation", async (context) => {
+test("purge and staff deactivation clear rendered private data before navigation or reconnect recovery", async (context) => {
   const purge = makeLiveHarness();
   purge.hub.subscribe({ domains: ["participants"], refresh: async () => {} });
   purge.hub.start();
@@ -3504,6 +3540,17 @@ test("purge and staff deactivation clear rendered private data before navigation
   await settle();
   assert.equal(deactivation.main.clears, 1);
   assert.deepEqual(deactivation.locationCalls, [["replace", "/staff"]]);
+
+  // The same access check runs when a socket reconnects, even when the staff
+  // invalidation itself was missed while this browser was offline.
+  const recovery = makeLiveHarness();
+  recovery.setStaffRoot({ dataset: { systemAdmin: "false", roles: "REGISTRATION" } });
+  recovery.hub.subscribe({ domains: ["participants"], refresh: async () => {} });
+  recovery.hub.start();
+  recovery.FakeSocket.instances[0].emit("open");
+  await settle();
+  assert.equal(recovery.main.clears, 1);
+  assert.deepEqual(recovery.locationCalls, [["replace", "/staff"]]);
 });
 
 test("finish selection rejects wrong-heat and duplicate race entries", () => {
@@ -3836,7 +3883,7 @@ const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = nu
     "fetch",
     "globalThis",
     "location",
-    `${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell, liveHeatCard };`,
+    `${liveRuntimeHelpersScript}${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell, liveHeatCard };`,
   )(
     document,
     fetchStub,
@@ -3908,6 +3955,58 @@ test("a duck number that stops resolving clears the page and reloads into the no
 
   assert.deepEqual(page.reloads, ["reload"]);
   assert.equal(page.nodes.main.children.length, 0);
+});
+
+const missingDuckPage = (raceStatus = null) => {
+  const document = new FakeDocument(false);
+  const missing = document.createElement("h1");
+  missing.dataset.liveMissingDuck = "128";
+  const main = document.createElement("main");
+  main.append(document.createElement("section"));
+  document.querySelector = (selector) => selector === "[data-live-missing-duck]"
+    ? missing
+    : selector === "main" ? main : null;
+  const requests = [];
+  const subscriptions = [];
+  const reloads = [];
+  const api = new Function(
+    "document",
+    "fetch",
+    "globalThis",
+    "location",
+    `${liveRuntimeHelpersScript}${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork };`,
+  )(
+    document,
+    async (url) => {
+      requests.push(String(url));
+      return Response.json({ raceStatus });
+    },
+    { quickDucksLive: { subscribe(options) { subscriptions.push(options); } } },
+    { pathname: "/duck/128", reload() { reloads.push("reload"); } },
+  );
+  return { api, main, missing, reloads, requests, subscriptions };
+};
+
+test("an unresolved numbered duck uses a successful live probe without reloading", async () => {
+  const page = missingDuckPage();
+
+  assert.equal(page.subscriptions.length, 1);
+  assert.equal(page.subscriptions[0].root, page.missing);
+  await page.api.liveRefreshWork();
+
+  assert.deepEqual(page.requests, ["/api/v1/ducks/number/128?probe=1"]);
+  assert.deepEqual(page.reloads, []);
+  assert.equal(page.main.children.length, 1, "the friendly not-found paint remains visible");
+});
+
+test("a numbered duck probe reloads only after that duck becomes public", async () => {
+  const page = missingDuckPage({ duck: { visibleNumber: 128 } });
+
+  await page.api.liveRefreshWork();
+
+  assert.deepEqual(page.requests, ["/api/v1/ducks/number/128?probe=1"]);
+  assert.deepEqual(page.reloads, ["reload"]);
+  assert.equal(page.main.children.length, 0);
 });
 
 test("live board entries link a visible duck number and stay plain text when unassigned", () => {
@@ -4044,7 +4143,7 @@ const participantCards = () => {
     "window",
     "location",
     "fetch",
-    `${duckDetailHelpersScript}${participantScript}; return { participantAddRaceFacts };`,
+    `${liveRuntimeHelpersScript}${duckDetailHelpersScript}${participantScript}; return { participantAddRaceFacts };`,
   )(
     document,
     { addEventListener() {} },
@@ -5144,7 +5243,9 @@ const finalistHarness = (finalists) => {
   const finalistCard = document.createElement("section");
   const runtime = buildRuntime(
     [
+      liveRuntimeHelpersScript,
       rosterEligibilityHelpersScript,
+      "const finalistRequest = liveCreateLatestRequest();",
       liftFrom(staffHomeScript, "text", /const text = \(tag, value, className\) => \{[\s\S]*?\n\};/),
       liftFrom(staffHomeScript, "empty", /const empty = \(message\) => .*;\n/),
       liftFrom(staffHomeScript, "historyCard", /const historyCard = \(title, detail\) => \{[\s\S]*?\n\};/),

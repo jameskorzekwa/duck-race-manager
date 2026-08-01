@@ -536,15 +536,24 @@ const getDuck = async (request: Request, token: string, env: Env): Promise<Respo
 };
 
 // Unknown, unpaired, and out-of-event numbers are indistinguishable here: all
-// three return the same 404, so this adds no enumeration signal beyond the
-// duck numbers the public board already publishes.
+// three return the same 404 to ordinary callers. The already-open friendly 404
+// page uses `probe=1` while waiting for a pairing; that request returns an empty
+// successful projection so recovery polling does not manufacture repeated
+// browser 404 errors. It reveals no more than the ordinary endpoint because a
+// resolved number returns the same public status in both modes.
 const getDuckByNumber = async (
   request: Request,
   visibleNumber: string,
   env: Env,
 ): Promise<Response> => {
+  const liveProbe = /^[1-9][0-9]{0,8}$/.test(visibleNumber)
+    && new URL(request.url).search === "?probe=1";
   const status = await findDuckNumberRaceStatus(visibleNumber, env);
-  if (status === null) return json({ error: "Not found." }, 404);
+  if (status === null) {
+    return liveProbe
+      ? json({ raceStatus: null })
+      : json({ error: "Not found." }, 404);
+  }
   return json({
     raceStatus: followableStatus(status, await findDuckNumberFollowState(request, env, visibleNumber)),
   });

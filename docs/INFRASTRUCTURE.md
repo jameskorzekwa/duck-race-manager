@@ -580,8 +580,8 @@ signals, or logs.
 
 The object broadcasts only a validated bounded
 `{type:"refresh", domains:[...], version:<random UUID>}` signal. Domains come
-from the fixed `all`, `event`, `participants`, `ducks`, `heats`, `returns`,
-`staff`, and `support` allowlist. The frame contains no authoritative race data,
+from the fixed `all`, `event`, `participants`, `ducks`, `heats`, `staff`, and
+`support` allowlist. The frame contains no authoritative race data,
 IDs, names, contact details, event/participant/duck labels, lookup codes, tokens,
 tag URLs, commands, mutation payloads, client network identifiers, or durable
 application state.
@@ -595,10 +595,14 @@ API refetches. They poll approximately every five seconds while WebSocket is
 unavailable/disconnected and use an approximately 30-second integrity refresh
 while connected. Hidden tabs pause polling/rendering, reconnects use jitter and
 refetch immediately, and concurrent refresh triggers are coalesced.
+An authoritative empty race-board poll returns an already-open `/race` document
+to the Preparing home page even if it missed the event-deletion signal. All
+unversioned application JavaScript is served `no-store`: the classic page
+clients and shared live runtime publish and roll back as one compatible unit.
 
 The shared browser hub defers ordinary refreshes while a form, scan, NFC write,
-result selection, or command is dirty/in flight. Purge's `all` signal clears
-rendered main content and server-reloads without deferral. A `staff` signal calls
+result selection, or command is dirty/in flight. Event deletion's `all` signal
+clears rendered main content and server-reloads without deferral. A `staff` signal calls
 the PII-free `/api/v1/staff/session` projection; deactivation or reduced access
 clears protected rendering and navigates/reloads immediately. These behaviors
 are application safety rules, not WebSocket authorization; every API refetch

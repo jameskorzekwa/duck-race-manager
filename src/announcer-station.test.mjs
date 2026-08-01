@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { announcerHelpersScript, announcerScript } from "./client-scripts.ts";
+import { announcerHelpersScript, announcerScript, liveRuntimeHelpersScript } from "./client-scripts.ts";
 import worker, { createWorker } from "./index.ts";
 import { renderAnnouncer } from "./site.ts";
 
@@ -344,7 +344,7 @@ const announcerHarness = (route) => {
   const subscriptions = [];
   const assigned = [];
 
-  new Function("document", "fetch", "location", "globalThis", announcerScript)(
+  new Function("document", "fetch", "location", "globalThis", liveRuntimeHelpersScript + announcerScript)(
     document,
     fetchStub,
     { pathname: "/staff/announcer", assign: (value) => assigned.push(value) },
@@ -617,7 +617,7 @@ test("the announcer client is DOM-safe, live-subscribed, and signs out on 401", 
   });`));
 
   assert.ok(announcerScript.includes('location.assign("/staff?returnTo=" + encodeURIComponent(location.pathname));'));
-  assert.match(announcerScript, /if \(error\.message !== "signed-out"\) announcerMessage\.textContent = error\.message;/);
+  assert.match(announcerScript, /if \(announcerRequest\.isCurrent\(request\) && error\.message !== "signed-out"\) announcerMessage\.textContent = error\.message;/);
 });
 
 test("the announcer client subscribes only when its page is the one rendered", () => {
@@ -630,7 +630,7 @@ test("the announcer client subscribes only when its page is the one rendered", (
   // not this station never spends one of the bounded live connections.
   const document = new Document("#document");
   const subscriptions = [];
-  new Function("document", "fetch", "location", "globalThis", announcerScript)(
+  new Function("document", "fetch", "location", "globalThis", liveRuntimeHelpersScript + announcerScript)(
     document,
     async () => Response.json({}),
     { pathname: "/staff", assign: () => {} },

@@ -167,6 +167,8 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
   const cases = [
     ["POST", "/api/v1/registrations", ["participants"]],
     ["POST", "/api/v1/registrations/mine/duck-name", ["participants", "ducks", "heats"]],
+    ["POST", "/api/v1/registrations/mine/follow", ["participants"]],
+    ["POST", "/api/v1/registrations/mine/unfollow", ["participants"]],
     ["POST", "/api/v1/registrations/mine/delete", ["participants"]],
     ["POST", "/api/v1/staff/profiles", ["staff"]],
     ["POST", "/api/v1/staff/profiles/profile/role", ["staff"]],
@@ -208,6 +210,7 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
   for (const [method, path] of [
     ["GET", "/api/v1/staff/events"],
     ["GET", "/api/v1/registrations/mine"],
+    ["PATCH", "/api/v1/registrations/mine/11111111-1111-4111-8111-111111111111/contact"],
     ["POST", "/api/v1/staff/events/event/heats/round-one/plan-preview"],
     ["POST", "/api/v1/staff/inventory/provisioning/classify"],
     ["POST", "/api/v1/unknown"],

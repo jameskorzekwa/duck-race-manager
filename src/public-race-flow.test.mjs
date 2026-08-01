@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { liveScript, liveUiScript, participantScript, sitePhaseNavScript } from "./client-scripts.ts";
+import { liveRuntimeHelpersScript, liveScript, liveUiScript, participantScript, sitePhaseNavScript } from "./client-scripts.ts";
 import worker from "./index.ts";
 import {
   fallbackPublicPhase,
@@ -496,7 +496,9 @@ test("Preparing says the next race is being prepared instead of offering a CTA",
   // Nothing on the page can start a registration or a race-status visit.
   assert.doesNotMatch(body, /href="\/register"/);
   assert.doesNotMatch(body, /href="\/race"/);
-  assert.doesNotMatch(body, /data-live-summary/);
+  assert.match(body, /data-live-summary/);
+  assert.match(body, /data-home-actions hidden><\/div>/);
+  assert.match(body, /src="\/assets\/live\.js"/);
 });
 
 test("the home page keeps the hero and the three link-free explainer cards", async () => {
@@ -548,7 +550,7 @@ test("the home call to action lives in the section titled with the race, not in 
       assert.deepEqual(homeCta(summary), expectedHomeCta[phase], where);
       assert.match(
         summary,
-        /<div class="actions"><a class="button" href="[^"]+" data-home-cta>[^<]+<\/a><a class="button secondary" href="\/race">Open the full race board<\/a><\/div>/,
+        /<div class="actions" data-home-actions><a class="button" href="[^"]+" data-home-cta>[^<]+<\/a><a class="button secondary" href="\/race">Open the full race board<\/a><\/div>/,
         where,
       );
       assert.ok(summary.indexOf("data-live-summary-title") < summary.indexOf("data-home-cta"), where);
@@ -768,7 +770,11 @@ test("My Ducks offers Register again only while registration is open", () => {
     /<a class="button small" href="\/register" data-register-another>Register another participant<\/a>/,
   );
   for (const phase of ["PREPARING", "LOCKED_IN", "RACING", "RESULTS"]) {
-    assert.doesNotMatch(renderMyDucks(phase), /href="\/register"/, phase);
+    assert.match(
+      renderMyDucks(phase),
+      /<a class="button small" href="\/register" data-register-another hidden>Register another participant<\/a>/,
+      phase,
+    );
   }
 });
 
@@ -854,6 +860,14 @@ class QuickNode {
     this.tagName = tagName.toUpperCase();
     this.children = [];
     this.className = "";
+    this.classList = {
+      add: (...names) => {
+        this.className = [...new Set([...this.className.split(/\s+/).filter(Boolean), ...names])].join(" ");
+      },
+      remove: (...names) => {
+        this.className = this.className.split(/\s+/).filter((name) => name && !names.includes(name)).join(" ");
+      },
+    };
     this.clientWidth = 0;
     this.dataset = {};
     this.disabled = false;
@@ -923,7 +937,7 @@ const navHarness = (phase, { hasRegistrations = null, eventStatus, liveNav = tru
     return Response.json({ event: eventStatus === undefined ? null : { id: "event-1", status: eventStatus } });
   };
 
-  new Function("document", "fetch", "globalThis", sitePhaseNavScript)(
+  new Function("document", "fetch", "globalThis", `${liveRuntimeHelpersScript}${sitePhaseNavScript}`)(
     document,
     fetchStub,
     { quickDucksLive: { subscribe(subscriber) { subscriptions.push(subscriber); } } },
@@ -1089,7 +1103,7 @@ test("the served staff sign-in and not-found pages leave the live hub with no su
     document.append(nav);
 
     const subscriptions = [];
-    new Function("document", "fetch", "globalThis", sitePhaseNavScript)(
+    new Function("document", "fetch", "globalThis", `${liveRuntimeHelpersScript}${sitePhaseNavScript}`)(
       document,
       async () => { throw new Error("no request may be made"); },
       { quickDucksLive: { subscribe(subscriber) { subscriptions.push(subscriber); } } },
@@ -1155,7 +1169,7 @@ test("a nav fetch failure leaves the server-rendered nav untouched", async () =>
   );
   document.append(nav);
   const subscriptions = [];
-  new Function("document", "fetch", "globalThis", sitePhaseNavScript)(
+  new Function("document", "fetch", "globalThis", `${liveRuntimeHelpersScript}${sitePhaseNavScript}`)(
     document,
     async () => { throw new Error("offline"); },
     { quickDucksLive: { subscribe(subscriber) { subscriptions.push(subscriber); } } },
@@ -1186,7 +1200,7 @@ const summaryHarness = (board) => {
 
   const requests = [];
   const subscriptions = [];
-  new Function("document", "location", "fetch", "globalThis", liveScript)(
+  new Function("document", "location", "fetch", "globalThis", `${liveRuntimeHelpersScript}${liveScript}`)(
     document,
     { pathname: "/", protocol: "https:", host: "quickducks.com" },
     async (url) => {
@@ -1248,7 +1262,9 @@ test("the home summary states plainly when there is no public race", async () =>
   await harness.subscriptions[0].refresh();
 
   assert.equal(harness.stage.textContent, "No race scheduled");
-  assert.equal(harness.title.textContent, "No race is live right now.");
+  assert.equal(harness.stage.hidden, true);
+  assert.equal(harness.title.textContent, "The next race is being prepared.");
+  assert.equal(harness.line.textContent, "Check back soon for the next QuickDucks race.");
 });
 
 // --- My Ducks client: presence rule and search placement --------------------
@@ -1301,7 +1317,7 @@ const myDucksHarness = (registrations, { phaseVisible }) => {
   const subscriptions = [];
   new Function(
     "document", "location", "window", "globalThis", "requestAnimationFrame", "history", "fetch",
-    participantScript,
+    `${liveRuntimeHelpersScript}${participantScript}`,
   )(
     document,
     { search: "", pathname: "/my-ducks", hash: "", origin: "https://quickducks.com" },

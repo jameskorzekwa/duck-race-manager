@@ -5,6 +5,7 @@ import {
   heatRosterHelpersScript,
   inventoryDetailHelpersScript,
   inventoryGroupHelpersScript,
+  liveRuntimeHelpersScript,
   staffHomeScript,
   staffInventoryScript,
 } from "./client-scripts.ts";
@@ -325,7 +326,17 @@ const inventoryHarness = ({ ducks }) => {
   const requests = [];
   const selections = [];
   const runtime = build(
-    [inventoryGroupHelpersScript, "text", "humanize", "empty", "inventoryCard", "inventoryGroupSection", "loadInventory"],
+    [
+      liveRuntimeHelpersScript,
+      "const inventoryListRequest = liveCreateLatestRequest();",
+      inventoryGroupHelpersScript,
+      "text",
+      "humanize",
+      "empty",
+      "inventoryCard",
+      "inventoryGroupSection",
+      "loadInventory",
+    ],
     {
       document,
       api: async (url) => {
@@ -444,6 +455,8 @@ const detailHarness = ({ ducks, detailDelay = null }) => {
   let cleared = 0;
   const runtime = build(
     [
+      liveRuntimeHelpersScript,
+      "const inventoryListRequest = liveCreateLatestRequest();",
       inventoryGroupHelpersScript,
       inventoryDetailHelpersScript,
       "text",
@@ -562,6 +575,9 @@ const heatHarness = ({ roster, results = [], canRegistration = true, canInventor
   const location = { hash: "", assign: (url) => navigations.push(url) };
   const runtime = build(
     [
+      liveRuntimeHelpersScript,
+      "const heatDetailRequest = liveCreateLatestRequest();",
+      "const participantDetailRequest = liveCreateLatestRequest();",
       heatRosterHelpersScript,
       "text",
       "humanize",
@@ -590,6 +606,7 @@ const heatHarness = ({ roster, results = [], canRegistration = true, canInventor
       heatResults,
       participantDetail,
       selectedHeat: null,
+      currentEvent: { id: "event" },
       currentEventId: () => "event",
       showFacts: () => {},
       renderHeatControls: () => {},
@@ -1580,14 +1597,21 @@ const participantListHarness = () => {
   const participantFacts = document.hook("[data-participant-facts]", "dl");
   const participantActions = document.hook("[data-participant-actions]");
   const participantName = document.hook("[data-participant-name]", "h3");
+  const participantEditForm = document.hook("[data-participant-edit-form]", "form");
   participantDetail.hidden = true;
   const messages = [];
   const rendered = [];
   const resets = [];
   let listed = [];
+  let editDirty = false;
+  let resolveDetail;
+  let deferDetail = false;
   const runtime = build(
     [
       "let selectedRegistration = null;",
+      liveRuntimeHelpersScript,
+      "const participantListRequest = liveCreateLatestRequest();",
+      "const participantDetailRequest = liveCreateLatestRequest();",
       "text",
       "humanize",
       "empty",
@@ -1617,28 +1641,51 @@ const participantListHarness = () => {
       rendered,
       currentEvent: { id: "event" },
       participantQuery: () => new URLSearchParams({ limit: "200" }),
-      participantEditForm: { reset: () => resets.push("edit") },
+      participantEditForm,
       setMessage: (message, isError) => messages.push([message, Boolean(isError)]),
       api: async (url) => {
         const detail = url.match(/\/registrations\/([^/?]+)$/);
-        if (detail !== null) return { registration: participantSummary(decodeURIComponent(detail[1])) };
+        if (detail !== null) {
+          const registration = participantSummary(decodeURIComponent(detail[1]));
+          if (!deferDetail) return { registration };
+          deferDetail = false;
+          return new Promise((resolve) => { resolveDetail = () => resolve({ registration }); });
+        }
         return { registrations: listed };
       },
     },
-    ["loadParticipants", "openParticipantId"],
+    ["loadParticipantDetail", "loadParticipants", "openParticipantId"],
   );
+  participantEditForm.reset = () => resets.push("edit");
+  participantEditForm.querySelector = () => editDirty ? {} : null;
   return {
     ...runtime,
     messages,
     participantDetail,
     participantName,
     rendered,
+    deferNextDetail: () => { deferDetail = true; },
+    resolveDetail: () => resolveDetail(),
+    setEditDirty: (dirty) => { editDirty = dirty; },
     setList: (registrations) => { listed = registrations; },
     rows: () => participantList.children,
     row: (registrationId) => participantList.children
       .find((child) => child.dataset.registrationId === registrationId) ?? null,
   };
 };
+
+test("a participant detail response already in flight cannot overwrite a typed edit", async () => {
+  const harness = participantListHarness();
+  harness.deferNextDetail();
+
+  const loading = harness.loadParticipantDetail("registration-1");
+  harness.setEditDirty(true);
+  harness.resolveDetail();
+  await loading;
+
+  assert.deepEqual(harness.rendered, []);
+  assert.equal(harness.openParticipantId(), null);
+});
 
 test("pressing the open participant again closes the detail card and clears the highlight", async () => {
   const harness = participantListHarness();
@@ -1703,5 +1750,6 @@ test("a reload that still contains the open participant keeps the card and the h
 });
 
 test("event and live refreshes prune participant detail that left the filtered list", () => {
-  assert.match(staffHomeScript, /if \(canRegistration\) loads\.push\(loadParticipants\(true\)\)/);
+  assert.ok(staffHomeScript.includes("if (canRegistration) loads.push(loadParticipants(true));"));
+  assert.match(staffHomeScript, /if \(canRegistration && selectedRegistration\) \{\s*loads\.push\(loadParticipantDetail\(selectedRegistration\.registrationId\)\);\s*\}/);
 });
