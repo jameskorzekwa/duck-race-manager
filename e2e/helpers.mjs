@@ -64,6 +64,40 @@ export const expectNoDocumentOverflow = async (page) => {
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport + 1);
 };
 
+// A heat roster on the public board is a real table, and every participant row
+// has to keep the same three column positions however long its values are. This
+// is measured from the painted layout rather than asserted from markup: a column
+// only counts as aligned if the cell really starts where its own header starts,
+// holds its content without overflowing, and never runs into the column beside
+// it. Callers pass a viewport, so the same rule is checked narrow and wide.
+export const expectAlignedBoardRows = async (page) => {
+  const tables = await page.locator(".board-roster").evaluateAll((rosters) => rosters.map((roster) => {
+    const headerStarts = Array.from(roster.querySelectorAll("th"), (cell) => cell.getBoundingClientRect().x);
+    const rows = Array.from(roster.querySelectorAll("tbody tr"), (row) =>
+      Array.from(row.querySelectorAll("td"), (cell) => {
+        const box = cell.getBoundingClientRect();
+        return {
+          left: box.x,
+          right: box.right,
+          contentFits: cell.scrollWidth <= cell.clientWidth + 1,
+        };
+      }));
+    return { headerStarts, rows };
+  }));
+  expect(tables.length).toBeGreaterThan(0);
+  for (const table of tables) {
+    expect(table.headerStarts).toHaveLength(3);
+    for (const row of table.rows) {
+      expect(row).toHaveLength(3);
+      for (const [index, cell] of row.entries()) {
+        expect(Math.abs(cell.left - table.headerStarts[index])).toBeLessThanOrEqual(1);
+        expect(cell.contentFits).toBe(true);
+        if (index < row.length - 1) expect(cell.right).toBeLessThanOrEqual(row[index + 1].left + 1);
+      }
+    }
+  }
+};
+
 export const registerParticipant = async (client, eventId, index, overrides = {}) => {
   const firstName = overrides.firstName ?? `Racer${index}`;
   const lastName = overrides.lastName ?? "Example";

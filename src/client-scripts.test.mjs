@@ -1575,6 +1575,15 @@ test("live clients build safe DOM and retain reconnect plus polling fallback", (
   assert.match(participantScript, /\/api\/v1\/registrations\/mine/);
   assert.match(liveScript, /replaceChildren/);
   assert.match(liveScript, /textContent/);
+  assert.match(liveScript, /liveText\("table", "", "board-roster"\)/);
+  assert.match(liveScript, /\["Participant", "Duck", "Place"\]/);
+  assert.match(liveScript, /place === 1 \|\| place === 2 \|\| place === 3/);
+  assert.match(liveScript, /: "Not assigned"/);
+  assert.ok(
+    liveScript.indexOf('liveRound("FINAL", "Final"')
+      < liveScript.indexOf('liveRound("ROUND_ONE", "Round one"'),
+    "the Final is appended before Round one in DOM and reading order",
+  );
   assert.match(participantScript, /ArrowLeft/);
   assert.match(participantScript, /replaceChildren/);
   assert.match(participantScript, /textContent/);
@@ -3151,9 +3160,18 @@ test("the live board renders the stage chip from the public board status only", 
   assert.match(liveScript, /liveBoardSummary\.textContent = liveStageSummary\(/);
   // The stage never depends on anything beyond the public projection.
   assert.doesNotMatch(liveScript, /event\.(?:email|phone|lookupCode|privateToken|staff)/);
-  // Heat and podium rendering stays intact underneath the stage.
-  assert.match(liveScript, /liveRound\("Round one", event\.roundOneHeats, event\.currentHeat\)/);
-  assert.match(liveScript, /liveRound\("Final", event\.finalHeats, event\.currentHeat\)/);
+  // Heat and podium rendering stays intact underneath the stage. Each round
+  // section also carries its own round marker so the board exposes which
+  // section is which without depending on the heading text.
+  assert.match(liveScript, /liveRound\("FINAL", "Final", event\.finalHeats, event\.currentHeat\)/);
+  assert.match(liveScript, /liveRound\("ROUND_ONE", "Round one", event\.roundOneHeats, event\.currentHeat\)/);
+  assert.match(liveScript, /section\.dataset\.boardRound = round/);
+  // The Final is appended first, so DOM reading order matches the visual order
+  // instead of relying on CSS to move it above Round one.
+  assert.ok(
+    liveScript.indexOf('liveRound("FINAL"') < liveScript.indexOf('liveRound("ROUND_ONE"'),
+    "the Final section must be appended before the Round one section",
+  );
   assert.match(liveScript, /liveText\("h3", "Official podium"\)/);
 });
 
@@ -3817,7 +3835,7 @@ const liveDuckPage = ({ raceStatus = null, personalStatus = 200, boardEvent = nu
     "fetch",
     "globalThis",
     "location",
-    `${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell, liveHeatCard };`,
+    `${duckDetailHelpersScript}${liveScript}; return { liveRefreshWork, liveBoardDuckCell, liveBoardPlaceCell, liveHeatCard };`,
   )(
     document,
     fetchStub,
@@ -3894,7 +3912,12 @@ test("a duck number that stops resolving clears the page and reloads into the no
 test("live board entries link a visible duck number and stay plain text when unassigned", () => {
   const { api } = liveDuckPage();
 
+  // The duck cell carries the duck identity and nothing else. The official
+  // place used to be appended to this same text; it now has a column of its
+  // own so that every row's place starts at the same horizontal position.
   const paired = api.liveBoardDuckCell({ participantDisplayName: "Jamie R.", duckNumber: 128, place: null });
+  assert.equal(paired.tagName, "TD");
+  assert.equal(paired.className, "board-duck-cell");
   assert.equal(paired.children.length, 1);
   assert.equal(paired.children[0].tagName, "A");
   assert.equal(paired.children[0].href, "/duck/128");
@@ -3902,13 +3925,34 @@ test("live board entries link a visible duck number and stay plain text when una
 
   const placed = api.liveBoardDuckCell({ participantDisplayName: "Jamie R.", duckNumber: 4, place: 1 });
   assert.equal(placed.children[0].href, "/duck/4");
-  assert.equal(nodeText(placed), "Duck #4 · 1st place");
+  assert.equal(nodeText(placed), "Duck #4");
 
   // No duck assigned means no link at all, not an empty or dead one.
   const pending = api.liveBoardDuckCell({ participantDisplayName: "Jamie R.", duckNumber: null, place: null });
   assert.equal(pending.children.length, 0);
   assert.equal(nodeText(pending), "Duck number pending");
   assert.equal(pending.children.some((child) => child.tagName === "A"), false);
+});
+
+test("the board place column names every official place and stays filled when there is none", () => {
+  const { api } = liveDuckPage();
+
+  for (const [place, label] of [[1, "1st place"], [2, "2nd place"], [3, "3rd place"]]) {
+    const cell = api.liveBoardPlaceCell({ participantDisplayName: "Jamie R.", duckNumber: 4, place });
+    assert.equal(cell.tagName, "TD");
+    assert.equal(cell.className, "board-place-cell");
+    assert.equal(nodeText(cell), label, String(place));
+  }
+
+  // A missing, pending, or out-of-podium place still fills its column, so a row
+  // never collapses to fewer cells and the columns beside it cannot shift.
+  for (const place of [null, undefined, 0, 4]) {
+    assert.equal(
+      nodeText(api.liveBoardPlaceCell({ participantDisplayName: "Jamie R.", duckNumber: 4, place })),
+      "Not assigned",
+      String(place),
+    );
+  }
 });
 
 test("official heat winners render an accessible gold text marker beside the participant", () => {
@@ -3922,12 +3966,47 @@ test("official heat winners render an accessible gold text marker beside the par
       { participantDisplayName: "Donald M.", duckNumber: 5, duckName: null, place: null },
     ],
   }, null);
-  const winnerRow = card.children.find((child) => child.className === "board-entry");
-  const participant = winnerRow.children[0];
+  const heading = card.children[0];
+  const roster = card.children.find((child) => child.className === "board-roster");
+  assert.equal(roster.tagName, "TABLE");
+  // The roster is a real table labelled by the heat heading above it, so the
+  // reading order and the assistive-technology context match what is painted.
+  assert.equal(roster.getAttribute("aria-labelledby"), heading.id);
+  assert.deepEqual(
+    roster.children.find((child) => child.tagName === "COLGROUP").children.map((column) => column.className),
+    ["board-participant-column", "board-duck-column", "board-place-column"],
+  );
+  const header = roster.children.find((child) => child.tagName === "THEAD");
+  assert.deepEqual(
+    header.children[0].children.map((cell) => cell.textContent),
+    ["Participant", "Duck", "Place"],
+  );
+  const body = roster.children.find((child) => child.tagName === "TBODY");
+
+  // Every participant row is the same three cells in the same order, which is
+  // what keeps name, duck, and place aligned down the card.
+  assert.deepEqual(
+    body.children.map((row) => [row.className, row.children.map((cell) => cell.className)]),
+    [
+      ["board-entry", ["board-participant-cell", "board-duck-cell", "board-place-cell"]],
+      ["board-entry", ["board-participant-cell", "board-duck-cell", "board-place-cell"]],
+    ],
+  );
+
+  const winnerRow = body.children[0];
+  const participant = winnerRow.children[0].children[0];
   assert.equal(participant.className, "board-participant");
   assert.equal(participant.children[1].textContent, "Winner");
   assert.equal(participant.children[1].className, "winner-ribbon");
   assert.equal(nodeText(participant), "Daisy D.Winner");
+  assert.equal(nodeText(winnerRow.children[2]), "1st place");
+
+  // A racer with no recorded place wears no ribbon and still fills all three
+  // columns, so the winner's row is not wider than the rows beneath it.
+  const runner = body.children[1];
+  assert.equal(runner.children[0].children[0].children.length, 1);
+  assert.equal(nodeText(runner.children[0]), "Donald M.");
+  assert.equal(nodeText(runner.children[2]), "Not assigned");
 });
 
 test("a board entry replaces its generic label with the chosen duck name", () => {
@@ -3944,7 +4023,8 @@ test("a board entry replaces its generic label with the chosen duck name", () =>
   assert.equal(named.children[0].href, "/duck/128");
   assert.equal(nodeText(named), "Sir Quacks-a-Lot");
 
-  // A placed entry keeps the chosen name and official place.
+  // A placed entry keeps the chosen name; its official place is reported by the
+  // adjacent place column rather than appended to the duck label.
   assert.equal(
     nodeText(api.liveBoardDuckCell({
       participantDisplayName: "Jamie R.",
@@ -3952,7 +4032,7 @@ test("a board entry replaces its generic label with the chosen duck name", () =>
       duckName: "Bubbles",
       place: 1,
     })),
-    "Bubbles · 1st place",
+    "Bubbles",
   );
 
   // A suppressed, cleared, or absent name simply leaves the number.

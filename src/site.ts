@@ -128,6 +128,7 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .search-message { margin:.9rem 0 0; }
 .my-ducks-search > .privacy { margin-top:1.5rem; }
 .page-panel { max-width:49rem; margin:2rem auto 5rem; padding:clamp(1.2rem,5vw,3rem); border:3px solid var(--ink); border-radius:1.5rem; background:var(--paper); box-shadow:8px 8px 0 var(--ink); }
+.page-panel.race-status-hero { max-width:none; }
 .page-panel > .duck-mark { float:right; width:8rem; color:var(--water-dark); }
 .page-title { max-width:12ch; font-size:clamp(2.7rem,10vw,5.4rem); }
 .muted { color:var(--muted); line-height:1.55; }
@@ -363,15 +364,25 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .live-board { border-width:4px; background:var(--paper); box-shadow:7px 7px 0 var(--ink); }
 .live-board-title { max-width:none; margin-bottom:.5rem; }
 .live-board-stage { max-width:100%; margin:.2rem 0 .6rem; padding:.4rem .8rem; background:var(--yellow); font-size:.85rem; line-height:1.4; overflow-wrap:anywhere; }
-.board-round { margin-top:1.5rem; }
+.board-round { min-width:0; max-width:100%; margin-top:1.5rem; }
 .board-round h3 { font-size:1.65rem; }
 .board-grid { display:grid; gap:.8rem; }
-.board-heat { padding:1rem; border:3px solid var(--ink); border-radius:.85rem; background:var(--paper); }
+.board-heat { min-width:0; max-width:100%; padding:1rem; border:3px solid var(--ink); border-radius:.85rem; background:var(--paper); }
 .board-heat.current { background:#fff1a8; box-shadow:4px 4px 0 var(--ink); }
 .board-heat h4 { margin:.1rem 0 .4rem; font-size:1.2rem; }
-.board-entry { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.4rem 1rem; margin:.35rem 0 0; padding:.45rem .6rem; border-left:.35rem solid var(--water); background:#fff; font-weight:800; }
-.board-participant { display:inline-flex; flex-wrap:wrap; align-items:center; gap:.4rem; }
-.winner-ribbon { display:inline-flex; align-items:center; padding:.2rem .5rem; border:2px solid #7b5600; border-radius:999px; background:#f4c542; color:#3d2b00; font-size:.7rem; font-weight:950; letter-spacing:.06em; line-height:1.2; text-transform:uppercase; }
+.board-roster { width:100%; min-width:0; max-width:100%; margin:.2rem 0 0; border-collapse:separate; border-spacing:0 .35rem; table-layout:fixed; }
+.board-roster .board-participant-column { width:34%; }
+.board-roster .board-duck-column { width:42%; }
+.board-roster .board-place-column { width:24%; }
+.board-roster th { padding:0 .45rem .15rem; color:var(--muted); font-size:.7rem; font-weight:950; letter-spacing:.06em; line-height:1.25; text-align:left; text-transform:uppercase; }
+.board-roster td { min-width:0; padding:.5rem .45rem; background:#fff; font-weight:800; line-height:1.35; overflow-wrap:anywhere; vertical-align:top; word-break:break-word; }
+.board-roster td:first-child { border-left:.35rem solid var(--water); }
+.board-place-cell { color:#314a57; font-size:.88rem; }
+/* Keep rows painted by a cached pre-table live client readable during rollout. */
+p.board-entry { display:flex; flex-wrap:wrap; justify-content:space-between; gap:.4rem 1rem; margin:.35rem 0 0; padding:.45rem .6rem; border-left:.35rem solid var(--water); background:#fff; font-weight:800; }
+.board-participant { display:flex; min-width:0; max-width:100%; flex-wrap:wrap; align-items:center; gap:.4rem; }
+.board-participant > :first-child { min-width:0; max-width:100%; overflow-wrap:anywhere; }
+.winner-ribbon { display:inline-flex; min-width:0; max-width:100%; align-items:center; padding:.2rem .5rem; border:2px solid #7b5600; border-radius:999px; background:#f4c542; color:#3d2b00; font-size:.7rem; font-weight:950; letter-spacing:.06em; line-height:1.2; overflow-wrap:anywhere; text-transform:uppercase; }
 .winner-action { margin:0 0 1.4rem; padding:1rem; border:3px solid #7b5600; border-radius:1rem; background:#fff1a8; box-shadow:5px 5px 0 var(--ink); }
 .winner-action > * { margin-bottom:0; }
 .winner-action > * + * { margin-top:.75rem; }
@@ -444,7 +455,7 @@ details.operation-card[open] > summary { margin-bottom:0; }
 li.ineligible,.data-card.ineligible { border-color:#9f261c; background:#fff3f1; }
 .site-foot { padding:1rem 0 3rem; color:var(--muted); font-size:.85rem; text-align:center; }
 @media (min-width:44rem) { .cards { grid-template-columns:repeat(3,minmax(0,1fr)); } .field-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .console-grid.wide { grid-template-columns:minmax(16rem,.8fr) minmax(0,1.2fr); } .inventory-layout { grid-template-columns:minmax(0,1.15fr) minmax(20rem,.85fr); } .inventory-detail-panel { position:sticky; top:5.75rem; max-height:calc(100vh - 6.75rem); overflow:auto; } .board-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 17rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .hero h1 { font-size:clamp(1.7rem,8.9vw,2.3rem); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck-scene { --duck-center:50%; right:50%; bottom:4rem; width:13.5rem; } .hero-duck { --duck-lift:-.75rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } }
+@media (max-width:43.99rem) { .shell { width:min(100% - 1rem,40rem); } .site-head { flex-wrap:wrap; } .nav { width:100%; } .nav a { flex:1 1 0; padding:.7rem .45rem; text-align:center; } .nav a:first-child { display:none; } .hero { min-height:0; padding:1.5rem 1.5rem 17rem; border-radius:1.35rem; box-shadow:6px 6px 0 var(--ink); } .hero h1 { font-size:clamp(1.7rem,8.9vw,2.3rem); } .actions { position:relative; z-index:4; gap:var(--space-sm); } .button.small { min-height:2.75rem; } .hero-duck-scene { --duck-center:50%; right:50%; bottom:4rem; width:13.5rem; } .hero-duck { --duck-lift:-.75rem; } .hero-water { height:11rem; } .ticker { font-size:.7rem; } .page-panel > .duck-mark { width:5.7rem; } .privacy { display:block; } .privacy strong { display:block; margin-bottom:.25rem; } .participant-card { flex-basis:calc(100% - 2.25rem); } .participant-section-head-actions { flex-basis:100%; justify-content:flex-start; } .search-form { grid-template-columns:1fr; } .app-date-panel { position:fixed; top:1rem; right:1rem; left:1rem; width:auto; max-height:calc(100vh - 2rem); } .staff-bar { align-items:flex-start; } .staff-access-card .actions { width:100%; } .role-set > .check { min-height:2.75rem; } .staff-role-controls .button { flex:1 1 8rem; } .board-heat { padding:.75rem; } .board-roster th { padding-inline:.3rem; font-size:.62rem; letter-spacing:.035em; } .board-roster td { padding:.45rem .3rem; font-size:.8rem; } .board-place-cell { font-size:.76rem; } }
 @media (prefers-reduced-motion:no-preference) { .button,.result-button { transition:transform 80ms ease-out,box-shadow 80ms ease-out,filter 80ms ease-out,background-color 80ms ease-out; } .hero-duck { animation:duck-bob 2.8s ease-in-out infinite; } .hero-water::before { animation:water-flow 2.8s linear infinite; } @keyframes duck-bob { 0%,100% { transform:translateY(var(--duck-lift)); } 50% { transform:translateY(calc(var(--duck-lift) - 7px)); } } @keyframes water-flow { to { background-position:-10rem 0; } } }
 @media (prefers-reduced-motion:reduce) { html { scroll-behavior:auto; } .hero-water::before { background-position:-2.5rem 0; } }
 `;
@@ -596,7 +607,7 @@ export const renderRace = (phase: PublicPhase = "PREPARING"): string => page({
   phase,
   liveNav: true,
   content: `
-    <section class="page-panel">
+    <section class="page-panel race-status-hero" data-race-hero>
       ${duck()}
       <p class="eyebrow">Live race status</p>
       <h1 class="page-title">Race status</h1>

@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import {
   baseUrl,
   bootstrap,
+  expectAlignedBoardRows,
   expectNoDocumentOverflow,
   intakeDuck,
   pairDuck,
@@ -14,6 +15,9 @@ import {
 
 const namedDuckNumber = 701;
 const publicDuckName = "Captain Quacks on a Very Wide Blue River";
+const participantFirstName = "Named Participant With An Exceptionally Long Public Display Name";
+const participantLastName = "Riverside";
+const publicParticipantName = `${participantFirstName} R.`;
 
 test("participant-provided duck names replace generic labels across public live and responsive views", async ({ page, browser }, testInfo) => {
   test.setTimeout(150_000);
@@ -27,8 +31,8 @@ test("participant-provided duck names replace generic labels across public live 
 
   await page.goto("/register");
   const registration = page.locator("[data-registration-form]");
-  await registration.getByLabel("First name").fill("Named");
-  await registration.getByLabel("Last name").fill("Public");
+  await registration.getByLabel("First name").fill(participantFirstName);
+  await registration.getByLabel("Last name").fill(participantLastName);
   await registration.getByLabel(/Email/).fill("named.private@example.test");
   await registration.getByLabel("Phone (optional)").fill("+15550109999");
   await registration.getByRole("button", { name: "Register participant" }).click();
@@ -67,22 +71,33 @@ test("participant-provided duck names replace generic labels across public live 
   const followedPage = await openPublicPage("/my-ducks");
   const unnamedPage = await openPublicPage(`/duck/${unnamed.visibleNumber}`);
 
-  const raceNamedRow = racePage.locator(".board-entry").filter({ hasText: "Named P." });
+  const raceNamedRow = racePage.locator(".board-entry").filter({ hasText: publicParticipantName });
   const raceUnnamedRow = racePage.locator(".board-entry").filter({ hasText: "Daisy D." });
+  await expect(racePage.locator(".board-roster").first().getByRole("columnheader")).toHaveText([
+    "Participant",
+    "Duck",
+    "Place",
+  ]);
+  await expect(raceNamedRow.getByRole("cell")).toHaveText([
+    publicParticipantName,
+    `Duck #${namedDuckNumber}`,
+    "Not assigned",
+  ]);
   await expect(raceNamedRow.getByRole("link", { name: `Duck #${namedDuckNumber}`, exact: true })).toBeVisible();
   await expect(raceUnnamedRow.getByRole("link", { name: `Duck #${unnamed.visibleNumber}`, exact: true })).toBeVisible();
+  await expectAlignedBoardRows(racePage);
   await expect(duckPage.getByRole("heading", { name: `Duck #${namedDuckNumber}`, exact: true })).toBeVisible();
   await expect(tagPage.getByRole("heading", { name: `Duck #${namedDuckNumber}`, exact: true })).toBeVisible();
   await expect(privatePage.locator("main")).toContainText(`Duck #${namedDuckNumber}`);
   await expect(unnamedPage.getByRole("heading", { name: `Duck #${unnamed.visibleNumber}`, exact: true })).toBeVisible();
 
-  await followedPage.getByLabel("Participant name").fill("Named Public");
+  await followedPage.getByLabel("Participant name").fill(`${participantFirstName} ${participantLastName}`);
   await followedPage.getByRole("button", { name: "Find status" }).click();
-  const result = followedPage.locator("[data-search-results] .duck-card").filter({ hasText: "Named P." });
+  const result = followedPage.locator("[data-search-results] .duck-card").filter({ hasText: publicParticipantName });
   await expect(result).toContainText(`Duck #${namedDuckNumber}`);
   await result.getByRole("button", { name: "Add to My Ducks" }).click();
   const followedCard = followedPage.locator('[data-participant-section="followed"] [data-registration-id]')
-    .filter({ has: followedPage.getByRole("heading", { name: "Named P.", exact: true }) });
+    .filter({ has: followedPage.getByRole("heading", { name: publicParticipantName, exact: true }) });
   await expect(followedCard).toBeVisible();
   await expect(followedCard.getByRole("link", { name: `Duck #${namedDuckNumber}`, exact: true })).toBeVisible();
   await expect(followedCard.locator("[data-contact-summary], [data-contact-edit], [data-duck-name-form]")).toHaveCount(0);
@@ -93,9 +108,9 @@ test("participant-provided duck names replace generic labels across public live 
   const searchPage = await searchContext.newPage();
   const searchErrors = watchBrowserErrors(searchPage);
   await searchPage.goto("/my-ducks");
-  await searchPage.getByLabel("Participant name").fill("Named Public");
+  await searchPage.getByLabel("Participant name").fill(`${participantFirstName} ${participantLastName}`);
   await searchPage.getByRole("button", { name: "Find status" }).click();
-  const namedResult = searchPage.locator("[data-search-results] .duck-card").filter({ hasText: "Named P." });
+  const namedResult = searchPage.locator("[data-search-results] .duck-card").filter({ hasText: publicParticipantName });
   await expect(namedResult).toContainText(`Duck #${namedDuckNumber}`);
 
   await page.bringToFront();
@@ -113,12 +128,17 @@ test("participant-provided duck names replace generic labels across public live 
   await expect(ownedCard.getByText(`Duck #${namedDuckNumber}`, { exact: true })).toHaveCount(0);
   await racePage.bringToFront();
   await expect(raceNamedRow.getByRole("link", { name: publicDuckName, exact: true })).toBeVisible();
-  await expect(raceNamedRow).toContainText("Named P.");
+  await expect(raceNamedRow).toContainText(publicParticipantName);
+  await expect(raceNamedRow.getByRole("cell")).toHaveText([
+    publicParticipantName,
+    publicDuckName,
+    "Not assigned",
+  ]);
   await expect(raceNamedRow.getByText(`Duck #${namedDuckNumber}`, { exact: true })).toHaveCount(0);
   await duckPage.bringToFront();
   await expect(duckPage.getByRole("heading", { name: publicDuckName, exact: true })).toBeVisible();
   await expect(duckPage).toHaveTitle(`${publicDuckName} · QuickDucks`);
-  await expect(duckPage.locator("main")).toContainText("Named P.");
+  await expect(duckPage.locator("main")).toContainText(publicParticipantName);
   await expect(duckPage.locator("main")).not.toContainText(`Duck #${namedDuckNumber}`);
   await tagPage.bringToFront();
   await expect(tagPage.getByRole("heading", { name: publicDuckName, exact: true })).toBeVisible();
@@ -126,7 +146,7 @@ test("participant-provided duck names replace generic labels across public live 
   await expect(tagPage.locator("main")).not.toContainText(`Duck #${namedDuckNumber}`);
   await privatePage.bringToFront();
   await expect(privatePage.locator("main")).toContainText(publicDuckName);
-  await expect(privatePage.locator("main")).toContainText("Named Public");
+  await expect(privatePage.locator("main")).toContainText(`${participantFirstName} ${participantLastName}`);
   await expect(privatePage.locator("main")).not.toContainText(`Duck #${namedDuckNumber}`);
   await followedPage.bringToFront();
   await expect(followedCard.getByRole("link", { name: publicDuckName, exact: true })).toBeVisible();
@@ -156,6 +176,8 @@ test("participant-provided duck names replace generic labels across public live 
     }
     await expect(raceNamedRow.getByRole("link", { name: publicDuckName, exact: true })).toBeVisible();
     await expect(raceUnnamedRow.getByRole("link", { name: `Duck #${unnamed.visibleNumber}`, exact: true })).toBeVisible();
+    await expect(raceNamedRow.getByRole("cell").nth(2)).toHaveText("Not assigned");
+    await expectAlignedBoardRows(racePage);
     await expect(duckPage.getByRole("heading", { name: publicDuckName, exact: true })).toBeVisible();
     await expect(unnamedPage.getByRole("heading", { name: `Duck #${unnamed.visibleNumber}`, exact: true })).toBeVisible();
   }
@@ -169,7 +191,7 @@ test("participant-provided duck names replace generic labels across public live 
     expect(JSON.stringify(response.body)).not.toContain("named.private@example.test");
     expect(JSON.stringify(response.body)).not.toContain("+15550109999");
   }
-  expect(detail.body.raceStatus.participantDisplayName).toBe("Named P.");
+  expect(detail.body.raceStatus.participantDisplayName).toBe(publicParticipantName);
   expect(detail.body.raceStatus.duckName).toBe(publicDuckName);
   expect(scan.body.raceStatus.duckName).toBe(publicDuckName);
 

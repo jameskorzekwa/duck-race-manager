@@ -435,11 +435,24 @@ test.describe("sitewide UI consistency", () => {
     await directorContext.close();
   });
 
-  test("public primary panels keep the same paper surface color", async ({ page }) => {
+  test("the Race Status hero matches the Home hero width at every supported viewport", async ({ page }) => {
     await seedState("round-one");
-    await page.goto("/race");
-    await expect(page.locator(".page-panel")).toHaveCSS("background-color", "rgb(255, 253, 243)");
-    await expect(page.locator(".live-board")).toHaveCSS("background-color", "rgb(255, 253, 243)");
+    for (const width of [320, 390, 768, 1280]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.goto("/");
+      const homeHeroLocator = page.locator(".hero");
+      const homeHero = await homeHeroLocator.boundingBox();
+      const homeMaxWidth = await homeHeroLocator.evaluate((hero) => getComputedStyle(hero).maxWidth);
+      await page.goto("/race");
+      const raceHero = page.locator("[data-race-hero]");
+      await expect(raceHero).toHaveCSS("background-color", "rgb(255, 253, 243)");
+      await expect(page.locator(".live-board")).toHaveCSS("background-color", "rgb(255, 253, 243)");
+      const raceHeroBox = await raceHero.boundingBox();
+      expect(Math.abs(raceHeroBox.x - homeHero.x)).toBeLessThanOrEqual(1);
+      expect(Math.abs(raceHeroBox.width - homeHero.width)).toBeLessThanOrEqual(1);
+      expect(await raceHero.evaluate((hero) => getComputedStyle(hero).maxWidth)).toBe(homeMaxWidth);
+      await expectNoDocumentOverflow(page);
+    }
   });
 
   test("the home page puts the race action in the section named after the race", async ({ page }) => {

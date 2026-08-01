@@ -679,6 +679,7 @@ test("/race renders the full live board for the five post-DRAFT statuses", async
     assert.match(body, /data-live-board-stage/, status);
     assert.match(body, /data-live-board-title/, status);
     assert.match(body, /data-live-board-content/, status);
+    assert.match(body, /class="page-panel race-status-hero" data-race-hero/, status);
     assert.match(body, /<p class="message-line muted" data-live-board-error role="alert" hidden><\/p>/, status);
     assert.match(body, /src="\/assets\/live\.js"/, status);
     // The retired preparing panel cannot come back through this route.

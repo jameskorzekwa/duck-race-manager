@@ -2198,14 +2198,20 @@ const liveBoardDuckName = (entry) =>
   typeof entry.duckName === "string" && entry.duckName.length > 0 ? entry.duckName : null;
 
 const liveBoardDuckCell = (entry) => {
-  const cell = liveText("span", "");
+  const cell = liveText("td", "", "board-duck-cell");
   const link = duckDetailLink(document, entry.duckNumber, liveBoardDuckName(entry));
   if (link === null) cell.textContent = "Duck number pending";
   else cell.append(link);
-  if (entry.place !== null) {
-    cell.append(liveText("span", " · " + livePlaceLabel(entry.place) + " place"));
-  }
   return cell;
+};
+
+const liveBoardPlaceCell = (entry) => {
+  const place = entry.place;
+  return liveText(
+    "td",
+    place === 1 || place === 2 || place === 3 ? livePlaceLabel(place) + " place" : "Not assigned",
+    "board-place-cell",
+  );
 };
 
 // Mirrors the server-rendered duck detail facts exactly, so an authoritative
@@ -2237,27 +2243,54 @@ const liveDuckDetailFacts = (container, status) => {
 const liveHeatCard = (heat, currentHeat) => {
   const isCurrent = currentHeat && currentHeat.round === heat.round && currentHeat.number === heat.number;
   const card = liveText("article", "", "board-heat" + (isCurrent ? " current" : ""));
+  card.dataset.boardHeat = heat.round + ":" + heat.number;
+  card.dataset.boardRound = heat.round;
+  card.dataset.heatNumber = String(heat.number);
+  const heading = liveText("h4", liveRoundLabel(heat.round) + " · Heat " + heat.number);
+  heading.id = "board-heat-" + heat.round.toLowerCase().replaceAll("_", "-") + "-" + heat.number;
   card.append(
-    liveText("h4", liveRoundLabel(heat.round) + " · Heat " + heat.number),
+    heading,
     liveText("p", liveHeatStatus(heat.status), isCurrent ? "status-chip ready" : "status-chip"),
   );
   if (heat.roster.length === 0) {
     card.append(liveText("p", "Roster not posted yet.", "muted"));
   } else {
+    const table = liveText("table", "", "board-roster");
+    table.setAttribute("aria-labelledby", heading.id);
+    const columns = liveText("colgroup", "");
+    columns.append(
+      liveText("col", "", "board-participant-column"),
+      liveText("col", "", "board-duck-column"),
+      liveText("col", "", "board-place-column"),
+    );
+    const header = liveText("thead", "");
+    const headerRow = liveText("tr", "");
+    for (const label of ["Participant", "Duck", "Place"]) {
+      const columnHeading = liveText("th", label);
+      columnHeading.setAttribute("scope", "col");
+      headerRow.append(columnHeading);
+    }
+    header.append(headerRow);
+    const body = liveText("tbody", "");
     for (const entry of heat.roster) {
-      const row = liveText("p", "", "board-entry");
+      const row = liveText("tr", "", "board-entry");
+      const participantCell = liveText("td", "", "board-participant-cell");
       const participant = liveText("span", "", "board-participant");
       participant.append(liveText("span", entry.participantDisplayName));
       if (entry.place === 1) participant.append(liveText("span", "Winner", "winner-ribbon"));
-      row.append(participant, liveBoardDuckCell(entry));
-      card.append(row);
+      participantCell.append(participant);
+      row.append(participantCell, liveBoardDuckCell(entry), liveBoardPlaceCell(entry));
+      body.append(row);
     }
+    table.append(columns, header, body);
+    card.append(table);
   }
   return card;
 };
 
-const liveRound = (label, heats, currentHeat) => {
+const liveRound = (round, label, heats, currentHeat) => {
   const section = liveText("section", "", "board-round");
+  section.dataset.boardRound = round;
   section.append(liveText("h3", label));
   const grid = liveText("div", "", "board-grid");
   for (const heat of heats) grid.append(liveHeatCard(heat, currentHeat));
@@ -2302,8 +2335,8 @@ const liveRenderBoard = (board) => {
     podium.append(places);
     liveBoardContent.append(podium);
   }
-  if (event.roundOneHeats.length > 0) liveBoardContent.append(liveRound("Round one", event.roundOneHeats, event.currentHeat));
-  if (event.finalHeats.length > 0) liveBoardContent.append(liveRound("Final", event.finalHeats, event.currentHeat));
+  if (event.finalHeats.length > 0) liveBoardContent.append(liveRound("FINAL", "Final", event.finalHeats, event.currentHeat));
+  if (event.roundOneHeats.length > 0) liveBoardContent.append(liveRound("ROUND_ONE", "Round one", event.roundOneHeats, event.currentHeat));
   if (event.roundOneHeats.length === 0 && event.finalHeats.length === 0) {
     liveBoardContent.append(liveText("p", "Participants can still use this page before heats are made.", "empty-state"));
   }

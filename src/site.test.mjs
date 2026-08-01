@@ -51,6 +51,12 @@ const renderedPages = [
 
 const style = renderedPages[0].match(/<style>([\s\S]+)<\/style>/)?.[1];
 
+// Every document inlines the whole stylesheet, so a class name is present in
+// every page's source the moment it is styled at all. Asking whether a page
+// *uses* a class therefore has to be asked of its rendered body, not of the
+// document that carries the shared CSS.
+const pageBody = (markup) => markup.match(/<main class="shell">([\s\S]*)<\/main>/)?.[1];
+
 test("the private status page shows a scannable QR beside the readable lookup code", () => {
   const status = renderStatus({
     first_name: "Daisy",
@@ -260,6 +266,48 @@ test("the live board exposes a stage chip on every page that renders it", () => 
   // The full board left the home page; only the compact summary remains there.
   assert.equal(renderHome("RACING").includes("data-live-board-stage"), false);
   assert.equal(renderHome("RACING").includes("data-live-board-content"), false);
+});
+
+// The Home hero is an unconstrained block inside `main.shell`, so it spans the
+// whole shell. The Race Status hero is a `page-panel`, which is deliberately a
+// narrow reading measure everywhere else, so it opts out of that measure rather
+// than the panel rule changing underneath every other page that uses it.
+test("the Race Status hero spans the shell exactly like the home hero", () => {
+  assert.ok(style);
+  assert.match(style, /\.page-panel \{ max-width:49rem;/);
+  assert.match(style, /\.page-panel\.race-status-hero \{ max-width:none; \}/);
+  // Neither the desktop nor the narrow `.hero` rule constrains its own width,
+  // so "match the home hero" stays a single opt-out rather than a copied number.
+  assert.doesNotMatch(style, /\.hero \{[^}]*max-width:/);
+  assert.match(renderRace("RACING"), /<section class="page-panel race-status-hero" data-race-hero>/);
+  // The opt-out is scoped to that one hero; every other reading panel is unmoved.
+  // The shared stylesheet names the class on every page, so this is asked of the
+  // rendered body rather than of the whole document.
+  const myDucks = pageBody(renderMyDucks("RACING"));
+  const registration = pageBody(renderRegistration(undefined, "REGISTRATION"));
+  assert.ok(myDucks);
+  assert.ok(registration);
+  assert.match(pageBody(renderRace("RACING")), /race-status-hero/);
+  assert.doesNotMatch(myDucks, /race-status-hero/);
+  assert.doesNotMatch(registration, /race-status-hero/);
+});
+
+// A heat card lists several racers, and the eye reads down it. Fixed column
+// widths are what let it: without them each row sizes itself to its own longest
+// value and the duck and place columns walk left and right down the card.
+test("the live board roster is a fixed three-column table that keeps rows aligned", () => {
+  assert.ok(style);
+  assert.match(style, /\.board-roster \{[^}]*width:100%; min-width:0; max-width:100%;[^}]*table-layout:fixed;/);
+  assert.match(style, /\.board-roster \.board-participant-column \{ width:34%; \}/);
+  assert.match(style, /\.board-roster \.board-duck-column \{ width:42%; \}/);
+  assert.match(style, /\.board-roster \.board-place-column \{ width:24%; \}/);
+  // A long policy display name or duck name wraps inside its own column instead
+  // of widening it, and the winner ribbon shrinks rather than pushing the row.
+  assert.match(style, /\.board-roster td \{[^}]*min-width:0;[^}]*overflow-wrap:anywhere;[^}]*word-break:break-word;/);
+  assert.match(style, /\.winner-ribbon \{[^}]*min-width:0; max-width:100%;[^}]*overflow-wrap:anywhere;/);
+  // The narrow layout tightens the same three columns rather than dropping one.
+  assert.match(style, /@media \(max-width:43\.99rem\)[\s\S]*\.board-roster td \{ padding:\.45rem \.3rem; font-size:\.8rem; \}/);
+  assert.match(style, /@media \(max-width:43\.99rem\)[\s\S]*\.board-place-cell \{ font-size:\.76rem; \}/);
 });
 
 test("the how-it-works cards describe the race without linking anywhere", () => {

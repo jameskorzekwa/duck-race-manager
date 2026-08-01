@@ -2676,7 +2676,13 @@ noindex `/race` page, private status pages, and public duck-tag status pages.
 The home page instead carries a compact "happening now" summary, the stage chip
 plus one current-heat line, that links to `/race`. While there is no public
 event, `/race` has nothing to report, so it redirects to the home page with a
-`303` rather than rendering an empty race-status page. The board includes:
+`303` rather than rendering an empty race-status page.
+
+The `/race` hero above the board uses the shared page content width rather than
+the narrower reading panel, so at every supported viewport it starts at the same
+horizontal position, spans the same width, and applies the same max-width
+behaviour as the home page hero. The board beneath it shares that width, and
+neither surface overflows a 320px viewport. The board includes:
 
 - Safe event lifecycle status and date. The board turns that status into a
   prominent plain-language stage chip and summary line beside the event name:
@@ -2685,7 +2691,20 @@ event, `/race` has nothing to report, so it redirects to the home page with a
   `ROUND_ONE` round one under way, `FINAL` final under way, and `COMPLETED`
   results official. An unrecognized status falls back to neutral wording
   instead of raw enum text.
-- Ordered round-one and final heats.
+- Ordered round-one and final heats. Once a final heat exists the board renders
+  the **Final** section above the **Round one** section, because the final is the
+  primary race context from the moment it is created. Round-one heats keep their
+  existing deterministic order beneath it, and before a final exists round-one
+  ordering is unchanged. That order is document order and not a CSS-only
+  reordering, so the visual order, the DOM reading order, and the section
+  headings agree for assistive technology. A live refresh that creates the final
+  or changes a result repaints the same order rather than reloading the page.
+- Each heat card presents its roster as a three-column table — participant, duck,
+  and place — with column headers, so those three values sit in consistent column
+  positions and line up vertically across every roster row. A roster entry with
+  no assigned place reads "Not assigned" rather than leaving the column blank,
+  and long policy-filtered display names and duck names wrap inside their own
+  column instead of overlapping a neighbour or widening the page.
 - Safe heat status, including calling, running, and awaiting-result emphasis.
 - Policy-filtered participant display names and visible duck numbers. A filtered
   participant-chosen duck name completely replaces the generic `Duck #N` label;
