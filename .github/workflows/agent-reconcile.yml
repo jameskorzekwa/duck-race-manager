@@ -50,7 +50,17 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           main_sha="$(git rev-parse "origin/${DEFAULT_BRANCH}")"
 
-          gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName,baseRefOid,author,body \
+          # An in-flight review pins an exact head. Refreshing underneath it
+          # moves that head and the gate then rejects its own review as stale,
+          # which is worse than waiting one cycle.
+          active_reviews="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow agent-review.yml --limit 20 \
+            --json status --jq '[.[] | select(.status != "completed")] | length')"
+          if [[ "$active_reviews" != "0" ]]; then
+            printf 'A review is in flight; deferring candidate refresh.\n'
+            exit 0
+          fi
+
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName,author,body \
             --jq '.[] | select(.author.login == "app/github-actions") | select(.headRefName | startswith("opencode/")) | @base64' \
             > candidates.txt || true
 
@@ -59,12 +69,17 @@ jobs:
             candidate="$(printf '%s' "$encoded" | base64 --decode)"
             number="$(printf '%s' "$candidate" | node -e 'let b="";process.stdin.on("data",c=>b+=c).on("end",()=>console.log(JSON.parse(b).number))')"
             branch="$(printf '%s' "$candidate" | node -e 'let b="";process.stdin.on("data",c=>b+=c).on("end",()=>console.log(JSON.parse(b).headRefName))')"
-            base="$(printf '%s' "$candidate" | node -e 'let b="";process.stdin.on("data",c=>b+=c).on("end",()=>console.log(JSON.parse(b).baseRefOid))')"
-            [[ "$base" == "$main_sha" ]] && continue
-
-            printf 'Refreshing PR #%s (%s): base %s -> %s\n' "$number" "$branch" "${base:0:12}" "${main_sha:0:12}"
             git fetch --quiet origin "$branch"
             git checkout --quiet -B "$branch" "origin/$branch"
+            # "Behind" means main is not yet contained in this head. Comparing
+            # the PR's baseRefOid instead compares main to itself, which is both
+            # always true and briefly wrong right after a merge.
+            if git merge-base --is-ancestor "origin/${DEFAULT_BRANCH}" HEAD; then
+              git checkout --quiet "$main_sha"
+              continue
+            fi
+
+            printf 'Refreshing PR #%s (%s) onto %s\n' "$number" "$branch" "${main_sha:0:12}"
             if git merge --no-edit "origin/${DEFAULT_BRANCH}" > merge.log 2>&1; then
               # The candidate's own diff must still respect pipeline policy.
               if ! node scripts/validate-agent-patch.mjs "$PWD" "$main_sha" HEAD; then
