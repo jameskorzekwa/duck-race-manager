@@ -23,6 +23,7 @@ const migrationNames = [
   "0017_final_podium_selections.sql",
   "0018_participant_contact_preferences.sql",
   "0019_round_one_walk_up_admission.sql",
+  "0020_email_notification_assignment.sql",
 ];
 
 const lifecycleStatuses = [
@@ -404,6 +405,81 @@ test("0019 permits only command-bound pairing into a never-started Round One hea
     'after-start', 'event-walk-up', 'heat-unstarted', 'entry-unbound',
     '2026-07-30T00:02:00Z', 'assign-walk-up',
   ), /heat roster is locked/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0020 pins new notifications to an assignment without inventing one for legacy rows", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0020_email_notification_assignment.sql"));
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff-email', 'staff-email-sub', 'staff@example.com');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event-email', 'email-race', 'Email Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, email, email_notifications_enabled,
+       status, lookup_code, private_token_hash, submitted_at, status_changed_at)
+    VALUES ('registration-email', 'event-email', 'Daisy', 'Duck',
+            'daisy@example.com', 1, 'ACTIVE', 'DAASY234', 'private-hash',
+            '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry-email', 'event-email', 'registration-email');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck-email', 42, 'IN_USE', '2026-08-01T00:00:00Z');
+    INSERT INTO event_ducks
+      (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck-email', 'event-email', 'duck-email',
+            '2026-08-01T00:00:00Z', 'staff-email');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('assign-email', 'event-email', 'ASSIGN_DUCK', 'assignment-email',
+            '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES ('assignment-email', 'event-email', 'entry-email', 'event-duck-email',
+            'duck-email', '2026-08-01T00:00:00Z', 'staff-email', 'assign-email');
+    INSERT INTO heats (id, event_id, round, heat_number, status, target_size)
+    VALUES ('heat-email', 'event-email', 'ROUND_ONE', 1, 'PLANNED', 3);
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number,
+       assignment_source, assigned_at, source_command_id)
+    VALUES ('heat-entry-email', 'event-email', 'heat-email', 'entry-email',
+            'ROUND_ONE', 1, 'PAIRING', '2026-08-01T00:00:00Z', 'assign-email');
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, heat_id, notification_type, status)
+    VALUES ('legacy-before', 'event-email', 'registration-email', 'heat-email',
+            'HEAT_ASSIGNED', 'PENDING');
+  `);
+
+  applyMigrations(database, ["0020_email_notification_assignment.sql"]);
+  assert.equal(database.prepare(
+    "SELECT duck_assignment_id FROM email_notifications WHERE id = 'legacy-before'",
+  ).get().duck_assignment_id, null, "a current assignment is not guessed for pre-migration work");
+
+  // The previously deployed Worker still writes the original column list.
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, heat_id, notification_type, status)
+    VALUES ('legacy-after', 'event-email', 'registration-email', 'heat-email',
+            'HEAT_UPCOMING', 'PENDING');
+  `);
+  assert.equal(database.prepare(
+    "SELECT duck_assignment_id FROM email_notifications WHERE id = 'legacy-after'",
+  ).get().duck_assignment_id, null);
+
+  assert.throws(() => database.prepare(
+    "UPDATE email_notifications SET duck_assignment_id = ? WHERE id = ?",
+  ).run("missing-assignment", "legacy-before"), /FOREIGN KEY constraint failed/);
+  database.prepare(
+    "UPDATE email_notifications SET duck_assignment_id = ? WHERE id = ?",
+  ).run("assignment-email", "legacy-before");
+  database.prepare("DELETE FROM duck_assignments WHERE id = ?").run("assignment-email");
+  assert.equal(database.prepare(
+    "SELECT duck_assignment_id FROM email_notifications WHERE id = 'legacy-before'",
+  ).get().duck_assignment_id, null, "assignment deletion safely invalidates pending work");
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });
