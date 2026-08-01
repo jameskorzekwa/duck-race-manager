@@ -5628,6 +5628,7 @@ const renderEvent = (detail, readiness) => {
   if (!lifecycleShouldRenderEvent(eventSelect.value, currentEvent, detail.event)) return false;
   currentEvent = detail.event;
   currentEventDetail = detail;
+  renderWalkUpAvailability(detail.walkUpAdmission);
   if (eventSummary) showFacts(eventSummary, [
     ["Name", currentEvent.name],
     ["Status", humanize(currentEvent.status)],
@@ -5691,6 +5692,10 @@ const loadEvents = async (preferredId) => {
     currentEventDetail = null;
     selectedRegistration = null;
     selectedHeat = null;
+    renderWalkUpAvailability({
+      allowed: false,
+      reason: "Walk-up registration is unavailable until an event is ready for registration.",
+    });
     if (eventSummary) eventSummary.replaceChildren(empty("Create a draft event to begin."));
     if (readinessList) readinessList.replaceChildren(empty("No lifecycle is available."));
     for (const selector of [
@@ -5919,9 +5924,34 @@ const participantDetail = document.querySelector("[data-participant-detail]");
 const participantFacts = document.querySelector("[data-participant-facts]");
 const participantEditForm = document.querySelector("[data-participant-edit-form]");
 const participantActions = document.querySelector("[data-participant-actions]");
+const walkUpCard = document.querySelector("[data-walkup-card]");
+const walkUpForm = document.querySelector("[data-walkup-form]");
+const walkUpAvailability = document.querySelector("[data-walkup-availability]");
+const walkUpGuide = document.querySelector("[data-walkup-guide]");
+let currentWalkUpAdmission = { allowed: false, reason: "Checking walk-up availability…" };
+let pendingWalkUpCommand = null;
 // The participants surface is rendered by both the Admin console's Participants
 // view and the registration desk, so it is always all-or-nothing on a page.
 const participantsPresent = Boolean(participantFilterForm && participantList && participantDetail);
+
+const renderWalkUpAvailability = (admission) => {
+  if (!walkUpCard || !walkUpForm || !walkUpAvailability) return;
+  const allowed = admission && admission.allowed === true;
+  currentWalkUpAdmission = {
+    allowed,
+    reason: admission && typeof admission.reason === "string"
+      ? admission.reason
+      : "Walk-up availability could not be confirmed. Refresh before registering anyone.",
+  };
+  walkUpAvailability.textContent = currentWalkUpAdmission.reason;
+  walkUpForm.hidden = !allowed;
+  if (walkUpGuide) walkUpGuide.hidden = !allowed;
+  const button = walkUpForm.querySelector('button[type="submit"]');
+  if (button) button.disabled = !allowed;
+  // A closed disclosure opens itself so the explanation is visible immediately;
+  // the form and its action are removed from the interaction flow.
+  if (!allowed) walkUpCard.open = true;
+};
 
 const participantQuery = () => {
   const values = new FormData(participantFilterForm);
@@ -6279,18 +6309,23 @@ participantFilterForm?.addEventListener("submit", (event) => {
     .catch((error) => setMessage(error.message, true));
 });
 
-document.querySelector("[data-walkup-form]")?.addEventListener("submit", async (event) => {
+walkUpForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const resultTarget = document.querySelector("[data-walkup-result]");
+  if (!currentWalkUpAdmission.allowed) {
+    resultTarget.textContent = currentWalkUpAdmission.reason;
+    return;
+  }
   const values = new FormData(form);
+  pendingWalkUpCommand ??= { commandId: crypto.randomUUID(), privateToken: randomPrivateToken() };
   await perform(button, "Creating walk-up registration…", async () => {
-    const privateToken = randomPrivateToken();
+    const { commandId, privateToken } = pendingWalkUpCommand;
     const result = await api(
       "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/registrations",
       commandOptions("POST", {
-        commandId: crypto.randomUUID(),
+        commandId,
         privateToken,
         firstName: String(values.get("firstName")),
         lastName: String(values.get("lastName")),
@@ -6306,10 +6341,12 @@ document.querySelector("[data-walkup-form]")?.addEventListener("submit", async (
     link.target = "_blank";
     link.rel = "noopener";
     resultTarget.replaceChildren(text("strong", "Lookup code: " + result.registration.lookupCode + " · "), link);
+    pendingWalkUpCommand = null;
     form.reset();
     await loadParticipants();
     renderParticipantDetail(result.registration);
   });
+  if (!currentWalkUpAdmission.allowed) button.disabled = true;
 });
 
 participantEditForm?.addEventListener("submit", async (event) => {
@@ -6771,10 +6808,9 @@ if (isSystemAdmin) {
 // This client runs on the Admin console and on the registration desk, and the
 // desk renders the participants surface and nothing else. RaceUpdates admits a
 // bounded number of connections and fans every signal out to every matching
-// subscriber, so a page must ask only for the domains it can actually repaint:
-// subscribing a registration device to "heats" or "support" woke a refresh whose
-// heat and support loaders each returned on their first line, once per device,
-// for every heat transition of the race.
+// subscriber, so the broad page refresh asks only for the domains its operation
+// loaders can repaint. The small walk-up cutoff projection below is intentionally
+// separate: it consumes a heat signal without waking the absent heat loader.
 //
 // Each domain is therefore gated on the markup and the role that would consume
 // it, exactly as loadEvent gates the loaders themselves. The "event" domain is
@@ -6799,6 +6835,31 @@ staffLiveSubscription = globalThis.quickDucksLive.subscribe({
   root: operationsRoot,
   refresh: () => loadEvents(currentEvent?.id),
   isBlocked: () => staffCommandCount > 0,
+});
+
+// The admission cutoff is caused by a heat start. This narrow subscriber is
+// rooted on the read-only explanation rather than the surrounding forms, so a
+// staffer who has already typed a name still sees the authoritative closure
+// immediately without losing what they typed. The stale submit remains guarded
+// by the backend as well.
+//
+// It asks the dedicated cutoff projection rather than reloading the whole event
+// detail. Deleting the event publishes a heat signal too, and by the time this
+// subscriber runs the event it still remembers may already be gone; the event
+// detail answers that with a 404, which is a browser console error on a page
+// that did nothing wrong. The cutoff projection answers "closed" instead, so
+// this surface degrades to the truth in one request and logs nothing.
+if (walkUpAvailability) globalThis.quickDucksLive.subscribe({
+  domains: ["heats"],
+  root: walkUpAvailability,
+  refresh: async () => {
+    if (!currentEvent) return;
+    const eventId = currentEvent.id;
+    const body = await api(
+      "/api/v1/staff/events/" + encodeURIComponent(eventId) + "/walk-up-admission",
+    );
+    if (currentEvent && currentEvent.id === eventId) renderWalkUpAvailability(body.walkUpAdmission);
+  },
 });
 `;
 

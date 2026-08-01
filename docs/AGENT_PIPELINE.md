@@ -53,6 +53,7 @@ Pipeline state is represented by labels:
 | `agent:grouped` | Requirements belong to a canonical active issue |
 | `agent:blocked` | Explicit dependencies or input are outstanding |
 | `agent:question` | Implementation is blocked on a question posted to the issue; any James reply resumes it automatically from the saved partial work |
+| `agent:reviewing` | The single model runner is executing this candidate's independent review |
 | `agent:review` | A PR is under deterministic CI or agent review |
 | `agent:approved` | Independent review passed at the current head |
 | `agent:merge-slot` | The single PR/release allowed in production lane |
@@ -192,6 +193,15 @@ does not call a model. It:
 - Retries stale work with bounded machine-readable attempts.
 - Repairs labels when PR, workflow, and deployment state proves the transition.
 - Advances the oldest approved PR after the production lane is free.
+
+A candidate whose base has moved is behind, not invalid. Reconciliation merges
+the default branch forward into it with a deterministic, model-free job, re-runs
+`validate-agent-patch` against the new base, rewrites the provenance marker,
+clears any stale approval, and re-dispatches both gates, so the exact-SHA
+guarantee is rebuilt at the new head instead of being bypassed. Only a genuine
+merge conflict returns the work to the model, which resumes from its saved
+patch. Re-implementation is the fallback, never the routine response to an
+unrelated merge.
 
 An interrupted model turn is restarted from issue, branch, PR, and check state;
 it is never resumed as if a provider call were exactly-once.

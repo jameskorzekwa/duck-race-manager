@@ -166,6 +166,76 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
   );
 });
 
+test("a candidate behind main is merged forward instead of re-implemented", async () => {
+  const reconcile = await read(".github/workflows/agent-reconcile.yml");
+  const refresh = reconcile.slice(reconcile.indexOf("  refresh-candidates:"), reconcile.indexOf("  reconcile:"));
+
+  // Deterministic and model-free: a plain merge, never a model session.
+  assert.match(refresh, /git merge --no-edit "origin\/\$\{DEFAULT_BRANCH\}"/);
+  assert.doesNotMatch(refresh, /openchamber|self-hosted/);
+
+  // Only bot-authored pipeline candidates, and only when actually behind.
+  assert.match(refresh, /select\(\.author\.login == "app\/github-actions"\)/);
+  assert.match(refresh, /startswith\("opencode\/"\)/);
+  assert.match(refresh, /\[\[ "\$base" == "\$main_sha" \]\] && continue/);
+
+  // The refreshed diff is re-checked, the provenance marker is rewritten by
+  // this trusted job, stale approval is cleared, and both gates re-run.
+  assert.match(refresh, /validate-agent-patch\.mjs "\$PWD" "\$main_sha" HEAD/);
+  assert.match(refresh, /agent-pipeline task-run=/);
+  assert.match(refresh, /--remove-label agent:approved/);
+  assert.match(refresh, /gh workflow run ci\.yml --ref "\$branch"/);
+  assert.match(refresh, /gh workflow run agent-review\.yml --ref "\$DEFAULT_BRANCH" -f pr="\$number"/);
+
+  // A real conflict falls back to re-implementation from the saved patch.
+  assert.match(refresh, /git merge --abort/);
+  assert.match(refresh, /gh workflow run agent-task\.yml --ref "\$DEFAULT_BRANCH" -f issue="\$issue"/);
+});
+
+test("the reviewer contract comes from trusted main, and a missing marker rejects", async () => {
+  const review = await read(".github/workflows/agent-review.yml");
+
+  // Agent contracts are control plane: a reviewer fix must reach candidates
+  // that were built before it landed.
+  assert.match(review, /git fetch --quiet origin \$\{\{ github\.event\.repository\.default_branch \}\}/);
+  assert.match(review, /rm -rf "\$model_dir\/\.opencode"/);
+  assert.match(review, /git -C trusted archive FETCH_HEAD \.opencode/);
+  assert.ok(
+    review.indexOf('rm -rf "$model_dir/.opencode"') > review.indexOf('git -C trusted archive "${{ needs.prepare.outputs.base }}"'),
+    "the trusted contract must overwrite the snapshot's, not precede it",
+  );
+
+  // A completed review without a marker is a rejection, not infrastructure.
+  const gate = review.slice(review.indexOf("  gate:"), review.indexOf("  queue-merge:"));
+  assert.match(gate, /const infrastructureFailure = process\.env\.RESET_RESULT !== "success"\n\s+\|\| process\.env\.REVIEW_RESULT !== "success";/);
+  assert.doesNotMatch(gate, /infrastructureFailure = [\s\S]{0,200}decision\.exitStatus !== 0/);
+
+  const reviewer = await read(".opencode/agents/pipeline-reviewer.md");
+  assert.match(reviewer, /Write the marker first/);
+  assert.match(reviewer, /There is no other contract to fetch/);
+});
+
+test("a starting implementation reports its own running state", async () => {
+  const workflow = await read(".github/workflows/agent-task.yml");
+  const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));
+
+  // The runner reports state itself, so no observer timing can make the label
+  // lag: no polling watcher, and no dependence on a reconciliation sweep.
+  assert.match(implement, /Report that implementation started/);
+  assert.match(implement, /"agent:running"/);
+  assert.doesNotMatch(workflow, /mark-running/);
+  assert.match(implement, /startable = new Set\(\["agent:inbox", "agent:triage", "agent:ready", "agent:queued"\]\)/);
+  assert.match(implement, /if \(!current\.some\(\(label\) => startable\.has\(label\)\)\)/);
+  assert.match(implement, /continue-on-error: true/);
+
+  // The report step is the only write authority the model job holds, and the
+  // model still never receives a token: no step passes one into OpenChamber.
+  assert.match(implement, /issues: write/);
+  assert.doesNotMatch(implement, /contents: write|pull-requests: write|actions: write/);
+  const dispatch = implement.slice(implement.indexOf("Run local OAuth implementation lead"));
+  assert.doesNotMatch(dispatch, /GITHUB_TOKEN|github\.token/);
+});
+
 test("failures retry immediately and only stopped recovery parks at agent:error", async () => {
   const task = await read(".github/workflows/agent-task.yml");
   const publish = task.slice(task.indexOf("  publish:"));
@@ -180,7 +250,7 @@ test("failures retry immediately and only stopped recovery parks at agent:error"
   // Cron is a backstop only: every completed pipeline run sweeps immediately.
   assert.match(reconcile, /workflow_run:/);
   assert.match(reconcile, /workflows: \[Agent Task, Agent Review PR, Release\]/);
-  assert.match(reconcile, /types: \[completed\]/);
+  assert.match(reconcile, /types: \[in_progress, completed\]/);
   assert.match(reconcile, /github\.event_name == 'workflow_run'/);
 
   const implementation = await read("scripts/agent-pipeline.mjs");
@@ -218,6 +288,14 @@ test("a blocked implementation can ask James and resume on his reply", async () 
   assert.match(reconciliation, /issuesWithLabel\("agent:question"\)/);
   assert.match(reconciliation, /questionAnswered\(comments\)/);
 
+  // A duplicate dispatch must not clobber an unanswered question, and must
+  // still let the answer through.
+  const prepare = workflow.slice(workflow.indexOf("  prepare:"), workflow.indexOf("  implement:"));
+  assert.match(prepare, /currentLabels\.includes\("agent:question"\)/);
+  assert.match(prepare, /agent-pipeline question=/);
+  assert.match(prepare, /Date\.parse\(comment\.created_at\) > Date\.parse\(lastQuestion\.created_at\)/);
+  assert.match(prepare, /if \(!answered\) \{/);
+
   const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
   assert.match(orchestrator, /PIPELINE_TASK_QUESTION:N/);
   assert.match(orchestrator, /finish every part of the implementation the answer does not affect/);
@@ -231,9 +309,11 @@ test("queued work is labeled queued until the model runner actually starts", asy
   assert.match(prepare, /setState\(issue, "agent:queued"\)/);
   assert.doesNotMatch(prepare, /setState\(issue, "agent:running"\)/);
   assert.match(prepare, /!currentLabels\.includes\("agent:running"\)/);
-  // The model job itself must stay token-free, and no per-run watcher job may
+  // The model job may report that it started (issues: write, nothing more) but
+  // must never hand a credential to the model, and no per-run watcher job may
   // return: it cannot outlive a deep runner queue.
-  assert.doesNotMatch(implement, /GITHUB_TOKEN:|issues: write/);
+  assert.doesNotMatch(implement, /GITHUB_TOKEN:/);
+  assert.doesNotMatch(implement, /contents: write|pull-requests: write|actions: write/);
   assert.doesNotMatch(workflow, /mark-running/);
 
   const reconciliation = await read("scripts/agent-pipeline.mjs");
@@ -360,7 +440,10 @@ test("model budgets let a full feature finish inside each job timeout", async ()
 test("reconciliation is deterministic and model-free", async () => {
   const workflow = await read(".github/workflows/agent-reconcile.yml");
   const implementation = await read("scripts/agent-pipeline.mjs");
-  assert.doesNotMatch(workflow, /models: read|id-token: write|opencode/);
+  // Model-free means it never invokes a model or claims the model runner;
+  // the opencode/ branch prefix is candidate naming, not model execution.
+  assert.doesNotMatch(workflow, /models: read|id-token: write/);
+  assert.doesNotMatch(workflow, /openchamber|runs-on: \[self-hosted/);
   assert.match(workflow, /reconcileAgentPipeline/);
   assert.match(implementation, /run\.event === "workflow_dispatch"/);
   assert.match(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);

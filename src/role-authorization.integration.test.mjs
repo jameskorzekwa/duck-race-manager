@@ -474,6 +474,49 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     commandId: command(),
   }), 201, "race director starts round one");
 
+  const beforeDeniedWalkUps = database.prepare(
+    "SELECT COUNT(*) AS count FROM registrations WHERE event_id = ?",
+  ).get(eventId).count;
+  for (const [index, [label, deniedActor]] of [
+    ["duck manager", actors.ducks],
+    ["announcer", actors.announcer],
+    ["heat runner", actors.heats],
+    ["result taker", actors.results],
+    ["roleless actor", actors.none],
+  ].entries()) {
+    const denied = await post(deniedActor, `/api/v1/staff/events/${eventId}/registrations`, {
+      commandId: command(),
+      privateToken: String.fromCharCode(107 + index).repeat(43),
+      firstName: "Denied",
+      lastName: label,
+      email: null,
+      phone: null,
+      emailNotificationsEnabled: false,
+      notes: null,
+    });
+    assert.equal(denied.status, 403, `${label} cannot admit a Round One walk-up`);
+  }
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM registrations WHERE event_id = ?").get(eventId).count,
+    beforeDeniedWalkUps,
+    "least-privilege denials write no participant",
+  );
+
+  // REGISTRATION is sufficient while the heat has not started, and the same
+  // least-privileged actor completes the ordinary scan/pairing flow. The spare
+  // duck was already taken in through the DUCK_MANAGER station above.
+  const roundOneWalkUp = await json(await post(
+    actors.registration,
+    `/api/v1/staff/events/${eventId}/registrations`,
+    {
+      commandId: command(), privateToken: "w".repeat(43), firstName: "RoundOne", lastName: "Walkup",
+      email: null, phone: null, emailNotificationsEnabled: false, notes: null,
+    },
+  ), 201, "registration admits a Round One walk-up");
+  await json(await post(actors.registration, `/api/v1/staff/ducks/${duckTwoToken}/assignments`, {
+    commandId: command(), eventId, lookupCode: roundOneWalkUp.registration.lookupCode,
+  }), 201, "registration pairs the Round One walk-up");
+
   // Starting the round locked the roster, so the heat runner picks up at
   // LOADING with no lock step of its own.
   const lockedHeat = await json(await api(

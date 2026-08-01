@@ -21,6 +21,11 @@ import {
   type RegistrationInput,
 } from "./registration.ts";
 import type { Env } from "./types.ts";
+import {
+  unstartedRoundOneHeatExistsSql,
+  WALK_UP_ADMISSION_WITHOUT_EVENT,
+  walkUpAdmissionFor,
+} from "./walk-up-admission.ts";
 
 const headers = {
   "cache-control": "no-store",
@@ -196,11 +201,12 @@ interface ExistingCommand {
   event_id: string;
   command_type: string;
   result_id: string | null;
+  request_fingerprint: string | null;
 }
 
 const findCommand = (env: Env, commandId: string): Promise<ExistingCommand | null> =>
   env.DB.prepare(
-    "SELECT event_id, command_type, result_id FROM race_commands WHERE id = ?",
+    "SELECT event_id, command_type, result_id, request_fingerprint FROM race_commands WHERE id = ?",
   ).bind(commandId).first<ExistingCommand>();
 
 const registrationResult = (
@@ -349,17 +355,14 @@ const validateParticipant = (
   return { value: { input: validation.value, staffNotes }, errors };
 };
 
-const getOpenEvent = (env: Env, eventId: string, now: string): Promise<EventRow | null> =>
+const getWalkUpEvent = (env: Env, eventId: string): Promise<EventRow | null> =>
   env.DB.prepare(
     `SELECT id, name, status, event_date, email_required,
-            registration_opens_at, registration_closes_at
+             registration_opens_at, registration_closes_at
        FROM events
-      WHERE id = ?
-        AND status = 'REGISTRATION_OPEN'
-        AND (registration_opens_at IS NULL OR registration_opens_at <= ?)
-        AND (registration_closes_at IS NULL OR registration_closes_at > ?)
-      LIMIT 1`,
-  ).bind(eventId, now, now).first<EventRow>();
+       WHERE id = ?
+       LIMIT 1`,
+  ).bind(eventId).first<EventRow>();
 
 const createWalkUp = async (
   request: Request,
@@ -379,12 +382,34 @@ const createWalkUp = async (
   }
 
   const tokenHash = await hashToken(privateToken);
+  const now = new Date().toISOString();
+  const event = await getWalkUpEvent(env, eventId);
+  if (event === null) return json({ error: "Walk-up registration is not open for this event." }, 409);
+  const validation = validateParticipant(payload, event.email_required === 1);
+  if (validation.value === undefined) {
+    return json({ error: "Registration validation failed.", fields: validation.errors }, 422);
+  }
+  const value = validation.value;
+  // Store only a one-way fingerprint of the normalized request material. A
+  // matching retry can replay after the cutoff, while changed names, contacts,
+  // preferences, notes, or token cannot silently reuse the command identifier.
+  const requestFingerprint = await hashToken(JSON.stringify({
+    eventId,
+    tokenHash,
+    firstName: value.input.firstName,
+    lastName: value.input.lastName,
+    email: value.input.email,
+    phone: value.input.phone,
+    emailNotificationsEnabled: value.input.emailNotificationsEnabled,
+    notes: value.staffNotes,
+  }));
   const previous = await findCommand(env, commandId);
   if (previous !== null) {
     if (
       previous.event_id !== eventId
       || previous.command_type !== "CREATE_STAFF_REGISTRATION"
       || previous.result_id === null
+      || (previous.request_fingerprint != null && previous.request_fingerprint !== requestFingerprint)
     ) {
       return json({ error: "This command identifier was already used for another operation." }, 409);
     }
@@ -395,18 +420,31 @@ const createWalkUp = async (
     return registrationResult(replay, true, 200, { privateStatusPath: `/r/${privateToken}` });
   }
 
-  const now = new Date().toISOString();
-  const event = await getOpenEvent(env, eventId, now);
-  if (event === null) return json({ error: "Walk-up registration is not open for this event." }, 409);
-  const validation = validateParticipant(payload, event.email_required === 1);
-  if (validation.value === undefined) {
-    return json({ error: "Registration validation failed.", fields: validation.errors }, 422);
+  // Useful preflight only. The command insert below repeats this predicate in
+  // the transaction and is the authority when a heat starts concurrently.
+  const available = await env.DB.prepare(
+    `SELECT 1 AS allowed
+       FROM events e
+      WHERE e.id = ?
+        AND (
+          (e.status = 'REGISTRATION_OPEN'
+            AND (e.registration_opens_at IS NULL OR e.registration_opens_at <= ?)
+            AND (e.registration_closes_at IS NULL OR e.registration_closes_at > ?))
+          OR (e.status = 'ROUND_ONE' AND ${unstartedRoundOneHeatExistsSql("e.id")})
+        )
+      LIMIT 1`,
+  ).bind(eventId, now, now).first<{ allowed: number }>();
+  if (available === null) {
+    return json({
+      error: event.status === "ROUND_ONE"
+        ? "Walk-up registration has closed because every Round One heat has started."
+        : "Walk-up registration is not open for this event.",
+    }, 409);
   }
 
   const registrationId = crypto.randomUUID();
   const raceEntryId = crypto.randomUUID();
   const lookupCode = randomLookupCode();
-  const value = validation.value;
   const requestedAt = typeof payload.clientTimestamp === "string" && !Number.isNaN(Date.parse(payload.clientTimestamp))
     ? new Date(payload.clientTimestamp).toISOString()
     : now;
@@ -414,23 +452,32 @@ const createWalkUp = async (
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO race_commands
-          (id, event_id, command_type, result_id, requested_at, completed_at)
-         SELECT ?, id, 'CREATE_STAFF_REGISTRATION', ?, ?, ?
-           FROM events
-          WHERE id = ?
-            AND status = 'REGISTRATION_OPEN'
-            AND (registration_opens_at IS NULL OR registration_opens_at <= ?)
-            AND (registration_closes_at IS NULL OR registration_closes_at > ?)`,
-      ).bind(commandId, registrationId, requestedAt, now, eventId, now, now),
+          (id, event_id, command_type, result_id, requested_at, completed_at,
+           actor_staff_profile_id, request_fingerprint)
+         SELECT ?, e.id, 'CREATE_STAFF_REGISTRATION', ?, ?, ?, ?, ?
+           FROM events e
+          WHERE e.id = ?
+            AND (
+              (e.status = 'REGISTRATION_OPEN'
+                AND (e.registration_opens_at IS NULL OR e.registration_opens_at <= ?)
+                AND (e.registration_closes_at IS NULL OR e.registration_closes_at > ?))
+              OR (e.status = 'ROUND_ONE' AND ${unstartedRoundOneHeatExistsSql("e.id")})
+            )`,
+      ).bind(
+        commandId, registrationId, requestedAt, now, actor.id, requestFingerprint,
+        eventId, now, now,
+      ),
       env.DB.prepare(
         `INSERT INTO registrations
           (id, event_id, first_name, last_name, email, phone, status, lookup_code,
            private_token_hash, email_notifications_enabled, created_via, staff_notes,
            submitted_at, status_changed_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'SUBMITTED', ?, ?, ?, 'STAFF', ?, ?, ?)`,
+         SELECT ?, rc.event_id, ?, ?, ?, ?, 'SUBMITTED', ?, ?, ?, 'STAFF', ?, ?, ?
+           FROM race_commands rc
+          WHERE rc.id = ? AND rc.event_id = ?
+            AND rc.command_type = 'CREATE_STAFF_REGISTRATION' AND rc.result_id = ?`,
       ).bind(
         registrationId,
-        eventId,
         value.input.firstName,
         value.input.lastName,
         value.input.email,
@@ -441,23 +488,34 @@ const createWalkUp = async (
         value.staffNotes,
         now,
         now,
+        commandId,
+        eventId,
+        registrationId,
       ),
       env.DB.prepare(
         `INSERT INTO race_entries (id, event_id, registration_id)
-         VALUES (?, ?, ?)`,
-      ).bind(raceEntryId, eventId, registrationId),
+         SELECT ?, r.event_id, r.id
+           FROM registrations r
+           JOIN race_commands rc ON rc.id = ? AND rc.result_id = r.id
+          WHERE r.id = ? AND r.event_id = ?
+            AND rc.command_type = 'CREATE_STAFF_REGISTRATION'`,
+      ).bind(raceEntryId, commandId, registrationId, eventId),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
            actor_type, occurred_at, details_json)
-         VALUES (?, ?, ?, 'REGISTRATION_CREATED', 'REGISTRATION', ?, 'STAFF', ?, ?)`,
+         SELECT ?, rc.event_id, rc.id, 'REGISTRATION_CREATED', 'REGISTRATION',
+                rc.result_id, 'STAFF', ?, ?
+           FROM race_commands rc
+          WHERE rc.id = ? AND rc.event_id = ?
+            AND rc.command_type = 'CREATE_STAFF_REGISTRATION' AND rc.result_id = ?`,
       ).bind(
         crypto.randomUUID(),
-        eventId,
-        commandId,
-        registrationId,
         now,
         JSON.stringify({ staff_profile_id: actor.id, created_via: "STAFF" }),
+        commandId,
+        eventId,
+        registrationId,
       ),
     ]);
   } catch {
@@ -466,6 +524,7 @@ const createWalkUp = async (
       replayCommand?.event_id === eventId
       && replayCommand.command_type === "CREATE_STAFF_REGISTRATION"
       && replayCommand.result_id !== null
+      && (replayCommand.request_fingerprint == null || replayCommand.request_fingerprint === requestFingerprint)
     ) {
       const replay = await getRegistration(env, replayCommand.result_id);
       if (replay !== null && replay.private_token_hash === tokenHash) {
@@ -476,8 +535,50 @@ const createWalkUp = async (
   }
 
   const created = await getRegistration(env, registrationId);
-  if (created === null) return json({ error: "The saved registration could not be loaded." }, 500);
+  if (created === null) {
+    return json({
+      error: "Walk-up registration has closed because no unstarted Round One heat remains.",
+    }, 409);
+  }
   return registrationResult(created, false, 201, { privateStatusPath: `/r/${privateToken}` });
+};
+
+// "May this desk still admit a walk-up to this event?" — the read-only cutoff
+// projection the registration surface repaints from when a heat starts. It
+// repeats the exact predicate `createWalkUp` guards its command insert with, so
+// the sentence on screen and the answer the write gives can never disagree.
+//
+// It deliberately answers 200 for an event that no longer exists instead of the
+// 404 this repository uses for a missing resource. This is a question about a
+// permission, not a fetch of a record, and the honest answer for a deleted event
+// is "no". The distinction is load-bearing rather than cosmetic: deleting an
+// event publishes a heat refresh signal, so every open registration surface asks
+// this question one more time about an event that has just been removed. A 404
+// there is a browser console error on a page that did nothing wrong, and the
+// full-race journey pins the number of legitimate 404s it is allowed to see.
+const walkUpAdmissionStatus = async (env: Env, eventId: string): Promise<Response> => {
+  const now = new Date().toISOString();
+  const row = await env.DB.prepare(
+    `SELECT e.status AS status,
+            CASE WHEN (
+              e.status = 'REGISTRATION_OPEN'
+              AND (e.registration_opens_at IS NULL OR e.registration_opens_at <= ?)
+              AND (e.registration_closes_at IS NULL OR e.registration_closes_at > ?)
+            ) OR (
+              e.status = 'ROUND_ONE' AND ${unstartedRoundOneHeatExistsSql("e.id")}
+            ) THEN 1 ELSE 0 END AS allowed
+       FROM events e
+      WHERE e.id = ?
+      LIMIT 1`,
+  ).bind(now, now, eventId).first<{ status: string; allowed: number }>();
+
+  return json({
+    eventId,
+    eventExists: row !== null,
+    walkUpAdmission: row === null
+      ? WALK_UP_ADMISSION_WITHOUT_EVENT
+      : walkUpAdmissionFor(row.status, row.allowed === 1),
+  });
 };
 
 const mutableEventStatuses = ["REGISTRATION_OPEN", "REGISTRATION_CLOSED", "ROUND_ONE", "FINAL"];
@@ -1116,6 +1217,18 @@ export const handleParticipantOperations = async (
   actor: StaffActor,
 ): Promise<Response | null> => {
   const url = new URL(request.url);
+  // Least privilege matches the walk-up create it describes: this projection
+  // says whether that command would be accepted, and nothing else about the
+  // event, so it is available to exactly the roles that may run it.
+  const walkUpAdmissionMatch = url.pathname.match(
+    /^\/api\/v1\/staff\/events\/([^/]{1,128})\/walk-up-admission$/,
+  );
+  if (walkUpAdmissionMatch !== null && request.method === "GET") {
+    const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
+    return walkUpAdmissionStatus(env, walkUpAdmissionMatch[1]);
+  }
+
   const eventRegistrationsMatch = url.pathname.match(
     /^\/api\/v1\/staff\/events\/([^/]{1,128})\/registrations$/,
   );
