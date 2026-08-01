@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closingIssueNumbers, firstDeployedRelease, markerNumbers, questionAnswered, recoverFailedIssue, validExactCheck } from "../scripts/agent-pipeline.mjs";
+import { closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, questionAnswered, recoverFailedIssue, validExactCheck, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
 
 function fakeRecoveryGithub(comments) {
   const actions = { labels: [], comments: [], dispatched: 0 };
@@ -162,4 +162,50 @@ test("an identical release commit settles as deployed", async () => {
   const github = { rest: { repos: { compareCommitsWithBasehead: async () => ({ data: { status: "identical" } }) } } };
 
   assert.equal((await firstDeployedRelease(github, "o", "r", runs, "ddd")).id, 4);
+});
+
+function fakeStateGithub(comments) {
+  const written = [];
+  const github = {
+    paginate: async () => comments,
+    rest: {
+      issues: {
+        listComments: () => {},
+        get: async () => ({ data: { labels: [{ name: "agent:failed" }, { name: "enhancement" }] } }),
+        setLabels: async ({ labels }) => { written.push(labels); },
+      },
+    },
+  };
+  return { github, context: { repo: { owner: "o", repo: "r" } }, written };
+}
+
+test("an older run may not overwrite state a newer run has claimed", async () => {
+  const comments = [
+    { body: "<!-- agent-pipeline task-run=100 -->" },
+    { body: "<!-- agent-pipeline task-run=200 -->" },
+  ];
+  const { github, context, written } = fakeStateGithub(comments);
+
+  assert.equal(await writeIssueStateIfCurrent({ github, context }, 7, "agent:failed", 100), false);
+  assert.deepEqual(written, []);
+});
+
+test("the newest run owns the state and writes it", async () => {
+  const comments = [
+    { body: "<!-- agent-pipeline task-run=100 -->" },
+    { body: "<!-- agent-pipeline task-run=200 -->" },
+  ];
+  const { github, context, written } = fakeStateGithub(comments);
+
+  assert.equal(await writeIssueStateIfCurrent({ github, context }, 7, "agent:running", 200), true);
+  assert.deepEqual(written, [["enhancement", "agent:running"]]);
+  assert.equal(latestTaskRun(comments), 200);
+});
+
+test("an issue with no claim yet accepts the write", async () => {
+  const { github, context, written } = fakeStateGithub([{ body: "no markers here" }]);
+
+  assert.equal(await writeIssueStateIfCurrent({ github, context }, 7, "agent:queued", 300), true);
+  assert.equal(written.length, 1);
+  assert.equal(latestTaskRun([]), null);
 });
