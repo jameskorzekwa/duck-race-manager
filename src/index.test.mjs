@@ -131,6 +131,7 @@ test("serves the name-search client that ships with My Ducks", async () => {
 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
+  assert.equal(response.headers.get("cache-control"), "no-store");
   assert.match(body, /\/api\/v1\/race-status\/search/);
   assert.match(body, /\/api\/v1\/registrations\/mine\/follow/);
   assert.equal(legacy.status, 404);
@@ -166,10 +167,10 @@ test("serves registration and staff pairing browser clients", async () => {
   const liveUiBody = await liveUi.text();
 
   assert.equal(registration.status, 200);
-  assert.equal(registration.headers.get("cache-control"), "public, max-age=3600");
+  assert.equal(registration.headers.get("cache-control"), "no-store");
   assert.match(await registration.text(), /\/api\/v1\/registrations/);
   assert.equal(participant.status, 200);
-  assert.equal(participant.headers.get("cache-control"), "public, max-age=3600");
+  assert.equal(participant.headers.get("cache-control"), "no-store");
   assert.match(await participant.text(), /\/api\/v1\/registrations\/mine/);
   assert.equal(staff.status, 200);
   assert.equal(staff.headers.get("cache-control"), "no-store");
@@ -184,7 +185,7 @@ test("serves registration and staff pairing browser clients", async () => {
   assert.equal(staffAccess.headers.get("strict-transport-security"), "max-age=31536000");
   assert.match(await staffAccess.text(), /\/api\/v1\/staff\/profiles/);
   assert.match(await live.text(), /\/api\/v1\/race-board/);
-  assert.equal(live.headers.get("cache-control"), "public, max-age=3600");
+  assert.equal(live.headers.get("cache-control"), "no-store");
   assert.match(liveUiBody, /\/api\/v1\/live/);
   assert.match(liveUiBody, /\/api\/v1\/staff\/session/);
   assert.equal(liveUi.headers.get("cache-control"), "no-store");
@@ -770,6 +771,19 @@ const staffHtmlPaths = [
   "/mock/staff/ducks/128/pair",
 ];
 
+const liveStaffNavPaths = new Set([
+  "/staff",
+  "/staff/access",
+  "/staff/inventory",
+  "/staff/registration",
+  "/staff/start-line",
+  "/staff/announcer",
+  "/staff/finish-line",
+  `/staff/ducks/${"a".repeat(32)}`,
+  "/mock/staff/home",
+  "/mock/staff/ducks/128/working",
+]);
+
 test("staff pages render the same primary site nav as the public site", async () => {
   // A staff member is also a visitor: during Registration a staff page offers
   // Home, Register, My Ducks, Staff, exactly like `/` and `/register` do.
@@ -790,19 +804,24 @@ test("staff pages render the same primary site nav as the public site", async ()
 
       assert.equal(response.status, 200, where);
       assert.deepEqual(primaryNavLabels(body), expected, where);
-      assert.equal(primaryNav(body), primaryNav(publicBody).replace(" data-live-nav", ""), where);
+      assert.equal(
+        primaryNav(body).replace(" data-live-nav", ""),
+        primaryNav(publicBody).replace(" data-live-nav", ""),
+        where,
+      );
+      assert.equal(primaryNav(body).includes("data-live-nav"), liveStaffNavPaths.has(path), where);
     }
   }
 });
 
-test("staff pages never take the live-nav subscription the hub admission is bounded by", async () => {
-  // `RaceUpdates` admits a bounded number of connections and the navigation
-  // subscriber in `live-ui.js` is gated on `data-live-nav`. Staff pages carry
-  // the server-rendered phase only, so they hold no nav subscription.
+test("staff pages with operational live data share their socket with phase navigation", async () => {
+  // `RaceUpdates` admits a bounded number of connections. These pages already
+  // have an operational subscriber, so a navigation subscriber adds no socket;
+  // static mock and sign-in surfaces remain unmarked.
   for (const path of staffHtmlPaths) {
     const body = await (await createWorker(async () => chromeActor)
       .fetch(new Request(`https://quickducks.com${path}`), phaseEnv("REGISTRATION_OPEN"))).text();
-    assert.doesNotMatch(primaryNav(body), /data-live-nav/, path);
+    assert.equal(primaryNav(body).includes("data-live-nav"), liveStaffNavPaths.has(path), path);
     assert.match(primaryNav(body), /data-phase="REGISTRATION"/, path);
   }
 
@@ -1608,8 +1627,11 @@ test("an unknown or unpaired duck number renders a friendly not-found state", as
   assert.match(body, /Duck #9999 isn’t racing\./);
   assert.match(body, /No duck with this number is paired with a participant in the current race\./);
   assert.match(body, /href="\/"/);
-  // A missing duck exposes no live surface and no enumeration detail: the copy
-  // never distinguishes an unknown number from an unpaired inventory duck.
+  // The same public number endpoint is watched so an already-open 404 can become
+  // the duck detail after pairing. The paint still exposes no personal surface
+  // or enumeration detail and never distinguishes the possible causes.
+  assert.match(body, /data-live-missing-duck="9999"/);
+  assert.match(body, /src="\/assets\/live\.js"/);
   assert.doesNotMatch(body, /data-live-personal/);
   assert.doesNotMatch(panel, /inventory|available|reserved|unpaired|does not exist|unknown/i);
 });

@@ -2811,7 +2811,10 @@ fixed route into one or more finite domains: `event`, `participants`, `ducks`,
 Publication runs best-effort through `ExecutionContext.waitUntil`.
 Read-only GETs, round-one plan preview, and provisioning tag classification do
 not publish. Replayed successful mutation responses may publish a harmless
-duplicate invalidation.
+duplicate invalidation. Browser-collection follow/unfollow and owner-only
+contact edits publish only the generic `participants` invalidation: every
+browser still re-reads its own cookie- and proof-scoped projection, and no
+collection identifier or private field enters the frame.
 
 The object accepts and broadcasts only a validated bounded
 `{type:"refresh", domains:[...], version:<random UUID>}` frame. It stores no race
@@ -2830,6 +2833,20 @@ may read them: the desk carries the participants surface and therefore asks for
 also listens narrowly for `heats` so a cutoff cannot be deferred by a dirty
 form. The Admin console adds its full heat surface and, for an administrator,
 `support`.
+The home page always carries the same live-capable Happening now region, even
+while it displays the established Preparing copy. Opening registration can
+therefore replace that region with the public event, registration navigation,
+and Register action without a document refresh. Phase changes also reconcile
+the phase-only action on My Ducks. Static Preparing and closed registration
+pages re-enter their server renderer when the phase changes; the open form keeps
+its typed-input protection and updates availability in place. Signed-in staff
+pages that already own an operational subscription share that connection with
+their public phase navigation. A canonical `/duck/{number}` page that currently
+shows the privacy-neutral not-racing 404 also watches that same public number
+projection; if staff pair the duck elsewhere, the already-open page re-enters
+the server renderer and becomes the public detail without exposing why it was
+previously unresolved. Sign-in, no-access, error, and catch-all not-found pages
+remain unsubscribed.
 Reconnect uses bounded jitter and triggers an integrity refetch to close the
 missed-signal gap. While disconnected or when WebSocket is unavailable,
 subscribers poll approximately every five seconds; while connected they perform
@@ -2844,10 +2861,36 @@ refresh proceeds. Station controls and
 rosters are replaced only when heat ID, revision, or state changed, with focus
 restored when possible.
 
+Every renderer that can overlap an initial, manual, post-command, or live read
+uses a shared monotonic request guard. A response may paint only while it is the
+latest request for that surface and still belongs to the selected event or
+record. This covers the public board and personal status, phase navigation,
+registration, My Ducks, unresolved numbered-duck recovery, staff
+event/participant/heat/finalist/support views, staff-access management,
+inventory, duck inspection/pairing, and all race-day stations. Participant,
+duck, and notification-attempt selections are revalidated by authoritative
+refreshes rather than blocking an externally changed record indefinitely. Live
+frames remain invalidations, not ordered race state. The duck-follow control
+invalidates both its own read and the device-presence read before saving, and
+the full event detail and narrow walk-up cutoff projection share a generation
+guard because both render the same admission controls.
+Public name-search follow actions likewise retire a search that started before
+the collection mutation, then queue a new authoritative search.
+
 An `all` signal is exceptional: every page removes its rendered main content and
 server-reloads immediately so deletion cannot leave participant or staff data on
 screen. Staff deactivation and reduced roles use the authorization revalidation
-path above and likewise override dirty-form deferral. D1/API data is always
+path above and likewise override dirty-form deferral. That revalidation runs for
+polling, reconnect, and visibility recovery as well as a received `staff`
+signal, so a missed signal cannot preserve an obsolete private projection. Page
+invalidation also makes every in-flight response unpaintable before navigation.
+Dropped deletion signals are repaired by polling the same authoritative APIs;
+in particular, an empty race-board response leaves the `/race` route for the
+Preparing home page just as a new server navigation does. The unversioned
+application scripts are served `no-store` because they share one global runtime,
+so a deployment or rollback cannot combine page-client and live-runtime
+versions.
+D1/API data is always
 authoritative, and a failed live publication never changes a committed mutation
 response.
 

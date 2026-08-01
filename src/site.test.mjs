@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { participantScript } from "./client-scripts.ts";
 import {
+  renderAnnouncer,
   renderDuck,
   renderFinishLine,
   renderHome,
@@ -300,15 +301,17 @@ test("the home hero is copy and artwork only, with the CTA in the race-named sec
   assert.match(hero, /<h1><span>Find your duck\.<\/span><br><span>Cheer it home\.<\/span><\/h1>/);
   assert.doesNotMatch(hero, /class="actions"|<a\b|data-home-cta/);
   assert.match(summary, /<a class="button" href="\/register" data-home-cta>Register<\/a>/);
-  // Preparing has no CTA, so it has no happening-now section, and the hero keeps
-  // the empty-state sentence in its own card below the artwork.
+  // Preparing has no CTA, but keeps the same live-capable happening-now section
+  // so registration can appear without replacing the document.
   const preparing = renderHome("PREPARING");
   const preparingHero = preparing.match(/<section class="hero">[\s\S]*?<\/section>/)?.[0];
   assert.ok(preparingHero);
   assert.doesNotMatch(preparingHero, /data-home-preparing|The next race is being prepared/);
-  assert.match(preparing, /<section class="status-section home-preparing-card"[^>]*><p class="eyebrow">Happening now<\/p><h2[^>]*data-home-preparing>/);
+  assert.match(preparing, /<section class="status-section home-preparing-card" data-live-summary[^>]*>[\s\S]*?<p class="eyebrow">Happening now<\/p>/);
   assert.match(preparing, /data-home-preparing>The next race is being prepared\./);
-  assert.doesNotMatch(preparing, /data-live-summary|data-home-cta|class="actions"/);
+  assert.match(preparing, /data-home-actions hidden><\/div>/);
+  assert.match(preparing, /src="\/assets\/live\.js"/);
+  assert.doesNotMatch(preparing, /data-home-cta/);
 });
 
 test("the populated race-status card always sits directly below the home hero", () => {
@@ -545,7 +548,7 @@ test("both public duck views paint the follow control from the resolved follow s
   }
 });
 
-test("the duck not-found view is friendly, terminal, and reveals nothing extra", () => {
+test("the duck not-found view is friendly, live-capable, and reveals nothing extra", () => {
   const markup = renderPublicDuckNotFound("4096");
   const panel = markup.match(/<section class="page-panel">[\s\S]*?<\/section>/)?.[0];
 
@@ -564,8 +567,11 @@ test("the duck not-found view is friendly, terminal, and reveals nothing extra",
     renderPublicDuck(duckStatus(), "RACING"),
     /<a class="button secondary" href="\/race">Back to the race board<\/a>/,
   );
-  // No live surface, no board, and no wording that separates the possible causes.
-  assert.doesNotMatch(markup, /data-live-personal|data-live-board|assets\/live\.js/);
+  // The visible number is enough to recheck this same public projection after a
+  // pairing signal. It still renders no board or personal data while unresolved.
+  assert.match(markup, /data-live-missing-duck="4096"/);
+  assert.match(markup, /assets\/live\.js/);
+  assert.doesNotMatch(markup, /data-live-personal|data-live-board/);
   assert.doesNotMatch(panel, /inventory|available|reserved|unpaired|unknown|does not exist/i);
   // The requested number is echoed back escaped, never as raw markup.
   assert.match(renderPublicDuckNotFound("<b>1</b>"), /Duck #&lt;b&gt;1&lt;\/b&gt; isn’t racing\./);
@@ -618,26 +624,34 @@ test("no rendered page offers a Preview button", () => {
   );
 });
 
-test("staff renderers take the resolved public phase and never claim a live-nav slot", () => {
-  const staffPages = [
-    ["staff login", renderStaffLogin("/staff", "REGISTRATION")],
+test("operational staff renderers keep phase navigation live without activating sign-in pages", () => {
+  const operationalPages = [
     ["staff home", renderStaffHome("Administrator", true, [], "REGISTRATION")],
+    ["registration desk", renderStaffRegistration("Registration staff", false, ["REGISTRATION"], "REGISTRATION")],
     ["staff access", renderStaffAccess("Administrator", true, [], "REGISTRATION")],
-    ["start line", renderStartLine("Start staff", false, false, ["HEAT_RUNNER"], "REGISTRATION")],
-    ["finish line", renderFinishLine("Finish staff", false, false, ["RESULT_TAKER"], "REGISTRATION")],
+    ["start line", renderStartLine("Start staff", true, false, ["HEAT_RUNNER"], "REGISTRATION")],
+    ["announcer", renderAnnouncer("Announcer", true, false, ["ANNOUNCER"], "REGISTRATION")],
+    ["finish line", renderFinishLine("Finish staff", true, false, ["RESULT_TAKER"], "REGISTRATION")],
     ["inventory", renderStaffInventory("Inventory staff", "https://quickducks.com", false, ["DUCK_MANAGER"], "REGISTRATION")],
     ["staff duck", renderStaffDuck("a".repeat(32), "Registration staff", false, ["REGISTRATION"], "REGISTRATION")],
-    ["pairing mock", renderStaffPairing("REGISTRATION")],
   ];
 
-  for (const [label, markup] of staffPages) {
+  for (const [label, markup] of operationalPages) {
     const nav = markup.match(/<nav class="nav"[\s\S]*?<\/nav>/)?.[0];
     assert.ok(nav, label);
     assert.match(nav, /data-phase="REGISTRATION"/, label);
     assert.match(nav, /<a href="\/register" data-nav-register>Register<\/a>/, label);
     assert.match(nav, /data-my-ducks-nav data-phase-visible="true">My Ducks<\/a>/, label);
-    // `data-live-nav` is the live hub's admission marker; staff pages hold no
-    // navigation subscription, so the server paint is final for them.
+    // These pages already subscribe for their operational data, so this marker
+    // adds a nav subscriber without adding another socket.
+    assert.match(nav, /data-live-nav/, label);
+  }
+
+  for (const [label, markup] of [
+    ["staff login", renderStaffLogin("/staff", "REGISTRATION")],
+    ["pairing mock", renderStaffPairing("REGISTRATION")],
+  ]) {
+    const nav = markup.match(/<nav class="nav"[\s\S]*?<\/nav>/)?.[0] ?? "";
     assert.doesNotMatch(nav, /data-live-nav/, label);
   }
 

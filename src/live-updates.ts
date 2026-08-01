@@ -191,6 +191,13 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && pathname === "/api/v1/registrations/mine/duck-name") {
     return domains("participants", "ducks", "heats");
   }
+  // Browser-collection membership can be open in more than one tab. The signal
+  // carries no collection or participant data; each browser simply re-reads
+  // its own cookie-scoped projection. Owner-only contact edits deliberately do
+  // not publish global activity metadata.
+  if (method === "POST" && /^\/api\/v1\/registrations\/mine\/(follow|unfollow)$/.test(pathname)) {
+    return domains("participants");
+  }
   // Public self-service deletion removes a participant from the race dataset,
   // so every participant surface has to refetch, exactly like creation.
   if (method === "POST" && pathname === "/api/v1/registrations/mine/delete") {

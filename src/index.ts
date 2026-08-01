@@ -196,8 +196,9 @@ export const createWorker = (
     // its navigation, and the public pages their whole body, from this phase, so
     // the first paint is already correct. Staff pages resolve it too: their
     // primary site navigation is the same one a visitor sees, so it has to be
-    // built from the same phase. They still set no `data-live-nav` marker, so
-    // they take no live-navigation subscription and hold no socket.
+    // built from the same phase. Signed-in operational pages opt their primary
+    // navigation into the live hub they already use; sign-in, no-access, error,
+    // and not-found pages keep no live-navigation subscriber or socket.
     // `publicPhaseForRender` degrades a
     // database failure to the Preparing phase instead of failing the render, so
     // no page on this path can 500 because of the phase query alone.
@@ -265,7 +266,7 @@ export const createWorker = (
       return new Response(searchScript, {
         headers: {
           ...securityHeaders,
-          "cache-control": "public, max-age=3600",
+          "cache-control": "no-store",
           "content-type": "text/javascript; charset=utf-8",
         },
       });
@@ -298,9 +299,9 @@ export const createWorker = (
       return new Response(script, {
         headers: {
           ...securityHeaders,
-          "cache-control": ["/assets/live-ui.js", "/assets/staff-duck.js", "/assets/staff-home.js", "/assets/staff-access.js", "/assets/start-line.js", "/assets/announcer.js", "/assets/finish-line.js", "/assets/staff-inventory.js", "/assets/app-select.js", "/assets/app-date-picker.js"].includes(url.pathname)
-            ? "no-store"
-            : "public, max-age=3600",
+          // These classic scripts share globals and are deployed as one unit.
+          // Never mix a cached page client with a rolled-back live-ui runtime.
+          "cache-control": "no-store",
           "content-type": "text/javascript; charset=utf-8",
         },
       });

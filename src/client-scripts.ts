@@ -1,5 +1,5 @@
 import { DUCK_NAME_ADJECTIVES, DUCK_NAME_NOUNS } from "./duck-name-suggestions.ts";
-import { publicPhaseByStatus } from "./public-phase.ts";
+import { homePhaseCta, publicPhaseByStatus } from "./public-phase.ts";
 import { publicHeatStatusLabels, publicOfficialResults } from "./race-status.ts";
 import { DUCK_NAME_MAX_LENGTH } from "./registration.ts";
 
@@ -232,6 +232,7 @@ const protectionReady = form.dataset.protectionReady === "true";
 let currentEvent = null;
 let pendingCommand = null;
 let registrationInFlight = false;
+const registrationEventRequest = liveCreateLatestRequest();
 
 const randomToken = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -283,6 +284,7 @@ firstNameInput.addEventListener("input", updatePublicNamePolicy);
 lastNameInput.addEventListener("input", updatePublicNamePolicy);
 
 const loadRegistrationEvent = async () => {
+  const request = registrationEventRequest.begin();
   try {
     const response = await fetch("/api/v1/events/current", {
       headers: { accept: "application/json" },
@@ -290,6 +292,7 @@ const loadRegistrationEvent = async () => {
     });
     if (!response.ok) throw new Error();
     const { event } = await response.json();
+    if (!registrationEventRequest.isCurrent(request) || document.hidden) return;
     currentEvent = event;
     if (!event) {
       eventName.textContent = "The next race is being prepared";
@@ -318,6 +321,7 @@ const loadRegistrationEvent = async () => {
     submitButton.disabled = false;
     setMessage("Ready when you are.");
   } catch {
+    if (!registrationEventRequest.isCurrent(request)) return;
     eventName.textContent = "Race details unavailable";
     eventDate.textContent = "Please refresh and try again.";
     submitButton.disabled = true;
@@ -1412,6 +1416,7 @@ const participantRender = (registrations) => {
 const participantFollowRoot = document.querySelector("[data-duck-follow]");
 const participantFollowMessage = document.querySelector("[data-follow-message]");
 let participantFollowBusy = false;
+const participantFollowRequest = liveCreateLatestRequest();
 
 // The duck page addresses itself by tag token or by visible number, and the
 // follow signals come from that same public endpoint.
@@ -1438,6 +1443,11 @@ const participantFollowAdded = () => {
 };
 
 const participantFollow = async (followId, button) => {
+  // A presence or follow-state read may already be in flight when the visitor
+  // clicks. Neither response may repaint the successful mutation with the
+  // state it observed before this command began.
+  participantFollowRequest.invalidate();
+  participantRequest.invalidate();
   participantFollowBusy = true;
   button.disabled = true;
   button.textContent = "Adding…";
@@ -1497,16 +1507,19 @@ const participantRenderFollow = (status) => {
 const participantRefreshFollow = async () => {
   const path = participantDuckStatusPath();
   if (path === null) return;
+  const request = participantFollowRequest.begin();
   const response = await fetch(path, { headers: { accept: "application/json" }, cache: "no-store" });
   // A duck that stopped being public is handled by the board client's own
   // reload path; this control simply keeps whatever the server painted.
   if (!response.ok) return;
   const body = await response.json();
-  if (document.hidden) return;
+  if (document.hidden || !participantFollowRequest.isCurrent(request)) return;
   participantRenderFollow(body.raceStatus);
 };
 
+const participantRequest = liveCreateLatestRequest();
 const participantFetch = async () => {
+  const request = participantRequest.begin();
   const renderGeneration = participantRenderGeneration;
   const response = await fetch(participantRoot
     ? "/api/v1/registrations/mine"
@@ -1518,11 +1531,13 @@ const participantFetch = async () => {
   const body = await response.json();
   if (!participantRoot) {
     if (!body || typeof body.hasRegistrations !== "boolean") throw new Error("invalid presence response");
+    if (!participantRequest.isCurrent(request) || document.hidden) return;
     participantSetNavPresence(body.hasRegistrations);
     return;
   }
   if (!body || !Array.isArray(body.registrations)) throw new Error("invalid collection response");
   const registrations = await Promise.all(body.registrations.map(participantLoadContact));
+  if (!participantRequest.isCurrent(request)) return;
   participantSetNavPresence(registrations.length > 0);
   participantSetSearchPlacement(registrations.length > 0);
   // The hub checks dirty state before starting a refresh. Check it again before
@@ -1588,6 +1603,22 @@ export const liveRuntimeHelpersScript = String.raw`
 const liveAllowedDomains = new Set(["all", "event", "participants", "ducks", "heats", "staff", "support"]);
 const livePollDelay = (connected) => connected ? 30000 : 5000;
 const liveDirtyDeferralMs = 300000;
+// Every authoritative renderer uses the same monotonic rule: once a newer read
+// starts, an older response may no longer paint. The page version also makes a
+// delete/access-revocation clear terminal, so an in-flight response cannot put
+// private or deleted data back while navigation is starting.
+let livePageVersion = 0;
+const liveInvalidatePage = () => { livePageVersion += 1; };
+const liveCreateLatestRequest = () => {
+  let latest = 0;
+  return {
+    begin() { return { request: ++latest, page: livePageVersion }; },
+    invalidate() { latest += 1; },
+    isCurrent(token) {
+      return Boolean(token) && token.request === latest && token.page === livePageVersion;
+    },
+  };
+};
 const liveReconnectDelay = (attempt, randomValue = Math.random()) => {
   const base = Math.min(1000 * (2 ** attempt), 15000);
   return Math.round(Math.min(15000, base * (0.8 + (0.4 * randomValue))));
@@ -1689,6 +1720,7 @@ const liveCreateHub = ({
     return now() - subscriber.dirtySince < liveDirtyDeferralMs;
   };
   const clearPrivatePage = () => {
+    liveInvalidatePage();
     const main = documentObject.querySelector?.("main");
     if (main) main.replaceChildren();
   };
@@ -1715,7 +1747,10 @@ const liveCreateHub = ({
       for (const subscriber of subscribers) subscriber.queue();
     };
   };
-  const refreshAll = () => {
+  const refreshAll = async () => {
+    // Polling, reconnect, and visibility recovery must enforce staff access too;
+    // a missed staff signal must never leave an old private projection visible.
+    if (!await verifyStaffAccess()) return;
     for (const subscriber of subscribers) subscriber.queue();
   };
   const verifyStaffAccess = () => {
@@ -1906,15 +1941,17 @@ const duckDetailLink = (documentObject, duckNumber, label) => {
 // This runtime ships inside `live-ui.js`, which every rendered page loads, so it
 // must not subscribe unconditionally: a subscriber is what makes the lazy hub
 // open its socket and start its pollers. The server marks public content pages
-// with `data-live-nav` on the nav, and only those pages register the subscriber.
-// A staff sign-in page, a not-found page, an unsupported-device page, or a staff
-// error page therefore keeps its server-rendered nav and holds no connection.
+// with `data-live-nav` on the nav. Signed-in operational pages carry it too and
+// reuse the live connection their own data already needs. A staff sign-in,
+// no-access, not-found, or staff error page therefore keeps its server-rendered
+// nav and holds no connection.
 export const sitePhaseNavScript = String.raw`
 const navPhaseByStatus = ${JSON.stringify(publicPhaseByStatus)};
 const navPhaseForStatus = (status) => Object.prototype.hasOwnProperty.call(navPhaseByStatus, status)
   ? navPhaseByStatus[status]
   : "PREPARING";
 const navRoot = document.querySelector("[data-site-nav]");
+const navRequest = liveCreateLatestRequest();
 // Admission marker, server-rendered on public content pages only. Its absence
 // means this page has no live need, so it must not subscribe and must stay
 // socket-free.
@@ -1941,6 +1978,19 @@ const navApplyMyDucks = (phase) => {
   navMyDucks.dataset.phaseVisible = phase === "PREPARING" ? "false" : "true";
   navMyDucks.hidden = navMyDucks.dataset.phaseVisible !== "true";
 };
+// My Ducks keeps the same section shell through every public phase. Its one
+// registration action and empty awaiting section follow the authoritative phase
+// in place, instead of retaining the server phase for the life of the tab.
+const navApplyRegistrationActions = (phase) => {
+  const allowed = phase === "REGISTRATION";
+  const action = document.querySelector("[data-register-another]");
+  if (action) action.hidden = !allowed;
+  const awaiting = document.querySelector('[data-participant-section="awaiting"]');
+  if (awaiting) {
+    if (allowed) awaiting.dataset.keepEmpty = "true";
+    else delete awaiting.dataset.keepEmpty;
+  }
+};
 const navRender = (phase) => {
   if (!navRoot) return;
   navRoot.dataset.phase = phase;
@@ -1950,12 +2000,14 @@ const navRender = (phase) => {
   const swap = navSwapLink(phase);
   if (swap) links.push(swap);
   navApplyMyDucks(phase);
+  navApplyRegistrationActions(phase);
   if (navMyDucks) links.push(navMyDucks);
   const staff = navRoot.querySelector("[data-nav-staff]");
   if (staff) links.push(staff);
   navRoot.replaceChildren(...links);
 };
 const navRefresh = async () => {
+  const request = navRequest.begin();
   try {
     const response = await fetch("/api/v1/events/current", {
       headers: { accept: "application/json" },
@@ -1963,7 +2015,18 @@ const navRefresh = async () => {
     });
     if (!response.ok) return;
     const body = await response.json();
-    navRender(navPhaseForStatus(body && body.event ? body.event.status : null));
+    if (!navRequest.isCurrent(request) || document.hidden) return;
+    const phase = navPhaseForStatus(body && body.event ? body.event.status : null);
+    const phasePage = document.querySelector("[data-live-phase-page]");
+    // Preparing/closed registration pages are intentionally structural and do
+    // not load the form client. Re-enter the server renderer when their phase
+    // changes; no typed draft exists on these variants to lose.
+    if (phasePage && phasePage.dataset.renderedPhase !== phase) {
+      document.querySelector("main")?.replaceChildren();
+      location.reload();
+      return;
+    }
+    navRender(phase);
   } catch {}
 };
 if (navIsLive) {
@@ -2122,6 +2185,14 @@ const liveSummaryRoot = document.querySelector("[data-live-summary]");
 const liveSummaryStage = document.querySelector("[data-live-summary-stage]");
 const liveSummaryTitle = document.querySelector("[data-live-summary-title]");
 const liveSummaryLine = document.querySelector("[data-live-summary-line]");
+const liveSummaryActions = document.querySelector("[data-home-actions]");
+const liveMissingDuck = document.querySelector("[data-live-missing-duck]");
+const liveHomePhaseCta = ${JSON.stringify(homePhaseCta)};
+const liveHomePhaseByStatus = ${JSON.stringify(publicPhaseByStatus)};
+const liveHomePhase = (status) => Object.prototype.hasOwnProperty.call(liveHomePhaseByStatus, status)
+  ? liveHomePhaseByStatus[status]
+  : "PREPARING";
+const liveRequest = liveCreateLatestRequest();
 let liveBoardVersion = null;
 let liveSummaryVersion = null;
 
@@ -2317,18 +2388,44 @@ const liveRenderSummary = (board) => {
   if (version === liveSummaryVersion) return;
   liveSummaryVersion = version;
   if (!board.event) {
+    liveSummaryRoot.classList.add("home-preparing-card");
+    liveSummaryStage.hidden = true;
     liveSummaryStage.textContent = "No race scheduled";
-    liveSummaryTitle.textContent = "No race is live right now.";
-    liveSummaryLine.textContent = "The next race will appear here when registration opens.";
+    liveSummaryTitle.dataset.homePreparing = "";
+    liveSummaryTitle.textContent = "The next race is being prepared.";
+    liveSummaryLine.textContent = "Check back soon for the next QuickDucks race.";
+    if (liveSummaryActions) {
+      liveSummaryActions.replaceChildren();
+      liveSummaryActions.hidden = true;
+    }
     return;
   }
   const event = board.event;
+  liveSummaryRoot.classList.remove("home-preparing-card");
+  liveSummaryStage.hidden = false;
+  delete liveSummaryTitle.dataset.homePreparing;
   liveSummaryStage.textContent = liveEventStage(event.status).label;
   liveSummaryTitle.textContent = event.name;
   liveSummaryLine.textContent = event.currentHeat
     ? "Running now: " + liveRoundLabel(event.currentHeat.round) + " · Heat " + event.currentHeat.number
       + " · " + liveHeatStatus(event.currentHeat.status) + "."
     : liveEventStage(event.status).summary;
+  if (liveSummaryActions) {
+    const phase = liveHomePhase(event.status);
+    const cta = Object.prototype.hasOwnProperty.call(liveHomePhaseCta, phase)
+      ? liveHomePhaseCta[phase]
+      : null;
+    liveSummaryActions.replaceChildren();
+    if (cta) {
+      const primary = liveText("a", cta.label, "button");
+      primary.href = cta.href;
+      primary.dataset.homeCta = "";
+      const boardLink = liveText("a", "Open the full race board", "button secondary");
+      boardLink.href = "/race";
+      liveSummaryActions.append(primary, boardLink);
+    }
+    liveSummaryActions.hidden = cta === null;
+  }
 };
 
 const liveFetchJson = async (url) => {
@@ -2352,7 +2449,7 @@ const liveUpdateDuckHeading = (status) => {
   document.title = identity + " · QuickDucks";
 };
 
-const liveRefreshPersonal = async () => {
+const liveRefreshPersonal = async (request) => {
   const personal = document.querySelector("[data-live-personal]");
   if (!personal) return;
   const pathParts = location.pathname.split("/");
@@ -2361,7 +2458,7 @@ const liveRefreshPersonal = async () => {
   try {
     if (personal.dataset.livePersonal === "private") {
       const body = await liveFetchJson("/api/v1/registrations/" + encodeURIComponent(token));
-      if (document.hidden) return;
+      if (document.hidden || !liveRequest.isCurrent(request)) return;
       personal.replaceChildren();
       const facts = liveText("dl", "", "facts");
       liveAddFact(facts, "Participant", body.firstName + " " + body.lastName);
@@ -2386,14 +2483,14 @@ const liveRefreshPersonal = async () => {
     // shared catch below, which reloads into the friendly not-found page.
     if (personal.dataset.livePersonal === "number") {
       const body = await liveFetchJson("/api/v1/ducks/number/" + encodeURIComponent(token));
-      if (document.hidden) return;
+      if (document.hidden || !liveRequest.isCurrent(request)) return;
       personal.replaceChildren();
       liveDuckDetailFacts(personal, body.raceStatus);
       liveUpdateDuckHeading(body.raceStatus);
       return;
     }
     const body = await liveFetchJson("/api/v1/ducks/" + encodeURIComponent(token));
-    if (document.hidden) return;
+    if (document.hidden || !liveRequest.isCurrent(request)) return;
     personal.replaceChildren();
     if (body.destination === "RACE_STATUS") {
       liveRaceFacts(personal, body.raceStatus, true);
@@ -2403,6 +2500,7 @@ const liveRefreshPersonal = async () => {
       location.replace("/");
     }
   } catch (error) {
+    if (!liveRequest.isCurrent(request)) return;
     if (error.status === 404) {
       document.querySelector("main")?.replaceChildren();
       location.reload();
@@ -2411,24 +2509,61 @@ const liveRefreshPersonal = async () => {
   }
 };
 
+// A numbered duck page may have been opened before that inventory duck was
+// paired into the public race. Its friendly 404 paint carries only the visible
+// number; a successful empty probe avoids repeated expected-404 console noise.
+// Once the same public endpoint starts resolving, reload through the server
+// renderer so the complete detail page and follow state arrive together.
+const liveRefreshMissingDuck = async (request) => {
+  if (!liveMissingDuck) return false;
+  const visibleNumber = liveMissingDuck.dataset.liveMissingDuck;
+  if (!visibleNumber) return true;
+  const response = await fetch("/api/v1/ducks/number/" + encodeURIComponent(visibleNumber) + "?probe=1", {
+    headers: { accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error("refresh failed");
+  const body = await response.json();
+  if (
+    document.hidden || !liveRequest.isCurrent(request)
+    || !body || !body.raceStatus || body.raceStatus.duck?.visibleNumber !== Number(visibleNumber)
+  ) return true;
+  document.querySelector("main")?.replaceChildren();
+  location.reload();
+  return true;
+};
+
 const liveRefreshWork = async () => {
+  const request = liveRequest.begin();
   try {
+    if (await liveRefreshMissingDuck(request)) return;
     const board = await liveFetchJson("/api/v1/race-board");
+    // The server redirects /race to Preparing when no event exists. Recover the
+    // same route contract from an authoritative poll too, so a missed best-
+    // effort deletion signal cannot strand an old Race Status document.
+    if (!board.event && location.pathname === "/race") {
+      if (document.hidden || !liveRequest.isCurrent(request)) return;
+      liveInvalidatePage();
+      document.querySelector("main")?.replaceChildren();
+      location.replace("/");
+      return;
+    }
     await Promise.allSettled([
-      liveRefreshPersonal(),
+      liveRefreshPersonal(request),
     ]);
-    if (document.hidden) return;
+    if (document.hidden || !liveRequest.isCurrent(request)) return;
     if (liveBoardRoot) liveRenderBoard(board);
     liveRenderSummary(board);
     liveShowBoardError(null);
   } catch {
+    if (!liveRequest.isCurrent(request)) return;
     liveShowBoardError("The race board could not be loaded. This page keeps trying automatically.");
   }
 };
-if (liveBoardRoot || liveSummaryRoot) {
+if (liveBoardRoot || liveSummaryRoot || liveMissingDuck) {
   globalThis.quickDucksLive.subscribe({
     domains: ["event", "participants", "ducks", "heats"],
-    root: liveBoardRoot || liveSummaryRoot,
+    root: liveBoardRoot || liveSummaryRoot || liveMissingDuck,
     refresh: liveRefreshWork,
   });
 }
@@ -2446,6 +2581,7 @@ const startMessage = document.querySelector("[data-station-message]");
 let startRenderKey = null;
 let startCommandBusy = false;
 let startSubscription = null;
+const startRequest = liveCreateLatestRequest();
 
 const startText = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -2560,27 +2696,28 @@ const startEmpty = (message) => {
   startMessage.textContent = "This page will keep checking for the next heat.";
 };
 const startLoadWork = async () => {
+  const request = startRequest.begin();
   try {
     const events = await startApi("/api/v1/staff/events");
-    if (document.hidden) return;
+    if (document.hidden || !startRequest.isCurrent(request)) return;
     const event = events.events.find((item) => ["ROUND_ONE", "FINAL"].includes(item.status));
     if (!event) {
       startEmpty("No race round is active right now.");
       return;
     }
     const listed = await startApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats");
-    if (document.hidden) return;
+    if (document.hidden || !startRequest.isCurrent(request)) return;
     const heat = startPickHeat(listed.heats, event.status === "FINAL" ? "FINAL" : "ROUND_ONE");
     if (!heat) {
       startEmpty(event.name + " has no unfinished heat in this round.");
       return;
     }
     const detail = await startApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats/" + encodeURIComponent(heat.id));
-    if (document.hidden) return;
+    if (document.hidden || !startRequest.isCurrent(request)) return;
     startRender(event, detail);
   } catch (error) {
     // The station message line remains the actionable operational error surface.
-    if (error.message !== "signed-out") startMessage.textContent = error.message;
+    if (startRequest.isCurrent(request) && error.message !== "signed-out") startMessage.textContent = error.message;
   }
 };
 const startLoad = startLoadWork;
@@ -2650,6 +2787,7 @@ const announcerMessage = document.querySelector("[data-station-message]");
 // and a live signal never refetches the whole race.
 const announcerResultCache = new Map();
 let announcerRenderKey = null;
+const announcerRequest = liveCreateLatestRequest();
 
 const announcerText = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -2758,9 +2896,10 @@ const announcerEmpty = (message) => {
   announcerProgress.textContent = "Waiting for the first official result.";
 };
 const announcerLoadWork = async () => {
+  const request = announcerRequest.begin();
   try {
     const events = await announcerApi("/api/v1/staff/events");
-    if (document.hidden) return;
+    if (document.hidden || !announcerRequest.isCurrent(request)) return;
     const event = announcerPickEvent(events.events);
     if (!event) {
       announcerEmpty("No race is on the water right now.");
@@ -2768,14 +2907,14 @@ const announcerLoadWork = async () => {
     }
     const eventPath = "/api/v1/staff/events/" + encodeURIComponent(event.id);
     const listed = await announcerApi(eventPath + "/heats");
-    if (document.hidden) return;
+    if (document.hidden || !announcerRequest.isCurrent(request)) return;
     const upcoming = startPickHeat(listed.heats, event.status === "FINAL" ? "FINAL" : "ROUND_ONE");
     // The announcer roster projection is exactly slot, full name, and duck
     // number, which is exactly what gets said out loud and nothing more.
     const current = upcoming === null
       ? null
       : await announcerApi(eventPath + "/heats/" + encodeURIComponent(upcoming.id) + "/announcer-roster");
-    if (document.hidden) return;
+    if (document.hidden || !announcerRequest.isCurrent(request)) return;
     const decided = [];
     for (const heat of listed.heats) {
       if (!(heat.publishedResultCount > 0)) continue;
@@ -2790,12 +2929,12 @@ const announcerLoadWork = async () => {
       announcerResultCache.set(heat.id, { key, results });
       decided.push({ heat, results });
     }
-    if (document.hidden) return;
+    if (document.hidden || !announcerRequest.isCurrent(request)) return;
     announcerRender(event, listed.heats, current, decided);
     announcerMessage.textContent = "This station only reads. It never changes the race.";
   } catch (error) {
     // The station message line remains the actionable operational error surface.
-    if (error.message !== "signed-out") announcerMessage.textContent = error.message;
+    if (announcerRequest.isCurrent(request) && error.message !== "signed-out") announcerMessage.textContent = error.message;
   }
 };
 if (announcerRoot) {
@@ -2963,6 +3102,7 @@ let finishScanBusy = false;
 let finishScanEndBusy = null;
 let finishCommandBusy = false;
 let finishSubscription = null;
+const finishRequest = liveCreateLatestRequest();
 
 const finishText = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -3460,16 +3600,17 @@ const finishEmpty = (message) => {
   finishMessage.textContent = "This station will keep checking for a running heat.";
 };
 const finishLoadWork = async () => {
+  const request = finishRequest.begin();
   try {
     const events = await finishApi("/api/v1/staff/events");
-    if (document.hidden) return;
+    if (document.hidden || !finishRequest.isCurrent(request)) return;
     const event = events.events.find((item) => ["ROUND_ONE", "FINAL"].includes(item.status));
     if (!event) {
       finishEmpty("No race round is active right now.");
       return;
     }
     const listed = await finishApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats");
-    if (document.hidden) return;
+    if (document.hidden || !finishRequest.isCurrent(request)) return;
     const round = event.status === "FINAL" ? "FINAL" : "ROUND_ONE";
     const heat = finishPickHeat(listed.heats, round);
     if (!heat) {
@@ -3477,11 +3618,11 @@ const finishLoadWork = async () => {
       return;
     }
     const detail = await finishApi("/api/v1/staff/events/" + encodeURIComponent(event.id) + "/heats/" + encodeURIComponent(heat.id));
-    if (document.hidden) return;
+    if (document.hidden || !finishRequest.isCurrent(request)) return;
     finishRender(event, detail);
   } catch (error) {
     // The station message line remains the actionable operational error surface.
-    if (error.message !== "signed-out") finishMessage.textContent = error.message;
+    if (finishRequest.isCurrent(request) && error.message !== "signed-out") finishMessage.textContent = error.message;
   }
 };
 const finishLoad = finishLoadWork;
@@ -4323,6 +4464,9 @@ let currentEvent = null;
 let selectedDuck = null;
 let inventoryCommandCount = 0;
 let inventorySubscription = null;
+const inventoryListRequest = liveCreateLatestRequest();
+const inventoryEventsRequest = liveCreateLatestRequest();
+const inventoryStationRequest = liveCreateLatestRequest();
 
 // A duck or race entry handed over by another staff page. Consumed once, so a
 // later refresh does not keep yanking the panel back to it.
@@ -4479,7 +4623,9 @@ const inventoryGroupSection = (group) => {
 };
 
 const loadInventory = async () => {
+  const request = inventoryListRequest.begin();
   const body = await api("/api/v1/staff/inventory/ducks");
+  if (!inventoryListRequest.isCurrent(request) || document.hidden) return;
   inventoryList.replaceChildren();
   if (body.ducks.length === 0) {
     inventoryList.append(empty("No ducks are in inventory. Scan a blank sticker to add the first one."));
@@ -4806,12 +4952,15 @@ const intakeOfferTakeover = (record) => {
 };
 
 const intakeRefreshStation = async () => {
+  const request = inventoryStationRequest.begin();
   await loadInventory();
+  if (!inventoryStationRequest.isCurrent(request) || document.hidden) return;
   if (!currentEvent) {
     if (intakeEnabled) intakeReservedCount.textContent = "0";
     return;
   }
   const detail = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id));
+  if (!inventoryStationRequest.isCurrent(request) || document.hidden) return;
   currentEvent = detail.event;
   if (!intakeEnabled) return;
   intakeReservedCount.textContent = String(detail.summary.eventDucks);
@@ -5023,7 +5172,9 @@ const applyRequestedSelection = async () => {
 };
 
 const loadEvents = async () => {
+  const request = inventoryEventsRequest.begin();
   const body = await api("/api/v1/staff/events", { headers: { accept: "application/json" } });
+  if (!inventoryEventsRequest.isCurrent(request) || document.hidden) return;
   eventSelect.replaceChildren();
   currentEvent = null;
   if (body.events.length === 0) {
@@ -5038,7 +5189,9 @@ const loadEvents = async () => {
     if (inventoryNoRace) inventoryNoRace.hidden = true;
   }
   await intakeRefreshStation();
+  if (!inventoryEventsRequest.isCurrent(request) || document.hidden) return;
   await intakeRecoverSelected();
+  if (!inventoryEventsRequest.isCurrent(request) || document.hidden) return;
   intakeUpdateControls();
   setMessage(currentEvent
     ? "Inventory is current."
@@ -5147,6 +5300,18 @@ let selectedRegistration = null;
 let selectedHeat = null;
 let staffCommandCount = 0;
 let staffLiveSubscription = null;
+const staffEventsRequest = liveCreateLatestRequest();
+const staffEventRequest = liveCreateLatestRequest();
+const participantListRequest = liveCreateLatestRequest();
+const participantDetailRequest = liveCreateLatestRequest();
+const heatListRequest = liveCreateLatestRequest();
+const heatDetailRequest = liveCreateLatestRequest();
+const finalistRequest = liveCreateLatestRequest();
+const supportSummaryRequest = liveCreateLatestRequest();
+const notificationListRequest = liveCreateLatestRequest();
+const notificationAttemptsRequest = liveCreateLatestRequest();
+const auditRequest = liveCreateLatestRequest();
+const walkUpAdmissionRequest = liveCreateLatestRequest();
 
 const text = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -5628,6 +5793,10 @@ const renderEvent = (detail, readiness) => {
   if (!lifecycleShouldRenderEvent(eventSelect.value, currentEvent, detail.event)) return false;
   currentEvent = detail.event;
   currentEventDetail = detail;
+  // The full event detail and the narrow heat subscriber both own this one
+  // projection. Whichever authoritative event snapshot renders last retires an
+  // older narrow response before it can reopen stale walk-up controls.
+  walkUpAdmissionRequest.invalidate();
   renderWalkUpAvailability(detail.walkUpAdmission);
   if (eventSummary) showFacts(eventSummary, [
     ["Name", currentEvent.name],
@@ -5684,7 +5853,21 @@ const renderLifecycleResult = (event) => {
 };
 
 const loadEvents = async (preferredId) => {
+  const request = staffEventsRequest.begin();
+  // A new event snapshot supersedes every event-scoped read already in flight.
+  staffEventRequest.invalidate();
+  participantListRequest.invalidate();
+  participantDetailRequest.invalidate();
+  heatListRequest.invalidate();
+  heatDetailRequest.invalidate();
+  finalistRequest.invalidate();
+  supportSummaryRequest.invalidate();
+  notificationListRequest.invalidate();
+  notificationAttemptsRequest.invalidate();
+  auditRequest.invalidate();
+  walkUpAdmissionRequest.invalidate();
   const body = await api("/api/v1/staff/events", { headers: { accept: "application/json" } });
+  if (!staffEventsRequest.isCurrent(request) || document.hidden) return;
   eventSelect.replaceChildren();
   if (body.events.length === 0) {
     eventSelect.append(new Option("No event exists", ""));
@@ -5744,21 +5927,29 @@ const loadEvents = async (preferredId) => {
       ? currentEvent.id
       : body.events[0].id;
   eventSelect.value = selectedId;
+  if (!staffEventsRequest.isCurrent(request)) return;
   await loadEvent(selectedId);
 };
 
 const loadEvent = async (eventId) => {
+  const request = staffEventRequest.begin();
   setMessage("Loading selected event operations…");
   const detail = await api("/api/v1/staff/events/" + encodeURIComponent(eventId));
+  if (!staffEventRequest.isCurrent(request) || document.hidden || eventSelect.value !== eventId) return;
   const readiness = canRaceRead
     ? await api("/api/v1/staff/events/" + encodeURIComponent(eventId) + "/readiness")
     : { readiness: {} };
+  if (!staffEventRequest.isCurrent(request) || document.hidden || eventSelect.value !== eventId) return;
   if (!renderEvent(detail, readiness)) return;
   const loads = [];
   if (canRegistration) loads.push(loadParticipants(true));
+  if (canRegistration && selectedRegistration) {
+    loads.push(loadParticipantDetail(selectedRegistration.registrationId));
+  }
   if (canRaceRead) loads.push(loadHeats(), loadFinalists());
   if (isSystemAdmin) loads.push(loadSupportSummary(), loadNotifications(), loadAudit());
   const results = await Promise.allSettled(loads);
+  if (!staffEventRequest.isCurrent(request) || currentEvent?.id !== eventId) return;
   const failed = results.filter((result) => result.status === "rejected");
   setMessage(failed.length === 0
     ? "All operation areas are current."
@@ -5996,9 +6187,12 @@ const toggleParticipantDetail = (registrationId) => {
 // and hides instead of describing someone the list no longer shows.
 const loadParticipants = async (pruneSelection = false) => {
   if (!currentEvent || !participantsPresent) return;
+  const eventId = currentEvent.id;
+  const request = participantListRequest.begin();
   const body = await api(
-    "/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/registrations?" + participantQuery(),
+    "/api/v1/staff/events/" + encodeURIComponent(eventId) + "/registrations?" + participantQuery(),
   );
+  if (!participantListRequest.isCurrent(request) || document.hidden || currentEvent?.id !== eventId) return;
   participantList.replaceChildren();
   if (body.registrations.length === 0) participantList.append(empty("No participants match these filters."));
   for (const registration of body.registrations) {
@@ -6142,6 +6336,7 @@ const participantUndeletableReason = (registration) => {
 };
 
 const clearParticipantDetail = () => {
+  participantDetailRequest.invalidate();
   selectedRegistration = null;
   participantDetail.hidden = true;
   participantFacts.replaceChildren();
@@ -6298,7 +6493,16 @@ const renderParticipantDetail = (registration) => {
 };
 
 const loadParticipantDetail = async (registrationId) => {
+  const eventId = currentEvent?.id;
+  const request = participantDetailRequest.begin();
   const body = await api("/api/v1/staff/registrations/" + encodeURIComponent(registrationId));
+  if (
+    !participantDetailRequest.isCurrent(request)
+    || document.hidden
+    || currentEvent?.id !== eventId
+    || Boolean(document.querySelector?.("[data-participant-edit-form]")
+      ?.querySelector?.("[data-live-dirty='true']"))
+  ) return;
   renderParticipantDetail(body.registration);
 };
 
@@ -6428,7 +6632,10 @@ const finalistCard = document.querySelector("[data-finalist-card]");
 
 const loadHeats = async () => {
   if (!currentEvent || !heatList) return;
-  const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/heats");
+  const eventId = currentEvent.id;
+  const request = heatListRequest.begin();
+  const body = await api("/api/v1/staff/events/" + encodeURIComponent(eventId) + "/heats");
+  if (!heatListRequest.isCurrent(request) || document.hidden || currentEvent?.id !== eventId) return;
   heatList.replaceChildren();
   if (body.heats.length === 0) {
     heatList.append(empty("No heats have been created."));
@@ -6654,7 +6861,10 @@ const renderHeatControls = (body) => {
 };
 
 const loadHeatDetail = async (heatId) => {
-  const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/heats/" + encodeURIComponent(heatId));
+  const eventId = currentEventId();
+  const request = heatDetailRequest.begin();
+  const body = await api("/api/v1/staff/events/" + encodeURIComponent(eventId) + "/heats/" + encodeURIComponent(heatId));
+  if (!heatDetailRequest.isCurrent(request) || document.hidden || currentEvent?.id !== eventId) return;
   selectedHeat = body.heat;
   heatDetail.hidden = false;
   document.querySelector("[data-heat-name]").textContent = humanize(body.heat.round) + " · Heat " + body.heat.number;
@@ -6699,7 +6909,10 @@ const loadFinalists = async () => {
     finalistList.replaceChildren();
     return;
   }
-  const body = await api("/api/v1/staff/events/" + encodeURIComponent(currentEvent.id) + "/finalists");
+  const eventId = currentEvent.id;
+  const request = finalistRequest.begin();
+  const body = await api("/api/v1/staff/events/" + encodeURIComponent(eventId) + "/finalists");
+  if (!finalistRequest.isCurrent(request) || document.hidden || currentEvent?.id !== eventId) return;
   finalistList.replaceChildren();
   for (const finalist of body.finalists) {
     const card = historyCard("Slot " + finalist.slotNumber + " · Duck #" + finalist.duck.visibleNumber, finalist.participant.firstName + " " + finalist.participant.lastName + " · won Heat " + finalist.qualifiedFrom.heatNumber + (finalist.podiumPlace ? " · podium " + finalist.podiumPlace : ""));
@@ -6715,10 +6928,14 @@ const supportSummary = document.querySelector("[data-support-summary]");
 const notificationList = document.querySelector("[data-notification-list]");
 const notificationAttempts = document.querySelector("[data-notification-attempts]");
 const auditList = document.querySelector("[data-audit-list]");
+let selectedNotificationId = null;
 
 const loadSupportSummary = async () => {
   if (!isSystemAdmin || !currentEvent || !supportSummary) return;
-  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEvent.id) + "/summary");
+  const eventId = currentEvent.id;
+  const request = supportSummaryRequest.begin();
+  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(eventId) + "/summary");
+  if (!supportSummaryRequest.isCurrent(request) || document.hidden || currentEvent?.id !== eventId) return;
   showFacts(supportSummary, [
     ["Total blockers", body.blockerCount], ["Registration", body.areas.registration.blockerCount],
     ["Inventory", body.areas.duck.blockerCount], ["Heats", body.areas.heat.blockerCount],
@@ -6741,7 +6958,13 @@ const notificationAction = async (notification, action, reason, button) => {
 };
 
 const loadNotificationAttempts = async (notificationId) => {
-  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEventId()) + "/notifications/" + encodeURIComponent(notificationId) + "/attempts");
+  const eventId = currentEventId();
+  const request = notificationAttemptsRequest.begin();
+  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(eventId) + "/notifications/" + encodeURIComponent(notificationId) + "/attempts");
+  if (
+    !notificationAttemptsRequest.isCurrent(request) || document.hidden
+    || currentEvent?.id !== eventId || selectedNotificationId !== notificationId
+  ) return;
   notificationAttempts.replaceChildren(text("h3", "Delivery attempts"));
   for (const attempt of body.attempts) notificationAttempts.append(historyCard("Attempt " + attempt.number + " · " + humanize(attempt.status), humanize(attempt.stage) + (attempt.errorCode ? " · " + attempt.errorCode : "")));
   if (body.attempts.length === 0) notificationAttempts.append(empty("No delivery attempts are recorded."));
@@ -6750,10 +6973,13 @@ const loadNotificationAttempts = async (notificationId) => {
 const loadNotifications = async () => {
   const form = document.querySelector("[data-notification-filter-form]");
   if (!isSystemAdmin || !currentEvent || !form || !notificationList) return;
+  const eventId = currentEvent.id;
+  const request = notificationListRequest.begin();
   const status = String(new FormData(form).get("status") || "");
   const parameters = new URLSearchParams({ limit: "100" });
   if (status) parameters.set("status", status);
-  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEvent.id) + "/notifications?" + parameters);
+  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(eventId) + "/notifications?" + parameters);
+  if (!notificationListRequest.isCurrent(request) || document.hidden || currentEvent?.id !== eventId) return;
   notificationList.replaceChildren();
   for (const notification of body.notifications) {
     const card = text("article", "", "data-card");
@@ -6765,7 +6991,10 @@ const loadNotifications = async () => {
     const actions = text("div", "", "actions");
     const attemptsButton = text("button", "Attempts", "button secondary small");
     attemptsButton.type = "button";
-    attemptsButton.addEventListener("click", () => loadNotificationAttempts(notification.id).catch((error) => setMessage(error.message, true)));
+    attemptsButton.addEventListener("click", () => {
+      selectedNotificationId = notification.id;
+      loadNotificationAttempts(notification.id).catch((error) => setMessage(error.message, true));
+    });
     actions.append(attemptsButton);
     if (["FAILED", "RETRY_PENDING"].includes(notification.status)) {
       const retry = text("button", "Retry", "button small"); retry.type = "button";
@@ -6784,11 +7013,24 @@ const loadNotifications = async () => {
     notificationList.append(card);
   }
   if (body.notifications.length === 0) notificationList.append(empty("No notifications match this filter."));
+  if (
+    selectedNotificationId !== null
+    && body.notifications.some((notification) => notification.id === selectedNotificationId)
+  ) {
+    await loadNotificationAttempts(selectedNotificationId);
+  } else if (selectedNotificationId !== null) {
+    selectedNotificationId = null;
+    notificationAttemptsRequest.invalidate();
+    notificationAttempts.replaceChildren();
+  }
 };
 
 const loadAudit = async () => {
   if (!isSystemAdmin || !currentEvent || !auditList) return;
-  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(currentEvent.id) + "/audit?limit=200");
+  const eventId = currentEvent.id;
+  const request = auditRequest.begin();
+  const body = await api("/api/v1/staff/support/events/" + encodeURIComponent(eventId) + "/audit?limit=200");
+  if (!auditRequest.isCurrent(request) || document.hidden || currentEvent?.id !== eventId) return;
   auditList.replaceChildren();
   for (const item of body.events) auditList.append(historyCard(humanize(item.action), item.occurredAt + " · " + (item.actorDisplayName || humanize(item.actorType)) + (item.code ? " · " + item.code : "")));
   if (body.events.length === 0) auditList.append(empty("No audit events are recorded."));
@@ -6855,10 +7097,15 @@ if (walkUpAvailability) globalThis.quickDucksLive.subscribe({
   refresh: async () => {
     if (!currentEvent) return;
     const eventId = currentEvent.id;
+    const request = walkUpAdmissionRequest.begin();
     const body = await api(
       "/api/v1/staff/events/" + encodeURIComponent(eventId) + "/walk-up-admission",
     );
-    if (currentEvent && currentEvent.id === eventId) renderWalkUpAvailability(body.walkUpAdmission);
+    if (
+      walkUpAdmissionRequest.isCurrent(request)
+      && !document.hidden
+      && currentEvent?.id === eventId
+    ) renderWalkUpAvailability(body.walkUpAdmission);
   },
 });
 `;
@@ -6873,6 +7120,7 @@ const staffAccessMessage = document.querySelector("[data-staff-access-message]")
 const staffAccessList = document.querySelector("[data-staff-access-list]");
 let staffCommandCount = 0;
 let staffLiveSubscription = null;
+const staffProfilesRequest = liveCreateLatestRequest();
 
 const text = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -6981,7 +7229,9 @@ const staffLifecycle = async (profile, action, roleChange, button) => {
 
 const loadStaffProfiles = async () => {
   if (!staffAccess) return;
+  const request = staffProfilesRequest.begin();
   const body = await api("/api/v1/staff/profiles");
+  if (!staffProfilesRequest.isCurrent(request) || document.hidden) return;
   staffAccessList.replaceChildren();
   for (const profile of body.staff) {
     const card = text("article", "", "staff-access-card");
@@ -7256,6 +7506,7 @@ let staffDuckBusy = 0;
 let staffDuckSubscription = null;
 let justPairedCode = null;
 let winnerSuccess = null;
+const staffDuckRequest = liveCreateLatestRequest();
 
 const text = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -8076,6 +8327,7 @@ const showPairing = (data) => {
 };
 
 const load = async () => {
+  const request = staffDuckRequest.begin();
   try {
     const [eventResponse, duck] = await Promise.all([
       fetchJson("/api/v1/events/current"),
@@ -8084,11 +8336,13 @@ const load = async () => {
     // A refresh already in flight when scanning starts must not repaint the
     // pairing area and release the newly acquired camera.
     if (qrStarting || qrScanning) return;
+    if (!staffDuckRequest.isCurrent(request) || document.hidden) return;
     // Resolved before anything is painted, so the statement about this duck and
     // the statement about its heat land together rather than one appearing
     // under the staffer a moment later.
     const heatHasNoEligibleRacer = await winnerHeatHasNoEligibleRacer(duck);
     if (qrStarting || qrScanning) return;
+    if (!staffDuckRequest.isCurrent(request) || document.hidden) return;
     currentEvent = eventResponse.event;
     summary.replaceChildren();
     qrStop(false);
@@ -8098,6 +8352,7 @@ const load = async () => {
     renderWinnerAction(duck, heatHasNoEligibleRacer);
   } catch (error) {
     if (qrStarting || qrScanning) return;
+    if (!staffDuckRequest.isCurrent(request)) return;
     if (error.message !== "signed-out") {
       if (error.status === 403 || error.status === 404) {
         selectedRegistration = null;
@@ -8128,7 +8383,10 @@ staffDuckSubscription = globalThis.quickDucksLive.subscribe({
   domains: ["event", "participants", "ducks", "heats"],
   root,
   refresh: load,
-  isBlocked: () => staffDuckBusy > 0 || selectedRegistration !== null || qrScanning,
+  // A participant selected for review is revalidated by the authoritative
+  // search after a live signal. Blocking here could leave an externally paired
+  // participant selectable forever; only commands and an active camera defer.
+  isBlocked: () => staffDuckBusy > 0 || qrScanning,
 });
 `;
 

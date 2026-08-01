@@ -465,11 +465,11 @@ interface PageOptions {
 // Staff stays in every phase.
 //
 // `data-live-nav` is the admission marker for the live navigation subscriber in
-// `live-ui.js`. Only public content pages set it. The live hub starts its socket
-// and pollers lazily on the first subscriber, so a page without this marker and
-// without any other live surface holds no connection at all — which matters
-// because `RaceUpdates` admits a bounded number of sockets. Those pages keep the
-// server-rendered nav for the life of the document.
+// `live-ui.js`. Public content pages and signed-in operational pages set it; the
+// latter already hold a connection for their own data, so the nav subscriber
+// costs no additional socket. The hub starts lazily on the first subscriber, so
+// sign-in, no-access, error, and not-found pages keep no connection and retain
+// their server-rendered nav for the life of the document.
 const siteNav = (phase: PublicPhase, liveNav: boolean): string => {
   const myDucksVisible = phaseShowsMyDucks(phase);
   const swap = phaseShowsRegisterNav(phase)
@@ -523,19 +523,20 @@ const liveBoard = (): string => `
 // The compact home summary. It carries the stage chip and a single current-heat
 // line and sends anyone who wants detail to `/race`; the full board lives there.
 //
-// This section is also where the phase call to action lives. `live.js` replaces
-// the title with the event's own name, so this is the block a visitor reads as
-// "this race", and the action for that race belongs beside it rather than in the
-// decorative hero. The section renders only when there is a call to action, so
-// the two are always present together.
-const happeningNow = (cta: PublicPhaseCta): string => `
-  <section class="status-section" data-live-summary aria-labelledby="happening-now-title">
+// This section is also where the phase call to action lives. It is deliberately
+// stable in Preparing as well as every public race phase: a home page opened
+// before registration starts must have a live region that can become the active
+// event without replacing the document. Preparing keeps its established copy
+// and has no action; the authoritative board refetch creates the phase action
+// when an event becomes public.
+const happeningNow = (cta: PublicPhaseCta | null): string => `
+  <section class="status-section${cta === null ? " home-preparing-card" : ""}" data-live-summary aria-labelledby="happening-now-title">
     <p class="eyebrow">Happening now</p>
-    <p class="status-chip live-board-stage" data-live-summary-stage aria-live="polite">Loading race stage…</p>
-    <h2 class="live-board-title" id="happening-now-title" data-live-summary-title>Checking the race…</h2>
-    <p class="lede" data-live-summary-line>Loading the latest official race information.</p>
+    <p class="status-chip live-board-stage" data-live-summary-stage aria-live="polite"${cta === null ? " hidden" : ""}>${cta === null ? "No race scheduled" : "Loading race stage…"}</p>
+    <h2 class="live-board-title" id="happening-now-title" data-live-summary-title${cta === null ? " data-home-preparing" : ""}>${cta === null ? "The next race is being prepared." : "Checking the race…"}</h2>
+    <p class="lede" data-live-summary-line>${cta === null ? "Check back soon for the next QuickDucks race." : "Loading the latest official race information."}</p>
     <p class="message-line muted" data-live-summary-error role="alert" hidden></p>
-    <div class="actions"><a class="button" href="${escapeHtml(cta.href)}" data-home-cta>${escapeHtml(cta.label)}</a><a class="button secondary" href="/race">Open the full race board</a></div>
+    <div class="actions" data-home-actions${cta === null ? " hidden" : ""}>${cta === null ? "" : `<a class="button" href="${escapeHtml(cta.href)}" data-home-cta>${escapeHtml(cta.label)}</a><a class="button secondary" href="/race">Open the full race board</a>`}</div>
   </section>`;
 
 // Preparing is deliberately terminal and bare: no form, no privacy block, no
@@ -575,13 +576,14 @@ export const renderHome = (phase: PublicPhase = "PREPARING"): string => {
         <span class="hero-duck-slit" aria-hidden="true"></span>
       </div>
     </section>
-    ${cta === null ? '<section class="status-section home-preparing-card" aria-labelledby="home-preparing-title"><p class="eyebrow">Happening now</p><h2 id="home-preparing-title" data-home-preparing>The next race is being prepared.</h2> <p class="lede">Check back soon for the next QuickDucks race.</p></section>' : happeningNow(cta)}
+    ${happeningNow(cta)}
     <div class="ticker" aria-label="QuickDucks features"><span>Pick your duck</span><span>Find your heat</span><span>Cheer loudly</span></div>
     <section id="how-it-works" class="cards" aria-label="How QuickDucks works">
       <article class="card"><strong>Before the race</strong><h3>Register in under a minute</h3><p class="muted">You don’t need an account. Keep your private status link and short lookup code for race day.</p></article>
       <article class="card"><strong>At check-in</strong><h3>Staff pair your selected duck</h3><p class="muted">A staff member scans the duck, then enters your code or finds your registration by name.</p></article>
       <article class="card"><strong>On race day</strong><h3>One clear source of truth</h3><p class="muted">You can follow heat assignments, finalist progress, and results from check-in to finish.</p></article>
-    </section>${cta === null ? "" : '\n    <script src="/assets/live.js" defer></script>'}`,
+    </section>
+    <script src="/assets/live.js" defer></script>`,
   });
 };
 
@@ -645,7 +647,8 @@ export const renderMyDucks = (phase: PublicPhase = "PREPARING"): string => page(
         <div class="participant-section-head">
           <h2 id="awaiting-participants-title">Awaiting Duck Assignment</h2>
           <div class="participant-section-head-actions">
-${phaseAllowsRegistration(phase) ? '            <a class="button small" href="/register" data-register-another>Register another participant</a>\n' : ""}            <div class="carousel-controls" data-carousel-controls hidden>
+            <a class="button small" href="/register" data-register-another${phaseAllowsRegistration(phase) ? "" : " hidden"}>Register another participant</a>
+            <div class="carousel-controls" data-carousel-controls hidden>
               <button class="button secondary small" type="button" data-carousel-previous aria-controls="awaiting-participants">Previous</button>
               <button class="button secondary small" type="button" data-carousel-next aria-controls="awaiting-participants">Next</button>
             </div>
@@ -697,7 +700,7 @@ export const renderRegistration = (
       robots: "noindex,nofollow",
       phase,
       liveNav: true,
-      content: preparingPanel("data-registration-preparing", registrationPreparingMessage),
+       content: preparingPanel('data-registration-preparing data-live-phase-page data-rendered-phase="PREPARING"', registrationPreparingMessage),
     });
   }
   if (!phaseAllowsRegistration(phase)) {
@@ -708,7 +711,7 @@ export const renderRegistration = (
       phase,
       liveNav: true,
       content: `
-    <section class="page-panel" data-registration-closed>
+    <section class="page-panel" data-registration-closed data-live-phase-page data-rendered-phase="${phase}">
       ${duck()}
       <h1 class="page-title message-title">${escapeHtml(registrationClosedMessage)}</h1>
       <div class="actions"><a class="button" href="/race">View race status</a></div>
@@ -952,21 +955,30 @@ export const renderPublicDuck = (
 export const renderPublicDuckNotFound = (
   visibleNumber?: string,
   phase: PublicPhase = "PREPARING",
-): string => page({
-  title: "Duck not racing",
-  description: "The requested QuickDucks duck number is not in the current race.",
-  robots: "noindex,nofollow",
-  phase,
-  liveNav: true,
-  content: `<section class="page-panel">${duck()}<p class="eyebrow">Public duck detail</p><h1 class="page-title">${visibleNumber === undefined ? "That duck isn’t racing." : `Duck #${escapeHtml(visibleNumber)} isn’t racing.`}</h1><p class="lede">No duck with this number is paired with a participant in the current race. Check the number printed on the duck, or find it on the live race board.</p>${boardLink(phase)}</section>`,
-});
+): string => {
+  // A canonical numbered URL can start unresolved and become public when staff
+  // pair that already-open duck elsewhere. Keep the friendly 404 paint, but
+  // give the live client the number so it can re-enter the server renderer once
+  // the authoritative endpoint starts resolving. Invalid catch-all paths never
+  // call this renderer and therefore remain phase-free and socket-free.
+  const liveMarker = visibleNumber === undefined
+    ? ""
+    : ` data-live-missing-duck="${escapeHtml(visibleNumber)}"`;
+  return page({
+    title: "Duck not racing",
+    description: "The requested QuickDucks duck number is not in the current race.",
+    robots: "noindex,nofollow",
+    phase,
+    liveNav: true,
+    content: `<section class="page-panel">${duck()}<p class="eyebrow">Public duck detail</p><h1 class="page-title"${liveMarker}>${visibleNumber === undefined ? "That duck isn’t racing." : `Duck #${escapeHtml(visibleNumber)} isn’t racing.`}</h1><p class="lede">No duck with this number is paired with a participant in the current race. Check the number printed on the duck, or find it on the live race board.</p>${boardLink(phase)}</section>${visibleNumber === undefined ? "" : '<script src="/assets/live.js" defer></script>'}`,
+  });
+};
 
 // Staff pages render the same primary site navigation as the public site, from
-// the same resolved phase, so a staff member sees the same Home/Register/My
-// Ducks/Staff links a visitor does. They deliberately do not set `liveNav`:
-// `data-live-nav` is the admission marker for the live navigation subscriber,
-// and `RaceUpdates` admits a bounded number of sockets, so staff surfaces keep
-// the server-rendered nav for the life of the document and hold no subscription.
+// the same resolved phase. Signed-in operational pages already own a live hub
+// subscription, so they also opt the navigation into event refreshes without
+// consuming another socket. Sign-in, no-access, and error pages remain static
+// and socket-free.
 export const renderStaffLogin = (returnTo = "/staff", phase: PublicPhase = "PREPARING"): string => page({
   title: "Staff sign in",
   description: "Sign in to protected QuickDucks race operations.",
@@ -1272,6 +1284,7 @@ export const renderStaffHome = (
   description: "Protected QuickDucks staff race operations.",
   robots: "noindex,nofollow",
   phase,
+  liveNav: true,
   content: `
     <section class="page-panel operations-panel staff-panel" data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff")}
@@ -1385,6 +1398,7 @@ export const renderStaffRegistration = (
     description: "Protected QuickDucks registration desk.",
     robots: "noindex,nofollow",
     phase,
+    liveNav: true,
     content: `
     <section class="page-panel operations-panel staff-panel" data-staff-registration data-operations-root data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff/registration")}
@@ -1449,6 +1463,7 @@ export const renderStaffAccess = (
   description: "Protected QuickDucks staff account and role management.",
   robots: "noindex,nofollow",
   phase,
+  liveNav: true,
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-access data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
       ${staffNav(isSystemAdmin, roles, "/staff/access")}
@@ -1479,6 +1494,7 @@ export const renderStartLine = (
   description: "Focused protected QuickDucks start-line station.",
   robots: "noindex,nofollow",
   phase,
+  liveNav: interactive,
   content: `<section class="page-panel station-panel staff-panel" data-start-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     ${staffNav(isSystemAdmin, roles, "/staff/start-line")}
     <p class="eyebrow">Start-line station</p><h1 class="page-title">Prepare the next heat.</h1>
@@ -1507,6 +1523,7 @@ export const renderAnnouncer = (
   description: "Focused protected QuickDucks announcer station.",
   robots: "noindex,nofollow",
   phase,
+  liveNav: interactive,
   content: `<section class="page-panel station-panel staff-panel announcer-panel" data-announcer${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     ${staffNav(isSystemAdmin, roles, "/staff/announcer")}
     <p class="eyebrow">Announcer station</p><h1 class="page-title">Read this out loud.</h1>
@@ -1546,6 +1563,7 @@ export const renderFinishLine = (
   description: "Focused protected QuickDucks finish-line station.",
   robots: "noindex,nofollow",
   phase,
+  liveNav: interactive,
   content: `<section class="page-panel station-panel staff-panel" data-finish-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     ${staffNav(isSystemAdmin, roles, "/staff/finish-line")}
     <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
@@ -1586,6 +1604,7 @@ export const renderStaffInventory = (
   description: "Protected QuickDucks duck inventory and NFC provisioning.",
   robots: "noindex,nofollow",
   phase,
+  liveNav: true,
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-inventory data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-app-origin="${escapeHtml(appOrigin)}">
       ${staffNav(isSystemAdmin, roles, "/staff/inventory")}
@@ -1676,6 +1695,7 @@ export const renderStaffDuck = (
   description: "Protected QuickDucks duck pairing and inspection.",
   robots: "noindex,nofollow",
   phase,
+  liveNav: true,
   content: `
     <section class="page-panel operations-panel staff-panel" data-staff-duck data-live-staff data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}" data-token="${escapeHtml(token)}">
       ${staffNav(isSystemAdmin, roles)}
@@ -1783,12 +1803,17 @@ const describeStatus = (status) => {
 // token, so a result card renders public race status only.
 const myDucksNav = document.querySelector("[data-my-ducks-nav]");
 const addedTag = () => createText("span", "In My Ducks", "success-tag");
+const statusSearchRequest = liveCreateLatestRequest();
 
 const addToMyDucks = async (followId, actions, button, feedback) => {
+  // A live search that began before this command must not restore its old Add
+  // action after the follow succeeds. markClean queues the replacement read.
+  statusSearchRequest.invalidate();
   button.disabled = true;
   button.textContent = "Adding…";
   feedback.textContent = "";
   feedback.hidden = true;
+  const endBusy = globalThis.quickDucksLive.beginBusy();
   try {
     const response = await fetch("/api/v1/registrations/mine/follow", {
       method: "POST",
@@ -1812,6 +1837,8 @@ const addToMyDucks = async (followId, actions, button, feedback) => {
     button.textContent = "Add to My Ducks";
     feedback.textContent = "That participant could not be added to My Ducks. Please try again.";
     feedback.hidden = false;
+  } finally {
+    endBusy();
   }
 };
 
@@ -1854,6 +1881,7 @@ const clearStatusSearchDraft = () => {
   }
 };
 const runStatusSearch = async (name) => {
+  const request = statusSearchRequest.begin();
   searchBusy = true;
   searchResults.replaceChildren();
   searchMessage.textContent = "Searching…";
@@ -1861,18 +1889,21 @@ const runStatusSearch = async (name) => {
     const eventResponse = await fetch("/api/v1/events/current", { headers: { accept: "application/json" } });
     if (!eventResponse.ok) throw new Error();
     const { event: currentEvent } = await eventResponse.json();
+    if (!statusSearchRequest.isCurrent(request) || document.hidden) return;
     if (!currentEvent) {
       searchMessage.textContent = "There is no public race to search right now.";
       return;
     }
     const parameters = new URLSearchParams({ eventId: currentEvent.id, name: String(name) });
     const response = await fetch("/api/v1/race-status/search?" + parameters, { headers: { accept: "application/json" } });
+    if (!statusSearchRequest.isCurrent(request) || document.hidden) return;
     if (response.status === 429) {
       searchMessage.textContent = "Too many searches. Please wait and try again.";
       return;
     }
     if (!response.ok) throw new Error();
     const { results } = await response.json();
+    if (!statusSearchRequest.isCurrent(request) || document.hidden) return;
     if (!Array.isArray(results) || results.length === 0) {
       searchMessage.textContent = "No matching public race status was found.";
       return;
@@ -1880,7 +1911,9 @@ const runStatusSearch = async (name) => {
     for (const result of results) appendStatusCard(searchResults, result);
     searchMessage.textContent = results.length === 1 ? "1 match found." : results.length + " matches found.";
   } catch {
-    searchMessage.textContent = "Status search is temporarily unavailable. Please try again.";
+    if (statusSearchRequest.isCurrent(request)) {
+      searchMessage.textContent = "Status search is temporarily unavailable. Please try again.";
+    }
   } finally {
     searchBusy = false;
   }
