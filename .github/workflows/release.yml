@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -48,8 +49,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" != "push" ]]; then
-            printf 'Release source event must be push; received %s.\n' "$EVENT_NAME" >&2
+          if [[ "$EVENT_NAME" != "push" && "$EVENT_NAME" != "workflow_dispatch" ]]; then
+            printf 'Release source event must be push or workflow_dispatch; received %s.\n' "$EVENT_NAME" >&2
             exit 1
           fi
           if [[ -z "$DEFAULT_BRANCH" ]]; then

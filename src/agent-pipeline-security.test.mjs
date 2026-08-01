@@ -460,6 +460,8 @@ test("the exact-head gate is autonomous and keeps deployment human-approved", as
   );
 
   const release = await read(".github/workflows/release.yml");
+  assert.match(release, /on:\n  workflow_dispatch:\n  push:/);
+  assert.match(release, /"\$EVENT_NAME" != "push" && "\$EVENT_NAME" != "workflow_dispatch"/);
   assert.match(release, /environment:/);
   assert.match(release, /production/);
 
@@ -506,4 +508,9 @@ test("reconciliation is deterministic and model-free", async () => {
   assert.match(implementation, /basehead: `\$\{run\.head_sha\}\.\.\.\$\{defaultRef\.data\.commit\.sha\}`/);
   assert.match(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);
   assert.match(implementation, /workflow_id: "agent-review\.yml", ref: defaultBranch/);
+  assert.match(implementation, /workflow_id: "release\.yml", ref: defaultBranch/);
+  assert.ok(
+    implementation.indexOf("github.rest.pulls.merge") < implementation.indexOf('workflow_id: "release.yml"'),
+    "the exact-head merge must complete before its release is dispatched",
+  );
 });
