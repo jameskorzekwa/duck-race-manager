@@ -3149,19 +3149,45 @@ not return `details_json`, contact data, tokens, or provider details.
 
 ### Notification Support
 
-The schema and administrator UI can list notification rows and attempts, retry
-`FAILED` or `RETRY_PENDING` records, and suppress or cancel eligible records.
-Retry creates a durable queue attempt and publishes only the notification ID to
-the configured queue producer.
+Operational race reminders are sent to a participant only when their current
+registration has both an email address and email updates enabled. Pairing creates
+one `HEAT_ASSIGNED` notification in the same D1 batch as the duck assignment and
+heat place. Moving a Round One or Final heat from `READY` to `CALLING` creates one
+`HEAT_UPCOMING` notification for each eligible opted-in racer on that heat. A
+matching command retry cannot create another logical message.
 
-**Deferred and non-operational:** current registration, pairing, heat, and
-result commands never create `email_notifications` rows. `wrangler.jsonc`
-declares only an `EMAIL_QUEUE` producer. There is no Worker queue consumer, SES
-template/send path, delivery callback, or automatic retry processor. Therefore
-no registration, assignment, upcoming-heat, finalist, or result email is
-currently delivered, regardless of the stored email-notification setting.
-Notification support controls operate only on records inserted by some external
-or future process and must not be presented as proof that delivery exists.
+The mutation publishes only the opaque notification ID to `EMAIL_QUEUE`; no
+name, address, duck number, lookup code, or token enters the queue message. A
+once-per-minute dispatcher recovers a notification committed before queue
+publication. Each durable row records the duck assignment that originated it.
+The consumer reloads the current consent, address, active registration, heat
+place, duck assignment, and heat state from D1 before it renders versioned text
+and HTML and asks SES to send. The originating assignment must still be the
+current one; a legacy row without that proof is cancelled rather than guessed.
+Opt-out, withdrawal, deletion, a changed assignment, or a heat that is no longer
+upcoming cancels stale work without sending. Email failure never rolls back
+pairing or a heat transition, and the onsite announcer remains authoritative.
+
+Each email names the event, participant, current duck number, and Round One or
+Final heat. Assignment mail asks the participant to stay near the pond; upcoming
+mail says the heat is being called and asks them to bring their duck to the pond.
+Both link only to public race status, explain that race progress can change, and
+do not promise a start time. Private status credentials and contact-preference
+credentials are never placed in email storage or reconstructed by the consumer.
+
+SES acceptance records `SENT`. That is the terminal success the current system
+can prove; it is not relabeled `DELIVERED`. SES delivery, bounce, and complaint
+event callbacks remain deferred. Temporary send failures receive bounded queue
+retries, exhausted or permanent failures become `FAILED`, and unexpected queue
+failures reach the configured DLQ. Each active delivery is owned by a unique D1
+claim token rather than a timestamp. If a claim becomes stale, QuickDucks cannot
+distinguish a pre-send Worker stop from SES acceptance followed by a failed D1
+write, so it records `DELIVERY_OUTCOME_UNKNOWN` and never sends or manually
+retries that notification again. This at-most-once recovery policy prefers one
+missed reminder to a duplicate. The administrator UI lists notification rows
+and attempts, retries other `FAILED` or `RETRY_PENDING` records, and can suppress
+or cancel eligible work. All persisted errors are fixed safe codes rather than
+raw provider responses.
 
 ## Delete Event (Any State)
 
@@ -3248,10 +3274,13 @@ External Cognito changes cannot share a D1 transaction. Staff grant and
 lifecycle handlers use compensation as described in the staff-access section
 and return explicit reconciliation errors if compensation also fails.
 
-Queue retry is also split across D1 and Cloudflare Queue. The durable attempt is
-created first. If publish fails, it is marked temporary failure and the
-notification returns to `RETRY_PENDING`; the same command can retry publication.
-This path does not make email delivery operational without a consumer.
+Queue publication is also split across D1 and Cloudflare Queue. Pairing or a heat
+call commits the durable notification with its race command before making a
+best-effort queue send. A failed send records a temporary queue attempt and
+returns the notification to `RETRY_PENDING`; if even that recovery write fails,
+the row remains `PENDING`. The once-per-minute dispatcher rediscovers both states.
+The configured consumer then claims the row and revalidates authoritative race
+and consent state before any SES request.
 
 ### Connectivity Failure
 
