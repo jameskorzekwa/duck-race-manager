@@ -177,7 +177,17 @@ test("a candidate behind main is merged forward instead of re-implemented", asyn
   // Only bot-authored pipeline candidates, and only when actually behind.
   assert.match(refresh, /select\(\.author\.login == "app\/github-actions"\)/);
   assert.match(refresh, /startswith\("opencode\/"\)/);
-  assert.match(refresh, /\[\[ "\$base" == "\$main_sha" \]\] && continue/);
+
+  // "Behind" is ancestry: whether main is already contained in the head. The
+  // PR's baseRefOid is the base branch's own tip, so comparing it to main
+  // compares main to itself and misfires while GitHub catches up on a merge.
+  assert.match(refresh, /git merge-base --is-ancestor "origin\/\$\{DEFAULT_BRANCH\}" HEAD/);
+  assert.doesNotMatch(refresh, /--json [^\n]*baseRefOid/);
+
+  // A review pins an exact head, so refreshing underneath one makes its own
+  // gate reject it as stale. Wait a cycle instead.
+  assert.match(refresh, /--workflow agent-review\.yml/);
+  assert.match(refresh, /select\(\.status != "completed"\)/);
 
   // The refreshed diff is re-checked, the provenance marker is rewritten by
   // this trusted job, stale approval is cleared, and both gates re-run.
