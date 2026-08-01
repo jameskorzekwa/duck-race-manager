@@ -1,7 +1,7 @@
 ---
 description: Maps relevant QuickDucks code, tests, invariants, and risks without editing files.
 mode: subagent
-model: anthropic/claude-sonnet-5
+model: openai/gpt-5.6-sol
 temperature: 0
 steps: 16
 permission:

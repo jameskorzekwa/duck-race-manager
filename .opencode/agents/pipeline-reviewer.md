@@ -1,7 +1,7 @@
 ---
 description: Independently reviews OpenCode-created QuickDucks pull requests without write authority.
 mode: primary
-model: anthropic/claude-opus-4-8
+model: openai/gpt-5.6-sol
 temperature: 0.1
 steps: 110
 permission:
