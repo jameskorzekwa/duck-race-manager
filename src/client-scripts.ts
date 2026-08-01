@@ -7250,12 +7250,14 @@ const heatBagInstruction = document.querySelector("[data-heat-bag-instruction]")
 const heatBagNumber = document.querySelector("[data-heat-bag-number]");
 const heatBagDuck = document.querySelector("[data-heat-bag-duck]");
 const heatBagNote = document.querySelector("[data-heat-bag-note]");
+const pairingConfirmation = document.querySelector("[data-pairing-confirmation]");
 let currentEvent = null;
 let selectedRegistration = null;
 let staffDuckBusy = 0;
 let staffDuckSubscription = null;
 let justPairedCode = null;
 let winnerSuccess = null;
+let pairingSelectionScrollFrame = null;
 
 const text = (tag, value, className) => {
   const element = document.createElement(tag);
@@ -7698,6 +7700,34 @@ const showInspection = (data) => {
   showDuckNameModeration(participant);
 };
 
+const cancelPairingSelectionScroll = () => {
+  if (pairingSelectionScrollFrame === null) return;
+  cancelAnimationFrame(pairingSelectionScrollFrame);
+  pairingSelectionScrollFrame = null;
+};
+
+// Selecting a result is an explicit move from finding a participant to
+// reviewing the pairing. Render that destination completely before moving the
+// viewport, and move focus to its non-actionable region rather than the confirm
+// button so Enter/Space can never carry through into an accidental pairing.
+// This helper is called only by result selection: scans, exact-code pairing,
+// live refreshes, and ordinary renders must not move the staff member's page.
+const scrollToPairingConfirmation = (registration) => {
+  if (!pairingConfirmation) return;
+  cancelPairingSelectionScroll();
+  registrationSearchInput?.blur();
+  pairingSelectionScrollFrame = requestAnimationFrame(() => {
+    pairingSelectionScrollFrame = null;
+    if (selectedRegistration !== registration || workArea?.hidden) return;
+    pairingConfirmation.focus({ preventScroll: true });
+    pairingConfirmation.scrollIntoView({
+      behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      block: "nearest",
+      inline: "nearest",
+    });
+  });
+};
+
 const renderSelection = (registration) => {
   selectedRegistration = registration;
   const review = document.querySelector("[data-pairing-review]");
@@ -7709,6 +7739,7 @@ const renderSelection = (registration) => {
     text("p", registration.phone || "No phone provided", "muted"),
   );
   document.querySelector("[data-confirm-pairing]").disabled = false;
+  scrollToPairingConfirmation(registration);
 };
 
 // One pairing command shared by the confirm button, an exactly typed lookup
@@ -7932,6 +7963,7 @@ const setRegistrationStatus = (value, isError) => {
 };
 
 const clearRegistrationSelection = () => {
+  cancelPairingSelectionScroll();
   selectedRegistration = null;
   const confirm = document.querySelector("[data-confirm-pairing]");
   if (confirm) confirm.disabled = true;

@@ -235,6 +235,8 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .pairing-review { margin:1rem 0; padding:1rem; border:2px solid var(--water-dark); border-radius:.8rem; background:#e4f4f8; }
 .pairing-review > * { margin-bottom:0; overflow-wrap:anywhere; }
 .pairing-review > * + * { margin-top:var(--space-xs); }
+.pairing-confirmation { scroll-margin-block:1rem; }
+.pairing-confirmation:focus-visible { border-radius:.9rem; outline:4px solid #83d8ec; outline-offset:.35rem; }
 .work-area { margin-top:var(--space-lg); }
 .work-area > * { margin-bottom:0; }
 .work-area > * + * { margin-top:var(--space-md); }
@@ -1705,8 +1707,10 @@ export const renderStaffDuck = (
         </form>
         <p class="muted" data-registration-search-status aria-live="polite">Loading participants who still need a duck…</p>
         <div class="result-list" data-registration-results></div>
-        <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
-        <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
+        <section class="pairing-confirmation" data-pairing-confirmation aria-label="Pairing confirmation" tabindex="-1">
+          <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
+          <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
+        </section>
       </section>` : ""}
       <script src="/assets/app-select.js" defer></script>
       <script src="/assets/staff-duck.js" defer></script>

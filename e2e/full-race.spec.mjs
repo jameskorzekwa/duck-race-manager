@@ -155,16 +155,22 @@ test.describe("complete race journey", () => {
       const search = staffPage.getByLabel("Participant code, name, phone, or email");
       await search.fill(participants[0].firstName);
       await staffPage.getByRole("button", { name: "Find participant" }).click();
-      await staffPage.getByRole("button", { name: /Browser Racer/ }).evaluate((row) => {
-        row.click();
-        const confirm = document.querySelector("[data-confirm-pairing]");
-        if (!(confirm instanceof HTMLButtonElement) || confirm.disabled) {
-          throw new Error("Pairing selection did not enable confirmation.");
-        }
-        confirm.click();
+      let browserPairingRequests = 0;
+      staffPage.on("request", (request) => {
+        if (new URL(request.url()).pathname === `/api/v1/staff/ducks/${ducks[0].tagToken}/assignments`
+          && request.method() === "POST") browserPairingRequests += 1;
       });
+      await staffPage.getByRole("button", { name: /Browser Racer/ }).click();
+      const pairingReview = staffPage.locator("[data-pairing-review]");
+      const confirmPairing = staffPage.getByRole("button", { name: "Confirm duck pairing", exact: true });
+      await expect(pairingReview).toContainText("Browser Racer");
+      await expect(confirmPairing).toBeEnabled();
+      await expect(confirmPairing).toBeInViewport();
+      expect(browserPairingRequests).toBe(0);
+      await confirmPairing.click();
       await expect(staffPage.getByRole("heading", { name: "Duck #101 paired" })).toBeVisible();
       await expect(staffPage.locator("[data-staff-message]")).toHaveText("Duck paired successfully.");
+      expect(browserPairingRequests).toBe(1);
 
       // Pairing seals this duck into a numbered heat bag it never comes out of,
       // so the race flow is not honest without the panel that names the bag.
