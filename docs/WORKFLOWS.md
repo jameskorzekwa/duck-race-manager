@@ -1910,6 +1910,29 @@ The console pairs that match directly instead of rendering a single-row list.
 Submitting with Enter prevents native form navigation and blurs the search field
 before the request so a mobile keyboard closes.
 
+**Implemented:** selecting a search result is an explicit move from finding a
+participant to reviewing the pairing, so the console finishes rendering the
+selected participant and enabling the confirmation button, then scrolls the
+confirmation region into view on the next frame. The destination is therefore
+stable, and the chosen participant is always visible in the confirmation context
+on a long result list, a short mobile viewport, or a viewport shortened by an
+on-screen keyboard. The search field is blurred first, for the same reason Enter
+blurs it. The scroll is smooth unless the browser reports
+`prefers-reduced-motion: reduce`, in which case it jumps immediately.
+
+Focus moves to the confirmation region itself, which is programmatically
+focusable but stays out of the tab sequence, and never to **Confirm duck
+pairing**. Nothing is submitted: the staff member still reads the review and
+presses the one confirmation button, and Enter or Space carried over from
+choosing the result cannot pair anyone. One Tab from the focused region reaches
+the confirm button, so the keyboard order matches the reading order.
+
+Only explicit search-result selection scrolls the page. Scanning, exact-code
+pairing, ordinary renders, and live refreshes leave the viewport and focus where
+the staff member put them; a queued scroll is cancelled if the selection is
+cleared or replaced before it runs, so a re-render cannot repeat it. The
+separate post-pairing heat-bag callout described below is unchanged.
+
 ### Participant QR Codes
 
 The private status page renders the participant's existing eight-character

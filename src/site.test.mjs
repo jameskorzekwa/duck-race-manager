@@ -95,6 +95,13 @@ test("the staff pairing page offers scanning, manual search, and a cancel path",
   // The list has a live status line of its own, above the results.
   assert.match(page, /<p class="muted" data-registration-search-status aria-live="polite">Loading participants who still need a duck…<\/p>/);
   assert.ok(page.indexOf("data-registration-search-status") < page.indexOf("data-registration-results"));
+  // Explicit result selection can move focus to a review region, with the
+  // confirmation action next in DOM order. The action itself never receives
+  // focus or activation merely because a result was chosen.
+  assert.match(page, /<section class="pairing-confirmation" data-pairing-confirmation aria-label="Pairing confirmation" tabindex="-1">/);
+  assert.ok(page.indexOf("data-pairing-confirmation") < page.indexOf("data-confirm-pairing"));
+  assert.match(style, /\.pairing-confirmation \{ scroll-margin-block:1rem; \}/);
+  assert.match(style, /\.pairing-confirmation:focus-visible \{[^}]*outline:4px solid #83d8ec;/);
   // The page itself never renders a participant or a QR payload.
   assert.doesNotMatch(page, /QD1:/);
 });
