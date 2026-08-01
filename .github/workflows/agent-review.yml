@@ -234,6 +234,14 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.base }}
 
+      # The agent contracts are trusted control plane, not candidate content:
+      # sourcing them from the candidate's base pins every review to whatever
+      # instructions existed when that candidate was built, so a reviewer fix
+      # could never reach an already-published PR.
+      - name: Fetch the trusted default branch
+        working-directory: trusted
+        run: git fetch --quiet origin ${{ github.event.repository.default_branch }}
+
       - name: Check out exact candidate as untrusted data
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -264,6 +272,10 @@ jobs:
           rm -rf "$model_dir"
           mkdir -p "$model_dir"
           git -C trusted archive "${{ needs.prepare.outputs.base }}" | tar -x -C "$model_dir"
+          # Replace the snapshot's agent configuration with the trusted default
+          # branch's, so reviewer contract fixes apply to existing candidates.
+          rm -rf "$model_dir/.opencode"
+          git -C trusted archive FETCH_HEAD .opencode | tar -x -C "$model_dir"
           mkdir -p "$model_dir/.pipeline" "$RUNNER_TEMP/agent-review"
           git -C candidate diff --no-ext-diff --binary "${{ needs.prepare.outputs.base }}..${EXPECTED_HEAD}" \
             > "$model_dir/.pipeline/candidate.patch"
@@ -528,7 +540,21 @@ jobs:
                 if (error.status !== 404) throw error;
               }
             };
+            // This candidate may only write its issue's state while it is still
+            // the newest run that claimed the issue: a review finishing after a
+            // fresh implementation was dispatched must not relabel live work.
+            const candidateRun = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) /)?.[1];
             const setIssueState = async (name) => {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: issueNumber, per_page: 100,
+              });
+              const claims = [...comments.flatMap(({ body }) => [...String(body ?? "")
+                .matchAll(/<!-- agent-pipeline task-run=(\d+) -->/g)].map((match) => match[1]))];
+              const newest = claims.at(-1);
+              if (candidateRun !== undefined && newest !== undefined && newest !== candidateRun) {
+                core.info(`A newer run (${newest}) owns issue #${issueNumber}; not writing ${name}.`);
+                return;
+              }
               const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
               const labels = issue.labels.map((label) => label.name).filter((label) => !stateLabels.includes(label));
               await github.rest.issues.setLabels({
@@ -606,9 +632,13 @@ jobs:
             await setIssueState("agent:failed");
             const report = String(decision.report ?? "Independent review failed without a report.").slice(0, 50000);
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            // A review that ran to completion but never printed its marker is a
+            // rejection, not broken infrastructure: treating it as the latter
+            // stranded correct candidates permanently, including one whose
+            // report said "Recommendation: APPROVE" in prose. Only an actual
+            // job failure counts as infrastructure.
             const infrastructureFailure = process.env.RESET_RESULT !== "success"
-              || process.env.REVIEW_RESULT !== "success"
-              || decision.exitStatus !== 0;
+              || process.env.REVIEW_RESULT !== "success";
             if (infrastructureFailure || revokedAfterStart) {
               const reason = revokedAfterStart
                 ? "An approval was dismissed after this review started. Rerun Agent Review to produce a fresh exact-head decision."
