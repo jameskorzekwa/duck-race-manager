@@ -168,17 +168,17 @@ test.describe("authoritative live refresh", () => {
     );
     const inventoryDuckId = (await client.get("/api/v1/staff/inventory/ducks")).body.ducks
       .find((item) => item.visibleNumber === 901).id;
+    const pairedInventory = waitForJson(
+      inventoryPage,
+      `/api/v1/staff/inventory/ducks/${encodeURIComponent(inventoryDuckId)}`,
+      (body) => body?.duck?.participant?.registrationId === created.registrationId,
+    );
     await pairDuck(client, seeded.eventId, duck, created);
     await registrationPage.bringToFront();
     await pairedCollection;
     await expect(registrationPage.locator(
       `[data-participant-section="paired"] [data-registration-id="${created.registrationId}"]`,
     )).toBeVisible();
-    const pairedInventory = waitForJson(
-      inventoryPage,
-      `/api/v1/staff/inventory/ducks/${encodeURIComponent(inventoryDuckId)}`,
-      (body) => body?.duck?.participant?.registrationId === created.registrationId,
-    );
     await inventoryPage.bringToFront();
     await pairedInventory;
     await expect(inventoryPage.locator("[data-inventory-facts]")).toContainText("Live Observer");

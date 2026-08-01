@@ -7097,6 +7097,11 @@ if (walkUpAvailability) globalThis.quickDucksLive.subscribe({
   refresh: async () => {
     if (!currentEvent) return;
     const eventId = currentEvent.id;
+    // This narrow projection and the full event loader both paint walk-up
+    // admission. A heat signal is newer than any full event request already in
+    // flight, so retire that request before its older snapshot can hide or
+    // reopen the form after this response renders.
+    staffEventRequest.invalidate();
     const request = walkUpAdmissionRequest.begin();
     const body = await api(
       "/api/v1/staff/events/" + encodeURIComponent(eventId) + "/walk-up-admission",

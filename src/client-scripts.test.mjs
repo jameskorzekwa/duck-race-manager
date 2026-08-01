@@ -3267,7 +3267,7 @@ test("secondary live projections retire responses that predate newer state", () 
   // other with a response from an older lifecycle/heat snapshot.
   assert.match(staffHomeScript, /const walkUpAdmissionRequest = liveCreateLatestRequest\(\)/);
   assert.match(staffHomeScript, /currentEventDetail = detail;[\s\S]*?walkUpAdmissionRequest\.invalidate\(\);\s*renderWalkUpAvailability/);
-  assert.match(staffHomeScript, /const request = walkUpAdmissionRequest\.begin\(\);[\s\S]*?walkUpAdmissionRequest\.isCurrent\(request\)/);
+  assert.match(staffHomeScript, /staffEventRequest\.invalidate\(\);\s*const request = walkUpAdmissionRequest\.begin\(\);[\s\S]*?walkUpAdmissionRequest\.isCurrent\(request\)/);
 });
 
 test("an authoritative empty race board leaves the server-only Race Status route", () => {
