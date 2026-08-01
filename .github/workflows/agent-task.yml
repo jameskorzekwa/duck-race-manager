@@ -91,7 +91,7 @@ jobs:
                 && pr.head.repo?.id === pr.base.repo?.id && branchName && marker
                 && linked.length === 1 && linked[0] === issueNumber
                 && marker[1] === branchName[2] && marker[2] === branchName[1]
-                && marker[3] === pr.base.sha;
+                && /^[0-9a-f]{40}$/.test(marker[3]);
             };
             if (openPulls.some(validPipelinePull)) {
               await setState(issue, "agent:review");

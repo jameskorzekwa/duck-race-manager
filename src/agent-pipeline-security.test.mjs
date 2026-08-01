@@ -166,7 +166,7 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
   );
 });
 
-test("a candidate behind main is merged forward instead of re-implemented", async () => {
+test("only a conflicting candidate is merged forward; being behind main is fine", async () => {
   const reconcile = await read(".github/workflows/agent-reconcile.yml");
   const refresh = reconcile.slice(reconcile.indexOf("  refresh-candidates:"), reconcile.indexOf("  reconcile:"));
 
@@ -174,22 +174,17 @@ test("a candidate behind main is merged forward instead of re-implemented", asyn
   assert.match(refresh, /git merge --no-edit "origin\/\$\{DEFAULT_BRANCH\}"/);
   assert.doesNotMatch(refresh, /openchamber|self-hosted/);
 
-  // Only bot-authored pipeline candidates, and only when actually behind.
+  // Only bot-authored pipeline candidates, and only genuine conflicts. Branch
+  // protection is not strict, so a candidate that is merely behind main merges
+  // cleanly; rewriting it would throw away a good review and a good CI run, and
+  // since every merge moves main it would never reach a fixed point.
   assert.match(refresh, /select\(\.author\.login == "app\/github-actions"\)/);
   assert.match(refresh, /startswith\("opencode\/"\)/);
-
-  // "Behind" is ancestry: whether main is already contained in the head. The
-  // PR's baseRefOid is the base branch's own tip, so comparing it to main
-  // compares main to itself and misfires while GitHub catches up on a merge.
-  assert.match(refresh, /git merge-base --is-ancestor "origin\/\$\{DEFAULT_BRANCH\}" HEAD/);
+  assert.match(refresh, /select\(\.mergeable == "CONFLICTING"\)/);
   assert.doesNotMatch(refresh, /--json [^\n]*baseRefOid/);
+  assert.doesNotMatch(refresh, /merge-base --is-ancestor/);
 
-  // A review pins an exact head, so refreshing underneath one makes its own
-  // gate reject it as stale. Wait a cycle instead.
-  assert.match(refresh, /--workflow agent-review\.yml/);
-  assert.match(refresh, /select\(\.status != "completed"\)/);
-
-  // The refreshed diff is re-checked, the provenance marker is rewritten by
+  // The resolved diff is re-checked, the provenance marker is rewritten by
   // this trusted job, stale approval is cleared, and both gates re-run.
   assert.match(refresh, /validate-agent-patch\.mjs "\$PWD" "\$main_sha" HEAD/);
   assert.match(refresh, /agent-pipeline task-run=/);
@@ -200,6 +195,32 @@ test("a candidate behind main is merged forward instead of re-implemented", asyn
   // A real conflict falls back to re-implementation from the saved patch.
   assert.match(refresh, /git merge --abort/);
   assert.match(refresh, /gh workflow run agent-task\.yml --ref "\$DEFAULT_BRANCH" -f issue="\$issue"/);
+});
+
+test("the review pins the head, tolerates base drift, and rejects conflicts", async () => {
+  const review = await read(".github/workflows/agent-review.yml");
+  const prepare = review.slice(review.indexOf("  prepare:"), review.indexOf("  reset-state:"));
+  const gate = review.slice(review.indexOf("  gate:"), review.indexOf("  queue-merge:"));
+
+  // The marker records the fork point the model built from. It is provenance,
+  // not freshness: it must be a default-branch commit that the head descends
+  // from, and it stays valid however far main moves ahead.
+  assert.match(prepare, /base=\$\{marker\[3\]\}/);
+  assert.doesNotMatch(prepare, /marker\[3\] !== pr\.base\.sha/);
+  assert.match(prepare, /compare\/\$\{base_sha\}\.\.\.\$\{head_sha\}" --jq '\.status'\)" != "ahead"/);
+  assert.match(prepare, /compare\/\$\{base_sha\}\.\.\.\$\{DEFAULT_BRANCH\}"/);
+
+  // What was reviewed is exactly what merges.
+  assert.match(gate, /pr\.head\.sha !== expectedHead/);
+
+  // The base is deliberately unpinned: merging any candidate moves main, and
+  // pinning it would invalidate every other in-flight review on every merge.
+  assert.doesNotMatch(gate, /pr\.base\.sha !== expectedBase/);
+
+  // Behind is acceptable, conflicting is not, and null means "still computing".
+  assert.match(gate, /pr\.mergeable === null/);
+  assert.match(gate, /pr\.mergeable === false/);
+  assert.match(gate, /Conflicts with the default branch/);
 });
 
 test("the reviewer contract comes from trusted main, and a missing marker rejects", async () => {
