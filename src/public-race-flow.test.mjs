@@ -1136,9 +1136,10 @@ test("the catch-all not-found path runs no phase query", async () => {
   assert.equal(unknownToken.queries.length, 1);
   assert.doesNotMatch(unknownToken.queries[0], /FROM events/);
 
-  // The comparison: a public content page does run exactly one phase query.
+  // The comparison: Race Status reads its phase plus the authoritative public
+  // board used for its scriptless initial paint.
   const race = await page("/race", "ROUND_ONE");
-  assert.equal(race.queries.length, 1);
+  assert.equal(race.queries.length, 3);
   assert.match(race.queries[0], /SELECT status\s+FROM events/);
 });
 

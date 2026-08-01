@@ -2221,6 +2221,27 @@ const liveHumanize = (value) => String(value || "").replaceAll("_", " ").toLower
 
 const liveRoundLabel = (round) => round === "FINAL" ? "Final" : "Round one";
 const livePlaceLabel = (place) => place === 1 ? "1st" : place === 2 ? "2nd" : "3rd";
+// The Winners finale states each rank in words. A final can be configured
+// deeper than three, so the ordinal is derived rather than picked from a
+// three-entry table that would call 4th place "3rd".
+const liveOrdinal = (place) => {
+  const tens = place % 100;
+  const ones = place % 10;
+  const suffix = tens >= 11 && tens <= 13 ? "th"
+    : ones === 1 ? "st"
+    : ones === 2 ? "nd"
+    : ones === 3 ? "rd"
+    : "th";
+  return place + suffix;
+};
+// Gold, silver, bronze — and nothing at all below third, because a medal is
+// never invented for a place that does not have one. The medal name is rendered
+// as text beside the ordinal, so rank never depends on colour, on the medal
+// disc, or on the stylesheet loading at all.
+const liveMedals = { 1: "Gold", 2: "Silver", 3: "Bronze" };
+const liveMedalName = (place) => Object.prototype.hasOwnProperty.call(liveMedals, place)
+  ? liveMedals[place]
+  : null;
 const liveHeatStatus = (status) => ({
   PLANNED: "Coming up",
   LOADING: "Ducks are being prepared",
@@ -2396,18 +2417,45 @@ const liveRenderBoard = (board) => {
     heatDetail,
     event.roundOneHeats.length + event.finalHeats.length > 0,
   );
+  // The finale. Only places the server actually published are drawn, in the
+  // order it published them, so a final that produced fewer than three valid
+  // places simply shows fewer winners and never invents one to fill a step.
   if (event.podium.length > 0) {
-    const podium = liveText("section", "", "board-round");
-    podium.append(liveText("h3", "Official podium"));
-    const places = liveText("div", "", "podium");
+    const winners = liveText("section", "", "board-round winners");
+    winners.append(liveText("h3", "Winners", "winners-title"));
+    winners.append(liveText(
+      "p",
+      "The official finish of the final, straight from the finish line.",
+      "winners-note",
+    ));
+    const places = liveText("ol", "", "podium");
     for (const entry of event.podium) {
-      const place = liveText("p", livePlaceLabel(entry.place) + " · " + entry.participantDisplayName, "podium-place");
+      const medal = liveMedalName(entry.place);
+      const place = liveText(
+        "li",
+        "",
+        "podium-place" + (medal === null ? "" : " podium-" + medal.toLowerCase()),
+      );
+      // Decorative only: the same rank is spelled out in the text beside it.
+      const disc = liveText("span", String(entry.place), "podium-medal");
+      disc.setAttribute("aria-hidden", "true");
+      const detail = liveText("span", "", "podium-detail");
+      detail.append(
+        liveText("span", medal === null
+          ? liveOrdinal(entry.place) + " place"
+          : medal + " medal · " + liveOrdinal(entry.place) + " place", "podium-rank"),
+        liveText("strong", entry.participantDisplayName, "podium-name"),
+      );
+      const duck = liveText("span", "", "podium-duck");
       const link = duckDetailLink(document, entry.duckNumber, liveBoardDuckName(entry));
-      if (link !== null) place.append(liveText("span", " · "), link);
+      if (link === null) duck.textContent = "Duck number pending";
+      else duck.append(link);
+      detail.append(duck);
+      place.append(disc, detail);
       places.append(place);
     }
-    podium.append(places);
-    liveBoardContent.append(podium);
+    winners.append(places);
+    liveBoardContent.append(winners);
   }
   if (event.finalHeats.length > 0) liveBoardContent.append(liveRound("Final", event.finalHeats, event.currentHeat));
   if (event.roundOneHeats.length > 0) liveBoardContent.append(liveRound("Round one", event.roundOneHeats, event.currentHeat));

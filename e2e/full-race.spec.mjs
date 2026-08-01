@@ -388,7 +388,7 @@ test.describe("complete race journey", () => {
       await page.getByRole("button", { name: "Complete event", exact: true }).click();
       await confirmAction(page);
       await page.goto("/race");
-      await expect(page.getByRole("heading", { name: "Official podium" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Winners" })).toBeVisible();
       await expect(page.getByText("Winner", { exact: true }).first()).toBeVisible();
       await expect(page.getByText("Results official", { exact: true })).toBeVisible();
       const podium = page.locator(".podium");
