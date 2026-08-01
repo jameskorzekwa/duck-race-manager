@@ -824,6 +824,15 @@ const confirmationCallsites = [
     "Publish this podium now? Read back: " + readback + ". This publishes immediately.",
     { danger: true, confirmLabel: "Publish podium" },
   )) return;`],
+  // The last-resort manual winner. It publishes an official result immediately,
+  // exactly like the scan it stands in for, so it is confirmed exactly like one
+  // — and the read-back names the duck, the racer, and the heat, because the
+  // staffer picked this one out of a dropdown rather than holding it.
+  [finishLineScript, `if (!await appConfirm(
+    "Record " + duckLabel + " (" + who + ") as the official Heat " + heatNumber + " winner?"
+      + " Use this only because that duck's tag could not be scanned. This publishes immediately.",
+    { danger: true, confirmLabel: "Record winner" },
+  )) return;`],
   [staffAccessScript, 'if (!await appConfirm("Really " + description + "?", { danger: action === "deactivate" })) return;'],
   [participantScript, `  const confirmed = await appConfirm(
     "Delete the registration for " + participantDisplayName(registration)
@@ -839,8 +848,11 @@ test("every confirmation callsite preserves its warning and returns before mutat
   }
   assert.equal((startLineScript.match(/\bappConfirm\(/g) ?? []).length, 1);
   // Submitting a podium the station assembled itself, clearing a place that was
-  // scanned into one, and publishing a scanned podium a withdrawal completed.
-  assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 3);
+  // scanned into one, publishing a scanned podium a withdrawal completed, and
+  // the last-resort manual winner. The fourth one publishes an official result
+  // from a dropdown instead of from a duck in the staffer's hand, which is the
+  // callsite here that most needs a read-back before it commits.
+  assert.equal((finishLineScript.match(/\bappConfirm\(/g) ?? []).length, 4);
   // Inventory owns takeover, clearing a duck name, assign, unpair, release,
   // and delete duck. Every one of them is destructive or irreversible.
   assert.equal((staffInventoryScript.match(/\bappConfirm\(/g) ?? []).length, 6);
@@ -3663,15 +3675,74 @@ test("NFC scanning cleans up unsupported records and read errors so one retry ca
   assert.deepEqual(readers.map((reader) => reader.scanCalls), [1, 1, 1]);
 });
 
-test("both rounds publish their result from the duck inspection page it was scanned on", () => {
-  assert.doesNotMatch(staffDuckScript, /quickducks\.finishStation|finishStationHandoff|location\.replace\("\/staff\/finish-line/);
+// Both rounds still publish through the same scanned endpoint on the duck's own
+// inspection page. What differs now is where the staffer ends up.
+//
+// Round one publishes one winner and there is nothing left to do with that duck,
+// so the page hands them back to the station that owns the rest of the heat.
+// The final builds its podium one scan at a time, so its staffer stays here and
+// keeps scanning; sending them away after each place would be three round trips
+// for one result.
+test("a scanned round-one winner returns to the finish line and the final keeps scanning", () => {
+  assert.doesNotThrow(() => new Function(staffDuckScript));
+
   assert.match(staffDuckScript, /"Mark Duck as Heat " \+ candidate\.heatNumber \+ " Winner"/);
   assert.match(staffDuckScript, /\/heat-winner/);
+  // The final's saved-place banner still renders on this page.
   assert.match(staffDuckScript, /const success = winnerSuccess;\s*winnerSuccess = null;/);
-  assert.match(finishLineScript, /Scan the winning duck's permanent NFC or QR tag/);
+
+  // The return trip is one fixed same-origin literal. Visible numbers provide
+  // the acknowledgement copy and bounded server-resolved keys let the finish
+  // line verify the exact committed result before revealing it.
+  assert.match(
+    staffDuckScript,
+    /location\.assign\("\/staff\/finish-line\?recorded=heat-winner"[\s\S]*?"&event=" \+ encodeURIComponent\(candidate\.eventId\)[\s\S]*?"&heatId=" \+ encodeURIComponent\(candidate\.heatId\)[\s\S]*?"&raceEntry=" \+ encodeURIComponent\(candidate\.raceEntryId\)\);/,
+  );
+  // Only the committed path navigates. The catch below it re-enables the button
+  // and shows the server's error, so a refusal can never redirect or claim a
+  // winner was saved.
+  assert.match(
+    staffDuckScript,
+    /message\.textContent = "Official winner saved\. Returning to the finish line…";\s*location\.assign\("\/staff\/finish-line/,
+  );
+
+  // The finish line's primary instruction names NFC and nothing else, and the
+  // finalists bag is part of the same prominent workflow. Pinning the exact
+  // sentence is what proves QR was removed from it; the final's own multi-place
+  // instruction is a different sentence and still mentions both.
+  assert.match(
+    finishLineScript,
+    /const FINISH_WINNER_SCAN_INSTRUCTION = "Heat finished\. Scan the winning duck's permanent NFC tag"\s*\+ " to open its inspection page and select it as the winner\.";/,
+  );
+  assert.match(
+    finishLineScript,
+    /const FINISH_FINALISTS_BAG_INSTRUCTION = "Then put the winning duck in the finalists bag\.";/,
+  );
+  // Every round-one surface says it through the constant rather than its own copy.
+  assert.match(finishLineScript, /\? FINISH_WINNER_SCAN_INSTRUCTION\b/);
+  assert.match(
+    finishLineScript,
+    /finishMessage\.textContent = FINISH_WINNER_SCAN_INSTRUCTION\s*\+ " Its inspection page will offer Mark Duck as Heat "/,
+  );
+  // The callout is its own region, so a scan, a refusal, or a repaint writing
+  // the message line cannot overwrite the instruction.
+  assert.match(finishLineScript, /finishCallout\.append\(\s*finishText\("strong", FINISH_WINNER_SCAN_INSTRUCTION\),\s*finishText\("p", FINISH_FINALISTS_BAG_INSTRUCTION\),\s*\);/);
+
+  // The acknowledgement handoff is validated, one-shot, and never a source of
+  // success or station state. The exact result is read back before the banner.
+  assert.match(finishLineScript, /parameters\.get\("recorded"\) !== "heat-winner"/);
+  assert.match(finishLineScript, /history\.replaceState\(null, "", location\.pathname\);/);
+  assert.match(finishLineScript, /\/\^\[0-9\]\{1,9\}\$\/\.test\(duckNumber\)/);
+  assert.match(finishLineScript, /const detail = await finishApi\("\/api\/v1\/staff\/events\//);
+  assert.match(finishLineScript, /result\.place === 1 && result\.raceEntryId === candidate\.raceEntryId/);
+  assert.match(finishLineScript, /detail\.heat\?\.round !== "ROUND_ONE" \|\| detail\.heat\.status !== "FINALIZED"/);
+  assert.match(finishLineScript, /select\.dataset\.liveUntracked = "true"/);
+  assert.match(liveUiScript, /event\.target\.dataset\.liveUntracked !== "true"/);
+  assert.match(staffDuckScript, /winnerFailure = error\.message;\s*message\.textContent = error\.message;/);
+
   assert.match(finishLineScript, /finishHeat\.round === "FINAL"/);
   assert.match(finishLineScript, /Submit official podium/);
-  assert.doesNotMatch(finishLineScript, /quickducks\.finishStation|finishPendingHandoff|finishConsumeHandoff/);
+  assert.doesNotMatch(finishLineScript, /\.innerHTML|\.outerHTML|insertAdjacentHTML|document\.write/);
 });
 
 // A final awards up to three places, so the scan that records one has to ask
@@ -5478,6 +5549,11 @@ const finishLineRenderHarness = () => {
     finishSubmit: document.createElement("button"),
     finishMessage: document.createElement("p"),
     finishIneligible: document.createElement("div"),
+    // The prominent finished-heat workflow and the acknowledgement a winner
+    // recorded on a duck's own page comes back to. Both are separate regions
+    // from the message line, which every scan and every repaint overwrites.
+    finishCallout: document.createElement("section"),
+    finishRecorded: document.createElement("section"),
   };
   const runtime = buildRuntime(
     [
@@ -5504,6 +5580,34 @@ const finishLineRenderHarness = () => {
         /const finishRenderScannedPodium = \(focusedRaceEntry\) => \{[\s\S]*?\n\};/,
       ),
       liftFrom(finishLineScript, "finishRenderSelections", /const finishRenderSelections = \(\) => \{[\s\S]*?\n\};/),
+      // The finished-heat workflow. These are lifted rather than described,
+      // because the whole point of the callout is the exact words it says.
+      liftFrom(
+        finishLineScript,
+        "FINISH_WINNER_SCAN_INSTRUCTION",
+        /const FINISH_WINNER_SCAN_INSTRUCTION = [\s\S]*?;\n/,
+      ),
+      liftFrom(
+        finishLineScript,
+        "FINISH_FINALISTS_BAG_INSTRUCTION",
+        /const FINISH_FINALISTS_BAG_INSTRUCTION = [\s\S]*?;\n/,
+      ),
+      liftFrom(
+        finishLineScript,
+        "FINISH_MANUAL_LAST_RESORT_HEADING",
+        /const FINISH_MANUAL_LAST_RESORT_HEADING = [\s\S]*?;\n/,
+      ),
+      liftFrom(
+        finishLineScript,
+        "FINISH_MANUAL_LAST_RESORT_NOTE",
+        /const FINISH_MANUAL_LAST_RESORT_NOTE = [\s\S]*?;\n/,
+      ),
+      liftFrom(
+        finishLineScript,
+        "finishRenderManualFallback",
+        /const finishRenderManualFallback = \(\) => \{[\s\S]*?\n\};/,
+      ),
+      liftFrom(finishLineScript, "finishRenderCallout", /const finishRenderCallout = \(\) => \{[\s\S]*?\n\};/),
       liftFrom(finishLineScript, "finishRender", /const finishRender = \(event, detail\) => \{[\s\S]*?\n\};/),
       "let finishEvent = null; let finishHeat = null; let finishRosterEntries = [];",
       "let finishSelected = []; let finishRenderKey = null; let finishScanBusy = false;",
@@ -5511,6 +5615,13 @@ const finishLineRenderHarness = () => {
       // The clear control is wired but never pressed by these render tests; the
       // command it sends is covered by the real handler integration tests.
       "const finishClearPodiumPlace = async () => {};",
+      // Same for the manual winner command. These tests prove the control is
+      // built, populated, and wired; the write it performs is covered by the
+      // real-handler integration tests, which is where authorization, revision,
+      // idempotency, audit, and promotion actually live.
+      "const manualWinnerCalls = [];",
+      "const finishRecordManualWinner = async (select, button) =>"
+      + " manualWinnerCalls.push({ raceEntryId: select.value, button });",
       "const selectFor = (raceEntryId, place, visibleNumber) =>"
       + " finishSelected.push({ raceEntryId, place, visibleNumber, participantDisplayName: 'Racer ' + raceEntryId });",
       "const requiredPlaces = () => finishRequiredPlaces();",
@@ -5529,10 +5640,34 @@ const finishLineRenderHarness = () => {
       "selectFor",
       "selectedPlaces",
       "submitBlocked",
+      "manualWinnerCalls",
       "FINISH_NO_ELIGIBLE_MESSAGE",
+      "FINISH_WINNER_SCAN_INSTRUCTION",
+      "FINISH_FINALISTS_BAG_INSTRUCTION",
+      "FINISH_MANUAL_LAST_RESORT_HEADING",
+      "FINISH_MANUAL_LAST_RESORT_NOTE",
     ],
   );
   return { ...elements, ...runtime };
+};
+
+// The callout's parts, read back out of whatever it painted. The fallback is
+// found by its own marker rather than by position, so adding a line to the
+// instruction above it cannot silently retarget these assertions.
+const calloutOf = (harness) => {
+  const fallback = harness.finishCallout.children.find((child) => child.dataset.finishManual === "true");
+  const select = fallback?.children.find((child) => child.tagName === "SELECT") ?? null;
+  return {
+    fallback,
+    select,
+    lines: harness.finishCallout.children
+      .filter((child) => child !== fallback)
+      .map((child) => child.textContent),
+    button: fallback?.children.find((child) => child.dataset.finishManualSubmit === "true") ?? null,
+    options: select === null
+      ? []
+      : select.children.map((option) => ({ value: option.value, label: option.textContent })),
+  };
 };
 
 // The default `final` seed exactly: three finalists, one duck each.
@@ -5797,7 +5932,16 @@ test("a round-one heat nobody can win says so instead of sending the staffer to 
     ],
   });
   assert.equal(harness.requiredPlaces(), 1);
-  assert.match(harness.finishMessage.textContent, /^Scan the winning duck's permanent NFC or QR tag\./);
+  // The station returns to the finished-heat instruction, which now names NFC
+  // only and says what the page that tag opens will offer. QR is not mentioned
+  // in the instruction a staffer is sent to act on; nothing about a QR tag that
+  // resolves to the same permanent URL has changed.
+  assert.equal(
+    harness.finishMessage.textContent,
+    harness.FINISH_WINNER_SCAN_INSTRUCTION + " Its inspection page will offer Mark Duck as Heat 2 Winner.",
+  );
+  assert.match(harness.finishMessage.textContent, /^Heat finished\. Scan the winning duck's permanent NFC tag/);
+  assert.doesNotMatch(harness.finishMessage.textContent, /QR/);
 });
 
 test("a running round-one heat nobody can win keeps its finish button and still says so", () => {
@@ -5820,4 +5964,179 @@ test("a running round-one heat nobody can win keeps its finish button and still 
     /^When the race physically finishes, press the one finish button\. /,
   );
   assert.ok(harness.finishMessage.textContent.endsWith(NO_ELIGIBLE_MESSAGE));
+});
+
+// ---------------------------------------------------------------------------
+// The finished-heat callout, its finalists bag reminder, and its last resort
+//
+// The instruction for recording a winner used to live only on the message line,
+// which every scan, every refusal and every repaint overwrites — so the one
+// sentence a result taker needs was the one sentence most likely to be gone by
+// the time they looked. The callout is a region of its own for that reason, and
+// these tests read it back rather than trusting that it was painted.
+// ---------------------------------------------------------------------------
+
+// Written out here rather than read back out of the shipped script, exactly
+// like NO_ELIGIBLE_MESSAGE above, so a silent drift in the wording fails this
+// file instead of quietly changing the instruction a staffer is given at the
+// water's edge. This sentence is pinned by the issue that asked for it.
+const WINNER_SCAN_INSTRUCTION = "Heat finished. Scan the winning duck's permanent NFC tag"
+  + " to open its inspection page and select it as the winner.";
+const FINALISTS_BAG_INSTRUCTION = "Then put the winning duck in the finalists bag.";
+const MANUAL_LAST_RESORT_HEADING = "Last resort: only if the tag cannot be scanned";
+const MANUAL_LAST_RESORT_NOTE = "Scanning the winning duck's own permanent NFC tag is how a winner"
+  + " is recorded. Use this only when that duck's tag cannot be scanned at all.";
+
+test("a finished round-one heat says the one instruction in its own region, word for word", () => {
+  const harness = finishLineRenderHarness();
+  assert.equal(harness.FINISH_WINNER_SCAN_INSTRUCTION, WINNER_SCAN_INSTRUCTION);
+  assert.equal(harness.FINISH_FINALISTS_BAG_INSTRUCTION, FINALISTS_BAG_INSTRUCTION);
+  assert.equal(harness.FINISH_MANUAL_LAST_RESORT_HEADING, MANUAL_LAST_RESORT_HEADING);
+  assert.equal(harness.FINISH_MANUAL_LAST_RESORT_NOTE, MANUAL_LAST_RESORT_NOTE);
+
+  // A heat that is still running has not finished, so it is never told to go
+  // and scan a winner: it still has one button, and that button is the finish.
+  harness.finishRender(roundOneEvent, {
+    heat: { ...roundOneHeat, status: "RUNNING" },
+    roster: [finalistEntry(1, "Active", 201), finalistEntry(2, "Racing", 202)],
+  });
+  assert.equal(harness.finishCallout.hidden, true);
+  assert.equal(harness.finishCallout.children.length, 0);
+
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: [finalistEntry(1, "Active", 201), finalistEntry(2, "Racing", 202)],
+  });
+  const callout = calloutOf(harness);
+  assert.equal(harness.finishCallout.hidden, false);
+  // The primary instruction and the finalists bag are one workflow in one
+  // block, in that order: scan the tag, then put the duck in the bag.
+  assert.deepEqual(callout.lines, [WINNER_SCAN_INSTRUCTION, FINALISTS_BAG_INSTRUCTION]);
+  // The instruction is emphatic without any styling, so it survives a
+  // stylesheet that never loaded.
+  assert.equal(harness.finishCallout.children[0].tagName, "STRONG");
+  // QR is gone from this instruction and only from this instruction.
+  assert.doesNotMatch(callout.lines.join(" "), /QR/);
+
+  // A heat nobody can win has a different thing to say, and must never be sent
+  // to scan a bag in which every duck is refused.
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: [withdrawn(finalistEntry(1, "Gone", 201)), withdrawn(finalistEntry(2, "Also gone", 202))],
+  });
+  assert.equal(harness.finishCallout.hidden, true);
+  assert.equal(harness.finishCallout.children.length, 0);
+  assert.equal(harness.finishMessage.textContent, NO_ELIGIBLE_MESSAGE);
+
+  // The final awards places through its own podium flow, so it never shows the
+  // single-winner instruction.
+  harness.finishRender(finalEvent, {
+    heat: finalHeat,
+    roster: [finalistEntry(1, "A", 101), finalistEntry(2, "B", 102), finalistEntry(3, "C", 103)],
+  });
+  assert.equal(harness.finishCallout.hidden, true);
+});
+
+test("the manual fallback names itself a last resort and offers only this heat's eligible racers", () => {
+  const harness = finishLineRenderHarness();
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: [
+      finalistEntry(1, "Active", 201),
+      withdrawn(finalistEntry(2, "Gone", 202)),
+      {
+        ...finalistEntry(3, "Barred", 203),
+        eligible: false,
+        participant: { firstName: "Racer", lastName: "Barred", registrationStatus: "DISQUALIFIED" },
+      },
+      finalistEntry(4, "Racing", 204),
+      // Paired to nobody: there is no duck to record, so there is nothing to
+      // offer, even though the racer themselves is perfectly eligible.
+      { ...finalistEntry(5, "Unpaired", 205), duck: null },
+    ],
+  });
+
+  const callout = calloutOf(harness);
+  // The warning is words, not colour and not position: it survives a screen
+  // reader, a narrow phone, and a stylesheet that never arrived.
+  assert.ok(callout.fallback, "the fallback is rendered inside the callout");
+  assert.equal(callout.fallback.children[0].tagName, "STRONG");
+  assert.equal(callout.fallback.children[0].textContent, MANUAL_LAST_RESORT_HEADING);
+  assert.match(callout.fallback.children[0].textContent, /Last resort/);
+  assert.equal(callout.fallback.children[1].textContent, MANUAL_LAST_RESORT_NOTE);
+
+  // The dropdown is labelled, describes itself with the warning, and leads with
+  // a placeholder so no racer is preselected into an accidental publish.
+  assert.equal(callout.select.getAttribute("aria-describedby"), "finish-manual-warning");
+  assert.equal(callout.fallback.children[0].id, "finish-manual-warning");
+  assert.equal(callout.fallback.children[2].tagName, "LABEL");
+  assert.equal(callout.fallback.children[2].htmlFor, callout.select.id);
+  assert.deepEqual(callout.options, [
+    { value: "", label: "Choose the winning duck" },
+    { value: "entry-1", label: "Duck #201 · Racer Active" },
+    { value: "entry-4", label: "Duck #204 · Racer Racing" },
+  ]);
+  // Withdrawn, disqualified, and unpaired racers are simply not offerable.
+  assert.equal(callout.options.some((option) => option.value === "entry-2"), false);
+  assert.equal(callout.options.some((option) => option.value === "entry-3"), false);
+  assert.equal(callout.options.some((option) => option.value === "entry-5"), false);
+
+  // The action is explicit and separate from choosing: picking a name in the
+  // dropdown publishes nothing by itself.
+  assert.equal(callout.button.textContent, "Record selected duck as winner");
+  assert.equal(callout.button.type, "button");
+  assert.deepEqual(harness.manualWinnerCalls, []);
+  callout.select.value = "entry-4";
+  callout.button.dispatch("click");
+  assert.deepEqual(harness.manualWinnerCalls.map((call) => call.raceEntryId), ["entry-4"]);
+});
+
+test("the fallback follows the roster, so it can never offer another heat or a racer who left", () => {
+  const harness = finishLineRenderHarness();
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: [finalistEntry(1, "Leaving", 201), finalistEntry(2, "Staying", 202)],
+  });
+  assert.deepEqual(calloutOf(harness).options.map((option) => option.value), ["", "entry-1", "entry-2"]);
+
+  // A racer who withdraws while the control is on screen leaves the list
+  // without a reload: the callout is rebuilt from the roster on every repaint.
+  harness.finishRender(roundOneEvent, {
+    heat: roundOneHeat,
+    roster: [withdrawn(finalistEntry(1, "Leaving", 201)), finalistEntry(2, "Staying", 202)],
+  });
+  assert.deepEqual(calloutOf(harness).options.map((option) => option.value), ["", "entry-2"]);
+
+  // Moving to the next heat replaces the options wholesale rather than adding
+  // to them, so nobody from the heat just finished can be recorded against this
+  // one. The server refuses a cross-heat race entry regardless; this is the
+  // half that stops it ever being offered.
+  harness.finishRender(roundOneEvent, {
+    heat: { ...roundOneHeat, id: "heat-3", number: 3, revision: 1 },
+    roster: [
+      { ...finalistEntry(7, "Next", 301), raceEntryId: "entry-7" },
+      { ...finalistEntry(8, "Also next", 302), raceEntryId: "entry-8" },
+    ],
+  });
+  assert.deepEqual(calloutOf(harness).options.map((option) => option.value), ["", "entry-7", "entry-8"]);
+
+  // The last eligible racer leaving takes the whole workflow with it: there is
+  // no winner to record and no dropdown pretending otherwise.
+  harness.finishRender(roundOneEvent, {
+    heat: { ...roundOneHeat, id: "heat-3", number: 3, revision: 1 },
+    roster: [
+      withdrawn({ ...finalistEntry(7, "Next", 301), raceEntryId: "entry-7" }),
+      withdrawn({ ...finalistEntry(8, "Also next", 302), raceEntryId: "entry-8" }),
+    ],
+  });
+  assert.equal(harness.finishCallout.hidden, true);
+  assert.equal(calloutOf(harness).fallback, undefined);
+});
+
+test("a returned scanned winner is verified from authoritative heat state before acknowledgement", () => {
+  assert.match(finishLineScript, /const finishTakeRecordedCandidate = \(\) => \{[\s\S]*?history\.replaceState\(null, "", location\.pathname\)/);
+  assert.match(finishLineScript, /!\/\^\[0-9\]\{1,9\}\$\/\.test\(duckNumber\)[\s\S]*?!validId\(raceEntryId\)/);
+  assert.match(finishLineScript, /const finishVerifyRecorded = async \(candidate\) => \{[\s\S]*?await finishApi\([\s\S]*?\/heats\/[\s\S]*?detail\.heat\?\.round !== "ROUND_ONE"[\s\S]*?detail\.heat\.status !== "FINALIZED"/);
+  assert.match(finishLineScript, /winner\?\.duck\?\.visibleNumber\) !== candidate\.duckNumber/);
+  assert.match(finishLineScript, /finishText\("strong", "Official winner saved"\)[\s\S]*?FINISH_FINALISTS_BAG_INSTRUCTION/);
 });

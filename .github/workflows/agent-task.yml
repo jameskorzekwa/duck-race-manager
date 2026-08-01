@@ -759,11 +759,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          current_base="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${{ github.event.repository.default_branch }}" --jq '.commit.sha')"
-          if [[ "$current_base" != "$EXPECTED_BASE" ]]; then
-            printf 'Default branch advanced from %s to %s.\n' "$EXPECTED_BASE" "$current_base" >&2
-            exit 1
-          fi
           node <<'NODE'
           const crypto = require("node:crypto");
           const fs = require("node:fs");

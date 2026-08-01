@@ -253,6 +253,42 @@ test("stations keep their actionable message lines after freshness removal", () 
   assert.match(intake, /data-intake-message/);
 });
 
+// The instruction for recording a winner used to live only on the message line
+// above, which every scan, every refusal, and every repaint overwrites. These
+// two regions exist so the one sentence a result taker needs is not the one
+// sentence most likely to have been overwritten by the time they look up.
+test("the finish line ships hidden, labelled regions for its winner workflow", () => {
+  const finishLine = renderFinishLine("Finish staff", false);
+
+  // Both are announced when they appear and named for what they hold, and both
+  // start hidden: the page claims nothing about a heat it has not loaded.
+  assert.match(
+    finishLine,
+    /<section class="station-recorded" data-finish-recorded hidden aria-live="polite" aria-label="Recorded winner"><\/section>/,
+  );
+  assert.match(
+    finishLine,
+    /<section class="station-callout" data-finish-callout hidden aria-live="polite" aria-label="How to record this heat's winner"><\/section>/,
+  );
+  // The workflow sits above the heat detail it is about, so on a phone it is
+  // read and seen before the roster rather than under it.
+  assert.ok(finishLine.indexOf("data-finish-recorded") < finishLine.indexOf("data-finish-callout"));
+  assert.ok(finishLine.indexOf("data-finish-callout") < finishLine.indexOf("data-station-heat"));
+  // The server paints neither instruction. The client owns those words, so
+  // there is exactly one copy of each sentence in the product and no way for a
+  // server-rendered duplicate to drift away from the one staff act on.
+  assert.doesNotMatch(finishLine, /Scan the winning duck|finalists bag|Last resort/);
+  // The callout is styled loudly but never depends on that styling to say what
+  // it is: the words themselves carry the warning.
+  assert.match(style, /\.station-callout \{/);
+  assert.match(style, /\.station-fallback \{/);
+  assert.match(style, /\.station-recorded \{/);
+  // The selector and its action keep the full station touch target, and both
+  // are bounded so a long duck name cannot push the page sideways at 320px.
+  assert.match(style, /\.station-fallback select \{[^}]*box-sizing:border-box;[^}]*max-width:100%;[^}]*min-height:4rem;/);
+  assert.match(style, /\.station-fallback \.button \{ box-sizing:border-box; width:100%; \}/);
+});
+
 test("the live board exposes a stage chip on every page that renders it", () => {
   const boardPages = [renderRace("RACING"), renderStatus(), renderDuck()];
 
