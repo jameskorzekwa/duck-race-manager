@@ -48,19 +48,28 @@ not authorized.
 | Open `/staff/registration` | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
 | Event list/detail context | Any operational role | Yes |
-| Event readiness, heat list/detail/announcer-roster, result, and finalist reads | `ANNOUNCER`, `HEAT_RUNNER`, `RESULT_TAKER`, or `RACE_DIRECTOR` | Yes |
+| Heat list/detail reads used by the round-one fallback | `ANNOUNCER`, `HEAT_RUNNER`, `RESULT_TAKER`, or `RACE_DIRECTOR` | Yes |
+| Event readiness, announcer-roster, result, and finalist reads | `ANNOUNCER`, `HEAT_RUNNER`, `RESULT_TAKER`, or `RACE_DIRECTOR` | Yes |
 | Lock, ready, call, and start heat | `HEAT_RUNNER` or `RACE_DIRECTOR` | Yes |
-| Finish heat and finalize required result/podium | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
+| Finish heat and finalize required final podium | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
+| Record a round-one heat winner by scanned tag, or through the finish line's manual fallback | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Record or clear a scanned final podium place | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/start-line` | `HEAT_RUNNER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/announcer` (read-only) | `ANNOUNCER` or `RACE_DIRECTOR` | Yes |
-| Open `/staff/finish-line` and resolve a roster duck by tag URL/number | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
+| Open `/staff/finish-line` | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
+| Resolve a final-place duck by tag URL/number on the finish-line form | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
 | Open the `/staff` Admin view | `RACE_DIRECTOR` | Yes |
 | Create/configure draft; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
 | Open `/staff/access` and the console's Support view | None | Yes |
 | Delete event: the whole dataset in any state | None | Yes |
+
+Recording which duck won a round-one heat remains `RESULT_TAKER` or
+`RACE_DIRECTOR` work, whether the winner is recorded by scanning that duck's
+permanent NFC tag or through the finish line's last-resort manual selector.
+Reopening, correcting, or resetting a published result remains `RACE_DIRECTOR`
+work.
 
 `is_system_admin` is an account type, not a race-day role. The race-day role for
 changing the state of the overall race — opening and closing registration,
@@ -2412,15 +2421,70 @@ so the announcer never has to refresh.
 `/staff/finish-line` prioritizes an `AWAITING_RESULT` heat, otherwise a `RUNNING`
 heat, in the active round. A newer running heat therefore cannot clear result
 selections for an older unpublished heat. A running heat exposes only `Mark heat
-finished`. For round one, the station then tells the result taker to scan the
-winning duck's permanent NFC or QR URL. Authenticated `GET /t/<tag>` remains
-read-only and redirects to `/staff/ducks/<tag>`. If exactly one round-one heat is
-awaiting a result and the duck's current participant is an active member of that
-roster, the inspection page leads with **Mark Duck as Heat N Winner**. The
+finished`. Authenticated `GET /t/<tag>` remains read-only and
+redirects to `/staff/ducks/<tag>`. If exactly one round-one heat is awaiting a result and the
+duck's current participant is an active member of that roster, the inspection
+page leads with **Mark Duck as Heat N Winner**. The
 confirmed POST revalidates the tag, assignment, roster entry, event round, heat
 revision, and sole awaiting heat inside the atomic result command before it
-publishes the winner. A result taker receives no contact details, lookup code,
-pairing control, or name-moderation control on that inspection page.
+publishes the winner. A role without registration PII permission receives no
+contact details, lookup code, pairing control, or name-moderation control on that
+inspection page.
+
+**A finished round-one heat that still needs its winner says so in its own
+region.** The instruction used to live only on the station message line, which
+every scan, every refusal, and every repaint overwrites, so the one sentence a
+staff member needs was the one most likely to be gone by the time they looked up.
+The station now paints a separate, deliberately loud callout that says, word for
+word, *Heat finished. Scan the winning duck's permanent NFC tag to open its
+inspection page and select it as the winner.* followed by *Then put the winning
+duck in the finalists bag.* — the step that is otherwise forgotten, because a
+duck returned to its round-one bag is a duck nobody can produce for the final.
+
+That primary instruction names NFC only. This does not disable QR anywhere: a QR
+tag encodes the same permanent canonical URL and still opens the same inspection
+page, and every other surface that mentions QR is unchanged. Offering two
+technologies in one sentence is what made it easy to skim past at the water's
+edge. The callout is shown only while there is actually a winner to record, so a
+running heat, a settled heat, a final, and a heat nobody can win never display it.
+
+**The manual selector is a last resort, and says so in words.** Inside the same
+callout, so the two read as one workflow rather than as competing ways to do the
+same job, the station renders a fallback headed *Last resort: only if the tag
+cannot be scanned*. The warning is text in its own heading rather than colour or
+position, so it survives a screen reader, a narrow phone, and a stylesheet that
+never loaded. Its dropdown is built from the authoritative roster of the heat
+being displayed, filtered by the same eligibility predicate the roster markers
+and the required-place count use, and it omits any racer with no duck assigned.
+It is rebuilt on every repaint, so a racer who withdraws while it is on screen
+leaves the list without a reload, and moving to the next heat replaces the
+options wholesale. A placeholder option leads the list, so nobody is preselected
+into an accidental publish, and choosing a name publishes nothing by itself: a
+separate **Record selected duck as winner** action, behind a danger confirmation
+that reads back the duck, the racer, and the heat, commits it.
+
+All of that is convenience only. The manual action posts the same command to the
+same guarded `results/finalize` endpoint the reviewed station form uses, with the
+same heat revision and a fresh RFC 4122 v4 `commandId`, so a manually selected
+winner and a scanned one are the same write: same role check, same result
+validation, same idempotent replay, same audit event, and the same promotion of
+the winner into the final. There is no second, weaker way to publish a result,
+and the server still refuses a cross-heat race entry, an ineligible racer, or a
+stale revision regardless of what the control offered.
+
+**A scanned winner returns the staffer to the finish line.** Only a committed
+publish navigates: on success the inspection page sends the browser to a fixed
+same-origin `/staff/finish-line` path carrying the visible duck/heat numbers and
+bounded event, heat, and race-entry verification keys. The station removes that
+one-shot context from the address bar immediately and reads the exact finalized
+round-one result back through the authenticated heat-detail handler. Only a
+matching first-place race entry and visible duck number reveal the *Official
+winner saved* acknowledgement and finalists-bag reminder, so a hand-edited URL
+cannot assert success. The current and next-heat state is fetched independently
+and never derived from the query string. Every failure and every conflict stays on
+the inspection page with the server's own actionable error, re-enables the
+control, and neither navigates nor claims success. The manual fallback shows the
+same acknowledgement in place, without a navigation, because it is already there.
 
 **A withdrawn or disqualified duck at the finish line is an expected outcome,
 not an error.** A duck that has been paired is already inside a heat bag, and
@@ -2523,9 +2587,9 @@ record.
 ## Round-One Results and Finalist Promotion
 
 After a round-one heat reaches `AWAITING_RESULT`, a result taker, race director,
-or administrator scans its winning duck and confirms the winner action on the
-staff inspection page. A race director or administrator may use the console
-result form as a recovery path. QuickDucks atomically:
+or administrator may scan its winning duck and confirm the winner action on the
+staff inspection page, or use the explicitly last-resort manual selector when
+the permanent tag cannot be scanned. QuickDucks atomically:
 
 - Writes one finalized first-place result linked to the current duck assignment.
 - Changes the heat to `FINALIZED`.
@@ -2626,8 +2690,9 @@ whichever surface publishes, every place is written in one atomic command.
 
 All result corrections and reopens require `RACE_DIRECTOR` or a system
 administrator, a fresh heat revision, a 4-to-500-character reason, and explicit
-confirmation. Result takers may finalize new results but cannot alter published
-results.
+confirmation. Result takers and race directors may finalize the single new
+round-one winner or a new final result. A result taker cannot alter a published
+result without the director role.
 
 A correction writes new `heat_results` rows, so it is held to exactly the rule a
 first publication is: every racer it names must still be `ACTIVE` and must still

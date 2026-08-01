@@ -76,6 +76,8 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.match(publish, /gh workflow run agent-review\.yml/);
   assert.match(publish, /--ref "\$\{\{ github\.event\.repository\.default_branch \}\}"/);
   assert.match(publish, /scripts\/validate-agent-patch\.mjs/);
+  assert.match(publish, /base=\$\{EXPECTED_BASE\}/);
+  assert.doesNotMatch(publish, /current_base|Default branch advanced/);
 });
 
 test("review publishes a candidate-SHA check without privileged candidate execution", async () => {

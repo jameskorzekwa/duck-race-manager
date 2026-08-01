@@ -575,12 +575,17 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     ), 201, `heat runner repeats ${transition} after admin reset`);
     revision = result.heat.revision;
   }
-  assert.equal((await post(actors.heats, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish`, {
-    commandId: command(), revision,
-  })).status, 403);
+  // Starting stays start-line work. Finishing and winner selection stay
+  // result-station work.
   assert.equal((await post(actors.results, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/start`, {
     commandId: command(), revision,
   })).status, 403);
+  assert.equal((await post(actors.none, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish`, {
+    commandId: command(), revision,
+  })).status, 403, "a roleless actor finishes nothing");
+  assert.equal((await post(actors.heats, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish`, {
+    commandId: command(), revision,
+  })).status, 403, "a heat runner cannot finish a heat");
 
   let finished = await json(await post(
     actors.results,
@@ -588,19 +593,39 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     { commandId: command(), revision },
   ), 201, "result taker finishes round-one heat");
   assert.equal((await api(
-    actors.heats,
+    actors.none,
     `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish-scan?value=101`,
   )).status, 403);
+  assert.equal((await api(
+    actors.heats,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish-scan?value=101`,
+  )).status, 403, "the final-station lookup remains result-role only");
   const selectedWinner = await json(await api(
     actors.results,
     `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/finish-scan?value=101`,
   ), 200, "result taker validates finish-line duck");
   assert.equal(selectedWinner.selection.raceEntryId, raceEntryId);
   assert.equal(JSON.stringify(selectedWinner).includes("daisy@example.com"), false);
-  const inspection = await json(await api(
-    actors.results,
-    `/api/v1/staff/ducks/${duckOneToken}`,
-  ), 200, "result taker inspects scanned winner");
+  // Result staff can follow the permanent tag into the scanned winner action.
+  for (const actorName of ["results", "director"]) {
+    const available = await json(await api(
+      actors[actorName],
+      `/api/v1/staff/ducks/${duckOneToken}`,
+    ), 200, `${actorName} inspects scanned winner`);
+    assert.equal(available.winnerAction.heatId, roundOneHeatId, actorName);
+    assert.equal(available.winnerAction.raceEntryId, raceEntryId, actorName);
+  }
+  for (const actorName of ["registration", "ducks"]) {
+    const available = await json(await api(
+      actors[actorName],
+      `/api/v1/staff/ducks/${duckOneToken}`,
+    ), 200, `${actorName} inspects duck without result authority`);
+    assert.equal(available.winnerAction, null, actorName);
+  }
+  for (const actorName of ["announcer", "heats"]) {
+    assert.equal((await api(actors[actorName], `/api/v1/staff/ducks/${duckOneToken}`)).status, 403, actorName);
+  }
+  const inspection = await json(await api(actors.results, `/api/v1/staff/ducks/${duckOneToken}`), 200, "result projection");
   assert.equal(inspection.winnerAction.heatId, roundOneHeatId);
   assert.equal(inspection.winnerAction.raceEntryId, raceEntryId);
   assert.deepEqual(Object.keys(inspection.assignment.participant), ["registrationStatus"]);
@@ -613,10 +638,10 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     revision: finished.heat.revision,
   };
   assert.equal((await post(
-    actors.registration,
+    actors.none,
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
     winnerPayload,
-  )).status, 403);
+  )).status, 403, "a roleless actor cannot publish a scanned winner");
   const finalized = await json(await post(
     actors.results,
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
@@ -628,16 +653,55 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     winnerPayload,
   ), 200, "result taker replays scanned winner command");
   assert.equal(replayedWinner.replayed, true);
+  // A matching retry stays inside the same result-station boundary.
+  for (const actorName of ["director"]) {
+    const replay = await json(await post(
+      actors[actorName],
+      `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
+      winnerPayload,
+    ), 200, `${actorName} replays scanned winner command`);
+    assert.equal(replay.replayed, true, actorName);
+  }
+  for (const actorName of ["registration", "ducks", "announcer", "heats"]) {
+    assert.equal((await post(
+      actors[actorName],
+      `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
+      winnerPayload,
+    )).status, 403, actorName);
+  }
   assert.equal((await post(
     actors.results,
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
     { ...winnerPayload, raceEntryId: "forged-entry" },
   )).status, 409);
-  assert.equal((await post(
-    actors.results,
-    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/finalize`,
-    { commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }] },
-  )).status, 403);
+  // Recording a round-one winner without a tag is the finish line's last-resort
+  // fallback for a duck whose tag will not scan, so it is authorized exactly
+  // like the scanned path above. Result staff reach the lifecycle check because
+  // the scan already settled this heat.
+  for (const [label, settledActor] of [
+    ["result taker", actors.results],
+    ["race director", actors.director],
+  ]) {
+    assert.equal((await post(
+      settledActor,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/finalize`,
+      { commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }] },
+    )).status, 409, `${label} is refused a settled heat on lifecycle, not on role`);
+  }
+  // Other roles remain refused before any state is read.
+  for (const [label, deniedActor] of [
+    ["registration", actors.registration],
+    ["duck manager", actors.ducks],
+    ["announcer", actors.announcer],
+    ["heat runner", actors.heats],
+    ["roleless actor", actors.none],
+  ]) {
+    assert.equal((await post(
+      deniedActor,
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/finalize`,
+      { commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }] },
+    )).status, 403, `${label} cannot record a round-one winner manually`);
+  }
   assert.equal(JSON.stringify(finalized).includes("daisy@example.com"), false);
   assert.equal((await post(actors.results, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/results/correct`, {
     commandId: command(), revision: finalized.heat.revision, reason: "Neighbor denial", results: [{ raceEntryId, place: 1 }],
@@ -685,7 +749,8 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     revision: finished.heat.revision,
     place: 1,
   };
-  for (const actorName of ["registration", "heats", "announcer"]) {
+  // Final podium recording and clearing retain that same result boundary.
+  for (const actorName of ["registration", "ducks", "announcer", "heats", "none"]) {
     assert.equal(
       (await post(actors[actorName], `/api/v1/staff/ducks/${duckOneToken}/heat-winner`, podiumPayload)).status,
       403,
@@ -697,6 +762,13 @@ test("station roles enforce the complete operational matrix with live D1 actors"
       })).status,
       403,
       `${actorName} may not clear a podium place`,
+    );
+    assert.equal(
+      (await post(actors[actorName], `/api/v1/staff/events/${eventId}/heats/${finalHeatId}/results/finalize`, {
+        commandId: command(), revision: finished.heat.revision, results: [{ raceEntryId, place: 1 }],
+      })).status,
+      403,
+      `${actorName} may not publish a final result manually`,
     );
   }
   const scannedPodium = await json(
