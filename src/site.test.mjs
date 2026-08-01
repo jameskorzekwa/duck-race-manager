@@ -110,8 +110,21 @@ test("result taker duck inspection exposes only the winner surface, not pairing 
   const page = renderStaffDuck("a".repeat(32), "Result staff", false, ["RESULT_TAKER"]);
 
   assert.match(page, /data-winner-action/);
-  assert.doesNotMatch(page, /data-registration-search|data-confirm-pairing|data-scan-qr/);
+  assert.doesNotMatch(page, /data-registration-search|data-confirm-pairing|data-scan-qr|data-replacement-work/);
   assert.doesNotMatch(page, /lookup code pairs|phone, or email/i);
+});
+
+test("the staff duck page makes emergency replacement an explicit repeated last resort", () => {
+  const page = renderStaffDuck("a".repeat(32), "Registration staff", false, ["REGISTRATION"]);
+
+  assert.match(page, /data-replacement-work hidden/);
+  assert.ok((page.match(/last resort for a lost or damaged duck/gi) ?? []).length >= 2);
+  assert.match(page, /Only eligible participants already paired in this race are listed/);
+  assert.match(page, /data-replacement-review/);
+  assert.match(page, /The current duck is lost/);
+  assert.match(page, /The current duck is damaged/);
+  assert.match(page, /data-confirm-replacement disabled/);
+  assert.match(style, /\.emergency-replacement \{[^}]*border:5px solid #9f261c;/);
 });
 
 test("the finalists card has current-winner wording and no verification control", () => {
@@ -215,8 +228,9 @@ test("every rendered form class remains covered by the shared form constraints",
   // the duplicate empty-draft deletion path removed one more console form.
   //
   // The registration desk then added five: the shared participants surface's
-  // filter, walk-up, duck-name, and edit forms, plus its own sign-out form.
-  assert.equal(openingForms, 32);
+  // filter, walk-up, duck-name, and edit forms, plus its own sign-out form. The
+  // scanned-duck page adds the emergency-replacement search form.
+  assert.equal(openingForms, 33);
   assert.equal(closingForms, openingForms);
   // "danger-zone" left the form vocabulary with the two purge forms; it now
   // styles only the <details>/<article> wrappers around destructive actions.

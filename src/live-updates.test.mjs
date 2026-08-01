@@ -193,6 +193,7 @@ test("successful mutation routes have explicit bounded refresh domains", () => {
     ["POST", "/api/v1/staff/registrations/registration/clear-duck-name", ["participants", "ducks", "heats"]],
     ["POST", "/api/v1/staff/inventory/assignments/assignment/unassign", ["ducks", "participants", "heats"]],
     ["POST", "/api/v1/staff/ducks/tag/assignments", ["ducks", "participants", "heats"]],
+    ["POST", "/api/v1/staff/ducks/tag/replacement", ["ducks", "participants", "heats"]],
     ["POST", "/api/v1/staff/ducks/tag/heat-winner", ["event", "participants", "heats"]],
     ["POST", "/api/v1/staff/events/event/heats/round-one/plan-commit", ["event", "participants", "heats"]],
     ["PUT", "/api/v1/staff/events/event/heats/heat/roster", ["event", "participants", "heats"]],

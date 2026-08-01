@@ -193,8 +193,14 @@ test("handler returns null for routes owned by other staff modules", async () =>
     env,
     staffActor,
   );
+  const replacementSearchResponse = await handleParticipantOperations(
+    new Request("https://quickducks.com/api/v1/staff/registrations/replacement-search?eventId=event-open&q=Daisy"),
+    env,
+    staffActor,
+  );
   assert.equal(duckResponse, null);
   assert.equal(registrationSearchResponse, null);
+  assert.equal(replacementSearchResponse, null);
   database.close();
 });
 

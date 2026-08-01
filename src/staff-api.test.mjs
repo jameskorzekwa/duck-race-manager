@@ -1300,7 +1300,7 @@ test("the staff duck projection no longer exposes returns", async () => {
   const body = await response.json();
 
   assert.equal(response.status, 200);
-  assert.deepEqual(Object.keys(body.permissions), ["pair"]);
+  assert.deepEqual(Object.keys(body.permissions), ["pair", "replace"]);
   assert.equal("disposition" in body, false);
   const sql = db.statements.map((statement) => statement.sql).join("\n");
   assert.doesNotMatch(sql, /duck_event_dispositions/);

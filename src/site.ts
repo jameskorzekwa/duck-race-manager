@@ -241,6 +241,15 @@ fieldset { margin:0; padding:1rem; border:2px solid #b8c6c9; border-radius:.8rem
 .work-area > * { margin-bottom:0; }
 .work-area > * + * { margin-top:var(--space-md); }
 .work-area > .result-list,.work-area > .pairing-review { margin-bottom:0; }
+.emergency-replacement { margin-top:var(--space-lg); padding:clamp(1rem,4vw,1.6rem); border:5px solid #9f261c; border-radius:1rem; background:#fff3f1; box-shadow:6px 6px 0 var(--ink); }
+.emergency-replacement > * { margin-bottom:0; }
+.emergency-replacement > * + * { margin-top:var(--space-md); }
+.emergency-replacement h2 { font-size:clamp(1.8rem,7vw,3.4rem); line-height:1.02; }
+.emergency-replacement .eyebrow { background:#ffd8d2; }
+.emergency-warning { padding:1rem; border:3px solid #9f261c; border-radius:.8rem; background:#ffd8d2; font-size:1.05rem; font-weight:900; line-height:1.5; }
+.replacement-reasons { display:grid; gap:.7rem; }
+.replacement-reasons label { display:flex; min-height:3rem; align-items:center; gap:.7rem; padding:.65rem; border:2px solid #b8c6c9; border-radius:.7rem; background:#fff; }
+.replacement-reasons input[type="radio"] { flex:none; width:1.4rem; height:1.4rem; min-height:1.4rem; margin:0; accent-color:var(--orange); }
 .staff-access-list { display:grid; gap:.75rem; margin-top:1rem; }
 .staff-access-card { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:var(--space-md); padding:var(--space-md); border:2px solid #b8c6c9; border-radius:.8rem; background:#fff; }
 .staff-access-card > * { min-width:0; max-width:100%; }
@@ -1730,6 +1739,27 @@ export const renderStaffDuck = (
         <section class="pairing-confirmation" data-pairing-confirmation aria-label="Pairing confirmation" tabindex="-1">
           <div class="pairing-review" data-pairing-review><p class="muted">Choose one registration to review.</p></div>
           <button class="button" type="button" data-confirm-pairing disabled>Confirm duck pairing</button>
+        </section>
+      </section>
+      <section class="emergency-replacement" data-replacement-work hidden aria-labelledby="replacement-title">
+        <p class="eyebrow">Emergency replacement · last resort</p>
+        <h2 id="replacement-title">Last resort for a lost or damaged duck</h2>
+        <p class="emergency-warning"><strong>This is only a last resort for a lost or damaged duck.</strong> It is not routine pairing. The participant keeps the same race place and the old duck tag stops representing them.</p>
+        <div class="privacy"><strong>Replacement duck</strong><span data-replacement-duck></span></div>
+        <form method="post" action="/staff" data-replacement-search>
+          <label>Paired participant name or current duck number<input name="query" type="search" enterkeyhint="search" autocomplete="off" maxlength="80" data-replacement-search-input><span>Only eligible participants already paired in this race are listed.</span></label>
+          <button class="button secondary" type="submit">Find paired participant</button>
+        </form>
+        <p class="muted" data-replacement-search-status aria-live="polite">Loading eligible paired participants…</p>
+        <div class="result-list" data-replacement-results></div>
+        <section class="pairing-confirmation" data-replacement-confirmation aria-label="Emergency replacement confirmation" tabindex="-1">
+          <div class="pairing-review" data-replacement-review><p class="muted">Choose one paired participant to review their duck, round, heat, and race progress.</p></div>
+          <fieldset class="replacement-reasons">
+            <legend>Why is this last-resort replacement needed?</legend>
+            <label><input type="radio" name="replacementIncident" value="LOST" data-replacement-incident> The current duck is lost</label>
+            <label><input type="radio" name="replacementIncident" value="DAMAGED" data-replacement-incident> The current duck is damaged</label>
+          </fieldset>
+          <button class="button danger station-control" type="button" data-confirm-replacement disabled>Confirm emergency replacement</button>
         </section>
       </section>` : ""}
       <script src="/assets/app-select.js" defer></script>

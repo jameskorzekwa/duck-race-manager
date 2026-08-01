@@ -133,10 +133,12 @@ test.describe("complete race journey", () => {
     });
 
     const ducks = [];
+    let emergencySpare;
     await test.step("intake ducks and pair one through the browser", async () => {
       for (let index = 0; index < participants.length; index += 1) {
         ducks.push(await intakeDuck(client, event.id, 101 + index));
       }
+      emergencySpare = await intakeDuck(client, event.id, 190);
       for (let index = 1; index < participants.length; index += 1) {
         await pairDuck(client, event.id, ducks[index], participants[index]);
       }
@@ -252,6 +254,36 @@ test.describe("complete race journey", () => {
       await page.getByRole("button", { name: "Start round one", exact: true }).click();
       await confirmAction(page);
       await expect(page.getByText("Round one", { exact: true }).first()).toBeVisible();
+
+      // Exercise the emergency replacement inside the broad lifecycle too, so
+      // the replacement has to survive every later result and final cleanup.
+      const search = (await client.get(
+        `/api/v1/staff/registrations/replacement-search?eventId=${event.id}&q=Browser%20Racer`,
+      )).body;
+      expect(search.candidates).toHaveLength(1);
+      const candidate = search.candidates[0];
+      const spareInspection = (await client.get(
+        `/api/v1/staff/ducks/${emergencySpare.tagToken}`,
+      )).body;
+      await client.post(`/api/v1/staff/ducks/${emergencySpare.tagToken}/replacement`, {
+        commandId: crypto.randomUUID(),
+        eventId: event.id,
+        raceEntryId: candidate.raceEntryId,
+        expectedAssignmentId: candidate.currentAssignment.id,
+        expectedReplacementReservationId: spareInspection.duck.reservationId,
+        expectedEventStatus: candidate.event.status,
+        expectedEventRevision: candidate.event.revision,
+        expectedHeatId: candidate.currentHeat.id,
+        expectedHeatRevision: candidate.currentHeat.revision,
+        expectedRegistrationRevision: candidate.registrationRevision,
+        expectedRaceEntryRevision: candidate.raceEntryRevision,
+        expectedCurrentDuckRevision: candidate.currentAssignment.duckRevision,
+        expectedReplacementDuckRevision: spareInspection.duck.revision,
+        incidentType: "DAMAGED",
+      });
+      const oldInspection = (await client.get(`/api/v1/staff/ducks/${ducks[0].tagToken}`)).body;
+      expect(oldInspection.assignment).toBeNull();
+      ducks[0] = emergencySpare;
     });
 
     await test.step("run and publish round-one heats", async () => {

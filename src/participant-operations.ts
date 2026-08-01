@@ -1248,7 +1248,7 @@ export const handleParticipantOperations = async (
   );
   if (registrationMatch === null) return null;
   const [, registrationId, operation] = registrationMatch;
-  if (registrationId === "search" && operation === undefined) return null;
+  if (["search", "replacement-search"].includes(registrationId) && operation === undefined) return null;
   const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
   if (denied !== null) return denied;
   if (operation === undefined && request.method === "GET") {

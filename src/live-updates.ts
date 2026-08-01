@@ -247,6 +247,9 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && /^\/api\/v1\/staff\/ducks\/[A-Za-z0-9_-]+\/assignments$/.test(pathname)) {
     return domains("ducks", "participants", "heats");
   }
+  if (method === "POST" && /^\/api\/v1\/staff\/ducks\/[A-Za-z0-9_-]+\/replacement$/.test(pathname)) {
+    return domains("ducks", "participants", "heats");
+  }
   if (method === "POST" && /^\/api\/v1\/staff\/ducks\/[A-Za-z0-9_-]+\/heat-winner$/.test(pathname)) {
     return domains("event", "participants", "heats");
   }

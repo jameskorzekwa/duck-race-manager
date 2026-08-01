@@ -43,6 +43,15 @@ const readJson = async (request: Request): Promise<Record<string, unknown> | nul
   }
 };
 
+const validEntityId = (value: unknown): value is string =>
+  typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+const validRevision = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const hashValue = async (value: string): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+
 interface StaffProfileRow {
   id: string;
   email: string;
@@ -215,6 +224,7 @@ interface StaffDuckRow {
   inventory_status: string;
   duck_revision: number;
   tag_status: string;
+  event_duck_id: string | null;
   event_name: string | null;
   event_status: string | null;
   assignment_id: string | null;
@@ -235,7 +245,8 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
   if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return json({ error: "Duck not found." }, 404);
   const duck = await env.DB.prepare(
     `SELECT d.id AS duck_id, d.visible_number, d.inventory_status,
-            d.revision AS duck_revision, dt.status AS tag_status,
+             d.revision AS duck_revision, dt.status AS tag_status,
+             ed.id AS event_duck_id,
             e.name AS event_name, e.status AS event_status,
             da.id AS assignment_id, da.valid_to AS assignment_valid_to,
             ed.event_id, da.race_entry_id, re.duck_name,
@@ -244,10 +255,10 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
             r.status AS registration_status
        FROM duck_tags dt
        JOIN ducks d ON d.id = dt.duck_id
-       LEFT JOIN event_ducks ed ON ed.id = (
-         SELECT ed2.id
-           FROM event_ducks ed2
-          WHERE ed2.duck_id = d.id
+        LEFT JOIN event_ducks ed ON ed.id = (
+          SELECT ed2.id
+            FROM event_ducks ed2
+           WHERE ed2.duck_id = d.id AND ed2.released_at IS NULL
           ORDER BY ed2.reserved_at DESC
           LIMIT 1
        )
@@ -268,6 +279,7 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
   if (duck === null) return json({ error: "Duck not found." }, 404);
 
   const includePii = canViewParticipantPii(actor);
+  const canReplace = hasAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
   // Both racing rounds publish their result by scanning the ducks that
   // finished, so this page carries the action in both of them. Round one offers
   // one winner; the final offers the places its podium still has open.
@@ -309,6 +321,7 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
   return json({
     permissions: {
       pair: hasAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]),
+      replace: canReplace,
     },
     duck: {
       id: duck.duck_id,
@@ -316,8 +329,13 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
       inventoryStatus: duck.inventory_status,
       revision: duck.duck_revision,
       tagStatus: duck.tag_status,
+      reservationId: duck.event_duck_id,
     },
     pairingRequired: hasAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"])
+      && duck.assignment_id === null
+      && duck.tag_status === "ACTIVE"
+      && ["AVAILABLE", "RESERVED_FOR_EVENT"].includes(duck.inventory_status),
+    emergencyReplacementEligible: canReplace
       && duck.assignment_id === null
       && duck.tag_status === "ACTIVE"
       && ["AVAILABLE", "RESERVED_FOR_EVENT"].includes(duck.inventory_status),
@@ -330,6 +348,492 @@ const getStaffDuck = async (token: string, env: Env, actor: StaffActor): Promise
     winnerAction,
     winnerIneligible,
   });
+};
+
+interface ReplacementCandidateRow {
+  event_id: string;
+  event_status: "ROUND_ONE" | "FINAL";
+  event_revision: number;
+  registration_id: string;
+  registration_revision: number;
+  race_entry_id: string;
+  race_entry_revision: number;
+  first_name: string;
+  last_name: string;
+  assignment_id: string;
+  current_duck_id: string;
+  current_duck_number: number;
+  current_duck_revision: number;
+  round_one_heat_id: string | null;
+  round_one_heat_number: number | null;
+  round_one_heat_status: string | null;
+  round_one_heat_revision: number | null;
+  round_one_slot_number: number | null;
+  final_heat_id: string | null;
+  final_heat_number: number | null;
+  final_heat_status: string | null;
+  final_heat_revision: number | null;
+  final_slot_number: number | null;
+  round_one_place: number | null;
+  final_place: number | null;
+}
+
+const replacementCandidateSelect = `
+  SELECT e.id AS event_id, e.status AS event_status, e.revision AS event_revision,
+         r.id AS registration_id, r.revision AS registration_revision,
+         re.id AS race_entry_id, re.revision AS race_entry_revision,
+         r.first_name, r.last_name,
+         da.id AS assignment_id, d.id AS current_duck_id,
+         d.visible_number AS current_duck_number, d.revision AS current_duck_revision,
+         roh.id AS round_one_heat_id, roh.heat_number AS round_one_heat_number,
+         roh.status AS round_one_heat_status, roh.revision AS round_one_heat_revision,
+         rohe.slot_number AS round_one_slot_number,
+         fh.id AS final_heat_id, fh.heat_number AS final_heat_number,
+         fh.status AS final_heat_status, fh.revision AS final_heat_revision,
+         fhe.slot_number AS final_slot_number,
+         rohr.place AS round_one_place, fhr.place AS final_place
+    FROM events e
+    JOIN registrations r ON r.event_id = e.id AND r.status = 'ACTIVE'
+    JOIN race_entries re ON re.registration_id = r.id
+    JOIN duck_assignments da ON da.race_entry_id = re.id AND da.valid_to IS NULL
+    JOIN ducks d ON d.id = da.duck_id
+    LEFT JOIN heat_entries rohe ON rohe.race_entry_id = re.id AND rohe.round = 'ROUND_ONE'
+    LEFT JOIN heats roh ON roh.id = rohe.heat_id
+    LEFT JOIN heat_results rohr ON rohr.heat_id = roh.id AND rohr.race_entry_id = re.id
+    LEFT JOIN heat_entries fhe ON fhe.race_entry_id = re.id AND fhe.round = 'FINAL'
+    LEFT JOIN heats fh ON fh.id = fhe.heat_id
+    LEFT JOIN heat_results fhr ON fhr.heat_id = fh.id AND fhr.race_entry_id = re.id`;
+
+const replacementHeat = (row: ReplacementCandidateRow, round: "ROUND_ONE" | "FINAL") => {
+  const final = round === "FINAL";
+  const id = final ? row.final_heat_id : row.round_one_heat_id;
+  const number = final ? row.final_heat_number : row.round_one_heat_number;
+  const status = final ? row.final_heat_status : row.round_one_heat_status;
+  const revision = final ? row.final_heat_revision : row.round_one_heat_revision;
+  const slotNumber = final ? row.final_slot_number : row.round_one_slot_number;
+  const place = final ? row.final_place : row.round_one_place;
+  return id === null ? null : { id, round, number, status, revision, slotNumber, place };
+};
+
+const replacementCandidateJson = (row: ReplacementCandidateRow) => ({
+  registrationId: row.registration_id,
+  registrationRevision: row.registration_revision,
+  raceEntryId: row.race_entry_id,
+  raceEntryRevision: row.race_entry_revision,
+  participant: { firstName: row.first_name, lastName: row.last_name },
+  currentAssignment: {
+    id: row.assignment_id,
+    duckId: row.current_duck_id,
+    duckNumber: row.current_duck_number,
+    duckRevision: row.current_duck_revision,
+  },
+  event: { id: row.event_id, status: row.event_status, revision: row.event_revision },
+  currentHeat: replacementHeat(row, row.event_status),
+  roundOneHeat: replacementHeat(row, "ROUND_ONE"),
+  finalHeat: replacementHeat(row, "FINAL"),
+});
+
+const searchReplacementCandidates = async (url: URL, env: Env): Promise<Response> => {
+  const eventId = url.searchParams.get("eventId")?.trim() ?? "";
+  const query = url.searchParams.get("q")?.trim() ?? "";
+  if (!validEntityId(eventId) || query.length > 80) {
+    return json({ error: "An event and a search of at most 80 characters are required." }, 400);
+  }
+  const like = `%${escapeLike(query)}%`;
+  const rows = await env.DB.prepare(
+    `${replacementCandidateSelect}
+      WHERE e.id = ? AND e.status IN ('ROUND_ONE', 'FINAL')
+        AND ((e.status = 'ROUND_ONE' AND roh.id IS NOT NULL)
+          OR (e.status = 'FINAL' AND fh.id IS NOT NULL))
+        AND (
+          ? = ''
+          OR r.first_name LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR r.last_name LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR (r.first_name || ' ' || r.last_name) LIKE ? ESCAPE '\\' COLLATE NOCASE
+          OR CAST(d.visible_number AS TEXT) = ?
+        )
+      ORDER BY r.last_name COLLATE NOCASE, r.first_name COLLATE NOCASE, d.visible_number
+      LIMIT ?`,
+  ).bind(eventId, query, like, like, like, query, REGISTRATION_SEARCH_LIMIT + 1)
+    .all<ReplacementCandidateRow>();
+  const truncated = rows.results.length > REGISTRATION_SEARCH_LIMIT;
+  return json({
+    candidates: rows.results.slice(0, REGISTRATION_SEARCH_LIMIT).map(replacementCandidateJson),
+    truncated,
+    limit: REGISTRATION_SEARCH_LIMIT,
+  });
+};
+
+interface ReplacementDuckRow {
+  duck_id: string;
+  visible_number: number;
+  inventory_status: string;
+  physical_condition: string;
+  revision: number;
+  event_duck_id: string | null;
+  event_duck_event_id: string | null;
+  assignment_id: string | null;
+}
+
+interface ReplacementCommandRow {
+  event_id: string;
+  command_type: string;
+  result_id: string | null;
+  request_fingerprint: string | null;
+}
+
+interface ReplacementResultRow {
+  assignment_id: string;
+  first_name: string;
+  last_name: string;
+  race_entry_id: string;
+  new_duck_number: number;
+  old_duck_number: number;
+  event_status: "ROUND_ONE" | "FINAL";
+  round_one_heat_number: number | null;
+  round_one_slot_number: number | null;
+  final_heat_number: number | null;
+  final_slot_number: number | null;
+}
+
+const replacementResult = async (
+  env: Env,
+  commandId: string,
+  fingerprint: string,
+  replayed: boolean,
+): Promise<Response | null> => {
+  const row = await env.DB.prepare(
+    `SELECT da.id AS assignment_id, r.first_name, r.last_name, da.race_entry_id,
+            new_d.visible_number AS new_duck_number,
+            old_d.visible_number AS old_duck_number, e.status AS event_status,
+            roh.heat_number AS round_one_heat_number, rohe.slot_number AS round_one_slot_number,
+            fh.heat_number AS final_heat_number, fhe.slot_number AS final_slot_number
+       FROM race_commands c
+       JOIN events e ON e.id = c.event_id
+       JOIN duck_assignments da ON da.id = c.result_id
+       JOIN ducks new_d ON new_d.id = da.duck_id
+       JOIN race_entries re ON re.id = da.race_entry_id
+       JOIN registrations r ON r.id = re.registration_id
+       JOIN duck_inventory_events old_event
+         ON old_event.source_command_id = c.id AND old_event.action = 'DUCK_UNASSIGNED'
+       JOIN ducks old_d ON old_d.id = old_event.duck_id
+       LEFT JOIN heat_entries rohe ON rohe.race_entry_id = re.id AND rohe.round = 'ROUND_ONE'
+       LEFT JOIN heats roh ON roh.id = rohe.heat_id
+       LEFT JOIN heat_entries fhe ON fhe.race_entry_id = re.id AND fhe.round = 'FINAL'
+       LEFT JOIN heats fh ON fh.id = fhe.heat_id
+      WHERE c.id = ? AND c.command_type = 'EMERGENCY_REPLACE_DUCK'
+        AND c.request_fingerprint = ?
+      LIMIT 1`,
+  ).bind(commandId, fingerprint).first<ReplacementResultRow>();
+  if (row === null) return null;
+  return json({
+    assignmentId: row.assignment_id,
+    replayed,
+    participant: { firstName: row.first_name, lastName: row.last_name, raceEntryId: row.race_entry_id },
+    oldDuck: { visibleNumber: row.old_duck_number },
+    newDuck: { visibleNumber: row.new_duck_number },
+    roundOneHeat: row.round_one_heat_number === null ? null : {
+      round: "ROUND_ONE", number: row.round_one_heat_number, slotNumber: row.round_one_slot_number,
+    },
+    finalHeat: row.final_heat_number === null ? null : {
+      round: "FINAL", number: row.final_heat_number, slotNumber: row.final_slot_number,
+    },
+    eventStatus: row.event_status,
+  }, replayed ? 200 : 201);
+};
+
+const replaceDuck = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  token: string,
+): Promise<Response> => {
+  if (!/^[A-Za-z0-9_-]{22,128}$/.test(token)) return json({ error: "Duck not found." }, 404);
+  const payload = await readJson(request);
+  if (payload === null) return json({ error: "A valid JSON request is required." }, 400);
+  const commandId = payload.commandId;
+  const eventId = payload.eventId;
+  const raceEntryId = payload.raceEntryId;
+  const expectedAssignmentId = payload.expectedAssignmentId;
+  const expectedReplacementReservationId = payload.expectedReplacementReservationId;
+  const expectedEventStatus = payload.expectedEventStatus;
+  const expectedEventRevision = payload.expectedEventRevision;
+  const expectedHeatId = payload.expectedHeatId;
+  const expectedHeatRevision = payload.expectedHeatRevision;
+  const expectedRegistrationRevision = payload.expectedRegistrationRevision;
+  const expectedRaceEntryRevision = payload.expectedRaceEntryRevision;
+  const expectedCurrentDuckRevision = payload.expectedCurrentDuckRevision;
+  const expectedReplacementDuckRevision = payload.expectedReplacementDuckRevision;
+  const incidentType = payload.incidentType;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || !validEntityId(eventId) || !validEntityId(raceEntryId)
+    || !validEntityId(expectedAssignmentId) || !validEntityId(expectedHeatId)
+    || (expectedReplacementReservationId !== null && !validEntityId(expectedReplacementReservationId))
+    || !validRevision(expectedEventRevision)
+    || !validRevision(expectedHeatRevision)
+    || !validRevision(expectedRegistrationRevision)
+    || !validRevision(expectedRaceEntryRevision)
+    || !validRevision(expectedCurrentDuckRevision)
+    || !validRevision(expectedReplacementDuckRevision)
+    || (expectedEventStatus !== "ROUND_ONE" && expectedEventStatus !== "FINAL")
+    || (incidentType !== "LOST" && incidentType !== "DAMAGED")
+  ) {
+    return json({
+      error: "Command, event, current pairing, revisions, heat context, and lost-or-damaged reason are required.",
+    }, 400);
+  }
+
+  const requestMaterial = {
+    eventId,
+    raceEntryId,
+    expectedAssignmentId,
+    expectedReplacementReservationId,
+    expectedEventStatus,
+    expectedEventRevision,
+    expectedHeatId,
+    expectedHeatRevision,
+    expectedRegistrationRevision,
+    expectedRaceEntryRevision,
+    expectedCurrentDuckRevision,
+    expectedReplacementDuckRevision,
+    incidentType,
+    replacementTagFingerprint: await hashValue(token),
+  };
+  const fingerprint = await hashValue(JSON.stringify(requestMaterial));
+  const existing = await env.DB.prepare(
+    `SELECT event_id, command_type, result_id, request_fingerprint
+       FROM race_commands WHERE id = ? LIMIT 1`,
+  ).bind(commandId).first<ReplacementCommandRow>();
+  if (existing !== null) {
+    if (
+      existing.event_id !== eventId
+      || existing.command_type !== "EMERGENCY_REPLACE_DUCK"
+      || existing.request_fingerprint !== fingerprint
+      || existing.result_id === null
+    ) return json({ error: "This command identifier was already used for another operation." }, 409);
+    return await replacementResult(env, commandId, fingerprint, true)
+      ?? json({ error: "The saved replacement result is no longer available." }, 409);
+  }
+
+  const replacement = await env.DB.prepare(
+    `SELECT d.id AS duck_id, d.visible_number, d.inventory_status,
+            d.physical_condition, d.revision,
+            ed.id AS event_duck_id, ed.event_id AS event_duck_event_id,
+            da.id AS assignment_id
+       FROM duck_tags dt
+       JOIN ducks d ON d.id = dt.duck_id
+       LEFT JOIN event_ducks ed ON ed.duck_id = d.id AND ed.released_at IS NULL
+       LEFT JOIN duck_assignments da ON da.duck_id = d.id AND da.valid_to IS NULL
+      WHERE dt.token = ? AND dt.status = 'ACTIVE'
+      LIMIT 1`,
+  ).bind(token).first<ReplacementDuckRow>();
+  if (replacement === null) return json({ error: "This tag is not an active race duck." }, 404);
+  if (replacement.revision !== expectedReplacementDuckRevision
+    || replacement.event_duck_id !== expectedReplacementReservationId) {
+    return json({ error: "The replacement duck changed. Refresh and try again." }, 409);
+  }
+  if (replacement.assignment_id !== null) return json({ error: "The replacement duck is already paired." }, 409);
+  if (
+    replacement.physical_condition !== "GOOD"
+    || !["AVAILABLE", "RESERVED_FOR_EVENT"].includes(replacement.inventory_status)
+  ) return json({ error: "The replacement duck is not physically eligible for pairing." }, 409);
+  if (replacement.event_duck_event_id !== null && replacement.event_duck_event_id !== eventId) {
+    return json({ error: "The replacement duck is reserved for another event." }, 409);
+  }
+
+  const candidate = await env.DB.prepare(
+    `${replacementCandidateSelect}
+      WHERE e.id = ? AND re.id = ? AND e.status IN ('ROUND_ONE', 'FINAL')
+        AND ((e.status = 'ROUND_ONE' AND roh.id IS NOT NULL)
+          OR (e.status = 'FINAL' AND fh.id IS NOT NULL))
+      LIMIT 1`,
+  ).bind(eventId, raceEntryId).first<ReplacementCandidateRow>();
+  if (candidate === null) return json({ error: "That participant is not eligible for an emergency replacement." }, 404);
+  const currentHeat = replacementHeat(candidate, candidate.event_status);
+  if (
+    currentHeat === null
+    || candidate.assignment_id !== expectedAssignmentId
+    || candidate.event_status !== expectedEventStatus
+    || candidate.event_revision !== expectedEventRevision
+    || candidate.registration_revision !== expectedRegistrationRevision
+    || candidate.race_entry_revision !== expectedRaceEntryRevision
+    || candidate.current_duck_revision !== expectedCurrentDuckRevision
+    || currentHeat.id !== expectedHeatId
+    || currentHeat.revision !== expectedHeatRevision
+  ) return json({ error: "The participant's pairing or race context changed. Refresh and try again." }, 409);
+  if (candidate.current_duck_id === replacement.duck_id) {
+    return json({ error: "The replacement must be a different unpaired duck." }, 409);
+  }
+
+  const now = new Date().toISOString();
+  const assignmentId = crypto.randomUUID();
+  const eventDuckId = expectedReplacementReservationId ?? crypto.randomUUID();
+  const oldStatus = incidentType === "LOST" ? "MISSING" : "DAMAGED";
+  const reason = incidentType === "LOST"
+    ? "Emergency replacement: old duck lost"
+    : "Emergency replacement: old duck damaged";
+  const commandExistsSql = `EXISTS (
+    SELECT 1 FROM race_commands c
+     WHERE c.id = ? AND c.event_id = ?
+       AND c.command_type = 'EMERGENCY_REPLACE_DUCK' AND c.request_fingerprint = ?
+  )`;
+  const statements: D1PreparedStatement[] = [env.DB.prepare(
+    `INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at,
+       actor_staff_profile_id, reason, request_fingerprint)
+     SELECT ?, e.id, 'EMERGENCY_REPLACE_DUCK', ?, ?, ?, ?, ?, ?
+       FROM events e
+       JOIN race_entries re ON re.id = ? AND re.event_id = e.id AND re.revision = ?
+       JOIN registrations r ON r.id = re.registration_id AND r.status = 'ACTIVE' AND r.revision = ?
+       JOIN duck_assignments old_da
+         ON old_da.race_entry_id = re.id AND old_da.valid_to IS NULL AND old_da.id = ?
+       JOIN ducks old_d ON old_d.id = old_da.duck_id AND old_d.revision = ?
+       JOIN ducks new_d ON new_d.id = ? AND new_d.revision = ?
+       JOIN duck_tags dt ON dt.duck_id = new_d.id AND dt.token = ? AND dt.status = 'ACTIVE'
+       JOIN heat_entries he ON he.race_entry_id = re.id AND he.heat_id = ?
+       JOIN heats h ON h.id = he.heat_id AND h.event_id = e.id AND h.revision = ?
+      WHERE e.id = ? AND e.status = ? AND e.status IN ('ROUND_ONE', 'FINAL') AND e.revision = ?
+        AND h.round = e.status
+        AND old_d.id <> new_d.id
+        AND new_d.physical_condition = 'GOOD'
+        AND new_d.inventory_status IN ('AVAILABLE', 'RESERVED_FOR_EVENT')
+        AND NOT EXISTS (SELECT 1 FROM duck_assignments da WHERE da.duck_id = new_d.id AND da.valid_to IS NULL)
+        AND COALESCE((SELECT ed.id FROM event_ducks ed
+                       WHERE ed.duck_id = new_d.id AND ed.released_at IS NULL LIMIT 1), '')
+            = COALESCE(?, '')
+        AND NOT EXISTS (SELECT 1 FROM event_ducks ed
+                         WHERE ed.duck_id = new_d.id AND ed.released_at IS NULL AND ed.event_id <> e.id)`,
+  ).bind(
+    commandId, assignmentId, now, now, actor.id, reason, fingerprint,
+    raceEntryId, expectedRaceEntryRevision,
+    expectedRegistrationRevision, expectedAssignmentId,
+    expectedCurrentDuckRevision, replacement.duck_id,
+    expectedReplacementDuckRevision, token, expectedHeatId,
+    expectedHeatRevision, eventId, expectedEventStatus,
+    expectedEventRevision, expectedReplacementReservationId,
+  )];
+  if (expectedReplacementReservationId === null) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO event_ducks
+        (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+       SELECT ?, ?, ?, ?, ? WHERE ${commandExistsSql}`,
+    ).bind(eventDuckId, eventId, replacement.duck_id, now, actor.id, commandId, eventId, fingerprint));
+  }
+  statements.push(
+    env.DB.prepare(
+      `UPDATE duck_assignments
+          SET valid_to = ?, end_reason = 'EMERGENCY_REPLACED', ended_by_staff_profile_id = ?
+        WHERE id = ? AND event_id = ? AND valid_to IS NULL AND ${commandExistsSql}`,
+    ).bind(now, actor.id, expectedAssignmentId, eventId, commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `UPDATE ducks
+          SET inventory_status = ?, inventory_status_changed_at = ?,
+              updated_at = ?, revision = revision + 1
+        WHERE id = ? AND revision = ? AND ${commandExistsSql}`,
+    ).bind(oldStatus, now, now, candidate.current_duck_id, expectedCurrentDuckRevision,
+      commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `INSERT INTO duck_assignments
+        (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+         assigned_by_staff_profile_id, source_command_id)
+       SELECT ?, ?, ?, ed.id, ?, ?, ?, ?
+         FROM event_ducks ed
+        WHERE ed.id = ? AND ed.event_id = ? AND ed.duck_id = ? AND ed.released_at IS NULL
+          AND ${commandExistsSql}`,
+    ).bind(assignmentId, eventId, raceEntryId, replacement.duck_id, now, actor.id, commandId,
+      eventDuckId, eventId, replacement.duck_id, commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `UPDATE ducks
+          SET inventory_status = 'IN_USE', inventory_status_changed_at = ?,
+              updated_at = ?, revision = revision + 1
+        WHERE id = ? AND revision = ? AND ${commandExistsSql}`,
+    ).bind(now, now, replacement.duck_id, expectedReplacementDuckRevision,
+      commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `UPDATE registrations SET revision = revision + 1, updated_at = ?
+        WHERE id = ? AND revision = ? AND status = 'ACTIVE' AND ${commandExistsSql}`,
+    ).bind(now, candidate.registration_id, expectedRegistrationRevision,
+      commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `UPDATE race_entries SET revision = revision + 1, updated_at = ?
+        WHERE id = ? AND revision = ? AND ${commandExistsSql}`,
+    ).bind(now, raceEntryId, expectedRaceEntryRevision, commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `UPDATE final_podium_selections SET duck_assignment_id = ?
+        WHERE event_id = ? AND race_entry_id = ? AND duck_assignment_id = ?
+          AND ${commandExistsSql}`,
+    ).bind(assignmentId, eventId, raceEntryId, expectedAssignmentId, commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `INSERT INTO duck_inventory_events
+        (id, event_id, duck_id, action, actor_staff_profile_id,
+         source_command_id, occurred_at, details_json)
+       SELECT ?, ?, ?, 'DUCK_UNASSIGNED', ?, ?, ?, ? WHERE ${commandExistsSql}`,
+    ).bind(crypto.randomUUID(), eventId, candidate.current_duck_id, actor.id, commandId, now,
+      JSON.stringify({ assignment_id: expectedAssignmentId, replacement_duck_id: replacement.duck_id, incident_type: incidentType }),
+      commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `INSERT INTO duck_inventory_events
+        (id, event_id, duck_id, action, actor_staff_profile_id,
+         source_command_id, occurred_at, details_json)
+       SELECT ?, ?, ?, 'DUCK_REASSIGNED', ?, ?, ?, ? WHERE ${commandExistsSql}`,
+    ).bind(crypto.randomUUID(), eventId, replacement.duck_id, actor.id, commandId, now,
+      JSON.stringify({ assignment_id: assignmentId, replaced_assignment_id: expectedAssignmentId, replaced_duck_id: candidate.current_duck_id }),
+      commandId, eventId, fingerprint),
+    env.DB.prepare(
+      `INSERT INTO audit_events
+        (id, event_id, command_id, action, subject_type, subject_id,
+         actor_type, occurred_at, details_json)
+       SELECT ?, ?, ?, 'EMERGENCY_DUCK_REPLACED', 'DUCK_ASSIGNMENT',
+              CASE WHEN
+                EXISTS (SELECT 1 FROM duck_assignments da
+                         WHERE da.id = ? AND da.race_entry_id = ? AND da.duck_id = ? AND da.valid_to IS NULL)
+                AND EXISTS (SELECT 1 FROM duck_assignments da
+                            WHERE da.id = ? AND da.valid_to IS NOT NULL AND da.end_reason = 'EMERGENCY_REPLACED')
+                AND EXISTS (SELECT 1 FROM ducks d WHERE d.id = ? AND d.inventory_status = ? AND d.revision = ?)
+                AND EXISTS (SELECT 1 FROM ducks d WHERE d.id = ? AND d.inventory_status = 'IN_USE' AND d.revision = ?)
+                AND EXISTS (SELECT 1 FROM registrations r WHERE r.id = ? AND r.revision = ?)
+                AND EXISTS (SELECT 1 FROM race_entries re WHERE re.id = ? AND re.revision = ?)
+              THEN ? END,
+              'STAFF', ?, ?
+        WHERE ${commandExistsSql}`,
+    ).bind(
+      crypto.randomUUID(), eventId, commandId,
+      assignmentId, raceEntryId, replacement.duck_id,
+      expectedAssignmentId,
+      candidate.current_duck_id, oldStatus, expectedCurrentDuckRevision + 1,
+      replacement.duck_id, expectedReplacementDuckRevision + 1,
+      candidate.registration_id, expectedRegistrationRevision + 1,
+      raceEntryId, expectedRaceEntryRevision + 1,
+      assignmentId, now, JSON.stringify({
+      staff_profile_id: actor.id,
+      race_entry_id: raceEntryId,
+      replaced_assignment_id: expectedAssignmentId,
+      replaced_duck_id: candidate.current_duck_id,
+      replacement_duck_id: replacement.duck_id,
+      incident_type: incidentType,
+    }), commandId, eventId, fingerprint),
+  );
+
+  let replayed = false;
+  try {
+    await env.DB.batch(statements);
+  } catch {
+    replayed = true;
+  }
+  const committed = await env.DB.prepare(
+    `SELECT event_id, command_type, result_id, request_fingerprint
+       FROM race_commands WHERE id = ? LIMIT 1`,
+  ).bind(commandId).first<ReplacementCommandRow>();
+  if (
+    committed === null
+    || committed.event_id !== eventId
+    || committed.command_type !== "EMERGENCY_REPLACE_DUCK"
+    || committed.request_fingerprint !== fingerprint
+    || (committed.result_id !== assignmentId && !replayed)
+  ) return json({ error: "Replacement conflicted with another update. Refresh and try again." }, 409);
+  const result = await replacementResult(env, commandId, fingerprint, replayed);
+  return result ?? json({ error: "Replacement conflicted with another update. Refresh and try again." }, 409);
 };
 
 const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
@@ -853,11 +1357,24 @@ export const handleStaffApi = async (
     return searchRegistrations(url, env);
   }
 
+  if (url.pathname === "/api/v1/staff/registrations/replacement-search" && request.method === "GET") {
+    const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
+    return searchReplacementCandidates(url, env);
+  }
+
   const assignmentMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)\/assignments$/);
   if (assignmentMatch !== null && request.method === "POST") {
     const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
     if (denied !== null) return denied;
     return pairDuck(request, env, actor, assignmentMatch[1]);
+  }
+
+  const replacementMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)\/replacement$/);
+  if (replacementMatch !== null && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["REGISTRATION", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
+    return replaceDuck(request, env, actor, replacementMatch[1]);
   }
 
   const duckMatch = url.pathname.match(/^\/api\/v1\/staff\/ducks\/([A-Za-z0-9_-]+)$/);
