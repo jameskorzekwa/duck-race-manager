@@ -41,6 +41,33 @@ export async function firstDeployedRelease(github, owner, repo, releaseRuns, mer
   return null;
 }
 
+// Durable state has exactly one owner: the newest Agent Task run that claimed
+// the issue. Overlapping runs otherwise clobber each other - an old run's
+// publish step writing agent:failed after a newer run's prepare already queued
+// it, leaving a live implementation labelled failed. Every state write from a
+// run therefore proves it is still the current owner first.
+export function latestTaskRun(comments) {
+  const runs = markerNumbers(comments, "task-run");
+  return runs.length > 0 ? runs.at(-1) : null;
+}
+
+export async function writeIssueStateIfCurrent({ github, context }, issueNumber, state, ownerRunId) {
+  const { owner, repo } = context.repo;
+  const comments = await github.paginate(github.rest.issues.listComments, {
+    owner, repo, issue_number: issueNumber, per_page: 100,
+  });
+  const current = latestTaskRun(comments);
+  if (current !== null && ownerRunId !== undefined && Number(current) !== Number(ownerRunId)) {
+    return false;
+  }
+  const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+  const labels = [...labelNames(issue)].filter((label) => !STATE_LABELS.includes(label));
+  await github.rest.issues.setLabels({
+    owner, repo, issue_number: issueNumber, labels: [...labels, state],
+  });
+  return true;
+}
+
 export const TASK_RETRY_LIMIT = 10;
 
 // An agent:question issue resumes when James replies after the latest posted
