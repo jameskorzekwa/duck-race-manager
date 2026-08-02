@@ -198,6 +198,14 @@ does not call a model. It:
 - Repairs labels when PR, workflow, and deployment state proves the transition.
 - Advances the oldest approved PR after the production lane is free.
 
+A trusted same-repository PR opened by James and closing exactly one pipeline
+issue counts as active work for reconciliation. This supports model-free recovery
+from a saved artifact or rejected candidate: while that PR is open, the issue is
+not redispatched as an orphan. The PR remains outside autonomous candidate
+review and the serialized agent merge lane. After it merges, reconciliation
+marks the linked issue `agent:deployed` only when a successful production release
+contains the merge commit, including when the issue was already closed by the PR.
+
 A candidate whose base has moved is behind, not invalid. Mergeable candidates
 keep their immutable fork-point provenance and existing exact-head gates. Only a
 candidate GitHub reports as `CONFLICTING` is refreshed by merging the default

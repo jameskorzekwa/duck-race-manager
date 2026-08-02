@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, questionAnswered, recoverFailedIssue, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
+import { closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, questionAnswered, recoverFailedIssue, trustedManualPullProvenance, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
 
 function fakeRecoveryGithub(comments) {
   const actions = { labels: [], comments: [], dispatched: 0 };
@@ -97,6 +97,24 @@ test("a question resumes only on a James reply newer than the question", () => {
 test("closingIssueNumbers extracts unique durable closing references", () => {
   assert.deepEqual(closingIssueNumbers("Closes #12\nFixes #12\nResolved #30"), [12, 30]);
   assert.deepEqual(closingIssueNumbers("Related to #12"), []);
+});
+
+test("only a trusted same-repository manual PR can own one issue outside the pipeline", () => {
+  const pull = {
+    user: { id: 38769771 },
+    base: { ref: "main", repo: { id: 7 } },
+    head: { repo: { id: 7 } },
+    body: "Closes #104",
+  };
+
+  assert.equal(trustedManualPullProvenance(pull, "main"), true);
+  assert.equal(trustedManualPullProvenance({ ...pull, user: { id: 99 } }, "main"), false);
+  assert.equal(trustedManualPullProvenance({
+    ...pull,
+    head: { repo: { id: 8 } },
+  }, "main"), false);
+  assert.equal(trustedManualPullProvenance({ ...pull, body: "Closes #104\nCloses #105" }, "main"), false);
+  assert.equal(trustedManualPullProvenance(pull, "develop"), false);
 });
 
 test("markerNumbers extracts comma-separated machine state", () => {
