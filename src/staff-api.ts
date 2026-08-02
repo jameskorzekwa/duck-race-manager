@@ -15,7 +15,8 @@ import {
   type StaffIdentityProvisioner,
 } from "./staff-access.ts";
 import type { Env } from "./types.ts";
-import { publishEmailNotification } from "./email-notifications.ts";
+import { publishPendingParticipantNotifications } from "./email-notifications.ts";
+import { assignmentNotificationStatements } from "./participant-notifications.ts";
 import { heatHasNeverStartedSql, unstartedRoundOneHeatExistsSql } from "./walk-up-admission.ts";
 
 const headers = {
@@ -1316,36 +1317,17 @@ const pairDuck = async (
     }
   }
 
-  // The notification row is part of the same authoritative command as the
-  // assignment and heat slot. Contact details never enter the queue payload;
-  // the consumer rechecks the current address, consent, assignment, and heat.
-  // Re-pairing into an existing slot is harmless because the schema permits one
-  // HEAT_ASSIGNED message for this participant and heat.
-  const notificationId = assignedHeatId === null ? null : crypto.randomUUID();
-  if (notificationId !== null) {
-    statements.push(env.DB.prepare(
-      `INSERT INTO email_notifications
-        (id, event_id, registration_id, heat_id, duck_assignment_id,
-         notification_type, status,
-         template_version, created_by_command_id, scheduled_at, updated_at)
-       SELECT ?, r.event_id, r.id, h.id, ?, 'HEAT_ASSIGNED', 'PENDING', 1, ?, ?, ?
-         FROM registrations r
-         JOIN race_entries re ON re.registration_id = r.id
-         JOIN heat_entries he ON he.race_entry_id = re.id
-         JOIN heats h ON h.id = he.heat_id AND h.event_id = r.event_id
-        WHERE r.id = ? AND h.id = ? AND r.status = 'ACTIVE'
-          AND r.email IS NOT NULL AND r.email_notifications_enabled = 1
-       ON CONFLICT DO NOTHING`,
-    ).bind(
-      notificationId,
-      assignmentId,
-      commandId,
-      now,
-      now,
-      context.registration_id,
-      assignedHeatId,
-    ));
-  }
+  // Both channel rows are committed with the assignment. The queue receives
+  // only their opaque IDs and delivery reloads current consent and contact.
+  if (assignedHeatId !== null) statements.push(...assignmentNotificationStatements(
+    env,
+    eventId,
+    context.registration_id,
+    assignedHeatId,
+    assignmentId,
+    commandId,
+    now,
+  ));
 
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events
@@ -1372,7 +1354,7 @@ const pairDuck = async (
     return json({ error: "Pairing conflicted with another update. Refresh and try again." }, 409);
   }
 
-  if (notificationId !== null) await publishEmailNotification(env, notificationId);
+  await publishPendingParticipantNotifications(env);
 
   return pairingResponse(
     assignmentId,

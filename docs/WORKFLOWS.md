@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0019_round_one_walk_up_admission.sql`, browser
+the Worker, D1 migrations through `0022_participant_notification_channels.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -671,9 +671,32 @@ corresponding valid address. Invalid non-empty contact is rejected even with its
 opt-in off. The same validation and controls apply during public registration,
 staff walk-up registration, and staff participant edits. Audit history records
 only the changed field names, never old or new contact values or ownership
-proof. Email consent participates in the implemented operational-email workflow.
-SMS consent is captured independently, but SMS delivery is not implemented and
-the choice does not enqueue an SMS.
+proof. Email and SMS consent independently control the implemented participant
+notification workflow.
+
+### Participant Race Notifications
+
+**Implemented:** an opted-in participant receives independent email and/or SMS
+for registration confirmation, Round One heat assignment, qualification and
+Final assignment, each official round result, and each time their assigned heat
+becomes the next runnable heat. The first reminder is created by the command
+that starts its round; later reminders are created by the official result or
+automatic skip that advances authoritative race progression. There are no
+estimated start times or wall-clock reminder jobs.
+
+Each channel and lifecycle occurrence has one durable outbox row in the same D1
+batch as its domain mutation. Queue publication and provider delivery happen
+afterward, so provider failure cannot roll back race work. Command replays,
+queue duplicates, cron reconciliation, and repeated stale-message publication
+remain duplicate-safe. Provider failures use persisted bounded backoff; a queue
+delivery count is not a provider attempt and cannot bypass or exhaust it.
+
+Delivery reloads current consent, normalized contact, assignment/result state,
+local suppression, and AWS provider suppression immediately before sending.
+Withdrawn consent, cleared or invalid contact, an email unsubscribe, SES
+suppression, or carrier/SNS STOP therefore suppresses accepted pending work.
+Email unsubscribe and SMS STOP are destination-wide and survive event deletion;
+D1 stores only digests, not copied destinations, bodies, or provider errors.
 
 The privacy notice warns that anyone with access to the originating browser
 profile may view or edit its owned contact details. Cancel discards an edit,

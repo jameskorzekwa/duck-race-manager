@@ -556,14 +556,20 @@ to add a new racer after Round One starts. Rollback is Worker-only: retain the
 migration and any admitted roster entries; the previous Worker reads and races
 them normally but offers no further Round One walk-ups.
 
-The Worker sends only opaque notification IDs to `quickducks-email` through the
-`EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
+The Worker sends only opaque participant-notification IDs to `quickducks-email`
+through the `EMAIL_QUEUE` producer binding. Email and SMS retain independent
+channel rows, consent, suppression checks, and provider attempts. The same
+Worker consumes batches of at most ten,
 with five bounded queue attempts and `quickducks-email-dlq` attached. A one-minute
 cron republishes durable `PENDING` work and queue-publication failures, closing
 the D1-commit/queue-publication gap without putting email delivery inside a race
 control request. Queue duplicates are expected and safe: a D1 claim and the
 logical-message unique index prevent an ordinary duplicate delivery from
-sending twice. Migration `0021_email_delivery_claim.sql` adds the nullable,
+sending twice. Migration `0022_participant_notification_channels.sql` adds a
+backward-compatible `EMAIL` default, lifecycle occurrence keys, result
+revisions, and digest-only global suppression/unsubscribe tables. SMS types are
+prefixed in storage so a rolled-back Worker cannot misdeliver one as email.
+Migration `0021_email_delivery_claim.sql` adds the nullable,
 unique token used to own an active delivery claim; it remains compatible with
 the previous Worker. A stale claim is terminally recorded as
 `DELIVERY_OUTCOME_UNKNOWN` and is not automatically or manually retried, because
@@ -571,8 +577,11 @@ it may represent SES acceptance followed by a failed D1 finalization. This
 at-most-once recovery policy can miss a reminder after a pre-send Worker stop,
 but cannot duplicate a message whose post-send persistence was ambiguous.
 
-The consumer signs a structured SES v2 `SendEmail` request with the Worker's
-encrypted AWS key. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
+The consumer checks SES account suppression and signs a structured SES v2
+`SendEmail` request with the Worker's encrypted AWS key. It checks SNS's current
+phone-number opt-out state before transactional direct `Publish`, so an AWS-
+handled STOP is honored immediately before SMS delivery. `EMAIL_FROM_ADDRESS`
+is the non-secret committed sender
 `race@quickducks.com`; it remains under the verified `quickducks.com` identity.
 Current consent, address, assignment, and heat state are loaded only after the
 opaque ID is received. Migration `0020_email_notification_assignment.sql` adds
@@ -581,13 +590,27 @@ notifications pin their originating assignment, while null legacy work and any
 replacement mismatch are cancelled instead of being rendered with a different
 duck. Automatic invocation logs remain disabled, and raw SES responses,
 recipient addresses, rendered bodies, and credentials must not be logged or
-persisted as errors. SES acceptance is recorded honestly as `SENT`;
-delivery/bounce/complaint callbacks are not currently implemented.
+persisted as errors. SES or SNS acceptance is recorded honestly as `SENT`, not
+as proof of handset/mailbox delivery. Email includes an opaque, digest-at-rest
+unsubscribe capability that records destination-wide suppression.
 
-After deployment, use a synthetic controlled registration to opt into email,
-pair it, and call its heat. Confirm the support view reaches `SENT` for the
-assignment and upcoming notification and that the controlled mailbox receives
-the expected text. Do not use participant data for this canary. Inspect the main
+AWS does provide SMS. QuickDucks uses Amazon SNS direct transactional SMS (AWS
+End User Messaging SMS is the current AWS product family for SMS setup), and it
+is not free. Before production use, the account must leave the SMS sandbox,
+obtain an approved US origination identity and carrier registration, and set a
+bounded spend limit. First deploy the updated `WorkerPermissionsBoundary` from
+`infra/aws/github-actions-bootstrap.yaml` through the manual bootstrap process;
+the three destination APIs require `Resource: "*"`, while that boundary grants
+only `sns:Publish`, `sns:CheckIfPhoneNumberIsOptedOut`, and
+`ses:GetSuppressedDestination`. Twilio, Telnyx, and Vonage trials are useful for
+experiments but are not dependable free production SMS because carrier fees
+remain. Email is the no-SMS-cost fallback.
+
+After deployment, use synthetic controlled registrations to opt into email and
+SMS, pair them, and advance a heat. Confirm registration, assignment, next-heat,
+result, and advancement messages reach `SENT` and controlled destinations.
+Exercise email unsubscribe and an SNS test-number opt-out before participant
+use. Inspect the main
 queue and DLQ metrics for retries. If sending misbehaves, pause the queue
 consumer first (or remove its consumer binding in a reviewed Worker rollback),
 then revoke the Worker SES key if containment requires it. Retain D1 notification

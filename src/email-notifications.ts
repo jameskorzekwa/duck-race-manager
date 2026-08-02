@@ -1,4 +1,8 @@
 import type { Env } from "./types.ts";
+import {
+  processParticipantNotification,
+  type SmsSender,
+} from "./participant-notifications.ts";
 
 export const EMAIL_NOTIFICATION_TYPES = ["HEAT_ASSIGNED", "HEAT_UPCOMING"] as const;
 
@@ -371,9 +375,28 @@ export const processEmailNotification = async (
   env: Env,
   notificationId: string,
   sender: EmailSender = sendEmailWithSes,
-  queueDeliveryAttempt = 1,
+  _queueDeliveryAttempt = 1,
+  smsSender?: SmsSender,
 ): Promise<EmailProcessingResult> => {
   if (!notificationIdPattern.test(notificationId)) return "NOOP";
+  // Keep this exported compatibility entry point because queue and test callers
+  // already use it. Once migration 0022 is present, every row has a channel and
+  // the channel-neutral consumer also upgrades legacy pending email to the same
+  // consent, suppression, retry, and claim behavior.
+  const participantRow = await env.DB.prepare(
+    "SELECT channel FROM email_notifications WHERE id = ? LIMIT 1",
+  ).bind(notificationId).first<{ channel: "EMAIL" | "SMS" }>();
+  if (participantRow !== null) {
+    return processParticipantNotification(env, notificationId, {
+      emailSender: sender,
+      ...(smsSender === undefined ? {} : { smsSender }),
+      // Injected transports are local/test seams and have no corresponding AWS
+      // account suppression endpoint. Production defaults still perform both
+      // provider-native checks immediately before delivery.
+      ...(sender === sendEmailWithSes ? {} : { emailSuppressed: async () => false }),
+      ...(smsSender === undefined ? {} : { smsSuppressed: async () => false }),
+    });
+  }
   const claimRow = await notificationClaimRow(env, notificationId);
   if (claimRow === null) return "NOOP";
   const staleSendingBefore = new Date(Date.now() - 2 * 60_000).toISOString();
@@ -451,7 +474,10 @@ export const processEmailNotification = async (
       ? error
       : new EmailSendError("EMAIL_SENDER_FAILURE", true);
     const completedAt = new Date().toISOString();
-    const exhausted = failure.retryable && queueDeliveryAttempt >= 5;
+    // Provider attempts are durable and independent of Cloudflare queue
+    // delivery counts. A transport retry can therefore never consume the
+    // provider budget before this code actually calls SES.
+    const exhausted = failure.retryable && attemptNumber >= 5;
     const retryable = failure.retryable && !exhausted;
     const code = exhausted ? "DELIVERY_RETRIES_EXHAUSTED" : failure.safeCode;
     await env.DB.batch([
@@ -467,7 +493,7 @@ export const processEmailNotification = async (
                 last_error_code = ?, retry_after = ?, updated_at = ?
           WHERE id = ? AND status = 'SENDING' AND delivery_claim_token = ?`,
       ).bind(
-        retryable ? "QUEUED" : "FAILED",
+        retryable ? "RETRY_PENDING" : "FAILED",
         retryable ? null : completedAt,
         code,
         retryable ? isoAfter(60_000) : null,
@@ -507,12 +533,21 @@ export const processEmailNotification = async (
 
 const publishEmailNotificationUnsafe = async (env: Env, notificationId: string): Promise<void> => {
   if (!notificationIdPattern.test(notificationId)) return;
+  const now = new Date().toISOString();
+  const staleQueuedBefore = new Date(Date.now() - 5 * 60_000).toISOString();
+  const staleSendingBefore = new Date(Date.now() - 2 * 60_000).toISOString();
   const notification = await env.DB.prepare(
     `SELECT id, event_id, status
        FROM email_notifications
-      WHERE id = ? AND status IN ('PENDING', 'RETRY_PENDING')
-      LIMIT 1`,
-  ).bind(notificationId).first<{ id: string; event_id: string; status: string }>();
+       WHERE id = ? AND (
+         status = 'PENDING'
+         OR (status = 'RETRY_PENDING' AND (retry_after IS NULL OR retry_after <= ?))
+         OR (status = 'QUEUED' AND queued_at IS NOT NULL AND queued_at <= ?)
+         OR (status = 'SENDING' AND (sending_started_at IS NULL OR sending_started_at <= ?))
+       )
+       LIMIT 1`,
+  ).bind(notificationId, now, staleQueuedBefore, staleSendingBefore)
+    .first<{ id: string; event_id: string; status: string }>();
   if (notification === null) return;
 
   const startedAt = new Date().toISOString();
@@ -534,9 +569,9 @@ const publishEmailNotificationUnsafe = async (env: Env, notificationId: string):
       ).bind(attemptId, notification.event_id, notificationId, attemptNumber, startedAt, completedAt),
       env.DB.prepare(
         `UPDATE email_notifications
-            SET status = 'QUEUED', queued_at = COALESCE(queued_at, ?),
-                retry_after = NULL, last_error_code = NULL, updated_at = ?
-          WHERE id = ? AND status IN ('PENDING', 'RETRY_PENDING')`,
+            SET status = 'QUEUED', queued_at = ?,
+                 retry_after = NULL, last_error_code = NULL, updated_at = ?
+          WHERE id = ? AND status IN ('PENDING', 'RETRY_PENDING', 'QUEUED')`,
       ).bind(completedAt, completedAt, notificationId),
     ]);
   } catch {
@@ -553,7 +588,7 @@ const publishEmailNotificationUnsafe = async (env: Env, notificationId: string):
           `UPDATE email_notifications
               SET status = 'RETRY_PENDING', last_error_code = 'QUEUE_PUBLISH_FAILED',
                   retry_after = ?, updated_at = ?
-            WHERE id = ? AND status IN ('PENDING', 'RETRY_PENDING')`,
+            WHERE id = ? AND status IN ('PENDING', 'RETRY_PENDING', 'QUEUED')`,
         ).bind(isoAfter(60_000), completedAt, notificationId),
       ]);
     } catch {
@@ -576,21 +611,37 @@ export const publishEmailNotification = async (env: Env, notificationId: string)
 
 export const dispatchPendingEmailNotifications = async (env: Env): Promise<void> => {
   const now = new Date().toISOString();
+  const staleQueuedBefore = new Date(Date.now() - 5 * 60_000).toISOString();
+  const staleSendingBefore = new Date(Date.now() - 2 * 60_000).toISOString();
   const pending = await env.DB.prepare(
     `SELECT id
        FROM email_notifications
-      WHERE (status = 'PENDING' AND (scheduled_at IS NULL OR scheduled_at <= ?))
-         OR (status = 'RETRY_PENDING' AND (retry_after IS NULL OR retry_after <= ?))
-      ORDER BY created_at, id
-      LIMIT 100`,
-  ).bind(now, now).all<{ id: string }>();
+       WHERE (status = 'PENDING' AND (scheduled_at IS NULL OR scheduled_at <= ?))
+          OR (status = 'RETRY_PENDING' AND (retry_after IS NULL OR retry_after <= ?))
+          OR (status = 'QUEUED' AND queued_at IS NOT NULL AND queued_at <= ?)
+          OR (status = 'SENDING' AND (sending_started_at IS NULL OR sending_started_at <= ?))
+       ORDER BY created_at, id
+       LIMIT 100`,
+  ).bind(now, now, staleQueuedBefore, staleSendingBefore).all<{ id: string }>();
   await Promise.all(pending.results.map((notification) => publishEmailNotification(env, notification.id)));
+};
+
+// Every domain caller uses this no-throw boundary after its D1 batch commits.
+// A failed reconciliation read or queue publication leaves the durable row for
+// the next cron run and can never replace a successful race response.
+export const publishPendingParticipantNotifications = async (env: Env): Promise<void> => {
+  try {
+    await dispatchPendingEmailNotifications(env);
+  } catch {
+    // Deliberately best-effort, including D1 selection failures.
+  }
 };
 
 export const handleEmailQueue = async (
   batch: MessageBatch<unknown>,
   env: Env,
   sender: EmailSender = sendEmailWithSes,
+  smsSender?: SmsSender,
 ): Promise<void> => {
   for (const message of batch.messages) {
     if (typeof message.body !== "string" || !notificationIdPattern.test(message.body)) {
@@ -598,9 +649,12 @@ export const handleEmailQueue = async (
       continue;
     }
     try {
-      const result = await processEmailNotification(env, message.body, sender, message.attempts);
-      if (result === "RETRY") message.retry({ delaySeconds: 60 });
-      else message.ack();
+      await processEmailNotification(env, message.body, sender, message.attempts, smsSender);
+      // Expected provider failures and not-yet-due claims are persisted with an
+      // authoritative retry_after. Acknowledging prevents queue redelivery from
+      // bypassing that backoff; cron republishes only when it is due. Unexpected
+      // infrastructure exceptions still use the bounded queue retry below.
+      message.ack();
     } catch {
       // Unexpected infrastructure failures are left to the bounded queue retry
       // policy and then the configured DLQ. No provider/request material is
