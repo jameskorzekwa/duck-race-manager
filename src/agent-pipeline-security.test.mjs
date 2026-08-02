@@ -12,7 +12,7 @@ test("implementation keeps models and candidate execution outside native-token p
 
   assert.doesNotMatch(implement, /id-token: write/);
   assert.doesNotMatch(implement, /models: read|OPENCODE_AUTH_CONTENT|GITHUB_TOKEN:/);
-  assert.match(implement, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
+  assert.match(implement, /runs-on: \[self-hosted, macOS, ARM64, quickducks-implement\]/);
   assert.match(implement, /openchamber session create/);
   assert.match(implement, /vars\.AGENT_IMPLEMENT_MODEL \|\| 'openai\/gpt-5\.6-sol'/);
   assert.match(implement, /vars\.AGENT_IMPLEMENT_VARIANT \|\| 'xhigh'/);
@@ -72,7 +72,7 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.match(publish, /ATTEMPT_DIGEST: \$\{\{ needs\.implement\.outputs\.digest \}\}/);
   assert.match(publish, /base64 \| tr -d '\\n'/);
   assert.match(publish, /github-actions\[bot\]/);
-  assert.match(publish, /gh workflow run ci\.yml --ref "\$branch"/);
+  assert.doesNotMatch(publish, /gh workflow run ci\.yml/);
   assert.match(publish, /gh workflow run agent-review\.yml/);
   assert.match(publish, /--ref "\$\{\{ github\.event\.repository\.default_branch \}\}"/);
   assert.match(publish, /scripts\/validate-agent-patch\.mjs/);
@@ -88,7 +88,7 @@ test("review publishes a candidate-SHA check without privileged candidate execut
 
   assert.doesNotMatch(validate, /id-token: write|models: read|cache: npm/);
   assert.doesNotMatch(review, /models: read|OPENCODE_AUTH_CONTENT|GITHUB_TOKEN:/);
-  assert.match(review, /runs-on: \[self-hosted, macOS, ARM64, quickducks-model\]/);
+  assert.match(review, /runs-on: \[self-hosted, macOS, ARM64, quickducks-review\]/);
   assert.match(review, /openchamber session create/);
   assert.match(review, /vars\.AGENT_REVIEW_MODEL \|\| 'anthropic\/claude-opus-4-8'/);
   assert.match(review, /--model "\$PIPELINE_REVIEW_MODEL"/);
@@ -170,12 +170,28 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
     implementation.indexOf("const recoveryPrefix"),
   );
   assert.match(lane, /"queued", "in_progress", "waiting", "pending", "requested"/);
-  assert.match(lane, /agent-review\.yml/);
-  assert.match(lane, /run\.head_branch === pr\.head\.ref/);
+  assert.match(lane, /pendingRuns\.data\.workflow_runs/);
+  assert.doesNotMatch(lane, /ci\.yml/);
   assert.ok(
     implementation.indexOf("const pendingGate") < implementation.indexOf("gate-recovery-exhausted"),
     "the pending-gate check must run before any attempt is counted",
   );
+});
+
+test("durable reconciliation trusts bot markers and waits for deployed prerequisites", async () => {
+  const implementation = await read("scripts/agent-pipeline.mjs");
+  const task = await read(".github/workflows/agent-task.yml");
+  const review = await read(".github/workflows/agent-review.yml");
+
+  assert.match(implementation, /comment\.user\?\.id === AUTOMATION_USER_ID/);
+  assert.match(implementation, /markerNumbers\(trustedAutomationComments\(comments\), "task-run"\)/);
+  assert.match(implementation, /pipelineIssue \? labels\.has\("agent:deployed"\) : data\.state === "closed"/);
+  assert.match(implementation, /listCommitStatusesForRef/);
+  assert.doesNotMatch(implementation, /reviewChecks\.data\.check_runs/);
+  assert.doesNotMatch(implementation, /workflow_id: "release\.yml", event: "push"/);
+  assert.match(task, /agent-pipeline recovery-reset=\$\{context\.runId\}/);
+  assert.match(task, /comment\.user\?\.id === 41898282\n\s+&& String\(comment\.body/);
+  assert.match(review, /comments\.filter\(\(comment\) => comment\.user\?\.id === 41898282\)/);
 });
 
 test("trusted manual recovery PRs suppress retries without entering autonomous lanes", async () => {
@@ -190,12 +206,11 @@ test("trusted manual recovery PRs suppress retries without entering autonomous l
   assert.match(implementation, /latestTaskRun\(comments\) === null/);
 });
 
-test("only a conflicting candidate is merged forward; being behind main is fine", async () => {
+test("only a conflicting candidate returns to its saved implementation session", async () => {
   const reconcile = await read(".github/workflows/agent-reconcile.yml");
   const refresh = reconcile.slice(reconcile.indexOf("  refresh-candidates:"), reconcile.indexOf("  reconcile:"));
 
-  // Deterministic and model-free: a plain merge, never a model session.
-  assert.match(refresh, /git merge --no-edit "origin\/\$\{DEFAULT_BRANCH\}"/);
+  // Deterministic and model-free: reconciliation dispatches but never invokes a model itself.
   assert.doesNotMatch(refresh, /openchamber|self-hosted/);
 
   // Only bot-authored pipeline candidates, and only genuine conflicts. Branch
@@ -208,16 +223,10 @@ test("only a conflicting candidate is merged forward; being behind main is fine"
   assert.doesNotMatch(refresh, /--json [^\n]*baseRefOid/);
   assert.doesNotMatch(refresh, /merge-base --is-ancestor/);
 
-  // The resolved diff is re-checked, the provenance marker is rewritten by
-  // this trusted job, stale approval is cleared, and both gates re-run.
-  assert.match(refresh, /validate-agent-patch\.mjs "\$PWD" "\$main_sha" HEAD/);
+  // A conflicting tree cannot reuse its old exact-tree attestation.
   assert.match(refresh, /agent-pipeline task-run=/);
-  assert.match(refresh, /--remove-label agent:approved/);
-  assert.match(refresh, /gh workflow run ci\.yml --ref "\$branch"/);
-  assert.match(refresh, /gh workflow run agent-review\.yml --ref "\$DEFAULT_BRANCH" -f pr="\$number"/);
-
-  // A real conflict falls back to re-implementation from the saved patch.
-  assert.match(refresh, /git merge --abort/);
+  assert.match(refresh, /Returning its saved patch to the existing implementation session/);
+  assert.doesNotMatch(refresh, /git merge|ci\.yml|agent-review\.yml/);
   assert.match(refresh, /gh workflow run agent-task\.yml --ref "\$DEFAULT_BRANCH" -f issue="\$issue"/);
 });
 
@@ -315,7 +324,7 @@ test("failures retry immediately and only stopped recovery parks at agent:error"
   assert.match(reconcile, /cron: "\*\/10 \* \* \* \*"/);
   // Cron is a backstop only: every completed pipeline run sweeps immediately.
   assert.match(reconcile, /workflow_run:/);
-  assert.match(reconcile, /workflows: \[Agent Task, Agent Review PR, Release\]/);
+  assert.match(reconcile, /workflows: \[Agent Task, Agent Review, Release\]/);
   assert.match(reconcile, /types: \[in_progress, completed\]/);
   assert.match(reconcile, /github\.event_name == 'workflow_run'/);
 
@@ -477,7 +486,8 @@ test("the exact-head gate is autonomous and keeps deployment human-approved", as
   );
 
   const release = await read(".github/workflows/release.yml");
-  assert.match(release, /on:\n  workflow_dispatch:\n  push:/);
+  assert.match(release, /on:\n  workflow_dispatch:\n    inputs:/);
+  assert.match(release, /\n  push:\n/);
   assert.match(release, /"\$EVENT_NAME" != "push" && "\$EVENT_NAME" != "workflow_dispatch"/);
   assert.match(release, /environment:/);
   assert.match(release, /production/);
@@ -523,7 +533,7 @@ test("reconciliation is deterministic and model-free", async () => {
   assert.match(implementation, /basehead: `\$\{recordedBase\}\.\.\.\$\{run\.head_sha\}`/);
   assert.match(implementation, /getBranch\(\{ owner, repo, branch: pr\.base\.ref \}\)/);
   assert.match(implementation, /basehead: `\$\{run\.head_sha\}\.\.\.\$\{defaultRef\.data\.commit\.sha\}`/);
-  assert.match(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);
+  assert.doesNotMatch(implementation, /workflow_id: "ci\.yml", ref: pr\.head\.ref/);
   assert.match(implementation, /workflow_id: "agent-review\.yml", ref: defaultBranch/);
   assert.match(implementation, /workflow_id: "release\.yml", ref: defaultBranch/);
   const queue = implementation.slice(implementation.indexOf("export async function queueNextApproved"));

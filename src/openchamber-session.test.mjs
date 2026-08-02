@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   resolveParentSession,
+  summarizeSessionMetrics,
   uniqueMarkerLine,
   waitForIdleSessions,
   waitForOpenChamberSession,
@@ -33,6 +34,35 @@ test("the parent session is the one without a parent id", () => {
     () => resolveParentSession([{ id: "ses_one" }, { id: "ses_two" }]),
     /2 parent sessions; refusing to guess/,
   );
+});
+
+test("session metrics aggregate model usage without transcript content", () => {
+  const metrics = summarizeSessionMetrics([
+    {
+      id: "parent",
+      model: { providerID: "openai", id: "gpt-test", variant: "xhigh" },
+      cost: 1.25,
+      tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 30, write: 2 } },
+      time: { created: 1000, updated: 4000 },
+    },
+    {
+      id: "child",
+      parentID: "parent",
+      cost: 0.5,
+      tokens: { input: 40, output: 10, reasoning: 3, cache: { read: 4, write: 1 } },
+      time: { created: 1500, updated: 5000 },
+    },
+  ]);
+  assert.deepEqual(metrics, {
+    sessionCount: 2,
+    provider: "openai",
+    model: "gpt-test",
+    variant: "xhigh",
+    cost: 1.75,
+    tokens: { input: 140, output: 30, reasoning: 8, cacheRead: 34, cacheWrite: 3 },
+    modelDurationMs: 4000,
+  });
+  assert.equal(JSON.stringify(metrics).includes("transcript"), false);
 });
 
 test("polling adopts a session the dispatch call never confirmed", async () => {
@@ -166,7 +196,7 @@ test("conflicting markers across messages decide nothing", async () => {
     ...clock,
     pollIntervalMs: 10,
     idleGraceMs: 20,
-  }), /without exactly one PIPELINE_REVIEW_ marker/);
+  }), /without exactly one new PIPELINE_REVIEW_ marker/);
 });
 
 test("marker extraction requires exactly one unambiguous marker line", () => {
@@ -195,7 +225,7 @@ test("polling rejects stable idle without a terminal marker", async () => {
     ...clock,
     pollIntervalMs: 10,
     idleGraceMs: 20,
-  }), /became idle without exactly one PIPELINE_TASK_ marker/);
+  }), /became idle without exactly one new PIPELINE_TASK_ marker/);
 });
 
 test("polling remains bounded while sessions stay busy", async () => {

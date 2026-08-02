@@ -1,8 +1,10 @@
 import { defineConfig } from "@playwright/test";
 
+const baseURL = process.env.E2E_BASE_URL ?? "http://localhost:8787";
+
 export default defineConfig({
   testDir: "./e2e",
-  fullyParallel: false,
+  fullyParallel: true,
   workers: 1,
   retries: process.env.CI ? 1 : 0,
   forbidOnly: Boolean(process.env.CI),
@@ -10,7 +12,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   reporter: process.env.CI ? [["line"], ["html", { open: "never" }]] : "line",
   use: {
-    baseURL: "http://localhost:8787",
+    baseURL,
     browserName: "chromium",
     actionTimeout: 15_000,
     navigationTimeout: 30_000,
@@ -20,7 +22,7 @@ export default defineConfig({
   },
   webServer: {
     command: "node scripts/start-e2e-server.mjs",
-    url: "http://localhost:8787/health",
+    url: `${baseURL}/health`,
     reuseExistingServer: false,
     timeout: 120_000,
     stdout: "pipe",

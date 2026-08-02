@@ -3,7 +3,7 @@ import { expect } from "@playwright/test";
 import { localPreviewTurnstileToken } from "../src/local-preview.ts";
 import { createClient, randomToken, seed } from "../scripts/seed-local.mjs";
 
-export const baseUrl = "http://localhost:8787";
+export const baseUrl = process.env.E2E_BASE_URL ?? "http://localhost:8787";
 
 export const seedState = (state, options = {}) => seed({
   url: baseUrl,

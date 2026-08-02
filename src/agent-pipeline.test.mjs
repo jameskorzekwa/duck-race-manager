@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyTaskResult, closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, questionAnswered, recoverFailedIssue, trustedManualPullProvenance, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
+import { classifyTaskResult, closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, pipelineValidationProvenance, questionAnswered, recoverFailedIssue, trustedManualPullProvenance, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
 
 function fakeRecoveryGithub(comments) {
+  comments = comments.map((comment) => ({ user: { id: 41898282 }, ...comment }));
   const actions = { labels: [], comments: [], dispatched: 0 };
   const github = {
     paginate: async () => comments,
@@ -65,6 +66,18 @@ test("a spent retry budget parks the issue at agent:error", async () => {
   assert.equal(actions.dispatched, 0);
 });
 
+test("a trusted recovery reset starts a fresh retry budget", async () => {
+  const { github, context, actions } = fakeRecoveryGithub([
+    ...Array.from({ length: 5 }, (_, index) => ({ body: `<!-- agent-pipeline task-retry=${index + 1} -->` })),
+    { body: "<!-- agent-pipeline recovery-reset=200 -->" },
+    { body: `<!-- agent-pipeline run-failed=201 --> <!-- agent-pipeline attempt-digest=${"a".repeat(64)} -->` },
+  ]);
+
+  assert.equal(await recoverFailedIssue({ github, context }, 70), "retried");
+  assert.ok(actions.comments.some((body) => body.includes("task-retry=1")));
+  assert.equal(actions.dispatched, 1);
+});
+
 test("the same hosted failures twice stop repair churn even when the patch changes", async () => {
   const signature = "d".repeat(64);
   const { github, context, actions } = fakeRecoveryGithub([
@@ -120,6 +133,22 @@ test("closingIssueNumbers extracts unique durable closing references", () => {
   assert.deepEqual(closingIssueNumbers("Related to #12"), []);
 });
 
+test("validation provenance binds one task run to one immutable tested tree", () => {
+  const body = [
+    `<!-- agent-pipeline task-run=123 issue=7 base=${"a".repeat(40)} -->`,
+    `<!-- agent-pipeline validation-run=123 attempt=2 artifact=456 digest=${"b".repeat(64)} tree=${"c".repeat(40)} -->`,
+    "Closes #7",
+  ].join("\n");
+  assert.deepEqual(pipelineValidationProvenance({ body }), {
+    runId: 123,
+    runAttempt: 2,
+    artifactId: 456,
+    artifactDigest: "b".repeat(64),
+    treeSha: "c".repeat(40),
+  });
+  assert.equal(pipelineValidationProvenance({ body: body.replace("validation-run=123", "validation-run=124") }), null);
+});
+
 test("only a trusted same-repository manual PR can own one issue outside the pipeline", () => {
   const pull = {
     user: { id: 38769771 },
@@ -140,7 +169,7 @@ test("only a trusted same-repository manual PR can own one issue outside the pip
 
 test("markerNumbers extracts comma-separated machine state", () => {
   const comments = [
-    { body: "<!-- agent-pipeline blocked-by=4,9 -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline blocked-by=4,9 -->" },
     { body: "Unrelated prose" },
   ];
   assert.deepEqual(markerNumbers(comments, "blocked-by"), [4, 9]);
@@ -236,6 +265,7 @@ test("an identical release commit settles as deployed", async () => {
 });
 
 function fakeStateGithub(comments) {
+  comments = comments.map((comment) => ({ user: { id: 41898282 }, ...comment }));
   const written = [];
   const github = {
     paginate: async () => comments,
@@ -270,7 +300,7 @@ test("the newest run owns the state and writes it", async () => {
 
   assert.equal(await writeIssueStateIfCurrent({ github, context }, 7, "agent:running", 200), true);
   assert.deepEqual(written, [["enhancement", "agent:running"]]);
-  assert.equal(latestTaskRun(comments), 200);
+  assert.equal(latestTaskRun(comments.map((comment) => ({ user: { id: 41898282 }, ...comment }))), 200);
 });
 
 test("an issue with no claim yet accepts the write", async () => {
@@ -279,4 +309,12 @@ test("an issue with no claim yet accepts the write", async () => {
   assert.equal(await writeIssueStateIfCurrent({ github, context }, 7, "agent:queued", 300), true);
   assert.equal(written.length, 1);
   assert.equal(latestTaskRun([]), null);
+});
+
+test("untrusted comments cannot claim ownership of an agent task", () => {
+  const comments = [
+    { user: { id: 99 }, body: "<!-- agent-pipeline task-run=999 -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline task-run=200 -->" },
+  ];
+  assert.equal(latestTaskRun(comments), 200);
 });

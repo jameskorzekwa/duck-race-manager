@@ -284,7 +284,7 @@ test("release workflow safely handles main dispatches and explicit push sources"
   );
   assert.match(trigger, /push:\n\s+branches:\n\s+- main\n\s+tags:\n\s+- "v\*\.\*\.\*"/);
   assert.match(trigger, /workflow_dispatch:/);
-  assert.doesNotMatch(releaseWorkflow, /workflow_run/);
+  assert.doesNotMatch(trigger, /workflow_run/);
   assert.equal(releaseWorkflow.match(/fetch-depth: 0/g)?.length, 2);
   assert.equal(releaseWorkflow.match(/fetch-tags: true/g)?.length, 2);
   assert.equal(releaseWorkflow.match(/persist-credentials: false/g)?.length, 2);

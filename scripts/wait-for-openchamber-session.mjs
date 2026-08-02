@@ -95,6 +95,30 @@ export function resolveParentSession(sessions) {
   return parents[0] ?? null;
 }
 
+export function summarizeSessionMetrics(sessions) {
+  const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const created = sessions.map((session) => number(session?.time?.created)).filter((value) => value > 0);
+  const updated = sessions.map((session) => number(session?.time?.updated)).filter((value) => value > 0);
+  const parent = resolveParentSession(sessions);
+  return {
+    sessionCount: sessions.length,
+    provider: parent?.model?.providerID ?? null,
+    model: parent?.model?.id ?? null,
+    variant: parent?.model?.variant ?? null,
+    cost: sessions.reduce((total, session) => total + number(session?.cost), 0),
+    tokens: {
+      input: sessions.reduce((total, session) => total + number(session?.tokens?.input), 0),
+      output: sessions.reduce((total, session) => total + number(session?.tokens?.output), 0),
+      reasoning: sessions.reduce((total, session) => total + number(session?.tokens?.reasoning), 0),
+      cacheRead: sessions.reduce((total, session) => total + number(session?.tokens?.cache?.read), 0),
+      cacheWrite: sessions.reduce((total, session) => total + number(session?.tokens?.cache?.write), 0),
+    },
+    modelDurationMs: created.length > 0 && updated.length > 0
+      ? Math.max(0, Math.max(...updated) - Math.min(...created))
+      : null,
+  };
+}
+
 export async function waitForOpenChamberSession({
   directory,
   timeoutSeconds,
@@ -108,6 +132,7 @@ export async function waitForOpenChamberSession({
   stallMs = DEFAULT_STALL_MS,
   abort = abortSessions,
   onSessionResolved,
+  markerOffset = 0,
 }) {
   const modelDirectory = String(directory ?? "").trim();
   if (!modelDirectory) throw new Error("A model directory is required.");
@@ -116,6 +141,9 @@ export async function waitForOpenChamberSession({
   }
   if (typeof markerPrefix !== "string" || markerPrefix.length === 0) {
     throw new Error("A terminal marker prefix is required.");
+  }
+  if (!Number.isSafeInteger(markerOffset) || markerOffset < 0) {
+    throw new Error("Marker offset must be a non-negative integer.");
   }
 
   const started = now();
@@ -170,7 +198,7 @@ export async function waitForOpenChamberSession({
             "--session", sessionId,
             "--dir", modelDirectory,
             "--role", "assistant",
-            "--limit", "10",
+            "--limit", "100",
             "--json",
           ]);
           const messages = Array.isArray(response?.messages) ? response.messages : [];
@@ -183,12 +211,18 @@ export async function waitForOpenChamberSession({
             0,
           );
           const message = messages.at(-1) ?? null;
-          if (carriers.length === 1 && markerCount === 1) {
-            return { sessionId, directory: modelDirectory, sessionStatus: parent.status, lastAssistantMessage: carriers[0] };
+          if (carriers.length >= 1 && markerCount === markerOffset + 1) {
+            return {
+              sessionId,
+              directory: modelDirectory,
+              sessionStatus: parent.status,
+              lastAssistantMessage: carriers.at(-1),
+              metrics: summarizeSessionMetrics(sessions),
+            };
           }
           if (now() - idleSince >= idleGraceMs) {
             const suffix = finalLine(message);
-            throw new Error(`Session ${sessionId} became idle without exactly one ${markerPrefix} marker${suffix ? `; final line: ${suffix}` : "."}`);
+            throw new Error(`Session ${sessionId} became idle without exactly one new ${markerPrefix} marker${suffix ? `; final line: ${suffix}` : "."}`);
           }
         }
       }
@@ -297,6 +331,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       directory: args.dir,
       timeoutSeconds: Number(args.timeout),
       markerPrefix: args["marker-prefix"],
+      markerOffset: Number(args["marker-offset"] ?? 0),
       onSessionResolved: (sessionId) => {
         if (!args.state || !existsSync(args.state)) return;
         const state = JSON.parse(readFileSync(args.state, "utf8"));

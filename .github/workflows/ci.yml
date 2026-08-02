@@ -3,9 +3,6 @@ name: CI
 on:
   pull_request:
   workflow_dispatch:
-  push:
-    branches:
-      - "**"
 
 permissions:
   contents: read
@@ -15,10 +12,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Validate
+  core:
+    name: Core validation
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     env:
       CI: "true"
       WRANGLER_SEND_METRICS: "false"
@@ -43,17 +40,68 @@ jobs:
       - name: Check TypeScript
         run: npm run typecheck
 
-      - name: Run full test suite
+      - name: Run unit and integration tests
         run: npm test
-
-      - name: Install Chromium for browser integration tests
-        run: npx playwright install --with-deps chromium
-
-      - name: Run browser integration suite
-        run: npm run test:e2e
 
       - name: Validate all Worker bundles and Wrangler configurations
         run: npm run wrangler:validate
 
       - name: Validate D1 migrations locally
         run: npm run db:migrate:local
+
+  browser:
+    name: Browser shard ${{ matrix.shard }}/2
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser integration shard
+        run: npm run test:e2e -- --shard=${{ matrix.shard }}/2
+
+  validate:
+    name: Validate
+    needs: [core, browser]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every validation shard
+        env:
+          BROWSER_RESULT: ${{ needs.browser.result }}
+          CORE_RESULT: ${{ needs.core.result }}
+        run: |
+          test "$CORE_RESULT" = "success"
+          test "$BROWSER_RESULT" = "success"
+
+  metrics:
+    name: Metrics
+    needs: [core, browser, validate]
+    if: always()
+    permissions:
+      actions: read
+    uses: ./.github/workflows/pipeline-metrics.yml
+    with:
+      pipeline: CI

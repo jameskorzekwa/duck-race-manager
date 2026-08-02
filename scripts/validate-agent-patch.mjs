@@ -15,8 +15,10 @@ const protectedPaths = [
   /^scripts\/cleanup-model-workspace\.mjs$/i,
   /^scripts\/e2e-redaction\.mjs$/i,
   /^scripts\/seed-model-workspace\.mjs$/i,
+  /^scripts\/run-e2e-shards\.mjs$/i,
   /^scripts\/summarize-verification-failure\.mjs$/i,
   /^scripts\/validate-agent-patch\.mjs$/i,
+  /^scripts\/validation-manifest\.mjs$/i,
   /^scripts\/wait-for-openchamber-session\.mjs$/i,
 ];
 
