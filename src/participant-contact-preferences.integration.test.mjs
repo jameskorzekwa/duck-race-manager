@@ -86,6 +86,13 @@ const harness = (context) => {
   `);
   const env = makeEnv(database);
   const liveFrames = [];
+  const rateLimitKeys = [];
+  env.PUBLIC_SEARCH_RATE_LIMITER = {
+    async limit({ key }) {
+      rateLimitKeys.push(key);
+      return { success: true };
+    },
+  };
   env.RACE_UPDATES = {
     idFromName() { return "race-updates"; },
     get() {
@@ -112,7 +119,7 @@ const harness = (context) => {
       body,
     }), env, { waitUntil() {} });
   };
-  return { api, database, liveFrames };
+  return { api, database, liveFrames, rateLimitKeys };
 };
 
 const register = async (api, context, firstName, options = {}) => {
@@ -133,7 +140,8 @@ const register = async (api, context, firstName, options = {}) => {
       lastName: "Racer",
       email: options.email ?? `${firstName.toLowerCase()}@example.test`,
       phone: options.phone ?? "+15550102030",
-      emailNotificationsEnabled: false,
+      emailNotificationsEnabled: options.emailNotificationsEnabled ?? false,
+      smsNotificationsEnabled: options.smsNotificationsEnabled ?? false,
       turnstileToken: "turnstile-test",
     },
   });
@@ -151,10 +159,10 @@ const proofHeaders = (proof, origin) => ({
 });
 
 test("owned contact reads and updates require participant-specific proof", async (context) => {
-  const { api, database, liveFrames } = harness(context);
+  const { api, database, liveFrames, rateLimitKeys } = harness(context);
   const first = await register(api, context, "Alpha", {
     email: "alpha.owner@example.test",
-    phone: "+15550100001",
+    phone: "(555) 010-0001",
   });
   const second = await register(api, context, "Beta", {
     cookie: first.cookie,
@@ -176,13 +184,14 @@ test("owned contact reads and updates require participant-specific proof", async
   assert.deepEqual(initial, {
     registrationId: first.registrationId,
     email: "alpha.owner@example.test",
-    phone: "+15550100001",
+    phone: "(555) 010-0001",
     emailNotificationsEnabled: false,
     smsNotificationsEnabled: false,
     revision: 0,
   });
   assert.equal(initialResponse.headers.get("cache-control"), "no-store");
   assert.equal(/proof|token|lookup|name/i.test(JSON.stringify(initial)), false);
+  assert.deepEqual(rateLimitKeys, [], "authorized contact reads do not spend the public mutation budget");
 
   for (const [label, options] of [
     ["missing proof", { cookie }],
@@ -203,7 +212,7 @@ test("owned contact reads and updates require participant-specific proof", async
     commandId,
     expectedRevision: initial.revision,
     email: "  ALPHA.NEW@EXAMPLE.TEST ",
-    phone: " +15550109999 ",
+    phone: " +1 (555) 010-9999 ",
     emailNotificationsEnabled: true,
     smsNotificationsEnabled: true,
   };
@@ -242,7 +251,7 @@ test("owned contact reads and updates require participant-specific proof", async
   assert.deepEqual(updated, {
     registrationId: first.registrationId,
     email: "alpha.new@example.test",
-    phone: "+15550109999",
+    phone: "(555) 010-9999",
     emailNotificationsEnabled: true,
     smsNotificationsEnabled: true,
     revision: 1,
@@ -256,7 +265,7 @@ test("owned contact reads and updates require participant-specific proof", async
     `).get(first.registrationId) },
     {
       email: "alpha.new@example.test",
-      phone: "+15550109999",
+      phone: "(555) 010-9999",
       email_notifications_enabled: 1,
       sms_notifications_enabled: 1,
       revision: 1,
@@ -269,7 +278,7 @@ test("owned contact reads and updates require participant-specific proof", async
   assert.deepEqual(persisted, {
     registrationId: first.registrationId,
     email: "alpha.new@example.test",
-    phone: "+15550109999",
+    phone: "(555) 010-9999",
     emailNotificationsEnabled: true,
     smsNotificationsEnabled: true,
     revision: 1,
@@ -323,7 +332,7 @@ test("owned contact reads and updates require participant-specific proof", async
   const command = database.prepare(
     "SELECT request_fingerprint FROM race_commands WHERE id = ?",
   ).get(commandId).request_fingerprint;
-  for (const secret of ["alpha.new@example.test", "+15550109999", first.privateToken]) {
+  for (const secret of ["alpha.new@example.test", "(555) 010-9999", first.privateToken]) {
     assert.equal(audit.includes(secret), false);
     assert.equal(command.includes(secret), false);
   }
@@ -369,6 +378,18 @@ test("contact mutation validates transport and private projections stay isolated
     headers: proofHeaders(owner.privateToken, "https://quickducks.com"),
     body: { ...valid, commandId: crypto.randomUUID(), email: "not-email" },
   }), 422, "invalid email");
+  await jsonBody(await api(path, {
+    method: "PATCH",
+    cookie: owner.cookie,
+    headers: proofHeaders(owner.privateToken, "https://quickducks.com"),
+    body: { ...valid, commandId: crypto.randomUUID(), phone: "555-12", smsNotificationsEnabled: false },
+  }), 422, "invalid phone without SMS consent");
+  await jsonBody(await api(path, {
+    method: "PATCH",
+    cookie: owner.cookie,
+    headers: proofHeaders(owner.privateToken, "https://quickducks.com"),
+    body: { ...valid, commandId: crypto.randomUUID(), email: null, emailNotificationsEnabled: true },
+  }), 422, "email consent without email");
   await jsonBody(await api(path, {
     method: "PATCH",
     cookie: owner.cookie,
@@ -426,7 +447,7 @@ test("contact mutation validates transport and private projections stay isolated
   for (const projection of [search, followerMine, privateStatus, board]) {
     const serialized = JSON.stringify(projection);
     assert.equal(serialized.includes("private.sentinel@example.test"), false);
-    assert.equal(serialized.includes("+15550999999"), false);
+    assert.equal(serialized.includes("(555) 099-9999"), false);
     assert.equal(/smsNotificationsEnabled|emailNotificationsEnabled|ownershipProof/i.test(serialized), false);
   }
 
@@ -495,4 +516,66 @@ test("contact mutation validates transport and private projections stay isolated
     cookie: owner.cookie,
     headers: proofHeaders(owner.privateToken),
   }), 404, "rotated old proof denied");
+});
+
+test("public registration captures independent contact consent and canonical phone data", async (context) => {
+  const { api, database } = harness(context);
+  const invalidBase = {
+    eventId: "event-contact",
+    commandId: crypto.randomUUID(),
+    privateToken: randomToken(),
+    firstName: "Rejected",
+    lastName: "Contact",
+    email: "rejected@example.test",
+    phone: "8173206150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: false,
+    turnstileToken: "validation-runs-first",
+  };
+  for (const [label, change, field] of [
+    ["invalid public email", { email: "rejected@" }, "email"],
+    ["invalid public phone", { phone: "81732" }, "phone"],
+    ["public email consent gate", { email: null, emailNotificationsEnabled: true }, "email_notifications_enabled"],
+    ["public SMS consent gate", { phone: null, smsNotificationsEnabled: true }, "sms_notifications_enabled"],
+  ]) {
+    const response = await api("/api/v1/registrations", {
+      method: "POST",
+      headers: { origin: "https://quickducks.com" },
+      body: { ...invalidBase, ...change, commandId: crypto.randomUUID(), privateToken: randomToken() },
+    });
+    const body = await jsonBody(response, 422, label);
+    assert.ok(body.fields[field], label);
+  }
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM registrations WHERE first_name = 'Rejected'",
+  ).get().count, 0);
+  const owner = await register(api, context, "Consent", {
+    email: "CONSENT@EXAMPLE.TEST",
+    phone: "817.320.6150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: true,
+  });
+  const row = database.prepare(`
+    SELECT email, phone, email_notifications_enabled, sms_notifications_enabled
+      FROM registrations WHERE id = ?
+  `).get(owner.registrationId);
+  assert.deepEqual({ ...row }, {
+    email: "consent@example.test",
+    phone: "(817) 320-6150",
+    email_notifications_enabled: 0,
+    sms_notifications_enabled: 1,
+  });
+  const contact = await jsonBody(await api(contactPath(owner.registrationId), {
+    cookie: owner.cookie,
+    headers: proofHeaders(owner.privateToken),
+  }), 200, "public consent round trip");
+  assert.deepEqual(contact, {
+    registrationId: owner.registrationId,
+    email: "consent@example.test",
+    phone: "(817) 320-6150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: true,
+    revision: 0,
+  });
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });

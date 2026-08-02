@@ -257,6 +257,7 @@ interface RegistrationPayload {
   email?: unknown;
   phone?: unknown;
   emailNotificationsEnabled?: unknown;
+  smsNotificationsEnabled?: unknown;
   turnstileToken?: unknown;
   clientTimestamp?: unknown;
 }
@@ -315,6 +316,14 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   ) {
     return json({ error: "Invalid event, command, or private token." }, 400);
   }
+  if (
+    (payload.emailNotificationsEnabled !== undefined && typeof payload.emailNotificationsEnabled !== "boolean")
+    || (payload.smsNotificationsEnabled !== undefined && typeof payload.smsNotificationsEnabled !== "boolean")
+    || (payload.email !== undefined && payload.email !== null && typeof payload.email !== "string")
+    || (payload.phone !== undefined && payload.phone !== null && typeof payload.phone !== "string")
+  ) {
+    return json({ error: "Contact fields or notification preferences are malformed." }, 400);
+  }
 
   const tokenHash = await hashToken(payload.privateToken);
   const previous = await env.DB.prepare(
@@ -357,6 +366,7 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   if (typeof payload.email === "string") form.set("email", payload.email);
   if (typeof payload.phone === "string") form.set("phone", payload.phone);
   if (payload.emailNotificationsEnabled === true) form.set("email_notifications_enabled", "on");
+  if (payload.smsNotificationsEnabled === true) form.set("sms_notifications_enabled", "on");
   const validation = validateRegistration(form, event.email_required === 1);
   if (validation.value === undefined) {
     return json({ error: "Registration validation failed.", fields: validation.errors }, 422);
@@ -403,10 +413,11 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
          VALUES (?, ?, 'CREATE_REGISTRATION', ?, ?, ?)`,
       ).bind(payload.commandId, event.id, registrationId, clientTimestamp, now),
       env.DB.prepare(
-        `INSERT INTO registrations
+         `INSERT INTO registrations
           (id, event_id, first_name, last_name, email, phone, status, lookup_code,
-           private_token_hash, email_notifications_enabled, created_via, submitted_at, status_changed_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'SUBMITTED', ?, ?, ?, 'PUBLIC', ?, ?)`,
+            private_token_hash, email_notifications_enabled, sms_notifications_enabled,
+            created_via, submitted_at, status_changed_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'SUBMITTED', ?, ?, ?, ?, 'PUBLIC', ?, ?)`,
       ).bind(
         registrationId,
         event.id,
@@ -417,6 +428,7 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         lookupCode,
         tokenHash,
         value.emailNotificationsEnabled ? 1 : 0,
+        value.smsNotificationsEnabled ? 1 : 0,
         now,
         now,
       ),
@@ -1184,8 +1196,12 @@ const getMyContact = async (
   env: Env,
   registrationId: string,
 ): Promise<Response> => {
-  const rateLimit = await publicRateLimit(request, env, "contact-read");
-  if (!rateLimit.success) return json({ error: "Too many requests. Please wait and try again." }, 429);
+  // My Ducks reloads this private projection after every relevant live signal
+  // and may own many registrations. Applying the public search budget here
+  // would make ordinary race activity or one initial multi-card paint hide
+  // authorized contact details after 20 reads. The opaque participant proof and
+  // HttpOnly collection cookie both remain mandatory; proof minting and writes
+  // retain their mutation rate limits.
   const target = await getOwnedContact(request, env, registrationId);
   return target === null
     ? json({ error: "Contact details are not available." }, 404)

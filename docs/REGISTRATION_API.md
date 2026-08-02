@@ -32,8 +32,9 @@ Example request:
   "firstName": "Daisy",
   "lastName": "Duck",
   "email": "daisy@example.com",
-  "phone": null,
+  "phone": "(817) 320-6150",
   "emailNotificationsEnabled": true,
+  "smsNotificationsEnabled": true,
   "turnstileToken": "turnstile-response-token",
   "clientTimestamp": "2026-07-26T00:00:00.000Z"
 }
@@ -72,6 +73,10 @@ Public registration fails closed unless:
 
 - the event is `REGISTRATION_OPEN` and inside its configured time window;
 - required names and event-specific email policy pass validation;
+- every non-empty email is valid and every non-empty phone normalizes to exactly
+  ten US digits, regardless of whether its notification choice is off;
+- email consent has a valid email and SMS consent has a valid phone (omitted
+  consent fields default to `false` for older clients);
 - the request is same-origin when an `Origin` header is present; and
 - server-side Turnstile verification succeeds.
 
@@ -83,9 +88,10 @@ GET /api/v1/registrations/{privateToken}
 
 The high-entropy token is the authorization credential. The response includes
 participant name, registration status, staff lookup code, and event details.
-Email and phone remain staff-only and are not returned, even with the private
-token. Never place this endpoint or its response in analytics, application
-logs, public links, or search indexes.
+This endpoint does not return email, phone, or contact preferences. Those values
+are available only to authorized staff and through the originating browser's
+separately proof-protected owned-contact routes. Never place this endpoint or
+its response in analytics, application logs, public links, or search indexes.
 
 The short lookup code is for staff search only and must never authorize this
 endpoint.
@@ -115,6 +121,17 @@ server-side to every independent registration created from that browser,
 allowing one phone to retain many participant names, lookup codes, and race
 statuses across refreshes. Successful reads renew its server-side expiry. The
 cookie contains no participant data or private status tokens.
+
+An owned My Ducks card reads and updates contact details through
+`GET|PATCH /api/v1/registrations/mine/{registrationId}/contact`. Both routes
+require the HttpOnly collection cookie, a `REGISTRATION`-sourced collection
+link, and that participant's high-entropy ownership proof. The mutation also
+requires the exact application `Origin`, a UUID command ID, and the current
+registration revision. It accepts email, phone, and the two independent consent
+booleans together, applies the same contact validation and normalization as
+registration, and rejects unsupported fields. These private fields are not
+added to the general collection response, public search, race status, or live
+signals.
 
 ## Public Name Search
 

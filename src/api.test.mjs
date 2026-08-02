@@ -839,7 +839,9 @@ test("creates registration, race-entry, command, and audit records atomically", 
         firstName: "Daisy",
         lastName: "Duck",
         email: "DAISY@example.com",
+        phone: "817.320.6150",
         emailNotificationsEnabled: true,
+        smsNotificationsEnabled: true,
         duckKeepPreference: "KEEP",
         turnstileToken: "verified-test-token",
       }),
@@ -873,6 +875,9 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.equal(db.batches[0].length, 6);
   assert.match(db.batches[0][0].sql, /INSERT INTO race_commands/);
   assert.match(db.batches[0][1].sql, /INSERT INTO registrations/);
+  assert.match(db.batches[0][1].sql, /email_notifications_enabled, sms_notifications_enabled/);
+  assert.equal(db.batches[0][1].args.includes("(817) 320-6150"), true);
+  assert.deepEqual(db.batches[0][1].args.slice(8, 10), [1, 1]);
   assert.match(db.batches[0][2].sql, /INSERT INTO race_entries/);
   assert.doesNotMatch(db.batches[0][2].sql, /duck_keep_preference/);
   assert.equal(db.batches[0][2].args.length, 3);
@@ -891,6 +896,41 @@ test("creates registration, race-entry, command, and audit records atomically", 
   await assert.doesNotReject(publicationTask);
   assert.equal(publicationCalls, 1);
   assert.deepEqual(JSON.parse(publicationFrame).domains, ["participants"]);
+});
+
+test("public registration rejects invalid contacts and ungated consent before Turnstile", async () => {
+  const base = {
+    eventId: openEvent.id,
+    commandId: crypto.randomUUID(),
+    privateToken: randomToken(),
+    firstName: "Daisy",
+    lastName: "Duck",
+    email: "daisy@example.test",
+    phone: "8173206150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: false,
+    turnstileToken: "not-reached",
+  };
+  for (const [label, change, field] of [
+    ["invalid email", { email: "daisy@" }, "email"],
+    ["incomplete phone", { phone: "817320" }, "phone"],
+    ["email consent without email", { email: null, emailNotificationsEnabled: true }, "email_notifications_enabled"],
+    ["SMS consent without phone", { phone: null, smsNotificationsEnabled: true }, "sms_notifications_enabled"],
+  ]) {
+    const db = makeDb((sql) => sql.includes("status = 'REGISTRATION_OPEN'") ? openEvent : null);
+    const response = await handleApi(
+      new Request("https://quickducks.com/api/v1/registrations", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://quickducks.com" },
+        body: JSON.stringify({ ...base, ...change, commandId: crypto.randomUUID() }),
+      }),
+      makeEnv(db, { TURNSTILE_SECRET_KEY: "test-secret" }),
+    );
+    const body = await response.json();
+    assert.equal(response.status, 422, label);
+    assert.ok(body.fields[field], label);
+    assert.equal(db.batches.length, 0, label);
+  }
 });
 
 test("rejects a Turnstile result for a different hostname", async (context) => {
