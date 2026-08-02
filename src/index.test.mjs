@@ -419,7 +419,7 @@ test("gates focused station pages by operational role", async () => {
   assert.equal(resultStart.status, 403);
   assert.equal(resultFinish.status, 200);
   const finishBody = await resultFinish.text();
-  assert.match(finishBody, /Record one official result/);
+  assert.match(finishBody, /Record and announce one result/);
   assert.match(finishBody, /Tag URL or duck number/);
   assert.doesNotMatch(finishBody, /participant email|participant phone/i);
 

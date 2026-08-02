@@ -150,7 +150,7 @@ test.describe("the finish-line winner workflow", () => {
       timeout: 20_000,
     });
 
-    // Recording the winner the fallback does offer publishes the real result.
+    // Recording the winner the fallback offers starts the announcement handoff.
     const winnerEntry = roster[0];
     await fallbackSelect(page).selectOption(winnerEntry.raceEntryId);
     // Marking the heat finished repaints while its command is still busy. The
@@ -163,18 +163,43 @@ test.describe("the finish-line winner workflow", () => {
     // The same acknowledgement a scanned winner lands on, including the bag.
     await expect(recorded(page)).toBeVisible({ timeout: 20_000 });
     await expect(recorded(page)).toContainText(
-      `Duck #${winnerEntry.duck.visibleNumber} is the official Heat ${running.number} winner.`,
+      `Duck #${winnerEntry.duck.visibleNumber} is recorded for Heat ${running.number}.`,
     );
     await expect(recorded(page)).toContainText(FINALISTS_BAG_INSTRUCTION);
-    // The heat is settled, so the workflow that asked for a winner is gone.
+    // Winner selection is gone, but the heat is not official until the spoken
+    // announcement is confirmed.
     await expect(callout(page)).toBeHidden();
+    const announced = page.getByRole("button", { name: "Winner announced" });
+    await expect(announced).toBeVisible();
 
+    const pending = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${running.id}`, {
+      token: admin.token,
+    });
+    expect(pending.body.heat.status).toBe("AWAITING_RESULT");
+    expect(pending.body.results).toEqual([]);
+    expect(pending.body.pendingResults[0].raceEntryId).toBe(winnerEntry.raceEntryId);
+
+    // The action represents a valid recorded winner, not merely a leftover row.
+    // If that racer leaves before the spoken announcement, live refresh removes
+    // the action; reactivation restores it without changing the pending result.
+    const winner = seeded.participants.find((participant) =>
+      participant.visibleNumber === winnerEntry.duck.visibleNumber
+    );
+    expect(winner).toBeTruthy();
+    await changeRegistrationStatus(admin.token, winner.registrationId, "withdraw");
+    await expect(announced).toBeHidden({ timeout: 20_000 });
+    await expect(page.locator("[data-station-message]")).toContainText("Winner announced is unavailable");
+    await expect(callout(page)).toBeHidden();
+    await changeRegistrationStatus(admin.token, winner.registrationId, "reactivate");
+    await expect(announced).toBeVisible({ timeout: 20_000 });
+
+    await announced.click();
+    await confirmAction(page, "Winner announced");
     const published = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${running.id}`, {
       token: admin.token,
     });
     expect(published.body.heat.status).toBe("FINALIZED");
     expect(published.body.results.map((result) => result.place)).toEqual([1]);
-    expect(published.body.results[0].raceEntryId).toBe(winnerEntry.raceEntryId);
     // Nothing was moved around the racer who left.
     expect(published.body.roster.map((entry) => `${entry.slotNumber}|${entry.raceEntryId}`))
       .toEqual(roster.map((entry) => `${entry.slotNumber}|${entry.raceEntryId}`));
@@ -284,6 +309,18 @@ test.describe("the finish-line winner workflow", () => {
     // acceptance rather than on which success code the result path returns; the
     // authoritative heat state below is what proves the winner was published.
     expect(recordedWinner.status, JSON.stringify(recordedWinner.body)).toBeLessThan(300);
+    const announced = await rawJson(
+      `/api/v1/staff/events/${seeded.eventId}/heats/${running.id}/winner-announced`,
+      {
+        token: admin.token,
+        method: "POST",
+        body: {
+          commandId: crypto.randomUUID(),
+          revision: recordedWinner.body.heat.revision,
+        },
+      },
+    );
+    expect(announced.status, JSON.stringify(announced.body)).toBe(201);
 
     // Reopening it is not the same decision, and this role does not have it.
     const settled = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${running.id}`, {

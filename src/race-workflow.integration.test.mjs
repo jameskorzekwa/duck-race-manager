@@ -206,7 +206,7 @@ const raceToAwaitingFinal = async (
   database,
   { name, slug, racerCount, heatCapacity, releasedSpareDucks = 0, optInRegistrationIndex = null,
     optInRegistrationIndexes = null, deliverEmails = false, afterPairing = null,
-    afterRoundOneTransition = null, queueSendFailures = 0 },
+    afterRoundOneTransition = null, afterRoundOneResultRecorded = null, queueSendFailures = 0 },
 ) => {
   const {
     api,
@@ -356,15 +356,34 @@ const raceToAwaitingFinal = async (
       await transition(heat, operation);
       await afterRoundOneTransition?.({ database, env, eventId, heat, operation, transition });
     }
-    const published = await jsonBody(await post(
+    const recorded = await jsonBody(await post(
       `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`,
       {
         commandId: crypto.randomUUID(),
         revision: heat.revision,
         results: [{ raceEntryId: detail.roster[0].raceEntryId, place: 1 }],
       },
-    ), 201, `publish round-one heat ${heat.number}`);
-    heat.revision = published.heat.revision;
+    ), 201, `record round-one heat ${heat.number}`);
+    assert.equal(recorded.heat.status, "AWAITING_RESULT");
+    assert.equal(recorded.heat.publishedResultCount, 0);
+    assert.equal(recorded.pendingResults[0].raceEntryId, detail.roster[0].raceEntryId);
+    heat.revision = recorded.heat.revision;
+    await afterRoundOneResultRecorded?.({ database, env, api, post, eventId, heat, detail, recorded });
+    const confirmationCommandId = crypto.randomUUID();
+    const finalized = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`,
+      { commandId: confirmationCommandId, revision: heat.revision },
+    ), 201, `confirm round-one heat ${heat.number} winner announced`);
+    assert.equal(finalized.heat.status, "FINALIZED");
+    assert.equal(finalized.results[0].raceEntryId, detail.roster[0].raceEntryId);
+    heat.revision = finalized.heat.revision;
+    if (heat.number === 1) {
+      const replay = await jsonBody(await post(
+        `/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`,
+        { commandId: confirmationCommandId, revision: recorded.heat.revision },
+      ), 200, "replay winner announcement confirmation");
+      assert.equal(replay.replayed, true);
+    }
   }
 
   await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-final`, {
@@ -403,6 +422,23 @@ const raceToAwaitingFinal = async (
     `/api/v1/staff/events/${eventId}/readiness`,
     { token: staffToken },
   ), 200, "completion readiness")).readiness.complete;
+  const recordAndAnnounce = async (heat, results, label = `heat ${heat.number}`) => {
+    const recorded = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`,
+      { commandId: crypto.randomUUID(), revision: heat.revision, results },
+    ), 201, `record ${label}`);
+    assert.equal(recorded.heat.status, "AWAITING_RESULT");
+    assert.deepEqual(recorded.results, []);
+    assert.equal(recorded.pendingResults.length, results.length);
+    heat.revision = recorded.heat.revision;
+    const confirmed = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`,
+      { commandId: crypto.randomUUID(), revision: heat.revision },
+    ), 201, `confirm ${label} winner announced`);
+    heat.revision = confirmed.heat.revision;
+    heat.status = confirmed.heat.status;
+    return confirmed;
+  };
   return {
     api,
     post,
@@ -413,6 +449,7 @@ const raceToAwaitingFinal = async (
     leaveRace,
     releasedSpares,
     completionReadiness,
+    recordAndAnnounce,
     env,
     worker,
     queuedNotifications,
@@ -1167,15 +1204,15 @@ test("a final podium is built one scanned duck at a time and published by the la
 
   const secondScan = await winnerContext(scan, second);
   assert.deepEqual(secondScan.winnerAction.podium.availablePlaces, [2]);
-  const published = await jsonBody(
+  const recordedPodium = await jsonBody(
     await scan.record(second, secondScan.winnerAction, 2),
     201,
-    "record second place and publish",
+    "record second place and complete the pending podium",
   );
-  // The last place publishes the whole podium in the same command.
-  assert.equal(published.heat.status, "FINALIZED");
-  assert.deepEqual(published.results.map((result) => result.place), [1, 2, 3]);
-  assert.deepEqual(published.results.map((result) => result.duck.visibleNumber), [
+  assert.equal(recordedPodium.heat.status, "AWAITING_RESULT");
+  assert.deepEqual(recordedPodium.results, []);
+  assert.deepEqual(recordedPodium.pendingResults.map((result) => result.place), [1, 2, 3]);
+  assert.deepEqual(recordedPodium.pendingResults.map((result) => result.duck.visibleNumber), [
     first.visibleNumber,
     second.visibleNumber,
     third.visibleNumber,
@@ -1183,11 +1220,22 @@ test("a final podium is built one scanned duck at a time and published by the la
   // Provisional places do not outlive the result they became, and a published
   // final reports no podium to take rather than an empty one that reads as
   // three places still waiting to be scanned.
-  assert.equal(published.podium, null);
+  assert.equal(recordedPodium.podium, null);
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
     0,
   );
+
+  assert.deepEqual(
+    (await jsonBody(await api("/api/v1/race-board"), 200, "board before announcement confirmation")).event.podium,
+    [],
+  );
+  const announced = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/winner-announced`,
+    { commandId: crypto.randomUUID(), revision: recordedPodium.heat.revision },
+  ), 201, "confirm the final winner announcement");
+  assert.equal(announced.heat.status, "FINALIZED");
+  assert.deepEqual(announced.results.map((result) => result.place), [1, 2, 3]);
 
   const board = await jsonBody(await api("/api/v1/race-board"), 200, "published podium board");
   assert.deepEqual(board.event.podium.map((entry) => entry.duckNumber), [
@@ -1339,7 +1387,7 @@ test("a scanned final podium refuses racers who left and never strands the final
   assert.equal(detail.podium.complete, true);
   assert.deepEqual(detail.podium.placements.map((placement) => placement.place), [1, 2]);
 
-  const publishedPodium = await jsonBody(await post(
+  const recordedPodium = await jsonBody(await post(
     `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
     {
       commandId: crypto.randomUUID(),
@@ -1349,13 +1397,18 @@ test("a scanned final podium refuses racers who left and never strands the final
         place: placement.place,
       })),
     },
-  ), 201, "publish the completed scanned podium");
-  assert.deepEqual(publishedPodium.results.map((result) => result.place), [1, 2]);
+  ), 201, "record the completed scanned podium");
+  assert.deepEqual(recordedPodium.pendingResults.map((result) => result.place), [1, 2]);
   assert.equal(
     database.prepare("SELECT COUNT(*) AS count FROM final_podium_selections").get().count,
     0,
     "publishing consumes the provisional places",
   );
+  const publishedPodium = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/winner-announced`,
+    { commandId: crypto.randomUUID(), revision: recordedPodium.heat.revision },
+  ), 201, "confirm the reduced final winner announcement");
+  assert.deepEqual(publishedPodium.results.map((result) => result.place), [1, 2]);
   const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
     commandId: crypto.randomUUID(),
   }), 201, "complete the event on the reduced podium");
@@ -1421,17 +1474,22 @@ test("a recorded place the shrinking podium hides never locks its own duck out",
 
   // The reduced podium still publishes, and the event still completes.
   const lastScan = await winnerContext(scan, second);
-  const published = await jsonBody(
+  const recordedPodium = await jsonBody(
     await scan.record(second, lastScan.winnerAction, 1),
     201,
-    "the last remaining place publishes the reduced podium",
+    "the last remaining place records the reduced podium",
   );
-  assert.equal(published.heat.status, "FINALIZED");
-  assert.deepEqual(published.results.map((result) => result.place), [1, 2]);
-  assert.deepEqual(published.results.map((result) => result.duck.visibleNumber), [
+  assert.equal(recordedPodium.heat.status, "AWAITING_RESULT");
+  assert.deepEqual(recordedPodium.pendingResults.map((result) => result.place), [1, 2]);
+  assert.deepEqual(recordedPodium.pendingResults.map((result) => result.duck.visibleNumber), [
     second.visibleNumber,
     third.visibleNumber,
   ]);
+  const published = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/winner-announced`,
+    { commandId: crypto.randomUUID(), revision: recordedPodium.heat.revision },
+  ), 201, "confirm the reduced final winner announcement");
+  assert.equal(published.heat.status, "FINALIZED");
   const completed = await jsonBody(await post(`/api/v1/staff/events/${eventId}/complete`, {
     commandId: crypto.randomUUID(),
   }), 201, "complete the event on the reduced podium");
@@ -1651,14 +1709,18 @@ test("a final reduced by a withdrawal is still published and the event completed
     heat.revision = detail.heat.revision;
     heat.roster = detail.roster;
     for (const operation of ["ready", "call", "start", "finish"]) await transition(heat, operation);
-    const published = await jsonBody(await post(
+    const recorded = await jsonBody(await post(
       `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`,
       {
         commandId: crypto.randomUUID(),
         revision: heat.revision,
         results: [{ raceEntryId: heat.roster[0].raceEntryId, place: 1 }],
       },
-    ), 201, `publish round-one heat ${heat.number}`);
+    ), 201, `record round-one heat ${heat.number}`);
+    const published = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`,
+      { commandId: crypto.randomUUID(), revision: recorded.heat.revision },
+    ), 201, `confirm round-one heat ${heat.number} winner announced`);
     heat.revision = published.heat.revision;
   }
 
@@ -1742,8 +1804,13 @@ test("a final reduced by a withdrawal is still published and the event completed
     `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
     { commandId: crypto.randomUUID(), revision: finalHeat.revision, results: podium },
   ), 201, "publish the reduced podium");
-  assert.deepEqual(finalResult.results.map((result) => result.place), [1, 2]);
-  assert.equal(finalResult.heat.status, "FINALIZED");
+  assert.deepEqual(finalResult.pendingResults.map((result) => result.place), [1, 2]);
+  assert.equal(finalResult.heat.status, "AWAITING_RESULT");
+  const announcedFinal = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/winner-announced`,
+    { commandId: crypto.randomUUID(), revision: finalResult.heat.revision },
+  ), 201, "confirm reduced final winner announced");
+  assert.deepEqual(announcedFinal.results.map((result) => result.place), [1, 2]);
 
   // And the event is no longer stranded: completion is allowed and taken.
   const readiness = await jsonBody(await api(`/api/v1/staff/events/${eventId}/readiness`, {
@@ -1793,20 +1860,13 @@ test("a podium finisher disqualified after publication never strands the event",
     racerCount: 9,
     heatCapacity: 3,
   });
-  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness } = race;
+  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness, recordAndAnnounce } = race;
   assert.equal(finalists.length, 3, "three heats promote three finalists");
 
-  const published = await jsonBody(await post(
-    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
-    {
-      commandId: crypto.randomUUID(),
-      revision: finalHeat.revision,
-      results: finalists.map((finalist, index) => ({
-        raceEntryId: finalist.raceEntryId,
-        place: index + 1,
-      })),
-    },
-  ), 201, "publish the full three-place podium");
+  const published = await recordAndAnnounce(finalHeat, finalists.map((finalist, index) => ({
+    raceEntryId: finalist.raceEntryId,
+    place: index + 1,
+  })), "the full three-place podium");
   assert.deepEqual(published.results.map((result) => result.place), [1, 2, 3]);
   const publishedFinalRevision = published.heat.revision;
 
@@ -1871,19 +1931,12 @@ test("a podium finisher who withdraws after publication never strands the event"
     racerCount: 9,
     heatCapacity: 3,
   });
-  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness } = race;
+  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness, recordAndAnnounce } = race;
 
-  await jsonBody(await post(
-    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
-    {
-      commandId: crypto.randomUUID(),
-      revision: finalHeat.revision,
-      results: finalists.map((finalist, index) => ({
-        raceEntryId: finalist.raceEntryId,
-        place: index + 1,
-      })),
-    },
-  ), 201, "publish the full three-place podium");
+  await recordAndAnnounce(finalHeat, finalists.map((finalist, index) => ({
+    raceEntryId: finalist.raceEntryId,
+    place: index + 1,
+  })), "the full three-place podium");
 
   // The published *winner* leaves. Nothing shallower is worth pinning: if first
   // place can go without stranding the race, no place can.
@@ -1911,20 +1964,13 @@ test("withdrawing non-podium finalists below the published depth never strands t
     racerCount: 15,
     heatCapacity: 3,
   });
-  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness } = race;
+  const { api, post, eventId, finalHeat, finalists, leaveRace, completionReadiness, recordAndAnnounce } = race;
   assert.equal(finalists.length, 5, "five heats promote five finalists");
 
-  const published = await jsonBody(await post(
-    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
-    {
-      commandId: crypto.randomUUID(),
-      revision: finalHeat.revision,
-      results: finalists.slice(0, 3).map((finalist, index) => ({
-        raceEntryId: finalist.raceEntryId,
-        place: index + 1,
-      })),
-    },
-  ), 201, "publish a three-place podium out of five finalists");
+  const published = await recordAndAnnounce(finalHeat, finalists.slice(0, 3).map((finalist, index) => ({
+    raceEntryId: finalist.raceEntryId,
+    place: index + 1,
+  })), "a three-place podium out of five finalists");
   assert.deepEqual(published.results.map((result) => result.place), [1, 2, 3]);
 
   // Three finalists who hold no place at all leave. The podium is not touched
@@ -1968,7 +2014,7 @@ test("whatever a final publication accepts, completion accepts immediately", asy
     racerCount: 9,
     heatCapacity: 3,
   });
-  const { post, eventId, finalHeat, finalists, leaveRace, completionReadiness } = race;
+  const { post, eventId, finalHeat, finalists, leaveRace, completionReadiness, recordAndAnnounce } = race;
 
   // A finalist leaves before the podium is published, so publication itself
   // sizes the podium at two places.
@@ -1984,17 +2030,10 @@ test("whatever a final publication accepts, completion accepts immediately", asy
   assert.equal(shallow.status, 422, "publication stays exact and refuses a podium that is too shallow");
   assert.match((await shallow.json()).error, /exactly places 1 through 2\.$/);
 
-  await jsonBody(await post(
-    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
-    {
-      commandId: crypto.randomUUID(),
-      revision: finalHeat.revision,
-      results: [
-        { raceEntryId: finalists[0].raceEntryId, place: 1 },
-        { raceEntryId: finalists[1].raceEntryId, place: 2 },
-      ],
-    },
-  ), 201, "publish the podium publication itself demanded");
+  await recordAndAnnounce(finalHeat, [
+    { raceEntryId: finalists[0].raceEntryId, place: 1 },
+    { raceEntryId: finalists[1].raceEntryId, place: 2 },
+  ], "the podium publication itself demanded");
   assert.equal(
     (await completionReadiness()).allowed,
     true,
@@ -2089,6 +2128,7 @@ test("a duck released elsewhere in the event never strands the reactivation reme
     leaveRace,
     releasedSpares,
     completionReadiness,
+    recordAndAnnounce,
   } = race;
   assert.equal(releasedSpares.length, 1);
   assert.equal(
@@ -2102,17 +2142,10 @@ test("a duck released elsewhere in the event never strands the reactivation reme
   // A finalist is disqualified before the podium is published, so publication
   // sizes it at two places and accepts exactly that.
   await leaveRace(finalists[2], "disqualify");
-  await jsonBody(await post(
-    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
-    {
-      commandId: crypto.randomUUID(),
-      revision: finalHeat.revision,
-      results: [
-        { raceEntryId: finalists[0].raceEntryId, place: 1 },
-        { raceEntryId: finalists[1].raceEntryId, place: 2 },
-      ],
-    },
-  ), 201, "publish the two-place podium the eligible count demanded");
+  await recordAndAnnounce(finalHeat, [
+    { raceEntryId: finalists[0].raceEntryId, place: 1 },
+    { raceEntryId: finalists[1].raceEntryId, place: 2 },
+  ], "the two-place podium the eligible count demanded");
   assert.equal((await completionReadiness()).allowed, true);
 
   // The disqualification is reversed on appeal, which is the one change that
@@ -2204,6 +2237,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0019_round_one_walk_up_admission.sql",
     "0020_email_notification_assignment.sql",
     "0021_email_delivery_claim.sql",
+    "0022_pending_heat_result_announcement.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -2838,22 +2872,33 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       commandId: winnerCommand, eventId, heatId: heat.id,
       raceEntryId: winner, revision: heat.revision,
     };
-    const finalized = await jsonBody(await post(
+    const recorded = await jsonBody(await post(
       `/api/v1/staff/ducks/${winningParticipant.tagToken}/heat-winner`,
       winnerPayload,
-    ), 201, `publish scanned round-one winner ${heat.number}`);
+    ), 201, `record scanned round-one winner ${heat.number}`);
     const replayedWinner = await jsonBody(await post(
       `/api/v1/staff/ducks/${winningParticipant.tagToken}/heat-winner`,
       winnerPayload,
     ), 200, `replay scanned round-one winner ${heat.number}`);
     assert.equal(replayedWinner.replayed, true);
     const winnerAudit = database.prepare(
-      "SELECT details_json FROM audit_events WHERE command_id = ? AND action = 'HEAT_RESULT_FINALIZED'",
+      "SELECT details_json FROM audit_events WHERE command_id = ? AND action = 'HEAT_RESULT_RECORDED'",
     ).get(winnerCommand);
     assert.ok(winnerAudit);
     assert.equal(winnerAudit.details_json.includes(winningParticipant.tagToken), false);
     assert.equal(winnerAudit.details_json.includes(winningParticipant.firstName), false);
     assert.equal(winnerAudit.details_json.includes(`${winningParticipant.firstName.toLowerCase()}@example.com`), false);
+    assert.equal(recorded.heat.status, "AWAITING_RESULT");
+    assert.equal(recorded.results.length, 0);
+    const announcerPending = await jsonBody(await api(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/announcer-roster`,
+      { token: staffToken },
+    ), 200, `announcer reads pending winner ${heat.number}`);
+    assert.equal(announcerPending.pendingResults[0].raceEntryId, winner);
+    const finalized = await jsonBody(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`,
+      { commandId: crypto.randomUUID(), revision: recorded.heat.revision },
+    ), 201, `confirm scanned round-one winner ${heat.number} announced`);
     heat.revision = finalized.heat.revision;
     heat.status = finalized.heat.status;
     assert.equal(finalized.results.length, 1);
@@ -2990,7 +3035,12 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/results/finalize`,
     { commandId: crypto.randomUUID(), revision: finalHeat.revision, results: podium },
   ), 201, "finalize final");
-  assert.deepEqual(finalResult.results.map((result) => result.place), [1, 2, 3]);
+  assert.deepEqual(finalResult.pendingResults.map((result) => result.place), [1, 2, 3]);
+  const finalAnnouncement = await jsonBody(await post(
+    `/api/v1/staff/events/${eventId}/heats/${finalHeat.id}/winner-announced`,
+    { commandId: crypto.randomUUID(), revision: finalResult.heat.revision },
+  ), 201, "confirm final winner announced");
+  assert.deepEqual(finalAnnouncement.results.map((result) => result.place), [1, 2, 3]);
   const podiumBoard = await jsonBody(await api("/api/v1/race-board"), 200, "podium public board");
   assert.deepEqual(podiumBoard.event.podium.map((entry) => entry.place), [1, 2, 3]);
 
@@ -3129,6 +3179,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "heats",
     "heat_entries",
     "heat_results",
+    "pending_heat_results",
     "heat_result_history",
     "browser_registration_collections",
     "browser_collection_registrations",

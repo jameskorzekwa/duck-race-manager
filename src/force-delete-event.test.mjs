@@ -232,6 +232,15 @@ const seedFullEventDataset = (database, status) => {
     VALUES
       ('podium-place', 'event_test', 'final-heat', 'entry', 'assignment', 1,
        '2026-07-26T01:31:00Z', 'admin_test', '22222222-2222-4222-8222-222222222222');
+    -- A complete result waiting for the winner announcement is private scratch
+    -- state too. Force delete must clear it rather than letting its restricted
+    -- staff and command references block the only event-cleanup path.
+    INSERT INTO pending_heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
+       result_revision, recorded_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES
+      ('pending-result', 'event_test', 'final-heat', 'entry', 'assignment', 1, 1,
+       '2026-07-26T01:32:00Z', 'admin_test', '22222222-2222-4222-8222-222222222222');
     INSERT INTO email_notifications (id, event_id, registration_id, heat_id, notification_type, status)
     VALUES ('notification', 'event_test', 'registration', 'heat', 'HEAT_ASSIGNED', 'PENDING');
     INSERT INTO email_attempts (id, event_id, notification_id, attempt_number, stage, status, started_at)
@@ -261,6 +270,7 @@ const eventLinkedTables = [
   "heat_entries",
   "heat_results",
   "heat_result_history",
+  "pending_heat_results",
   "final_podium_selections",
   "email_notifications",
   "email_attempts",

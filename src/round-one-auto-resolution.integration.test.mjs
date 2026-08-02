@@ -351,6 +351,21 @@ const runHeatManually = async (env, database, heatNumber) => {
     director,
   );
   assert.equal(response.status, 201, `finalize heat ${heatNumber}: ${await response.clone().text()}`);
+  const recorded = await response.json();
+  const confirmed = await handleHeatOperations(
+    new Request(`https://quickducks.com/api/v1/staff/events/event_test/heats/${heat.id}/winner-announced`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId: crypto.randomUUID(), revision: recorded.heat.revision }),
+    }),
+    env,
+    director,
+  );
+  assert.equal(
+    confirmed.status,
+    201,
+    `confirm heat ${heatNumber} winner announced: ${await confirmed.clone().text()}`,
+  );
   return winner.race_entry_id;
 };
 

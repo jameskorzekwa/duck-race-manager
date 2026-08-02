@@ -91,9 +91,13 @@ export const expectCentered = async (locator, container = locator.locator("xpath
 };
 
 export const expectTouchTarget = async (locator) => {
-  const box = await locator.boundingBox();
-  expect(box).not.toBeNull();
-  expect(box.height).toBeGreaterThanOrEqual(44);
+  await expect(locator).toBeVisible();
+  // Read the live element's rectangle in one browser turn. Public navigation is
+  // authoritatively repainted after its phase fetch; `boundingBox()` can return
+  // null when that correct replacement lands between resolving a `:visible`
+  // locator and measuring it, even though the replacement target is visible.
+  const height = await locator.evaluate((element) => element.getBoundingClientRect().height);
+  expect(height).toBeGreaterThanOrEqual(44);
 };
 
 export const registerParticipant = async (client, eventId, index, overrides = {}) => {
@@ -149,14 +153,31 @@ export const transitionHeat = async (client, eventId, heat, operation) => {
   return response.body.heat;
 };
 
-export const finalizeHeat = async (client, eventId, heat, results) => {
+export const recordHeatResult = async (client, eventId, heat, results) => {
   const response = await client.post(`/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`, {
     commandId: crypto.randomUUID(),
     revision: heat.revision,
     results,
-  }, { label: `finalize synthetic heat ${heat.number}` });
+  }, { label: `record synthetic heat ${heat.number}` });
   Object.assign(heat, response.body.heat);
   return response.body.heat;
+};
+
+export const confirmWinnerAnnounced = async (client, eventId, heat) => {
+  const response = await client.post(`/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`, {
+    commandId: crypto.randomUUID(),
+    revision: heat.revision,
+  }, { label: `confirm synthetic heat ${heat.number} winner announced` });
+  Object.assign(heat, response.body.heat);
+  return response.body.heat;
+};
+
+// Existing broad lifecycle scenarios need the complete official-finish boundary.
+// Focused announcement tests call the two explicit helpers above to inspect the
+// required pending window.
+export const finalizeHeat = async (client, eventId, heat, results) => {
+  await recordHeatResult(client, eventId, heat, results);
+  return confirmWinnerAnnounced(client, eventId, heat);
 };
 
 export const rawJson = async (path, { token, method = "GET", body, origin = baseUrl } = {}) => {

@@ -322,6 +322,30 @@ test.describe("complete race journey", () => {
       await expect.poll(async () => {
         const heats = (await client.get(`/api/v1/staff/events/${event.id}/heats`)).body.heats;
         return heats.find((heat) => heat.round === "ROUND_ONE" && heat.number === 1)?.status;
+      }).toBe("AWAITING_RESULT");
+      await expect(page).toHaveURL(/\/staff\/finish-line/);
+      await expect(page.getByText("Winner recorded", { exact: true })).toBeVisible();
+
+      // Follow the browser-visible handoff all the way through the microphone
+      // view before returning to the finish line for the separate confirmation.
+      await page.goto("/staff/announcer");
+      await expect(page.locator("[data-announcer-winner]")).toBeVisible();
+      await expect(page.locator("[data-announcer-winner-heat]")).toHaveText("Round one · Heat 1 winner");
+      await expect(page.locator("[data-announcer-winner-name]")).toHaveText(
+        `${firstWinner.participant.firstName} ${firstWinner.participant.lastName}`,
+      );
+      await expect(page.locator("[data-announcer-winner-duck]")).toHaveText(
+        `Duck #${firstWinner.duck.visibleNumber}`,
+      );
+
+      await page.goto("/staff/finish-line");
+      const announced = page.getByRole("button", { name: "Winner announced" });
+      await expect(announced).toBeVisible();
+      await announced.click();
+      await confirmAction(page, "Winner announced");
+      await expect.poll(async () => {
+        const heats = (await client.get(`/api/v1/staff/events/${event.id}/heats`)).body.heats;
+        return heats.find((heat) => heat.round === "ROUND_ONE" && heat.number === 1)?.status;
       }).toBe("FINALIZED");
 
       const heats = (await client.get(`/api/v1/staff/events/${event.id}/heats`)).body.heats
@@ -407,8 +431,16 @@ test.describe("complete race journey", () => {
         }
       }
 
-      // The last place published the whole podium in the same command, without
-      // anybody pressing a separate submit.
+      // The last place records the complete podium, but the final stays
+      // unfinished until finish-line staff confirm that its winner was announced.
+      await expect.poll(async () => (await client.get(
+        `/api/v1/staff/events/${event.id}/heats/${finalHeat.id}`,
+      )).body.heat.status).toBe("AWAITING_RESULT");
+      await page.goto("/staff/finish-line");
+      const finalAnnounced = page.getByRole("button", { name: "Winner announced" });
+      await expect(finalAnnounced).toBeVisible();
+      await finalAnnounced.click();
+      await confirmAction(page, "Winner announced");
       await expect.poll(async () => (await client.get(
         `/api/v1/staff/events/${event.id}/heats/${finalHeat.id}`,
       )).body.heat.status).toBe("FINALIZED");

@@ -350,13 +350,20 @@ export const seed = async (options) => {
     heat.status = response.body.heat.status;
   };
   const finalize = async (heat, results) => {
-    const response = await client.post(`/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`, {
+    const recorded = await client.post(`/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`, {
       commandId: crypto.randomUUID(),
       revision: heat.revision,
       results,
-    }, { label: `finalize heat ${heat.number}` });
-    heat.revision = response.body.heat.revision;
-    heat.status = response.body.heat.status;
+    }, { label: `record heat ${heat.number} result` });
+    heat.revision = recorded.body.heat.revision;
+    heat.status = recorded.body.heat.status;
+    const confirmed = await client.post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`,
+      { commandId: crypto.randomUUID(), revision: heat.revision },
+      { label: `confirm heat ${heat.number} winner announced` },
+    );
+    heat.revision = confirmed.body.heat.revision;
+    heat.status = confirmed.body.heat.status;
   };
 
   const roundOneHeats = (await heatState()).filter((heat) => heat.round === "ROUND_ONE");

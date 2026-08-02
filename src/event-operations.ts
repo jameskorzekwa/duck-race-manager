@@ -2068,11 +2068,13 @@ const forceDeleteEvent = async (
       ).bind(commandId, now, now, fingerprint, eventId, revision, eventId),
       scoped("email_attempts"),
       scoped("email_notifications"),
-      // Provisional podium places reference the heat, its roster entry, the
-      // duck assignment, and the command that recorded them, so they go before
-      // any of those. Their foreign keys cascade, which makes this delete
-      // belt-and-braces rather than load-bearing — deliberately, because the
-      // only cleanup path this product has must never fail on scratch state.
+      // Pending complete results and provisional podium places reference the
+      // heat, its roster entry, the duck assignment, and their recording
+      // commands, so they go before any of those. Their foreign keys cascade,
+      // which makes these deletes belt-and-braces rather than load-bearing —
+      // deliberately, because the only cleanup path this product has must never
+      // fail on private result state.
+      scoped("pending_heat_results"),
       scoped("final_podium_selections"),
       scoped("heat_result_history"),
       scoped("heat_results"),

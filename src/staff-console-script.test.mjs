@@ -62,6 +62,9 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
   ]) {
     assert.ok(!staffHomeScript.includes(endpoint), `retired endpoint still present: ${endpoint}`);
   }
+  assert.match(staffHomeScript, /Result awaiting winner announcement/);
+  assert.match(staffHomeScript, /pendingResults\.length === 0/);
+  assert.match(staffHomeScript, /It stays private until finish-line staff confirm Winner announced/);
   assert.doesNotMatch(staffHomeScript, /canReturns|loadReturnReview|loadPurgeGate|reviewEvent/);
   assert.ok(!staffHomeScript.includes("/api/v1/staff/profiles"), "staff profiles moved off the console");
 });
@@ -96,6 +99,9 @@ test("delete event is an administrator-only danger control with a dialog and typ
   const submitPath = staffHomeScript.indexOf('+ "/force-delete"');
   assert.ok(submitPath >= 0);
   assert.ok(staffHomeScript.indexOf('location.assign("/staff")', submitPath) > submitPath);
+  assert.ok(staffHomeScript.indexOf("main.childElementCount > 0", submitPath) > submitPath);
+  assert.ok(staffHomeScript.indexOf("liveBeginPageExit();", submitPath) > submitPath);
+  assert.ok(staffHomeScript.indexOf("if (!forceDeleteNavigationStarted)", submitPath) > submitPath);
   assert.ok(staffHomeScript.includes('forceDeleteForm.elements.confirmName.placeholder = currentEvent.name;'));
   assert.ok(staffHomeScript.includes("forceDeleteCard.hidden = false;"));
   assert.doesNotMatch(staffHomeScript, /\b(?:window\.)?confirm\s*\(/);

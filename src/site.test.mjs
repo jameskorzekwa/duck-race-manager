@@ -309,6 +309,8 @@ test("the finish line ships hidden, labelled regions for its winner workflow", (
     finishLine,
     /<section class="station-callout" data-finish-callout hidden aria-live="polite" aria-label="How to record this heat's winner"><\/section>/,
   );
+  assert.match(finishLine, /data-submit-result hidden disabled>Record result<\/button>/);
+  assert.doesNotMatch(finishLine, /Submit official result/);
   // The workflow sits above the heat detail it is about, so on a phone it is
   // read and seen before the roster rather than under it.
   assert.ok(finishLine.indexOf("data-finish-recorded") < finishLine.indexOf("data-finish-callout"));

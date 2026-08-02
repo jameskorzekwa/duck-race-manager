@@ -674,11 +674,14 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
     winnerPayload,
   )).status, 403, "a roleless actor cannot publish a scanned winner");
-  const finalized = await json(await post(
+  const recorded = await json(await post(
     actors.results,
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
     winnerPayload,
-  ), 201, "result taker publishes scanned round-one winner");
+  ), 201, "result taker records scanned round-one winner");
+  assert.equal(recorded.heat.status, "AWAITING_RESULT");
+  assert.equal(recorded.heat.publishedResultCount, 0);
+  assert.equal(recorded.pendingResults[0].raceEntryId, raceEntryId);
   const replayedWinner = await json(await post(
     actors.results,
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
@@ -706,6 +709,36 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     `/api/v1/staff/ducks/${duckOneToken}/heat-winner`,
     { ...winnerPayload, raceEntryId: "forged-entry" },
   )).status, 409);
+  for (const actorName of ["registration", "ducks", "announcer", "heats", "none"]) {
+    assert.equal((await post(
+      actors[actorName],
+      `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/winner-announced`,
+      { commandId: command(), revision: recorded.heat.revision },
+    )).status, 403, `${actorName} may not confirm a winner announcement`);
+  }
+  const announcementCommand = command();
+  const finalized = await json(await post(
+    actors.results,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/winner-announced`,
+    { commandId: announcementCommand, revision: recorded.heat.revision },
+  ), 201, "result taker confirms the winner was announced");
+  assert.equal(finalized.heat.status, "FINALIZED");
+  assert.equal((await post(
+    actors.results,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/winner-announced`,
+    { commandId: command(), revision: recorded.heat.revision },
+  )).status, 409, "a second confirmation command cannot settle another state");
+  const replayedAnnouncement = await json(await post(
+    actors.director,
+    `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/winner-announced`,
+    { commandId: announcementCommand, revision: recorded.heat.revision },
+  ), 200, "race director safely replays the announcement confirmation");
+  assert.equal(replayedAnnouncement.replayed, true);
+  assert.equal((await post(
+    actors.results,
+    `/api/v1/staff/events/${eventId}/heats/not-the-confirmed-heat/winner-announced`,
+    { commandId: announcementCommand, revision: recorded.heat.revision },
+  )).status, 409, "an announcement command cannot be replayed against another heat");
   // Recording a round-one winner without a tag is the finish line's last-resort
   // fallback for a duck whose tag will not scan, so it is authorized exactly
   // like the scanned path above. Result staff reach the lifecycle check because
@@ -806,11 +839,18 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   const scannedPodium = await json(
     await post(actors.results, `/api/v1/staff/ducks/${duckOneToken}/heat-winner`, podiumPayload),
     201,
-    "result taker publishes the scanned final podium",
+    "result taker records the scanned final podium",
   );
-  assert.equal(scannedPodium.heat.status, "FINALIZED");
-  assert.deepEqual(scannedPodium.results.map((result) => result.place), [1]);
+  assert.equal(scannedPodium.heat.status, "AWAITING_RESULT");
+  assert.deepEqual(scannedPodium.pendingResults.map((result) => result.place), [1]);
   assert.equal(/email|phone|lookupCode/i.test(JSON.stringify(scannedPodium)), false);
+  const finalizedPodium = await json(await post(
+    actors.results,
+    `/api/v1/staff/events/${eventId}/heats/${finalHeatId}/winner-announced`,
+    { commandId: command(), revision: scannedPodium.heat.revision },
+  ), 201, "result taker confirms the final winner announcement");
+  assert.equal(finalizedPodium.heat.status, "FINALIZED");
+  assert.deepEqual(finalizedPodium.results.map((result) => result.place), [1]);
   await json(await post(actors.director, `/api/v1/staff/events/${eventId}/complete`, {
     commandId: command(),
   }), 201, "race director completes event");

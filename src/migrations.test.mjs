@@ -25,6 +25,7 @@ const migrationNames = [
   "0019_round_one_walk_up_admission.sql",
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
+  "0022_pending_heat_result_announcement.sql",
 ];
 
 const lifecycleStatuses = [
@@ -1266,6 +1267,93 @@ test("0021 adds unique nullable delivery claims without breaking older notificat
   assert.throws(() => database.prepare(
     "UPDATE email_notifications SET delivery_claim_token = ? WHERE id = ?",
   ).run("", "claim-notification-2"), /CHECK constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0022 keeps pending results private and fails closed for an older Worker", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0022_pending_heat_result_announcement.sql"));
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff', 'staff-sub', 'staff@example.com');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event', 'pending-race', 'Pending Race', 'UTC', 'ROUND_ONE');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES ('registration', 'event', 'Daisy', 'Duck', 'ACTIVE', 'DAISY123', 'hash',
+            '2026-08-02T00:00:00Z', '2026-08-02T00:00:00Z');
+    INSERT INTO race_entries (id, event_id, registration_id)
+    VALUES ('entry', 'event', 'registration');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('duck', 1, 'IN_USE', '2026-08-02T00:00:00Z');
+    INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event-duck', 'event', 'duck', '2026-08-02T00:00:00Z', 'staff');
+    INSERT INTO race_commands (id, event_id, command_type, requested_at, completed_at)
+    VALUES ('assign', 'event', 'ASSIGN_DUCK', '2026-08-02T00:00:00Z', '2026-08-02T00:00:00Z');
+    INSERT INTO duck_assignments
+      (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
+       assigned_by_staff_profile_id, source_command_id)
+    VALUES ('assignment', 'event', 'entry', 'event-duck', 'duck',
+            '2026-08-02T00:00:00Z', 'staff', 'assign');
+    INSERT INTO heats
+      (id, event_id, round, heat_number, status)
+    VALUES ('heat', 'event', 'ROUND_ONE', 1, 'PLANNED');
+    INSERT INTO heat_entries
+      (id, event_id, heat_id, race_entry_id, round, slot_number, assignment_source, assigned_at)
+    VALUES ('heat-entry', 'event', 'heat', 'entry', 'ROUND_ONE', 1,
+            'PAIRING', '2026-08-02T00:20:00Z');
+    UPDATE heats
+       SET status = 'AWAITING_RESULT', roster_locked_at = '2026-08-02T00:30:00Z',
+           finished_at = '2026-08-02T00:40:00Z'
+     WHERE id = 'heat';
+  `);
+
+  applyMigrations(database, ["0022_pending_heat_result_announcement.sql"]);
+  database.exec(`
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('record', 'event', 'RECORD_HEAT_RESULT', 'heat',
+            '2026-08-02T00:45:00Z', '2026-08-02T00:45:00Z', 'staff');
+    INSERT INTO pending_heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
+       result_revision, recorded_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('pending', 'event', 'heat', 'entry', 'assignment', 1, 1,
+            '2026-08-02T00:45:00Z', 'staff', 'record');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('old-finalize', 'event', 'FINALIZE_HEAT_RESULT', 'heat',
+            '2026-08-02T00:46:00Z', '2026-08-02T00:46:00Z', 'staff');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('old-result', 'event', 'heat', 'entry', 'assignment', 1, 1,
+            '2026-08-02T00:46:00Z', 'staff', 'old-finalize')
+  `), /pending result must be announcement-confirmed/);
+  assert.throws(
+    () => database.exec("UPDATE heats SET status = 'FINALIZED' WHERE id = 'heat'"),
+    /clear pending result before changing heat status/,
+  );
+
+  database.exec(`
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('announce', 'event', 'CONFIRM_WINNER_ANNOUNCEMENT', 'heat',
+            '2026-08-02T00:47:00Z', '2026-08-02T00:47:00Z', 'staff');
+    INSERT INTO heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, revision,
+       finalized_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('official', 'event', 'heat', 'entry', 'assignment', 1, 1,
+            '2026-08-02T00:47:00Z', 'staff', 'announce');
+    DELETE FROM pending_heat_results WHERE heat_id = 'heat';
+    UPDATE heats SET status = 'FINALIZED', finalized_at = '2026-08-02T00:47:00Z' WHERE id = 'heat';
+  `);
+  assert.equal(count(database, "pending_heat_results"), 0);
+  assert.equal(count(database, "heat_results"), 1);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });
