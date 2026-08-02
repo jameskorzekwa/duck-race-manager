@@ -641,7 +641,7 @@ const getMyRegistrations = async (request: Request, env: Env): Promise<Response>
        JOIN events e ON e.id = r.event_id
       WHERE bcr.collection_id = ?
         AND ${visibleCollectionLinkSql}
-      ORDER BY bcr.added_at`,
+      ORDER BY bcr.added_at, r.submitted_at, r.id`,
   ).bind(collection.id).all<{
     registration_id: string;
     race_entry_id: string;
