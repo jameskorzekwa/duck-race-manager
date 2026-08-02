@@ -9,6 +9,8 @@ import {
   rawJson,
   seedState,
   signIn,
+  transitionHeat,
+  finalizeHeat,
   watchBrowserErrors,
 } from "./helpers.mjs";
 
@@ -48,15 +50,6 @@ const selectParticipant = async (page, lookupCode) => {
   await expect(page.locator("[data-participant-detail]")).toBeVisible();
 };
 
-// Pressing the open row again closes the card, so re-reading a participant after
-// the race has moved on is a close followed by a fresh open — which is exactly
-// what forces the panel to re-fetch instead of repainting a cached projection.
-const reselectParticipant = async (page, lookupCode) => {
-  await participantRow(page, lookupCode).click();
-  await expect(page.locator("[data-participant-detail]")).toBeHidden();
-  await selectParticipant(page, lookupCode);
-};
-
 test.describe("the heat assignment in the participant detail panel", () => {
   test("names the round and heat for a paired participant and says so for an unpaired one", async ({ page }) => {
     const errors = watchBrowserErrors(page);
@@ -87,7 +80,8 @@ test.describe("the heat assignment in the participant detail panel", () => {
     // the browser had counted list positions instead of rendering the server's
     // answer, this is where a real duck would be sent to the wrong bag.
     await selectParticipant(page, assigned.lookupCode);
-    await expect(heatValue(page)).toHaveText(`Round One · Heat ${assigned.heatAssignments[0].heatNumber}`);
+    await expect(heatValue(page))
+      .toHaveText(`Round One · Heat ${assigned.heatAssignments[0].heatNumber} (upcoming)`);
     await expectNoDocumentOverflow(page);
 
     // The unpaired participant states it outright. A blank would render as the
@@ -95,8 +89,8 @@ test.describe("the heat assignment in the participant detail panel", () => {
     await selectParticipant(page, unassigned.lookupCode);
     await expect(heatValue(page)).toHaveText("Not assigned to a heat");
 
-    // Pairing that participant elsewhere makes the panel say so on its next
-    // authoritative read, rather than holding the stale "not assigned".
+    // Pairing elsewhere publishes a live signal. Keep this exact panel open: it
+    // must re-fetch and repaint itself rather than requiring a close/reopen.
     const duck = await intakeDuck(client, seeded.eventId, 701);
     await pairDuck(client, seeded.eventId, duck, unassigned);
     const paired = await rawJson(`/api/v1/staff/registrations/${unassigned.registrationId}`, {
@@ -105,9 +99,8 @@ test.describe("the heat assignment in the participant detail panel", () => {
     expect(paired.status).toBe(200);
     expect(paired.body.registration.heatAssignments).toHaveLength(1);
 
-    await reselectParticipant(page, unassigned.lookupCode);
     await expect(heatValue(page))
-      .toHaveText(`Round One · Heat ${paired.body.registration.heatAssignments[0].heatNumber}`);
+      .toHaveText(`Round One · Heat ${paired.body.registration.heatAssignments[0].heatNumber} (upcoming)`);
 
     expect(errors).toEqual([]);
   });
@@ -118,6 +111,15 @@ test.describe("the heat assignment in the participant detail panel", () => {
     // winner genuinely holds a place in two rounds at once.
     const seeded = await seedState("final");
     const admin = seeded.accounts.find((account) => account.isSystemAdmin);
+    const { client } = await bootstrap();
+
+    // The final seed stops at CALLING. Start it so this scenario proves the
+    // current label separately from the pre-start upcoming scenario below.
+    const heats = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats`, { token: admin.token });
+    expect(heats.status).toBe(200);
+    const finalHeat = heats.body.heats.find((heat) => heat.round === "FINAL");
+    expect(finalHeat).toBeTruthy();
+    await transitionHeat(client, seeded.eventId, finalHeat, "start");
 
     const listed = await rawJson(
       `/api/v1/staff/events/${seeded.eventId}/registrations?limit=200`,
@@ -149,7 +151,7 @@ test.describe("the heat assignment in the participant detail panel", () => {
     // with its round so neither number can be read as the other.
     const shown = heatValue(page);
     await expect(shown).toHaveText(
-      `Final · Heat ${final.heatNumber} (current) · advanced from Round One · Heat ${roundOne.heatNumber}`,
+      `Final · Heat ${final.heatNumber} (current) · advanced from Round One · Heat ${roundOne.heatNumber} (completed)`,
     );
     await expect(shown).toContainText("Final");
     await expect(shown).toContainText("Round One");
@@ -158,7 +160,7 @@ test.describe("the heat assignment in the participant detail panel", () => {
     // A participant who did not advance is not given a final place.
     await selectParticipant(page, stillInRoundOne.lookupCode);
     await expect(heatValue(page))
-      .toHaveText(`Round One · Heat ${stillInRoundOne.heatAssignments[0].heatNumber}`);
+      .toHaveText(`Round One · Heat ${stillInRoundOne.heatAssignments[0].heatNumber} (completed)`);
     await expect(heatValue(page)).not.toContainText("Final");
 
     // Withdrawal is bookkeeping only: the duck stays sealed in its bag and still
@@ -168,9 +170,53 @@ test.describe("the heat assignment in the participant detail panel", () => {
     await changeRegistrationStatus(admin.token, finalist.registrationId, "withdraw");
     await selectParticipant(page, finalist.lookupCode);
     await expect(heatValue(page)).toHaveText(
-      `Final · Heat ${final.heatNumber} (current) · advanced from Round One · Heat ${roundOne.heatNumber}`,
+      `Final · Heat ${final.heatNumber} (current) · advanced from Round One · Heat ${roundOne.heatNumber} (completed)`,
     );
 
+    expect(errors).toEqual([]);
+  });
+
+  test("marks a promoted Final place upcoming before the Final heat starts", async ({ page }) => {
+    const errors = watchBrowserErrors(page);
+    const seeded = await seedState("round-one");
+    const admin = seeded.accounts.find((account) => account.isSystemAdmin);
+    const { client } = await bootstrap();
+
+    const listedHeats = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats`, { token: admin.token });
+    expect(listedHeats.status).toBe(200);
+    for (const listed of listedHeats.body.heats.filter((heat) => heat.round === "ROUND_ONE")) {
+      if (listed.status === "FINALIZED") continue;
+      const loaded = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${listed.id}`, { token: admin.token });
+      expect(loaded.status).toBe(200);
+      const heat = loaded.body.heat;
+      if (heat.status === "CALLING") await transitionHeat(client, seeded.eventId, heat, "start");
+      if (heat.status === "RUNNING") await transitionHeat(client, seeded.eventId, heat, "finish");
+      const winner = loaded.body.roster.find((entry) => entry.eligible);
+      expect(winner).toBeTruthy();
+      await finalizeHeat(client, seeded.eventId, heat, [{ raceEntryId: winner.raceEntryId, place: 1 }]);
+    }
+
+    const started = await client.post(`/api/v1/staff/events/${seeded.eventId}/start-final`, {
+      commandId: crypto.randomUUID(),
+    }, { label: "start synthetic final" });
+    expect(started.body.event.status).toBe("FINAL");
+
+    const listed = await rawJson(
+      `/api/v1/staff/events/${seeded.eventId}/registrations?limit=200`,
+      { token: admin.token },
+    );
+    expect(listed.status).toBe(200);
+    const finalist = listed.body.registrations.find((registration) => registration.heatAssignments.length === 2);
+    expect(finalist).toBeTruthy();
+    const roundOne = finalist.heatAssignments.find((entry) => entry.round === "ROUND_ONE");
+    const final = finalist.heatAssignments.find((entry) => entry.round === "FINAL");
+    expect(final.status).toBe("LOADING");
+
+    await openParticipantsView(page, admin.email);
+    await selectParticipant(page, finalist.lookupCode);
+    await expect(heatValue(page)).toHaveText(
+      `Final · Heat ${final.heatNumber} (upcoming) · advanced from Round One · Heat ${roundOne.heatNumber} (completed)`,
+    );
     expect(errors).toEqual([]);
   });
 });

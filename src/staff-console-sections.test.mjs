@@ -1444,7 +1444,7 @@ test("the participant panel names the round and heat of the duck's place", () =>
   // number that a final would make ambiguous.
   const assigned = participantDetailHarness();
   assigned.renderParticipantDetail(registrationDetail());
-  assert.deepEqual(heatFact(assigned), ["Heat", "Round One · Heat 3"]);
+  assert.deepEqual(heatFact(assigned), ["Heat", "Round One · Heat 3 (upcoming)"]);
 
   // Never in a heat at all. The field states it rather than going blank, which
   // `showFacts` would otherwise render as the generic "None".
@@ -1452,26 +1452,45 @@ test("the participant panel names the round and heat of the duck's place", () =>
   unassigned.renderParticipantDetail(registrationDetail({ assignment: null }));
   assert.deepEqual(heatFact(unassigned), ["Heat", "Not assigned to a heat"]);
 
-  // Advanced: two real places at once. The final is the live one, so it is named
-  // first and marked, and the round-one heat is kept as where the duck came
-  // from rather than dropped.
+  // Advanced: two real places at once. Their lifecycle states, not the mere
+  // existence of a Final place, decide which one is current.
   const advanced = participantDetailHarness();
   advanced.renderParticipantDetail(registrationDetail({
     heatAssignments: [
       { round: "ROUND_ONE", heatNumber: 3, status: "FINALIZED" },
-      { round: "FINAL", heatNumber: 1, status: "CALLING" },
+      { round: "FINAL", heatNumber: 1, status: "RUNNING" },
     ],
   }));
-  assert.deepEqual(heatFact(advanced), ["Heat", "Final · Heat 1 (current) · advanced from Round One · Heat 3"]);
+  assert.deepEqual(
+    heatFact(advanced),
+    ["Heat", "Final · Heat 1 (current) · advanced from Round One · Heat 3 (completed)"],
+  );
   // Whichever order the projection arrives in, the applicable place leads.
   const reversed = participantDetailHarness();
   reversed.renderParticipantDetail(registrationDetail({
     heatAssignments: [
-      { round: "FINAL", heatNumber: 1, status: "CALLING" },
+      { round: "FINAL", heatNumber: 1, status: "RUNNING" },
       { round: "ROUND_ONE", heatNumber: 3, status: "FINALIZED" },
     ],
   }));
-  assert.deepEqual(heatFact(reversed), ["Heat", "Final · Heat 1 (current) · advanced from Round One · Heat 3"]);
+  assert.deepEqual(
+    heatFact(reversed),
+    ["Heat", "Final · Heat 1 (current) · advanced from Round One · Heat 3 (completed)"],
+  );
+
+  // Starting the Final lifecycle creates the roster before the Final heat is
+  // called. That place is upcoming, not current, while the prior heat is history.
+  const upcoming = participantDetailHarness({ eventStatus: "FINAL" });
+  upcoming.renderParticipantDetail(registrationDetail({
+    heatAssignments: [
+      { round: "ROUND_ONE", heatNumber: 3, status: "FINALIZED" },
+      { round: "FINAL", heatNumber: 1, status: "LOADING" },
+    ],
+  }));
+  assert.deepEqual(
+    heatFact(upcoming),
+    ["Heat", "Final · Heat 1 (upcoming) · advanced from Round One · Heat 3 (completed)"],
+  );
 });
 
 test("the heat fact degrades instead of throwing and taking the panel with it", () => {

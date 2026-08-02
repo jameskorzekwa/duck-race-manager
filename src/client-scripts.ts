@@ -6670,10 +6670,9 @@ const participantDuckFact = (registration) => {
 //
 // A participant who won their round-one heat holds two places at once. Both are
 // stated, because the round-one heat is where the duck came from and the final
-// is where it is going, and the applicable one is named first and marked so the
-// panel answers "which heat is this duck in *now*" without being read twice.
-// Winning a round-one heat requires that heat to have been finalized, so the
-// final is always the live half of that pair.
+// is where it is going. The event and heat lifecycle decide whether each place
+// is upcoming, current, or completed; merely having a Final place does not make
+// it current before that heat starts.
 //
 // Like every other fact here this runs inside no try block, so an older or
 // malformed projection degrades to the unassigned wording rather than throwing
@@ -6682,14 +6681,26 @@ const participantHeatFact = (registration) => {
   const assignments = Array.isArray(registration.heatAssignments) ? registration.heatAssignments : [];
   const label = (assignment) =>
     (assignment.round === "FINAL" ? "Final" : "Round One") + " · Heat " + assignment.heatNumber;
+  const timing = (assignment) => {
+    const eventStatus = currentEvent && typeof currentEvent.status === "string" ? currentEvent.status : null;
+    if (eventStatus === "COMPLETED") return "completed";
+    if (assignment.round === "ROUND_ONE" && eventStatus === "FINAL") return "completed";
+    if (assignment.round === "FINAL" && eventStatus === "ROUND_ONE") return "upcoming";
+    if (["FINALIZED", "CANCELLED"].includes(assignment.status)) return "completed";
+    if (["RUNNING", "AWAITING_RESULT"].includes(assignment.status)) {
+      return "current";
+    }
+    return "upcoming";
+  };
+  const timedLabel = (assignment) => label(assignment) + " (" + timing(assignment) + ")";
   const placed = assignments.filter((assignment) =>
     assignment && typeof assignment.heatNumber === "number"
   );
   const final = placed.find((assignment) => assignment.round === "FINAL");
   const roundOne = placed.find((assignment) => assignment.round === "ROUND_ONE");
-  if (final && roundOne) return label(final) + " (current) · advanced from " + label(roundOne);
-  if (final) return label(final);
-  if (roundOne) return label(roundOne);
+  if (final && roundOne) return timedLabel(final) + " · advanced from " + timedLabel(roundOne);
+  if (final) return timedLabel(final);
+  if (roundOne) return timedLabel(roundOne);
   return "Not assigned to a heat";
 };
 
