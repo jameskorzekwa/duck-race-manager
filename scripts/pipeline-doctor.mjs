@@ -39,7 +39,10 @@ export function pipelineFailureIdentity(run, jobs) {
     .sort((left, right) => left.job.localeCompare(right.job) || left.id - right.id);
   if (failures.length === 0) throw new Error("Failed run contains no failed job identity.");
 
-  const source = JSON.stringify({ version: 1, workflowPath, headSha: run.head_sha, failures });
+  // Job IDs are execution-local. Hash only stable identities so rerunning the
+  // same failed jobs at the same SHA reuses one incident.
+  const signatureFailures = failures.map(({ job, conclusion, steps }) => ({ job, conclusion, steps }));
+  const source = JSON.stringify({ version: 1, workflowPath, headSha: run.head_sha, failures: signatureFailures });
   const signature = createHash("sha256").update(source).digest("hex");
   const applicationFailure = workflowPath === ".github/workflows/agent-task.yml"
     && failures.every(({ job }) => job === "verify");

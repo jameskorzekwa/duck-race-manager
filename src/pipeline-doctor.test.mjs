@@ -36,6 +36,11 @@ test("doctor identities bind workflow, SHA, failed jobs, and failed steps", () =
   assert.match(identity.signature, /^[0-9a-f]{64}$/);
   assert.deepEqual(identity.failures[0].steps, ["Admit oldest approved PR"]);
   assert.equal(pipelineFailureIdentity(failedRun, [...jobs].reverse()).signature, identity.signature);
+  assert.equal(
+    pipelineFailureIdentity(failedRun, [{ ...jobs[0], id: 999 }]).signature,
+    identity.signature,
+    "rerun-local job IDs must not create duplicate incidents",
+  );
   assert.notEqual(
     pipelineFailureIdentity({ ...failedRun, head_sha: "b".repeat(40) }, jobs).signature,
     identity.signature,
