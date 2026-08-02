@@ -178,6 +178,18 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
   );
 });
 
+test("trusted manual recovery PRs suppress retries without entering autonomous lanes", async () => {
+  const implementation = await read("scripts/agent-pipeline.mjs");
+
+  assert.match(implementation, /const pipelineOpenPulls = openPulls\.filter/);
+  assert.match(implementation, /const issuesWithOpenPipelinePulls = new Set/);
+  assert.match(implementation, /\|\| trustedManualPullProvenance\(pr, defaultBranch\)/);
+  assert.match(implementation, /for \(const pr of pipelineOpenPulls\)/);
+  assert.match(implementation, /if \(!issuesWithOpenPipelinePulls\.has\(issue\.number\)\) continue;/);
+  assert.match(implementation, /manual-deployed=\$\{pr\.merge_commit_sha\}/);
+  assert.match(implementation, /latestTaskRun\(comments\) === null/);
+});
+
 test("only a conflicting candidate is merged forward; being behind main is fine", async () => {
   const reconcile = await read(".github/workflows/agent-reconcile.yml");
   const refresh = reconcile.slice(reconcile.indexOf("  refresh-candidates:"), reconcile.indexOf("  reconcile:"));

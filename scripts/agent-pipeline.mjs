@@ -136,6 +136,19 @@ function pipelinePullProvenance(pr, defaultBranch) {
     && marker[2] === branch[1];
 }
 
+// A trusted same-repository PR may recover a saved artifact or repair a rejected
+// candidate without another model run. It owns the linked issue while open, but
+// it is not a pipeline candidate: it never enters autonomous review or the merge
+// lane. Limiting this exception to James, the default branch, the same repository,
+// and exactly one closing reference prevents an unrelated or forked PR from
+// suppressing recovery.
+export function trustedManualPullProvenance(pr, defaultBranch, trustedUserId = 38769771) {
+  return pr.user?.id === trustedUserId
+    && pr.base.ref === defaultBranch
+    && pr.head.repo?.id === pr.base.repo?.id
+    && closingIssueNumbers(pr.body).length === 1;
+}
+
 export async function validExactCheck(github, owner, repo, pr) {
   const recordedBase = (pr.body ?? "").match(
     /<!-- agent-pipeline task-run=\d+ issue=\d+ base=([0-9a-f]{40}) -->/,
@@ -421,10 +434,13 @@ export async function reconcileAgentPipeline({ github, context, core }) {
   const openPulls = await github.paginate(github.rest.pulls.list, {
     owner, repo, state: "open", per_page: 100,
   });
+  const pipelineOpenPulls = openPulls.filter((pr) => pipelinePullProvenance(pr, defaultBranch));
+  const issuesWithOpenPipelinePulls = new Set(pipelineOpenPulls.flatMap((pr) => closingIssueNumbers(pr.body)));
   const issuesWithOpenPulls = new Set(openPulls
-    .filter((pr) => pipelinePullProvenance(pr, defaultBranch))
+    .filter((pr) => pipelinePullProvenance(pr, defaultBranch)
+      || trustedManualPullProvenance(pr, defaultBranch))
     .flatMap((pr) => closingIssueNumbers(pr.body)));
-  for (const pr of openPulls.filter((candidate) => pipelinePullProvenance(candidate, defaultBranch))) {
+  for (const pr of pipelineOpenPulls) {
     const [issueNumber] = closingIssueNumbers(pr.body);
     const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
     if (!labelNames(issue).has("agent:review")) continue;
@@ -495,6 +511,26 @@ export async function reconcileAgentPipeline({ github, context, core }) {
   const closedPulls = await github.paginate(github.rest.pulls.list, {
     owner, repo, state: "closed", sort: "updated", direction: "desc", per_page: 100,
   });
+  let releaseRuns;
+  for (const pr of closedPulls.filter((candidate) => candidate.merged_at
+    && trustedManualPullProvenance(candidate, defaultBranch))) {
+    const [issueNumber] = closingIssueNumbers(pr.body);
+    const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+    if (labelNames(issue).has("agent:deployed")) continue;
+    const comments = await commentsFor(issueNumber);
+    if (!STATE_LABELS.some((label) => labelNames(issue).has(label)) && latestTaskRun(comments) === null) continue;
+    releaseRuns ??= (await github.rest.actions.listWorkflowRuns({
+      owner, repo, workflow_id: "release.yml", event: "push", per_page: 100,
+    })).data.workflow_runs;
+    const deployedRun = await firstDeployedRelease(github, owner, repo, releaseRuns, pr.merge_commit_sha);
+    if (!deployedRun) continue;
+    await setState(issueNumber, "agent:deployed");
+    await commentOnce(
+      issueNumber,
+      `<!-- agent-pipeline manual-deployed=${pr.merge_commit_sha} -->`,
+      `Trusted manual recovery PR #${pr.number} was released to production by run ${deployedRun.id}.`,
+    );
+  }
   for (const state of ["agent:review", "agent:approved"]) {
     for (const issue of await issuesWithLabel(state)) {
       if (issuesWithOpenPulls.has(issue.number)) continue;
@@ -589,7 +625,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     (run) => run.status === "in_progress" || run.status === "queued",
   );
   for (const issue of await issuesWithLabel("agent:review")) {
-    if (!issuesWithOpenPulls.has(issue.number)) continue;
+    if (!issuesWithOpenPipelinePulls.has(issue.number)) continue;
     if (reviewActive) await setState(issue.number, "agent:reviewing");
   }
   if (!reviewActive) {
