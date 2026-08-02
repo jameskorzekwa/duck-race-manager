@@ -45,6 +45,7 @@ jobs:
     outputs:
       base: ${{ steps.prepare.outputs.base }}
       issue: ${{ steps.prepare.outputs.issue }}
+      question-resume: ${{ steps.prepare.outputs.question-resume }}
       skip: ${{ steps.prepare.outputs.skip }}
     steps:
       - name: Validate and mark durable run
@@ -74,6 +75,7 @@ jobs:
             };
 
             const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+            core.setOutput("question-resume", "false");
             if (issue.pull_request || issue.user.id !== trustedUserId || issue.state !== "open") {
               throw new Error(`Issue #${issueNumber} is not an open trusted intake issue.`);
             }
@@ -127,6 +129,7 @@ jobs:
                 core.setOutput("skip", "true");
                 return;
               }
+              core.setOutput("question-resume", "true");
             }
             if (!currentLabels.includes("agent:running")) {
               await setState(issue, "agent:queued");
@@ -166,6 +169,7 @@ jobs:
     env:
       EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
       PIPELINE_ISSUE: ${{ needs.prepare.outputs.issue }}
+      PIPELINE_QUESTION_RESUME: ${{ needs.prepare.outputs.question-resume }}
     outputs:
       decision: ${{ steps.result.outputs.decision }}
       digest: ${{ steps.result.outputs.digest }}
@@ -455,11 +459,18 @@ jobs:
           fs.writeFileSync(process.env.STATE_PATH, JSON.stringify(state));
           NODE
           status=0
+          if [[ "$PIPELINE_QUESTION_RESUME" == "true" ]]; then
+            turn_prompt="James replied after your latest question on issue #${PIPELINE_ISSUE}. Read the newest trusted issue comments in .pipeline/context.json and continue from the saved work. If James requested more investigation, perform that bounded investigation and use only any useful allowlisted specialist not already launched in this task. Implement when the new exchange resolves the fork, or ask one materially refined question again if a genuine decision remains. Emit exactly one new final task marker."
+          elif [[ -n "$PIPELINE_RESUME_SESSION" ]]; then
+            turn_prompt="Resume issue #${PIPELINE_ISSUE} from the reconstructed trusted snapshot. Read new hosted verification evidence in .pipeline/context.json, repair the complete failure index without repeating repository analysis or specialists, and emit exactly one new final task marker."
+          else
+            turn_prompt="Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot at .pipeline/context.json. Follow the pipeline-orchestrator contract and emit exactly one final task marker."
+          fi
           if [[ -n "$PIPELINE_RESUME_SESSION" ]]; then
             openchamber session send \
               --session "$PIPELINE_RESUME_SESSION" \
               --dir "$PIPELINE_MODEL_DIR" \
-              --prompt "Resume issue #${PIPELINE_ISSUE} from the reconstructed trusted snapshot. Read new hosted verification evidence in .pipeline/context.json, repair the complete failure index without repeating repository analysis or specialists, and emit exactly one new final task marker." \
+              --prompt "$turn_prompt" \
               --model "$PIPELINE_IMPLEMENT_MODEL" \
               --agent pipeline-orchestrator \
               --variant "$PIPELINE_IMPLEMENT_VARIANT" \
@@ -469,7 +480,7 @@ jobs:
             openchamber session create \
               --dir "$PIPELINE_MODEL_DIR" \
               --title "QuickDucks issue #${PIPELINE_ISSUE} implementation" \
-              --prompt "Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot at .pipeline/context.json. Follow the pipeline-orchestrator contract and emit exactly one final task marker." \
+              --prompt "$turn_prompt" \
               --model "$PIPELINE_IMPLEMENT_MODEL" \
               --agent pipeline-orchestrator \
               --variant "$PIPELINE_IMPLEMENT_VARIANT" \
