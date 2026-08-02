@@ -166,6 +166,59 @@ const proofHeaders = (proof, origin) => ({
   "x-quickducks-ownership-proof": proof,
 });
 
+test("public registration atomically creates independent email and SMS confirmations", async (context) => {
+  const { api, database, env } = harness(context);
+  const queued = [];
+  env.EMAIL_QUEUE = { async send(id) { queued.push(id); } };
+  const registration = await register(api, context, "Notify", {
+    email: "notify@example.test",
+    phone: "8173206150",
+    emailNotificationsEnabled: true,
+    smsNotificationsEnabled: true,
+  });
+  const notifications = database.prepare(
+    `SELECT id, channel,
+            CASE WHEN channel = 'SMS' THEN substr(notification_type, 5)
+                 ELSE notification_type END AS notification_type,
+            status
+       FROM email_notifications
+      WHERE registration_id = ?
+      ORDER BY channel`,
+  ).all(registration.registrationId).map((row) => ({ ...row }));
+  assert.deepEqual(notifications.map(({ channel, notification_type, status }) => ({
+    channel,
+    notification_type,
+    status,
+  })), [
+    { channel: "EMAIL", notification_type: "REGISTRATION_CONFIRMATION", status: "QUEUED" },
+    { channel: "SMS", notification_type: "REGISTRATION_CONFIRMATION", status: "QUEUED" },
+  ]);
+  assert.deepEqual(new Set(queued), new Set(notifications.map((notification) => notification.id)));
+  assert.ok(queued.every((id) => /^[0-9a-f-]{36}$/i.test(id)));
+  assert.doesNotMatch(JSON.stringify(queued), /notify|example|8173206150/i);
+  await jsonBody(await api(contactPath(registration.registrationId), {
+    method: "PATCH",
+    cookie: registration.cookie,
+    headers: proofHeaders(registration.privateToken, "https://quickducks.com"),
+    body: {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 0,
+      email: "notify@example.test",
+      phone: "8173206150",
+      emailNotificationsEnabled: true,
+      smsNotificationsEnabled: false,
+    },
+  }), 200, "withdraw only SMS consent");
+  assert.deepEqual(database.prepare(
+    `SELECT channel, status, status_reason
+       FROM email_notifications WHERE registration_id = ? ORDER BY channel`,
+  ).all(registration.registrationId).map((row) => ({ ...row })), [
+    { channel: "EMAIL", status: "QUEUED", status_reason: null },
+    { channel: "SMS", status: "CANCELLED", status_reason: "SMS_NOT_OPTED_IN" },
+  ]);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("owned contact reads and updates require participant-specific proof", async (context) => {
   const { api, contactReadRateLimitKeys, database, liveFrames, rateLimitKeys } = harness(context);
   const first = await register(api, context, "Alpha", {

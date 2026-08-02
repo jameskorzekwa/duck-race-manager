@@ -7,6 +7,8 @@ import {
   EmailSendError,
   handleEmailQueue,
   sendEmailWithSes,
+  sendSmsWithSns,
+  SmsSendError,
 } from "./email-notifications.ts";
 import worker from "./index.ts";
 
@@ -155,7 +157,7 @@ test("SES failures are safely classified without reading provider response bodie
   context.after(() => { globalThis.fetch = originalFetch; });
 
   globalThis.fetch = async () => { throw new Error("private network detail"); };
-  await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), "SES_NETWORK_ERROR", true);
+  await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), "DELIVERY_OUTCOME_UNKNOWN", false);
 
   for (const [status, safeCode, retryable] of [
     [408, "SES_TEMPORARY_FAILURE", true],
@@ -207,4 +209,54 @@ test("invalid or missing SES configuration fails closed before fetch", async (co
     await expectSendError(sendEmailWithSes(outboundEmail, env), "SES_CONFIGURATION_INVALID", false);
   }
   assert.equal(fetchCalled, false);
+});
+
+test("SNS sends a transactional SMS to the normalized current phone without persisting provider material", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return new Response("<PublishResponse><PublishResult><MessageId>sms-message-123</MessageId></PublishResult></PublishResponse>");
+  };
+  const result = await sendSmsWithSns({
+    to: "(817) 320-6150",
+    text: "QuickDucks: Round One, Heat 1 is next to race. Reply STOP to stop texts.",
+  }, sesEnv);
+  assert.deepEqual(result, { providerMessageId: "sms-message-123" });
+  assert.equal(request.url, "https://sns.us-east-1.amazonaws.com/");
+  const body = new URLSearchParams(request.options.body);
+  assert.equal(body.get("Action"), "Publish");
+  assert.equal(body.get("PhoneNumber"), "+18173206150");
+  assert.equal(body.get("MessageAttributes.entry.1.Name"), "AWS.SNS.SMS.SMSType");
+  assert.equal(body.get("MessageAttributes.entry.1.Value.StringValue"), "Transactional");
+  assert.equal(request.options.headers["content-type"], "application/x-www-form-urlencoded; charset=utf-8");
+  assert.match(request.options.headers.authorization, /Credential=AKIDEXAMPLE1234567\/20260801\/us-east-1\/sns\/aws4_request/);
+});
+
+test("SNS classifies safe retry outcomes and treats an ambiguous network outcome as terminal", async (context) => {
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const sms = { to: "8173206150", text: "QuickDucks test" };
+  for (const [response, code, retryable] of [
+    [new Response(null, { status: 429 }), "SNS_TEMPORARY_FAILURE", true],
+    [new Response(null, { status: 500 }), "SNS_TEMPORARY_FAILURE", true],
+    [new Response(null, { status: 400 }), "SNS_REJECTED", false],
+  ]) {
+    globalThis.fetch = async () => response;
+    await assert.rejects(sendSmsWithSns(sms, sesEnv), (error) => {
+      assert.ok(error instanceof SmsSendError);
+      assert.equal(error.safeCode, code);
+      assert.equal(error.retryable, retryable);
+      return true;
+    });
+  }
+  globalThis.fetch = async () => { throw new Error("provider request outcome is private"); };
+  await assert.rejects(sendSmsWithSns(sms, sesEnv), (error) => {
+    assert.ok(error instanceof SmsSendError);
+    assert.equal(error.safeCode, "DELIVERY_OUTCOME_UNKNOWN");
+    assert.equal(error.retryable, false);
+    return true;
+  });
 });

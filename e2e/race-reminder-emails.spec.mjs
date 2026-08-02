@@ -9,7 +9,7 @@ import {
   watchBrowserErrors,
 } from "./helpers.mjs";
 
-test("an opted-in participant receives assignment and called-heat reminders", async ({ page }) => {
+test("an opted-in participant receives assignment and next-runnable updates by email and SMS", async ({ page }) => {
   // Two seeded racers plus the participant registered below make one valid
   // three-duck heat. Keep this event throughout the scenario: seedState resets
   // the database and must never be used as a mid-test advancement helper.
@@ -17,6 +17,7 @@ test("an opted-in participant receives assignment and called-heat reminders", as
   const { client } = await bootstrap();
   await expect.poll(async () => (await client.get("/__local/emails")).body.emails.length).toBeGreaterThan(0);
   await client.request("/__local/emails", { method: "DELETE", expect: [204] });
+  await client.request("/__local/sms", { method: "DELETE", expect: [204] });
 
   const errors = watchBrowserErrors(page);
   await page.goto("/register");
@@ -24,6 +25,7 @@ test("an opted-in participant receives assignment and called-heat reminders", as
   await registration.getByLabel("First name").fill("Reminder");
   await registration.getByLabel("Last name").fill("Racer");
   await registration.getByLabel(/Email/).fill("reminder.racer@example.test");
+  await registration.getByLabel("Phone (optional)").fill("8173206150");
   await registration.getByRole("button", { name: "Register participant" }).click();
   await expect(page).toHaveURL(/\/my-ducks$/);
 
@@ -33,6 +35,10 @@ test("an opted-in participant receives assignment and called-heat reminders", as
   await card.getByRole("button", { name: "Edit contact details" }).click();
   await card.getByRole("checkbox", {
     name: "Send operational race updates by email",
+    exact: true,
+  }).check();
+  await card.getByRole("checkbox", {
+    name: "Send operational race updates by SMS",
     exact: true,
   }).check();
   await card.getByRole("button", { name: "Save changes" }).click();
@@ -54,7 +60,10 @@ test("an opted-in participant receives assignment and called-heat reminders", as
 
   const targetEmails = async () => (await client.get("/__local/emails")).body.emails
     .filter((email) => email.to === "reminder.racer@example.test");
+  const targetSms = async () => (await client.get("/__local/sms")).body.messages
+    .filter((message) => message.to === "(817) 320-6150");
   await expect.poll(async () => (await targetEmails()).length).toBe(1);
+  await expect.poll(async () => (await targetSms()).length).toBe(1);
   const assignment = (await targetEmails())[0];
   expect(assignment.from).toBe("race@quickducks.local");
   expect(assignment.subject).toContain("Duck #502 is assigned to Round One, Heat 1");
@@ -66,18 +75,20 @@ test("an opted-in participant receives assignment and called-heat reminders", as
   await client.post(`/api/v1/staff/events/${seeded.eventId}/start-round-one`, {
     commandId: crypto.randomUUID(),
   });
+  await expect.poll(async () => (await targetEmails()).length).toBe(2);
+  await expect.poll(async () => (await targetSms()).length).toBe(2);
   const heats = await client.get(`/api/v1/staff/events/${seeded.eventId}/heats`);
   const heat = heats.body.heats.find((candidate) => candidate.round === "ROUND_ONE");
   await transitionHeat(client, seeded.eventId, heat, "ready");
   await transitionHeat(client, seeded.eventId, heat, "call");
 
-  await expect.poll(async () => (await targetEmails()).length).toBe(2);
   const upcoming = (await targetEmails())[1];
-  expect(upcoming.subject).toContain("Round One, Heat 1 is being called now");
+  expect(upcoming.subject).toContain("Round One, Heat 1 is next to race");
   expect(upcoming.text).toContain("Please bring Duck #502 to the pond");
   expect(upcoming.text).not.toMatch(/\b\d{1,2}:\d{2}\b/);
 
-  const serialized = JSON.stringify(await targetEmails());
+  const serialized = JSON.stringify({ emails: await targetEmails(), sms: await targetSms() });
+  expect((await targetSms())[1].text).toContain("Reply STOP to stop texts");
   const ownershipProofs = await page.evaluate(() =>
     Object.values(JSON.parse(localStorage.getItem("quickducks.participant-ownership.v1") || "{}")));
   for (const proof of ownershipProofs) expect(serialized).not.toContain(proof);

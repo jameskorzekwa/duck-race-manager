@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0019_round_one_walk_up_admission.sql`, browser
+the Worker, D1 migrations through `0022_participant_notification_channels.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -671,9 +671,26 @@ corresponding valid address. Invalid non-empty contact is rejected even with its
 opt-in off. The same validation and controls apply during public registration,
 staff walk-up registration, and staff participant edits. Audit history records
 only the changed field names, never old or new contact values or ownership
-proof. Email consent participates in the implemented operational-email workflow.
-SMS consent is captured independently, but SMS delivery is not implemented and
-the choice does not enqueue an SMS.
+proof. Email and SMS consent independently participate in the implemented
+participant-notification workflow.
+
+For each enabled channel, the application sends registration confirmation,
+Round One assignment, Final assignment after advancement, a reminder when the
+assigned heat becomes the next runnable heat, and the participant's official
+result. The first reminder in a round is committed when the round starts; later
+reminders are committed with the preceding official result, not from a clock or
+from staff merely calling a heat. Result and assignment records use the domain
+command's D1 batch, while queue publication and provider delivery happen only
+after commit. One channel can therefore be withdrawn without changing the
+other, and provider downtime never rolls back a race operation.
+
+Queue consumers reload the current contact value, consent, active duck, and heat
+state immediately before delivery. SES account suppression and SNS managed SMS
+opt-outs (including STOP) are enforced by AWS as part of accepting the send.
+Cloudflare Queues carries only an opaque outbox ID. A logical unique key includes
+participant, channel, heat, and lifecycle type, so command retries, queue
+duplicates, and reconciliation do not create another notification. A reset or
+re-call of the same next runnable heat is still the same lifecycle event.
 
 The privacy notice warns that anyone with access to the originating browser
 profile may view or edit its owned contact details. Cancel discards an edit,

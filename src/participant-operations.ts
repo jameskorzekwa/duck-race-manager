@@ -21,6 +21,10 @@ import {
   type RegistrationInput,
 } from "./registration.ts";
 import { reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
+import {
+  participantNotificationStatements,
+  publishParticipantNotifications,
+} from "./email-notifications.ts";
 import type { Env } from "./types.ts";
 import {
   unstartedRoundOneHeatExistsSql,
@@ -554,6 +558,13 @@ const createWalkUp = async (
   const requestedAt = typeof payload.clientTimestamp === "string" && !Number.isNaN(Date.parse(payload.clientTimestamp))
     ? new Date(payload.clientTimestamp).toISOString()
     : now;
+  const confirmationNotifications = participantNotificationStatements(env, {
+    eventId,
+    registrationId,
+    notificationType: "REGISTRATION_CONFIRMATION",
+    commandId,
+    now,
+  });
   try {
     await env.DB.batch([
       env.DB.prepare(
@@ -607,6 +618,7 @@ const createWalkUp = async (
           WHERE r.id = ? AND r.event_id = ?
             AND rc.command_type = 'CREATE_STAFF_REGISTRATION'`,
       ).bind(raceEntryId, commandId, registrationId, eventId),
+      ...confirmationNotifications.statements,
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -647,6 +659,7 @@ const createWalkUp = async (
       error: "Walk-up registration has closed because no unstarted Round One heat remains.",
     }, 409);
   }
+  await publishParticipantNotifications(env, confirmationNotifications.ids);
   return registrationResult(created, false, 201, { privateStatusPath: `/r/${privateToken}` });
 };
 
@@ -813,7 +826,7 @@ const editRegistration = async (
     `UPDATE email_notifications
         SET status = 'CANCELLED', terminal_at = ?, status_reason = 'EMAIL_NOT_OPTED_IN',
             retry_after = NULL, last_error_code = NULL, updated_at = ?
-      WHERE registration_id = ? AND ? = 0
+      WHERE registration_id = ? AND channel = 'EMAIL' AND ? = 0
         AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
         AND EXISTS (
           SELECT 1 FROM race_commands rc
@@ -825,6 +838,25 @@ const editRegistration = async (
     now,
     registrationId,
     value.input.emailNotificationsEnabled ? 1 : 0,
+    commandId,
+    registrationId,
+  ));
+  statements.push(env.DB.prepare(
+    `UPDATE email_notifications
+        SET status = 'CANCELLED', terminal_at = ?, status_reason = 'SMS_NOT_OPTED_IN',
+            retry_after = NULL, last_error_code = NULL, updated_at = ?
+      WHERE registration_id = ? AND channel = 'SMS' AND ? = 0
+        AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
+        AND EXISTS (
+          SELECT 1 FROM race_commands rc
+           WHERE rc.id = ? AND rc.command_type = 'UPDATE_REGISTRATION'
+             AND rc.result_id = ?
+        )`,
+  ).bind(
+    now,
+    now,
+    registrationId,
+    value.input.smsNotificationsEnabled ? 1 : 0,
     commandId,
     registrationId,
   ));

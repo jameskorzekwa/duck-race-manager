@@ -261,8 +261,11 @@ or when a local database drifted while a migration was being written.
 
 ## What is still not local
 
-- **Outbound email.** The queue producer runs, but there is no consumer and no
-  SES path in any environment, so nothing sends.
+- **Real outbound email and SMS.** Local queue consumption exercises the same
+  outbox claim, consent recheck, rendering, and terminal-state code as
+  production, but provider calls are replaced with in-memory sinks. Inspect or
+  clear them through `GET`/`DELETE /__local/emails` and
+  `GET`/`DELETE /__local/sms`; no local participant contact leaves the machine.
 - **Real NFC writing**, unless you serve the site to an Android phone with
   `npm run dev:network` and a `mkcert` certificate the phone trusts. That is only
   the scanning station on `/staff/inventory`; the rest of that page works on any

@@ -384,6 +384,11 @@ test("staff walk-up creation is event-guarded, audited, and idempotent", async (
   assert.equal(replay.status, 200);
   assert.equal((await replay.json()).replayed, true);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM registrations WHERE first_name = 'Della'").get().count, 1);
+  assert.equal(database.prepare(
+    `SELECT COUNT(*) AS count FROM email_notifications
+      WHERE registration_id = ?
+        AND notification_type IN ('REGISTRATION_CONFIRMATION', 'SMS_REGISTRATION_CONFIRMATION')`,
+  ).get(created.registration.registrationId).count, 2, "a replay keeps one row per opted-in channel");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE command_id = ?").get(commandId).count, 1);
   const auditDetails = database.prepare("SELECT details_json FROM audit_events WHERE command_id = ?").get(commandId).details_json;
   assert.deepEqual(JSON.parse(auditDetails), { staff_profile_id: "staff", created_via: "STAFF" });

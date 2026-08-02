@@ -29,7 +29,9 @@ import {
   dispatchPendingEmailNotifications,
   handleEmailQueue,
   sendEmailWithSes,
+  sendSmsWithSns,
   type EmailSender,
+  type SmsSender,
 } from "./email-notifications.ts";
 import {
   phaseAllowsRaceStatus,
@@ -193,6 +195,7 @@ export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
   emailSender: EmailSender = sendEmailWithSes,
+  smsSender: SmsSender = sendSmsWithSns,
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -637,7 +640,7 @@ export const createWorker = (
     return html(renderNotFound(), 404, true);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, emailSender);
+    await handleEmailQueue(batch, env, emailSender, smsSender);
   },
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(dispatchPendingEmailNotifications(env));

@@ -3,6 +3,10 @@ import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
 import { autoResolvableRoundOneHeatSql, reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
+import {
+  participantNotificationStatements,
+  publishParticipantNotifications,
+} from "./email-notifications.ts";
 import type { Env } from "./types.ts";
 import { unstartedRoundOneHeatExistsSql, walkUpAdmissionFor } from "./walk-up-admission.ts";
 
@@ -1765,6 +1769,7 @@ interface LifecycleSideEffects {
   statements: D1PreparedStatement[];
   audits: Record<string, unknown>[];
   bagMoves: BagMove[];
+  notificationIds: string[];
 }
 
 // Duck numbers, in the order the entries move, with unassigned places dropped.
@@ -1797,6 +1802,7 @@ const lifecycleSideEffects = async (
         duckNumbers: movedDuckNumbers(plan.entries),
         movedEntryCount: plan.entries.length,
       })),
+      notificationIds: [],
     };
   }
   if (definition.action === "reopen-registration") {
@@ -1815,19 +1821,55 @@ const lifecycleSideEffects = async (
         duckNumbers: movedDuckNumbers(plan.entries),
         movedEntryCount: plan.entries.length,
       })),
+      notificationIds: [],
     };
   }
   if (definition.action === "start-round-one" || definition.action === "start-final") {
     const round = definition.action === "start-round-one" ? "ROUND_ONE" : "FINAL";
+    const firstHeat = await env.DB.prepare(
+      `SELECT id FROM heats
+        WHERE event_id = ? AND round = ? AND status = 'PLANNED'
+          AND (round = 'FINAL' OR ${eligibleEntryCountSql("heats.event_id", "heats.id")} >= 2)
+        ORDER BY heat_number LIMIT 1`,
+    ).bind(eventId, round).first<{ id: string }>();
+    const recipients = firstHeat === null
+      ? { results: [] as { registration_id: string; duck_assignment_id: string }[] }
+      : await env.DB.prepare(
+        `SELECT r.id AS registration_id, da.id AS duck_assignment_id
+           FROM heat_entries he
+           JOIN race_entries re ON re.id = he.race_entry_id AND re.event_id = he.event_id
+           JOIN registrations r ON r.id = re.registration_id AND r.event_id = he.event_id
+           JOIN duck_assignments da
+             ON da.race_entry_id = re.id AND da.event_id = he.event_id AND da.valid_to IS NULL
+          WHERE he.event_id = ? AND he.heat_id = ? AND r.status = 'ACTIVE'
+          ORDER BY he.slot_number`,
+      ).bind(eventId, firstHeat.id).all<{ registration_id: string; duck_assignment_id: string }>();
+    const notificationIds: string[] = [];
+    const notificationStatements: D1PreparedStatement[] = [];
+    for (const recipient of recipients.results) {
+      const upcoming = participantNotificationStatements(env, {
+        eventId,
+        registrationId: recipient.registration_id,
+        heatId: firstHeat!.id,
+        duckAssignmentId: recipient.duck_assignment_id,
+        notificationType: "HEAT_UPCOMING",
+        commandId,
+        now,
+      });
+      notificationIds.push(...upcoming.ids);
+      notificationStatements.push(...upcoming.statements);
+    }
     return {
       statements: [
         lockRoundStatement(round, definition.commandType, eventId, commandId, actor.id, now, env),
+        ...notificationStatements,
       ],
       audits: [{ action: "HEAT_ROSTERS_LOCKED", round }],
       bagMoves: [],
+      notificationIds,
     };
   }
-  return { statements: [], audits: [], bagMoves: [] };
+  return { statements: [], audits: [], bagMoves: [], notificationIds: [] };
 };
 
 const sideEffectAuditStatement = (
@@ -1970,6 +2012,7 @@ const runLifecycleCommand = async (
     return resolved
       ?? json({ error: "The event transition conflicted with another update. Refresh and try again." }, 409);
   }
+  await publishParticipantNotifications(env, sideEffects.notificationIds);
 
   const transitioned: EventRow = {
     ...event,

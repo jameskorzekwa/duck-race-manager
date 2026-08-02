@@ -28,7 +28,7 @@ const notificationStatuses = new Set([
 ]);
 
 const terminalNotificationStatuses = new Set([
-  // SES SendEmail acceptance is the terminal state this application can prove.
+  // SES/SNS acceptance is the terminal state this application can prove.
   // Delivery/bounce callbacks are not implemented, so it is never relabeled as
   // DELIVERED merely to make the support count look complete.
   "SENT",
@@ -178,6 +178,7 @@ const operationalSummary = async (env: Env, eventId: string): Promise<Response> 
 interface NotificationListRow {
   id: string;
   registration_id: string;
+  channel: string;
   notification_type: string;
   status: string;
   template_version: number;
@@ -219,7 +220,7 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
   if (before !== null) args.push(before);
   args.push(limit);
   const rows = await env.DB.prepare(
-    `SELECT n.id, n.registration_id, n.notification_type, n.status,
+    `SELECT n.id, n.registration_id, n.channel, n.notification_type, n.status,
             n.template_version, n.scheduled_at, n.queued_at, n.sent_at,
             n.terminal_at, n.status_reason, n.last_error_code, n.created_at,
             r.first_name, r.last_name, h.heat_number, h.round,
@@ -245,8 +246,11 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
     notifications: rows.results.map((row) => ({
       id: row.id,
       registrationId: row.registration_id,
+      channel: row.channel,
       participantName: `${row.first_name} ${row.last_name}`,
-      type: row.notification_type,
+      type: row.channel === "SMS" && row.notification_type.startsWith("SMS_")
+        ? row.notification_type.slice(4)
+        : row.notification_type,
       status: row.status,
       terminal: terminalNotificationStatuses.has(row.status),
       templateVersion: row.template_version,

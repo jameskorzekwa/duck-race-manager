@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: QuickDucks Cognito staff authentication and SES sending identity
+Description: QuickDucks Cognito staff authentication and participant email/SMS delivery
 
 Parameters:
   AppOrigin:
@@ -123,6 +123,10 @@ Resources:
                   - ses:SendEmail
                   - ses:SendRawEmail
                 Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/quickducks.com
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - cognito-idp:AdminCreateUser

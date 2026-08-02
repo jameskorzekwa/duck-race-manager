@@ -154,6 +154,43 @@ test("operational summary reports registration, duck, heat, and notification blo
   for (const statement of db.statements) assert.doesNotMatch(statement.sql, /event_test/);
 });
 
+test("notification support facts identify the channel without projecting contact values", async () => {
+  const db = makeDb(() => null, () => ({
+    results: [{
+      id: "notification_sms",
+      registration_id: "registration_test",
+      channel: "SMS",
+      notification_type: "SMS_HEAT_UPCOMING",
+      status: "QUEUED",
+      template_version: 1,
+      scheduled_at: null,
+      queued_at: "2026-08-02T00:00:00Z",
+      sent_at: null,
+      terminal_at: null,
+      status_reason: null,
+      last_error_code: null,
+      created_at: "2026-08-02T00:00:00Z",
+      first_name: "Daisy",
+      last_name: "Duck",
+      heat_number: 2,
+      round: "ROUND_ONE",
+      attempt_count: 1,
+      last_attempt_status: "QUEUED",
+      last_attempt_error_code: null,
+    }],
+  }));
+  const response = await handleSupportOperations(
+    new Request("https://quickducks.com/api/v1/staff/support/events/event_test/notifications"),
+    makeEnv(db),
+    admin,
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.notifications[0].channel, "SMS");
+  assert.equal(body.notifications[0].type, "HEAT_UPCOMING");
+  assert.doesNotMatch(db.statements[0].sql, /r\.email|r\.phone|provider_message_id|error_detail/);
+});
+
 test("notification retry creates a durable attempt and queues only its notification ID", async () => {
   const commandId = crypto.randomUUID();
   const sent = [];
