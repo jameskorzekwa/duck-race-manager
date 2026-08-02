@@ -217,12 +217,22 @@ export async function waitForOpenChamberSession({
               directory: modelDirectory,
               sessionStatus: parent.status,
               lastAssistantMessage: carriers.at(-1),
+              markerCount,
               metrics: summarizeSessionMetrics(sessions),
             };
           }
           if (now() - idleSince >= idleGraceMs) {
             const suffix = finalLine(message);
-            throw new Error(`Session ${sessionId} became idle without exactly one new ${markerPrefix} marker${suffix ? `; final line: ${suffix}` : "."}`);
+            const error = new Error(`Session ${sessionId} became idle without exactly one new ${markerPrefix} marker${suffix ? `; final line: ${suffix}` : "."}`);
+            error.sessionResult = {
+              sessionId,
+              directory: modelDirectory,
+              sessionStatus: parent.status,
+              lastAssistantMessage: carriers.at(-1) ?? message,
+              markerCount,
+              metrics: summarizeSessionMetrics(sessions),
+            };
+            throw error;
           }
         }
       }
@@ -327,17 +337,22 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (!args.dir || !args.result || !args.timeout || !args["marker-prefix"]) {
       throw new Error("Usage: wait-for-openchamber-session.mjs --dir <path> --result <path> --timeout <seconds> --marker-prefix <prefix> [--state <path>]");
     }
-    const result = await waitForOpenChamberSession({
-      directory: args.dir,
-      timeoutSeconds: Number(args.timeout),
-      markerPrefix: args["marker-prefix"],
-      markerOffset: Number(args["marker-offset"] ?? 0),
-      onSessionResolved: (sessionId) => {
-        if (!args.state || !existsSync(args.state)) return;
-        const state = JSON.parse(readFileSync(args.state, "utf8"));
-        writeFileSync(args.state, JSON.stringify({ ...state, sessionId }));
-      },
-    });
-    writeFileSync(args.result, JSON.stringify(result, null, 2));
+    try {
+      const result = await waitForOpenChamberSession({
+        directory: args.dir,
+        timeoutSeconds: Number(args.timeout),
+        markerPrefix: args["marker-prefix"],
+        markerOffset: Number(args["marker-offset"] ?? 0),
+        onSessionResolved: (sessionId) => {
+          if (!args.state || !existsSync(args.state)) return;
+          const state = JSON.parse(readFileSync(args.state, "utf8"));
+          writeFileSync(args.state, JSON.stringify({ ...state, sessionId }));
+        },
+      });
+      writeFileSync(args.result, JSON.stringify(result, null, 2));
+    } catch (error) {
+      if (error.sessionResult) writeFileSync(args.result, JSON.stringify(error.sessionResult, null, 2));
+      throw error;
+    }
   }
 }

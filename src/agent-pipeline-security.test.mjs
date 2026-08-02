@@ -185,8 +185,9 @@ test("gate recovery waits while a dispatched gate run is still queued", async ()
   assert.match(lane, /"queued", "in_progress", "waiting", "pending", "requested"/);
   assert.match(lane, /pendingRuns\.data\.workflow_runs/);
   assert.doesNotMatch(lane, /ci\.yml/);
+  const pendingIndex = implementation.indexOf("const pendingGate");
   assert.ok(
-    implementation.indexOf("const pendingGate") < implementation.indexOf("gate-recovery-exhausted"),
+    pendingIndex < implementation.indexOf("gate-recovery-exhausted", pendingIndex),
     "the pending-gate check must run before any attempt is counted",
   );
 });
@@ -324,7 +325,7 @@ test("a starting implementation reports its own running state", async () => {
   assert.doesNotMatch(dispatch, /GITHUB_TOKEN|github\.token/);
 });
 
-test("failures retry immediately and only stopped recovery parks at agent:error", async () => {
+test("failures retry immediately and stopped recovery is transferred to Pipeline Doctor", async () => {
   const task = await read(".github/workflows/agent-task.yml");
   const publish = task.slice(task.indexOf("  publish:"));
   assert.match(publish, /recoverFailedIssue\(\{ github, context \}, issueNumber\)/);
@@ -337,12 +338,19 @@ test("failures retry immediately and only stopped recovery parks at agent:error"
   assert.match(reconcile, /cron: "\*\/10 \* \* \* \*"/);
   // Cron is a backstop only: every completed pipeline run sweeps immediately.
   assert.match(reconcile, /workflow_run:/);
-  assert.match(reconcile, /workflows: \[Agent Task, Agent Review, Release\]/);
+  assert.match(reconcile, /workflows: \[Agent Task, Agent Review, Pipeline Doctor, Release\]/);
   assert.match(reconcile, /types: \[in_progress, completed\]/);
   assert.match(reconcile, /github\.event_name == 'workflow_run'/);
 
   const implementation = await read("scripts/agent-pipeline.mjs");
   assert.match(implementation, /"agent:error",/);
+  assert.match(implementation, /agent:error is a transient handoff, never a terminal parking state/);
+  assert.match(implementation, /await escalateAgentError\(\{ github, context \}, issue\.number\)/);
+  assert.match(implementation, /workflow_id: "pipeline-doctor\.yml"/);
+  assert.match(implementation, /"agent:blocked"/);
+  assert.match(task, /if \[\[ -z "\$resume_session" \]\]; then\s+marker_offset=0/);
+  assert.match(task, /sessionResult\.markerCount/);
+  assert.match(task, /fs\.readFileSync\(process\.env\.PIPELINE_MODEL_STATE/);
   for (const marker of ["task-exhausted", "no-progress", "repeated-verification", "gate-recovery-exhausted", "orphan-exhausted", "stale-exhausted"]) {
     assert.match(implementation, new RegExp(marker));
   }
@@ -567,6 +575,9 @@ test("Pipeline Doctor isolates diagnosis from trusted publication", async () => 
   assert.match(workflow, /permissions: \{\}/);
   assert.match(workflow, /pipeline:incident/);
   assert.match(workflow, /doctorIncidentMarker/);
+  assert.match(workflow, /REQUESTED_INCIDENT/);
+  assert.match(workflow, /pipeline-doctor feature=/);
+  assert.match(workflow, /resumeFeature/);
   assert.match(workflow, /attempts >= 2/);
   assert.match(diagnose, /runs-on: \[self-hosted, macOS, ARM64, quickducks-implement\]/);
   assert.match(diagnose, /openchamber session create/);

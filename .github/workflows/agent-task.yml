@@ -361,6 +361,12 @@ jobs:
             const value = Number(seed.metadata?.markerOffset ?? 0);
             process.stdout.write(Number.isSafeInteger(value) && value >= 0 ? String(value) : "0");
           ')"
+          # Marker offsets describe transcript history and are valid only when
+          # the matching session can actually be resumed. A fresh session must
+          # count its first marker instead of discarding it as old history.
+          if [[ -z "$resume_session" ]]; then
+            marker_offset=0
+          fi
           resume_dir="$(SEED_METADATA="$PIPELINE_SEED_METADATA" STATE_ROOT="$state_root" node -e '
             const fs = require("node:fs"), path = require("node:path");
             const seed = JSON.parse(fs.readFileSync(process.env.SEED_METADATA, "utf8"));
@@ -516,6 +522,12 @@ jobs:
           try {
             sessionResult = JSON.parse(fs.readFileSync(`${artifactDir}/session-result.json`, "utf8"));
           } catch {}
+          try {
+            const state = JSON.parse(fs.readFileSync(process.env.PIPELINE_MODEL_STATE, "utf8"));
+            if (!sessionResult.sessionId && /^ses_[A-Za-z0-9]+$/.test(String(state.sessionId ?? ""))) {
+              sessionResult.sessionId = state.sessionId;
+            }
+          } catch {}
           const report = sessionResult.lastAssistantMessage?.text?.trim()
             ?? "Implementation produced no final report.";
           // The marker may sit anywhere in the final message, but it must be
@@ -549,7 +561,9 @@ jobs:
               path.join(process.env.HOME, ".local/state/quickducks-agent-runner/runners"),
               process.env.PIPELINE_MODEL_DIR,
             ),
-            markerOffset: Number(process.env.PIPELINE_MARKER_OFFSET) + (markerLines.length === 1 ? 1 : 0),
+            markerOffset: Number.isSafeInteger(sessionResult.markerCount)
+              ? sessionResult.markerCount
+              : Number(process.env.PIPELINE_MARKER_OFFSET) + (markerLines.length === 1 ? 1 : 0),
           }, null, 2));
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `decision=${decision.type}\ndigest=${digest}\n`);
           NODE

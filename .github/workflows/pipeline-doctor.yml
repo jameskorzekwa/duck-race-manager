@@ -1,5 +1,5 @@
 name: Pipeline Doctor
-run-name: Pipeline Doctor ${{ inputs.run || github.event.workflow_run.id || 'sweep' }}
+run-name: Pipeline Doctor ${{ inputs.incident || inputs.run || github.event.workflow_run.id || 'sweep' }}
 
 on:
   schedule:
@@ -8,6 +8,10 @@ on:
     inputs:
       run:
         description: Optional failed workflow run ID; blank sweeps unresolved failures
+        required: false
+        type: string
+      incident:
+        description: Optional trusted feature recovery incident number
         required: false
         type: string
   workflow_run:
@@ -26,6 +30,7 @@ jobs:
     if: >-
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && github.actor_id == '38769771') ||
+      (github.event_name == 'workflow_dispatch' && github.actor_id == '41898282' && inputs.incident != '') ||
       (github.event_name == 'workflow_run' && contains(fromJSON('["action_required","failure","startup_failure","timed_out"]'), github.event.workflow_run.conclusion))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -36,6 +41,7 @@ jobs:
     outputs:
       base: ${{ steps.prepare.outputs.base }}
       eligible: ${{ steps.prepare.outputs.eligible }}
+      feature: ${{ steps.prepare.outputs.feature }}
       incident: ${{ steps.prepare.outputs.incident }}
       run: ${{ steps.prepare.outputs.run }}
       signature: ${{ steps.prepare.outputs.signature }}
@@ -51,6 +57,7 @@ jobs:
         id: prepare
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
+          REQUESTED_INCIDENT: ${{ inputs.incident }}
           REQUESTED_RUN: ${{ inputs.run }}
         with:
           script: |
@@ -74,13 +81,79 @@ jobs:
             await ensureLabel("pipeline:application", "0e8a16", "Application failure owned by the feature repair loop");
 
             const requested = String(process.env.REQUESTED_RUN ?? "").trim();
+            const requestedIncident = String(process.env.REQUESTED_INCIDENT ?? "").trim();
             if (requested && !/^[1-9][0-9]*$/.test(requested)) throw new Error("Requested run ID is invalid.");
+            if (requestedIncident && !/^[1-9][0-9]*$/.test(requestedIncident)) throw new Error("Requested incident number is invalid.");
+            if (requested && requestedIncident) throw new Error("Request either a failed run or a feature incident, not both.");
+            const incidents = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "all", labels: "pipeline:incident", per_page: 100,
+            });
+            let selected;
+
+            const featureIncidents = requestedIncident
+              ? incidents.filter((issue) => issue.number === Number(requestedIncident))
+              : incidents.filter((issue) => issue.state === "open" && String(issue.body ?? "").includes("<!-- pipeline-doctor feature="));
+            for (const incident of featureIncidents) {
+              if (incident.state !== "open" || incident.user?.id !== 41898282) continue;
+              const match = String(incident.body ?? "").match(
+                /<!-- pipeline-doctor feature=([1-9][0-9]*) source=([0-9]+) signature=([0-9a-f]{64}) -->/,
+              );
+              if (!match) continue;
+              const incidentComments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: incident.number, per_page: 100,
+              });
+              const trusted = incidentComments.filter((comment) => comment.user?.id === 41898282);
+              const terminal = trusted.some((comment) => /<!-- pipeline-doctor (?:terminal|repair-pr)=/.test(comment.body ?? ""));
+              const attempts = trusted.filter((comment) => String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
+              if (terminal || attempts >= 2) continue;
+              const featureNumber = Number(match[1]);
+              const feature = (await github.rest.issues.get({ owner, repo, issue_number: featureNumber })).data;
+              if (feature.state !== "open" || feature.pull_request || feature.user?.id !== 38769771) continue;
+              const featureComments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: featureNumber, per_page: 100,
+              });
+              const trustedFeatureComments = featureComments.filter((comment) => [38769771, 41898282].includes(comment.user?.id));
+              const blocked = trustedFeatureComments
+                .flatMap((comment) => [...String(comment.body ?? "").matchAll(/<!-- agent-pipeline blocked-by=([0-9]+(?:,[0-9]+)*) -->/g)])
+                .map((entry) => entry[1].split(",").map(Number))
+                .at(-1) ?? [];
+              const featureLabels = new Set((feature.labels ?? []).map((label) => typeof label === "string" ? label : label.name));
+              if (!featureLabels.has("agent:blocked") || blocked.length !== 1 || blocked[0] !== incident.number) continue;
+              const sourceRun = Number(match[2]);
+              let run;
+              if (sourceRun > 0) {
+                try {
+                  run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: sourceRun })).data;
+                } catch (error) {
+                  if (error.status !== 404) throw error;
+                }
+              }
+              const reason = String(incident.body ?? "").match(/\nReason: `([^`]+)`\./)?.[1] ?? "bounded recovery exhausted";
+              selected = {
+                kind: "feature",
+                incident,
+                feature,
+                featureComments: trustedFeatureComments,
+                run,
+                jobs: [],
+                identity: {
+                  failures: [{ id: 0, job: `Feature recovery #${featureNumber}`, conclusion: "failure", steps: [reason] }],
+                  headSha: /^[0-9a-f]{40}$/.test(String(run?.head_sha ?? "")) ? run.head_sha : base,
+                  signature: match[3],
+                  sourceRun,
+                  workflow: "Agent Task",
+                  workflowPath: ".github/workflows/agent-task.yml",
+                },
+              };
+              break;
+            }
+
             const candidates = [];
-            if (context.eventName === "workflow_run") {
+            if (!selected && context.eventName === "workflow_run") {
               candidates.push((await github.rest.actions.getWorkflowRun({ owner, repo, run_id: context.payload.workflow_run.id })).data);
-            } else if (requested) {
+            } else if (!selected && requested) {
               candidates.push((await github.rest.actions.getWorkflowRun({ owner, repo, run_id: Number(requested) })).data);
-            } else {
+            } else if (!selected && !requestedIncident) {
               const cutoff = Date.now() - 2 * 60 * 60 * 1000;
               for (const workflowPath of doctor.DOCTOR_WORKFLOWS.keys()) {
                 const runs = await github.rest.actions.listWorkflowRuns({
@@ -92,11 +165,7 @@ jobs:
               candidates.sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
             }
 
-            const incidents = await github.paginate(github.rest.issues.listForRepo, {
-              owner, repo, state: "all", labels: "pipeline:incident", per_page: 100,
-            });
-            let selected;
-            for (const run of candidates) {
+            for (const run of selected ? [] : candidates) {
               if (!doctor.isDoctorFailure(run)
                   || (run.repository?.id !== undefined && run.repository.id !== context.payload.repository.id)) continue;
               const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
@@ -127,7 +196,7 @@ jobs:
                 const attempts = trusted.filter((comment) => String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
                 if (terminal || attempts >= 2) continue;
               }
-              selected = { run, jobs, identity, marker, existing };
+              selected = { kind: "run", run, jobs, identity, marker, existing };
               break;
             }
 
@@ -135,26 +204,37 @@ jobs:
             core.setOutput("base", base);
             if (!selected) return;
 
-            const { run, jobs, identity, marker, existing } = selected;
+            const { run, identity } = selected;
             const failureList = identity.failures.map(({ job, conclusion, steps }) =>
               `- ${job}: ${conclusion}${steps.length ? ` (${steps.join(", ")})` : ""}`).join("\n");
-            let incident = existing;
+            let incident = selected.incident ?? selected.existing;
             if (!incident) {
               incident = (await github.rest.issues.create({
                 owner,
                 repo,
                 title: `Pipeline incident: ${identity.workflow} run ${run.id}`,
                 labels: ["pipeline:incident"],
-                body: `${marker}\n\n[Failed workflow run](${run.html_url}) at \`${identity.headSha}\`.\n\n${failureList}`,
+                body: `${selected.marker}\n\n[Failed workflow run](${run.html_url}) at \`${identity.headSha}\`.\n\n${failureList}`,
               })).data;
             }
             await github.rest.issues.createComment({
               owner, repo, issue_number: incident.number,
-              body: `<!-- pipeline-doctor attempt=${context.runId} source=${run.id} -->\nDiagnosing ${identity.workflow} run ${run.id} against current trusted main \`${base}\`.`,
+              body: `<!-- pipeline-doctor attempt=${context.runId} source=${identity.sourceRun ?? run.id} -->\nDiagnosing ${selected.kind === "feature" ? `feature #${selected.feature.number}` : `${identity.workflow} run ${run.id}`} against current trusted main \`${base}\`.`,
             });
 
             const evidence = [];
-            for (const failure of identity.failures) {
+            if (selected.kind === "feature") {
+              const featureHistory = selected.featureComments.slice(-40)
+                .map((comment) => `[${comment.user?.login ?? comment.user?.id}] ${comment.body ?? ""}`)
+                .join("\n\n");
+              evidence.push({
+                job: identity.failures[0].job,
+                conclusion: "failure",
+                steps: identity.failures[0].steps,
+                log: doctor.redactDoctorEvidence(featureHistory),
+              });
+            }
+            for (const failure of selected.kind === "run" ? identity.failures : []) {
               let log = "Failed job log was unavailable.";
               try {
                 const response = await github.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", {
@@ -179,20 +259,26 @@ jobs:
               trustedBase: base,
               incident: incident.number,
               signature: identity.signature,
+              featureIssue: selected.kind === "feature" ? {
+                number: selected.feature.number,
+                title: doctor.redactDoctorEvidence(selected.feature.title, { maxCharacters: 500, maxLineCharacters: 500 }),
+                body: doctor.redactDoctorEvidence(selected.feature.body, { maxCharacters: 12000, maxLineCharacters: 600 }),
+              } : null,
               sourceRun: {
-                id: run.id,
-                url: run.html_url,
+                id: identity.sourceRun ?? run.id,
+                url: run?.html_url ?? null,
                 workflow: identity.workflow,
                 workflowPath: identity.workflowPath,
-                event: run.event,
+                event: run?.event ?? "feature-recovery",
                 headSha: identity.headSha,
-                conclusion: run.conclusion,
-                createdAt: run.created_at,
+                conclusion: run?.conclusion ?? "failure",
+                createdAt: run?.created_at ?? incident.created_at,
               },
               failures: evidence,
             }, null, 2));
+            core.setOutput("feature", selected.kind === "feature" ? String(selected.feature.number) : "");
             core.setOutput("incident", String(incident.number));
-            core.setOutput("run", String(run.id));
+            core.setOutput("run", String(identity.sourceRun ?? run.id));
             core.setOutput("signature", identity.signature);
             core.setOutput("workflow", identity.workflow);
 
@@ -473,6 +559,7 @@ jobs:
     env:
       EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
       EXPECTED_DIGEST: ${{ needs.diagnose.outputs.digest }}
+      FEATURE_ISSUE: ${{ needs.prepare.outputs.feature }}
       INCIDENT_NUMBER: ${{ needs.prepare.outputs.incident }}
       SOURCE_RUN: ${{ needs.prepare.outputs.run }}
       SOURCE_SIGNATURE: ${{ needs.prepare.outputs.signature }}
@@ -550,6 +637,7 @@ jobs:
             const doctor = await import(`${process.env.GITHUB_WORKSPACE}/scripts/pipeline-doctor.mjs`);
             const { owner, repo } = context.repo;
             const incident = Number(process.env.INCIDENT_NUMBER);
+            const feature = Number(process.env.FEATURE_ISSUE);
             let result = {};
             try { result = JSON.parse(fs.readFileSync("doctor-artifact/doctor-result.json", "utf8")); } catch {}
             const report = doctor.redactDoctorEvidence(String(result.report ?? "Pipeline Doctor did not produce a diagnosis."), {
@@ -558,6 +646,48 @@ jobs:
             const decision = String(process.env.DOCTOR_DECISION ?? "failed");
             const pr = Number(process.env.PR_NUMBER);
             const addLabel = async (name) => github.rest.issues.addLabels({ owner, repo, issue_number: incident, labels: [name] });
+            const resumeFeature = async () => {
+              if (!Number.isSafeInteger(feature) || feature < 1) return;
+              const issue = (await github.rest.issues.get({ owner, repo, issue_number: feature })).data;
+              const labels = (issue.labels ?? []).map((label) => typeof label === "string" ? label : label.name);
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: feature, per_page: 100,
+              });
+              const blockers = comments.filter((comment) => comment.user?.id === 41898282)
+                .flatMap((comment) => [...String(comment.body ?? "").matchAll(/<!-- agent-pipeline blocked-by=([0-9]+(?:,[0-9]+)*) -->/g)])
+                .map((entry) => entry[1].split(",").map(Number))
+                .at(-1) ?? [];
+              if (issue.state !== "open" || !labels.includes("agent:blocked")
+                  || blockers.length !== 1 || blockers[0] !== incident) {
+                core.warning(`Feature #${feature} is no longer blocked solely by incident #${incident}; leaving its newer state unchanged.`);
+                return;
+              }
+              const stateLabels = [
+                "agent:inbox", "agent:triage", "agent:ready", "agent:queued", "agent:running",
+                "agent:grouped", "agent:blocked", "agent:question", "agent:review", "agent:reviewing",
+                "agent:approved", "agent:deployed", "agent:failed", "agent:error",
+              ];
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: feature,
+                body: `<!-- agent-pipeline doctor-cleared=${incident} -->\nPipeline Doctor incident #${incident} cleared automatic recovery; resuming from current main with the fresh bounded budget.`,
+              });
+              await github.rest.issues.setLabels({
+                owner, repo, issue_number: feature,
+                labels: [...labels.filter((label) => !stateLabels.includes(label)), "agent:inbox"],
+              });
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner, repo, workflow_id: "agent-task.yml", ref: context.payload.repository.default_branch,
+                  inputs: { issue: String(feature) },
+                });
+              } catch (error) {
+                await github.rest.issues.setLabels({
+                  owner, repo, issue_number: feature,
+                  labels: [...labels.filter((label) => !stateLabels.includes(label)), "agent:blocked"],
+                });
+                throw error;
+              }
+            };
             if (decision === "repair" && process.env.VERIFY_RESULT === "success" && Number.isSafeInteger(pr) && pr > 0) {
               await addLabel("pipeline:repair");
               await github.rest.issues.createComment({ owner, repo, issue_number: incident,
@@ -572,6 +702,7 @@ jobs:
               if (decision !== "external") {
                 await github.rest.issues.update({ owner, repo, issue_number: incident, state: "closed",
                   state_reason: decision === "noop" ? "completed" : "not_planned" });
+                await resumeFeature();
               }
               return;
             }

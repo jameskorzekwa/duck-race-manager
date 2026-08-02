@@ -34,6 +34,8 @@ Artifact promotion or fallback validation -> production approval -> deploy and s
 deterministic Agent Reconcile -> agent:deployed or agent:failed -> next slot
         |
         +-> failed control-plane run -> Pipeline Doctor incident -> verified repair PR
+        |
+        +-> exhausted feature recovery -> doctor-owned blocker -> resume, repair, or explicit intervention
 ```
 
 OpenChamber is the local model control plane and the local/mobile observability
@@ -60,7 +62,7 @@ Pipeline state is represented by labels:
 | `agent:approved` | Independent review passed at the current head |
 | `agent:merge-slot` | The single PR/release allowed in production lane |
 | `agent:deployed` | Production release and smoke verification succeeded |
-| `agent:error` | Automatic recovery stopped (retry budget, no progress, or review retries spent); a clarifying comment plus a rerun resumes it |
+| `agent:error` | Transient handoff after bounded recovery stops; reconciliation immediately transfers ownership to a Pipeline Doctor incident |
 | `agent:failed` | Bounded recovery or human intervention is required |
 
 Grouped issues also receive one marker:
@@ -71,6 +73,9 @@ Grouped issues also receive one marker:
 
 Blocked issues similarly use one `<!-- agent-pipeline blocked-by=12,34 -->`
 marker. These markers let reconciliation resume without depending on model memory.
+An exhausted feature receives a fresh recovery generation and is blocked on its
+deduplicated doctor incident, so it can never remain parked indefinitely at
+`agent:error`.
 
 Pipeline infrastructure incidents use separate labels rather than overloading a
 feature's state: `pipeline:incident` is the deduplicated incident ledger,
@@ -134,6 +139,11 @@ was queued. Trusted review later proves that fork point is still on `main` and
 that the exact candidate head remains mergeable. No external token exchange or
 long-lived credential is involved.
 
+Saved transcript marker offsets are coupled to their OpenChamber session ID. If
+a session cannot be resumed, the new session starts at offset zero; failure
+artifacts retain the resolved session ID and observed marker count so retries
+cannot discard a valid first marker or lose resumable model history.
+
 Patch extraction occurs in a fresh trusted Git repository, never in the model's
 workspace. Known ignored OpenCode runtime dependencies under `.opencode` are
 removed first. Before the first post-model Git command, a trusted `lstat` walk rejects
@@ -174,19 +184,27 @@ them to a human approval.
 ## Pipeline Doctor
 
 `pipeline-doctor.yml` listens for completed failures from Agent Task, Agent
-Review, Agent Reconcile, and Release. A staggered schedule is a backstop for
-missed `workflow_run` delivery, and James can dispatch one failed run by ID. A
-SHA-bound hash of the workflow path plus failed jobs and steps deduplicates each
-incident. Hosted Agent Task verification failures are not diagnosed again: they
-already feed their complete failure index to the same feature implementation
-session.
+Review, Agent Reconcile, and Release. It also owns exhausted feature recovery:
+Agent Reconcile creates a feature-generation-bound incident, records it as the
+feature's sole blocker, and dispatches the doctor immediately. A staggered
+schedule is a backstop for missed workflow delivery and unfinished incidents,
+and James can dispatch one failed run by ID. A SHA-bound hash of the workflow
+path plus failed jobs and steps deduplicates control-plane incidents; feature
+incidents bind the issue, latest owning task run, and terminal recovery reason.
+Hosted Agent Task verification failures remain in the feature loop until that
+loop exhausts its bounded budget.
 
 Each incident is a GitHub issue carrying `pipeline:incident`. The model receives
 only a plain trusted-main snapshot and bounded, credential-redacted failed-job
-evidence. It classifies the failure as application, pipeline, external, or
-already repaired. The dedicated `pipeline-doctor` agent cannot run commands,
-launch subagents, edit application code, or edit its own workflow, contract,
-classifier, or validator.
+or trusted feature-history evidence. It classifies the failure as application,
+pipeline, external, or already repaired. Application and no-op diagnoses close
+the incident and automatically resume the feature with a fresh bounded budget;
+pipeline repairs keep it blocked until the repair closes the incident; external
+diagnoses keep an explicit open intervention incident. After two complete doctor
+recovery generations, another exhaustion becomes an explicit external incident
+instead of unlimited model churn. The dedicated `pipeline-doctor` agent cannot
+run commands, launch subagents, edit application code, or edit its own workflow,
+contract, classifier, or validator.
 
 A pipeline repair may touch only an explicit control-plane allowlist. A copied
 trusted validator rejects other paths, binary files, symlinks, gitlinks, broad
