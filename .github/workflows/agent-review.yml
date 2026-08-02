@@ -786,7 +786,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
-      actions: read
+      actions: write
       checks: read
       # The lane merges the admitted PR directly with the REST API, because the
       # workflow token cannot arm native auto-merge. This job checks out and

@@ -1,0 +1,598 @@
+name: Pipeline Doctor
+run-name: Pipeline Doctor ${{ inputs.run || github.event.workflow_run.id || 'sweep' }}
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      run:
+        description: Optional failed workflow run ID; blank sweeps unresolved failures
+        required: false
+        type: string
+  workflow_run:
+    workflows: [Agent Task, Agent Review, Agent Reconcile, Release]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: quickducks-pipeline-doctor
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare trusted incident
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && github.actor_id == '38769771') ||
+      (github.event_name == 'workflow_run' && contains(fromJSON('["action_required","failure","startup_failure","timed_out"]'), github.event.workflow_run.conclusion))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    outputs:
+      base: ${{ steps.prepare.outputs.base }}
+      eligible: ${{ steps.prepare.outputs.eligible }}
+      incident: ${{ steps.prepare.outputs.incident }}
+      run: ${{ steps.prepare.outputs.run }}
+      signature: ${{ steps.prepare.outputs.signature }}
+      workflow: ${{ steps.prepare.outputs.workflow }}
+    steps:
+      - name: Check out trusted default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Select and deduplicate failed run
+        id: prepare
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REQUESTED_RUN: ${{ inputs.run }}
+        with:
+          script: |
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const doctor = await import(`${process.env.GITHUB_WORKSPACE}/scripts/pipeline-doctor.mjs`);
+            const { owner, repo } = context.repo;
+            const defaultBranch = context.payload.repository.default_branch;
+            const defaultRef = await github.rest.repos.getBranch({ owner, repo, branch: defaultBranch });
+            const base = defaultRef.data.commit.sha;
+            const ensureLabel = async (name, color, description) => {
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+            };
+            await ensureLabel("pipeline:incident", "b60205", "Trusted Pipeline Doctor incident");
+            await ensureLabel("pipeline:repair", "5319e7", "Pipeline Doctor repair awaiting review");
+            await ensureLabel("pipeline:external", "d93f0b", "External pipeline intervention required");
+            await ensureLabel("pipeline:application", "0e8a16", "Application failure owned by the feature repair loop");
+
+            const requested = String(process.env.REQUESTED_RUN ?? "").trim();
+            if (requested && !/^[1-9][0-9]*$/.test(requested)) throw new Error("Requested run ID is invalid.");
+            const candidates = [];
+            if (context.eventName === "workflow_run") {
+              candidates.push((await github.rest.actions.getWorkflowRun({ owner, repo, run_id: context.payload.workflow_run.id })).data);
+            } else if (requested) {
+              candidates.push((await github.rest.actions.getWorkflowRun({ owner, repo, run_id: Number(requested) })).data);
+            } else {
+              const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+              for (const workflowPath of doctor.DOCTOR_WORKFLOWS.keys()) {
+                const runs = await github.rest.actions.listWorkflowRuns({
+                  owner, repo, workflow_id: workflowPath.split("/").at(-1), status: "completed", per_page: 30,
+                });
+                candidates.push(...runs.data.workflow_runs.filter((run) =>
+                  doctor.isDoctorFailure(run) && Date.parse(run.created_at) >= cutoff));
+              }
+              candidates.sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at));
+            }
+
+            const incidents = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "all", labels: "pipeline:incident", per_page: 100,
+            });
+            let selected;
+            for (const run of candidates) {
+              if (!doctor.isDoctorFailure(run)
+                  || (run.repository?.id !== undefined && run.repository.id !== context.payload.repository.id)) continue;
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id: run.id, filter: "latest", per_page: 100,
+              });
+              let identity;
+              try {
+                identity = doctor.pipelineFailureIdentity(run, jobs);
+              } catch (error) {
+                core.warning(`Skipping run ${run.id}: ${error.message}`);
+                continue;
+              }
+              // Hosted candidate verification already feeds its complete failure
+              // index to the same implementation session. Do not duplicate it.
+              if (identity.applicationFailure) {
+                core.info(`Run ${run.id} is an Agent Task application verification failure.`);
+                continue;
+              }
+              const marker = doctor.doctorIncidentMarker(identity.signature, identity.headSha);
+              const existing = incidents.find((issue) => String(issue.body ?? "").includes(marker));
+              let comments = [];
+              if (existing) {
+                comments = await github.paginate(github.rest.issues.listComments, {
+                  owner, repo, issue_number: existing.number, per_page: 100,
+                });
+                const trusted = comments.filter((comment) => comment.user?.id === 41898282);
+                const terminal = trusted.some((comment) => /<!-- pipeline-doctor (?:terminal|repair-pr)=/.test(comment.body ?? ""));
+                const attempts = trusted.filter((comment) => String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
+                if (terminal || attempts >= 2) continue;
+              }
+              selected = { run, jobs, identity, marker, existing };
+              break;
+            }
+
+            core.setOutput("eligible", selected ? "true" : "false");
+            core.setOutput("base", base);
+            if (!selected) return;
+
+            const { run, jobs, identity, marker, existing } = selected;
+            const failureList = identity.failures.map(({ job, conclusion, steps }) =>
+              `- ${job}: ${conclusion}${steps.length ? ` (${steps.join(", ")})` : ""}`).join("\n");
+            let incident = existing;
+            if (!incident) {
+              incident = (await github.rest.issues.create({
+                owner,
+                repo,
+                title: `Pipeline incident: ${identity.workflow} run ${run.id}`,
+                labels: ["pipeline:incident"],
+                body: `${marker}\n\n[Failed workflow run](${run.html_url}) at \`${identity.headSha}\`.\n\n${failureList}`,
+              })).data;
+            }
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: incident.number,
+              body: `<!-- pipeline-doctor attempt=${context.runId} source=${run.id} -->\nDiagnosing ${identity.workflow} run ${run.id} against current trusted main \`${base}\`.`,
+            });
+
+            const evidence = [];
+            for (const failure of identity.failures) {
+              let log = "Failed job log was unavailable.";
+              try {
+                const response = await github.request("GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs", {
+                  owner, repo, job_id: failure.id,
+                });
+                log = Buffer.isBuffer(response.data)
+                  ? response.data.toString("utf8")
+                  : typeof response.data === "string"
+                    ? response.data
+                    : Buffer.from(response.data).toString("utf8");
+              } catch (error) {
+                log = `Failed job log unavailable: HTTP ${error.status ?? "unknown"}.`;
+              }
+              evidence.push({ job: failure.job, conclusion: failure.conclusion, steps: failure.steps,
+                log: doctor.redactDoctorEvidence(log) });
+            }
+            const artifact = path.join(process.env.RUNNER_TEMP, "pipeline-doctor-context");
+            fs.mkdirSync(artifact, { recursive: true });
+            fs.writeFileSync(path.join(artifact, "doctor-context.json"), JSON.stringify({
+              schemaVersion: 1,
+              repository: `${owner}/${repo}`,
+              trustedBase: base,
+              incident: incident.number,
+              signature: identity.signature,
+              sourceRun: {
+                id: run.id,
+                url: run.html_url,
+                workflow: identity.workflow,
+                workflowPath: identity.workflowPath,
+                event: run.event,
+                headSha: identity.headSha,
+                conclusion: run.conclusion,
+                createdAt: run.created_at,
+              },
+              failures: evidence,
+            }, null, 2));
+            core.setOutput("incident", String(incident.number));
+            core.setOutput("run", String(run.id));
+            core.setOutput("signature", identity.signature);
+            core.setOutput("workflow", identity.workflow);
+
+      - name: Upload immutable incident context
+        if: steps.prepare.outputs.eligible == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pipeline-doctor-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pipeline-doctor-context/doctor-context.json
+          if-no-files-found: error
+          retention-days: 7
+
+  diagnose:
+    name: Diagnose control plane
+    needs: prepare
+    if: needs.prepare.outputs.eligible == 'true'
+    runs-on: [self-hosted, macOS, ARM64, quickducks-implement]
+    timeout-minutes: 110
+    permissions:
+      actions: read
+      contents: read
+    env:
+      EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
+      INCIDENT_NUMBER: ${{ needs.prepare.outputs.incident }}
+      SOURCE_RUN: ${{ needs.prepare.outputs.run }}
+      SOURCE_SIGNATURE: ${{ needs.prepare.outputs.signature }}
+    outputs:
+      decision: ${{ steps.result.outputs.decision }}
+      digest: ${{ steps.result.outputs.digest }}
+    steps:
+      - name: Check out trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.base }}
+
+      - name: Download immutable incident context
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pipeline-doctor-context-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pipeline-doctor-context
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Build isolated maintainer workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_BASE"
+          node scripts/validate-agent-patch.mjs "$GITHUB_WORKSPACE" "$EXPECTED_BASE" "$EXPECTED_BASE"
+          command -v openchamber > /dev/null
+          openchamber status --json | node -e '
+            let body=""; process.stdin.on("data", c => body += c).on("end", () => {
+              const status=JSON.parse(body); if(status.status !== "ok" || status.runningCount < 1) throw new Error("OpenChamber is not running locally.");
+            });'
+          state_root="$HOME/.local/state/quickducks-agent-runner"
+          if ! [[ "$RUNNER_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            printf 'Unsafe runner name %q.\n' "$RUNNER_NAME" >&2
+            exit 1
+          fi
+          runner_root="$state_root/runners/$RUNNER_NAME"
+          workspace_root="$runner_root/workspaces"
+          state_path="$runner_root/active.json"
+          model_dir="$workspace_root/doctor-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$workspace_root" "$RUNNER_TEMP/pipeline-doctor"
+          if [[ -f "$state_path" ]]; then
+            previous_dir="$(STATE_PATH="$state_path" STATE_ROOT="$state_root" node <<'NODE'
+          const fs=require("node:fs"), path=require("node:path");
+          const state=JSON.parse(fs.readFileSync(process.env.STATE_PATH,"utf8"));
+          const root=path.resolve(process.env.STATE_ROOT,"runners")+path.sep;
+          const directory=path.resolve(String(state.directory ?? ""));
+          if(!directory.startsWith(root)) throw new Error("Persistent model state escapes runner state.");
+          process.stdout.write(directory);
+          NODE
+            )"
+            node scripts/wait-for-openchamber-session.mjs --mode idle --dir "$previous_dir" --state "$state_path" --timeout 600
+            node scripts/cleanup-model-workspace.mjs "$state_path" "$state_root/runners" "$previous_dir"
+          fi
+          node scripts/cleanup-model-workspace.mjs "$state_path" "$state_root/runners" "$model_dir"
+          mkdir -p "$model_dir/.pipeline"
+          git archive "$EXPECTED_BASE" | tar -x -C "$model_dir"
+          cp "$RUNNER_TEMP/pipeline-doctor-context/doctor-context.json" "$model_dir/.pipeline/doctor-context.json"
+          chmod -R a-w "$model_dir/.pipeline"
+          MODEL_DIR="$model_dir" STATE_PATH="$state_path" node <<'NODE'
+          const fs=require("node:fs");
+          fs.writeFileSync(process.env.STATE_PATH, JSON.stringify({directory:process.env.MODEL_DIR,phase:"prepared",runId:process.env.GITHUB_RUN_ID,runAttempt:process.env.GITHUB_RUN_ATTEMPT}));
+          NODE
+          {
+            printf 'PIPELINE_MODEL_DIR=%s\n' "$model_dir"
+            printf 'PIPELINE_MODEL_STATE=%s\n' "$state_path"
+            printf 'PIPELINE_MODEL_WORKSPACES=%s\n' "$workspace_root"
+          } >> "$GITHUB_ENV"
+
+      - name: Run local OAuth pipeline maintainer in OpenChamber
+        shell: bash
+        env:
+          PIPELINE_DOCTOR_MODEL: ${{ vars.AGENT_DOCTOR_MODEL || 'openai/gpt-5.6-sol' }}
+          PIPELINE_DOCTOR_VARIANT: ${{ vars.AGENT_DOCTOR_VARIANT || 'xhigh' }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$PIPELINE_DOCTOR_MODEL" =~ ^[a-z0-9-]+/[A-Za-z0-9._-]+$ ]]; then
+            printf 'AGENT_DOCTOR_MODEL %q is not provider/model.\n' "$PIPELINE_DOCTOR_MODEL" >&2
+            exit 1
+          fi
+          if ! [[ "$PIPELINE_DOCTOR_VARIANT" =~ ^[a-z0-9-]+$ ]]; then
+            printf 'AGENT_DOCTOR_VARIANT %q is not a variant.\n' "$PIPELINE_DOCTOR_VARIANT" >&2
+            exit 1
+          fi
+          STATE_PATH="$PIPELINE_MODEL_STATE" node <<'NODE'
+          const fs=require("node:fs"); const state=JSON.parse(fs.readFileSync(process.env.STATE_PATH,"utf8"));
+          state.phase="dispatching"; fs.writeFileSync(process.env.STATE_PATH,JSON.stringify(state));
+          NODE
+          status=0
+          openchamber session create \
+            --dir "$PIPELINE_MODEL_DIR" \
+            --title "QuickDucks pipeline incident #${INCIDENT_NUMBER}" \
+            --prompt "Diagnose source run ${SOURCE_RUN} from .pipeline/doctor-context.json. Follow the pipeline-doctor contract, make only an allowlisted control-plane repair when justified, and emit exactly one matching final marker." \
+            --model "$PIPELINE_DOCTOR_MODEL" \
+            --agent pipeline-doctor \
+            --variant "$PIPELINE_DOCTOR_VARIANT" \
+            --json \
+            > "$RUNNER_TEMP/pipeline-doctor/session-dispatch.json" 2>&1 || true
+          node "$GITHUB_WORKSPACE/scripts/wait-for-openchamber-session.mjs" \
+            --dir "$PIPELINE_MODEL_DIR" \
+            --result "$RUNNER_TEMP/pipeline-doctor/session-result.json" \
+            --state "$PIPELINE_MODEL_STATE" \
+            --timeout 6000 \
+            --marker-prefix PIPELINE_DOCTOR_ || status=$?
+          printf '%s\n' "$status" > "$RUNNER_TEMP/pipeline-doctor/doctor-exit-status.txt"
+
+      - name: Build deterministic diagnosis artifact
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf \
+            "$PIPELINE_MODEL_DIR/.opencode/node_modules" \
+            "$PIPELINE_MODEL_DIR/.opencode/package.json" \
+            "$PIPELINE_MODEL_DIR/.opencode/package-lock.json" \
+            "$PIPELINE_MODEL_DIR/.opencode/bun.lock"
+          node "$GITHUB_WORKSPACE/scripts/validate-agent-patch.mjs" --source "$PIPELINE_MODEL_DIR"
+          chmod -R u+w "$PIPELINE_MODEL_DIR/.pipeline"
+          rm -rf "$PIPELINE_MODEL_DIR/.pipeline"
+          node "$GITHUB_WORKSPACE/scripts/validate-agent-patch.mjs" --source "$PIPELINE_MODEL_DIR"
+          patch_repo="$RUNNER_TEMP/pipeline-doctor/patch-repo"
+          git clone --quiet --no-hardlinks "$GITHUB_WORKSPACE" "$patch_repo"
+          git -C "$patch_repo" checkout --quiet --detach "$EXPECTED_BASE"
+          rsync -a --delete --exclude '.git/' "$PIPELINE_MODEL_DIR/" "$patch_repo/"
+          git -C "$patch_repo" add -A
+          if ! git -C "$patch_repo" diff --cached --quiet; then
+            node "$GITHUB_WORKSPACE/scripts/validate-pipeline-repair.mjs" "$patch_repo"
+          fi
+          git -C "$patch_repo" diff --cached --binary --full-index HEAD > "$RUNNER_TEMP/pipeline-doctor/doctor.patch"
+          node --input-type=module <<'NODE'
+          import crypto from "node:crypto";
+          import fs from "node:fs";
+          const { classifyDoctorResult } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/pipeline-doctor.mjs`);
+          const root=`${process.env.RUNNER_TEMP}/pipeline-doctor`;
+          const exitStatus=Number(fs.readFileSync(`${root}/doctor-exit-status.txt`,"utf8").trim());
+          let session={}; try { session=JSON.parse(fs.readFileSync(`${root}/session-result.json`,"utf8")); } catch {}
+          const report=session.lastAssistantMessage?.text?.trim() ?? "Pipeline Doctor produced no final report.";
+          const markers=report.split(/\r?\n/).map(line => line.trim()).filter(line => line.startsWith("PIPELINE_DOCTOR_"));
+          const marker=markers.length === 1 ? markers[0] : "";
+          const patch=fs.readFileSync(`${root}/doctor.patch`);
+          const decision=classifyDoctorResult({signature:process.env.SOURCE_SIGNATURE,marker,patchLength:patch.length,exitStatus});
+          const digest=crypto.createHash("sha256").update(patch).digest("hex");
+          fs.writeFileSync(`${root}/doctor-result.json`,JSON.stringify({
+            baseSha:process.env.EXPECTED_BASE,incident:Number(process.env.INCIDENT_NUMBER),sourceRun:Number(process.env.SOURCE_RUN),
+            signature:process.env.SOURCE_SIGNATURE,decision,digest,report,exitStatus,modelMetrics:session.metrics ?? null,
+          },null,2));
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,`decision=${decision.type}\ndigest=${digest}\n`);
+          NODE
+
+      - name: Upload immutable diagnosis artifact
+        if: steps.result.conclusion == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pipeline-doctor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/pipeline-doctor/doctor.patch
+            ${{ runner.temp }}/pipeline-doctor/doctor-result.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Clean local maintainer context
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_root="$HOME/.local/state/quickducks-agent-runner"
+          if [[ -n "${PIPELINE_MODEL_DIR:-}" && -n "${PIPELINE_MODEL_STATE:-}" ]] && command -v openchamber > /dev/null; then
+            node "$GITHUB_WORKSPACE/scripts/wait-for-openchamber-session.mjs" --mode idle --dir "$PIPELINE_MODEL_DIR" --state "$PIPELINE_MODEL_STATE" --timeout 600
+            node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" "$PIPELINE_MODEL_STATE" "$state_root/runners" "$PIPELINE_MODEL_DIR"
+          fi
+          temp_state="${PIPELINE_MODEL_STATE:-$RUNNER_TEMP/pipeline-doctor-cleanup.json}"
+          node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" "$temp_state" "$RUNNER_TEMP" "$RUNNER_TEMP/pipeline-doctor"
+
+  verify:
+    name: Verify repair
+    needs: [prepare, diagnose]
+    if: needs.diagnose.result == 'success' && needs.diagnose.outputs.decision == 'repair'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
+      EXPECTED_DIGEST: ${{ needs.diagnose.outputs.digest }}
+      EXPECTED_SIGNATURE: ${{ needs.prepare.outputs.signature }}
+      WRANGLER_SEND_METRICS: "false"
+    steps:
+      - name: Check out trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.base }}
+
+      - name: Download diagnosis artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pipeline-doctor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: doctor-artifact
+
+      - name: Verify and apply exact repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const crypto=require("node:crypto"), fs=require("node:fs");
+          const patch=fs.readFileSync("doctor-artifact/doctor.patch");
+          const result=JSON.parse(fs.readFileSync("doctor-artifact/doctor-result.json","utf8"));
+          const digest=crypto.createHash("sha256").update(patch).digest("hex");
+          if(result.baseSha !== process.env.EXPECTED_BASE || result.signature !== process.env.EXPECTED_SIGNATURE
+            || result.digest !== digest || digest !== process.env.EXPECTED_DIGEST || result.decision?.type !== "repair") {
+            throw new Error("Pipeline Doctor artifact identity is invalid.");
+          }
+          NODE
+          cp scripts/validate-pipeline-repair.mjs "$RUNNER_TEMP/validate-pipeline-repair.mjs"
+          git apply --index --check doctor-artifact/doctor.patch
+          git apply --index doctor-artifact/doctor.patch
+          node "$RUNNER_TEMP/validate-pipeline-repair.mjs" "$GITHUB_WORKSPACE"
+
+      - name: Validate GitHub workflows with pinned actionlint
+        run: >-
+          docker run --rm -v "$GITHUB_WORKSPACE:/repo" -w /repo
+          rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+          -color
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run deterministic pipeline checks
+        run: |
+          npm audit --audit-level=high
+          npm run typecheck
+          npm test
+          npm run wrangler:validate
+
+  publish:
+    name: Publish diagnosis
+    needs: [prepare, diagnose, verify]
+    if: always() && needs.prepare.outputs.eligible == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: write
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
+      EXPECTED_DIGEST: ${{ needs.diagnose.outputs.digest }}
+      INCIDENT_NUMBER: ${{ needs.prepare.outputs.incident }}
+      SOURCE_RUN: ${{ needs.prepare.outputs.run }}
+      SOURCE_SIGNATURE: ${{ needs.prepare.outputs.signature }}
+    steps:
+      - name: Check out trusted base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.base }}
+
+      - name: Download diagnosis artifact
+        if: needs.diagnose.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pipeline-doctor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: doctor-artifact
+
+      - name: Publish safe repair PR
+        id: repair
+        if: needs.diagnose.outputs.decision == 'repair' && needs.verify.result == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_NAME: ${{ needs.prepare.outputs.workflow }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const crypto=require("node:crypto"), fs=require("node:fs");
+          const patch=fs.readFileSync("doctor-artifact/doctor.patch");
+          const result=JSON.parse(fs.readFileSync("doctor-artifact/doctor-result.json","utf8"));
+          const digest=crypto.createHash("sha256").update(patch).digest("hex");
+          if(result.baseSha !== process.env.EXPECTED_BASE || result.signature !== process.env.SOURCE_SIGNATURE
+            || result.digest !== digest || digest !== process.env.EXPECTED_DIGEST || result.decision?.type !== "repair") {
+            throw new Error("Pipeline Doctor publication identity is invalid.");
+          }
+          NODE
+          cp scripts/validate-pipeline-repair.mjs "$RUNNER_TEMP/validate-pipeline-repair.mjs"
+          git apply --index --check doctor-artifact/doctor.patch
+          git apply --index doctor-artifact/doctor.patch
+          node "$RUNNER_TEMP/validate-pipeline-repair.mjs" "$GITHUB_WORKSPACE"
+          branch="pipeline-doctor/incident${INCIDENT_NUMBER}-run${GITHUB_RUN_ID}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git commit -m "fix: repair ${WORKFLOW_NAME} pipeline failure"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}" \
+            push "https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
+          pr_url="$(gh pr create \
+            --base "${{ github.event.repository.default_branch }}" \
+            --head "$branch" \
+            --title "fix: repair ${WORKFLOW_NAME} pipeline failure" \
+            --label pipeline:repair \
+            --body "<!-- pipeline-doctor repair=${SOURCE_SIGNATURE} source=${SOURCE_RUN} -->
+
+          Trusted Pipeline Doctor repair for [source run ${SOURCE_RUN}](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN}).
+
+          Closes #${INCIDENT_NUMBER}")"
+          pr_number="${pr_url##*/}"
+          [[ "$pr_number" =~ ^[1-9][0-9]*$ ]]
+          printf 'pr=%s\n' "$pr_number" >> "$GITHUB_OUTPUT"
+          # GITHUB_TOKEN-created PRs do not emit pull_request workflows.
+          gh workflow run ci.yml --ref "$branch"
+
+      - name: Record terminal diagnosis or repair
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          DIAGNOSE_RESULT: ${{ needs.diagnose.result }}
+          DOCTOR_DECISION: ${{ needs.diagnose.outputs.decision }}
+          PR_NUMBER: ${{ steps.repair.outputs.pr }}
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        with:
+          script: |
+            const fs = require("node:fs");
+            const doctor = await import(`${process.env.GITHUB_WORKSPACE}/scripts/pipeline-doctor.mjs`);
+            const { owner, repo } = context.repo;
+            const incident = Number(process.env.INCIDENT_NUMBER);
+            let result = {};
+            try { result = JSON.parse(fs.readFileSync("doctor-artifact/doctor-result.json", "utf8")); } catch {}
+            const report = doctor.redactDoctorEvidence(String(result.report ?? "Pipeline Doctor did not produce a diagnosis."), {
+              maxCharacters: 20000, maxLineCharacters: 600,
+            });
+            const decision = String(process.env.DOCTOR_DECISION ?? "failed");
+            const pr = Number(process.env.PR_NUMBER);
+            const addLabel = async (name) => github.rest.issues.addLabels({ owner, repo, issue_number: incident, labels: [name] });
+            if (decision === "repair" && process.env.VERIFY_RESULT === "success" && Number.isSafeInteger(pr) && pr > 0) {
+              await addLabel("pipeline:repair");
+              await github.rest.issues.createComment({ owner, repo, issue_number: incident,
+                body: `<!-- pipeline-doctor repair-pr=${pr} -->\nVerified repair published as PR #${pr}. It remains unmerged for normal CI and review.` });
+              return;
+            }
+            if (["application", "external", "noop"].includes(decision)) {
+              if (decision === "application") await addLabel("pipeline:application");
+              if (decision === "external") await addLabel("pipeline:external");
+              await github.rest.issues.createComment({ owner, repo, issue_number: incident,
+                body: `<!-- pipeline-doctor terminal=${decision} -->\n${report}` });
+              if (decision !== "external") {
+                await github.rest.issues.update({ owner, repo, issue_number: incident, state: "closed",
+                  state_reason: decision === "noop" ? "completed" : "not_planned" });
+              }
+              return;
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: incident, per_page: 100,
+            });
+            const attempts = comments.filter((comment) => comment.user?.id === 41898282
+              && String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
+            const exhausted = attempts >= 2;
+            if (exhausted) await addLabel("pipeline:external");
+            await github.rest.issues.createComment({ owner, repo, issue_number: incident,
+              body: exhausted
+                ? `<!-- pipeline-doctor terminal=diagnosis-failed -->\nAutomatic diagnosis failed twice. Inspect Pipeline Doctor run ${context.runId}; no repair was published.`
+                : `<!-- pipeline-doctor diagnosis-failed=${context.runId} -->\nDiagnosis or hosted repair verification failed. One bounded retry remains.` });
+
+  metrics:
+    name: Metrics
+    needs: [prepare, diagnose, verify, publish]
+    if: always()
+    permissions:
+      actions: read
+    uses: ./.github/workflows/pipeline-metrics.yml
+    with:
+      pipeline: Pipeline Doctor
