@@ -90,6 +90,19 @@ test("the same hosted failures twice stop repair churn even when the patch chang
   assert.equal(actions.dispatched, 0);
 });
 
+test("two pre-artifact infrastructure failures stop retry churn", async () => {
+  const marker = "<!-- agent-pipeline infrastructure-failure=pre-artifact -->";
+  const { github, context, actions } = fakeRecoveryGithub([
+    { body: `<!-- agent-pipeline run-failed=1 --> ${marker}` },
+    { body: `<!-- agent-pipeline run-failed=2 --> ${marker}` },
+  ]);
+
+  assert.equal(await recoverFailedIssue({ github, context }, 70), "error");
+  assert.ok(actions.comments.some((body) => body.includes("repeated-infrastructure=pre-artifact")));
+  assert.deepEqual(actions.labels, ["enhancement", "agent:error"]);
+  assert.equal(actions.dispatched, 0);
+});
+
 test("verification signatures cover the complete sorted failure index", () => {
   const first = verificationFailureSignature("Failure index:\n- test B\n- test A\n- test A");
   const reordered = verificationFailureSignature("Failure index:\n- test A\n- test B");

@@ -42,6 +42,14 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.ok(implement.includes(extractionRsync));
   assert.ok(implement.indexOf("validate-agent-patch.mjs\" --source") < implement.indexOf(extractionRsync));
   assert.match(implement, /cleanup-model-workspace\.mjs/);
+  const workspaceReset = '"$state_path" "$state_root/runners" "$model_dir"';
+  assert.ok(implement.includes(workspaceReset));
+  assert.ok(
+    implement.indexOf(workspaceReset) < implement.indexOf('git archive "$EXPECTED_BASE"'),
+    "retry reconstruction must restore and remove a preserved read-only workspace before extraction",
+  );
+  assert.match(implement, /if: steps\.result\.conclusion == 'success'/);
+  assert.match(implement, /temp_state="\$\{PIPELINE_MODEL_STATE:-\$RUNNER_TEMP\/agent-task\/cleanup-state\.json\}"/);
   assert.match(implement, /wait-for-openchamber-session\.mjs/);
   assert.doesNotMatch(implement, /openchamber session create[\s\S]*?--wait/);
   assert.match(implement, /session-dispatch\.json" 2>&1 \|\| true/);
@@ -64,6 +72,7 @@ test("implementation keeps models and candidate execution outside native-token p
   assert.match(publish, /GH_TOKEN: \$\{\{ github\.token \}\}/);
   assert.match(publish, /attempt-digest=\$\{attemptDigest\}/);
   assert.match(publish, /verification-signature=\$\{verificationSignature\}/);
+  assert.match(publish, /infrastructure-failure=\$\{infrastructureFailure\}/);
   const failureStep = publish.slice(publish.indexOf("Mark failed implementation or publication"));
   assert.ok(
     failureStep.indexOf("const pipeline = await import") < failureStep.indexOf("pipeline.verificationFailureSignature"),
