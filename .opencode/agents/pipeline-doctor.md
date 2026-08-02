@@ -9,35 +9,65 @@ permission:
   edit:
     "*": deny
     ".github/workflows/agent-reconcile.yml": allow
+    "**/.github/workflows/agent-reconcile.yml": allow
     ".github/workflows/agent-review-revoke.yml": allow
+    "**/.github/workflows/agent-review-revoke.yml": allow
     ".github/workflows/agent-review.yml": allow
+    "**/.github/workflows/agent-review.yml": allow
     ".github/workflows/agent-task.yml": allow
+    "**/.github/workflows/agent-task.yml": allow
     ".github/workflows/ci.yml": allow
+    "**/.github/workflows/ci.yml": allow
     ".github/workflows/pipeline-metrics.yml": allow
+    "**/.github/workflows/pipeline-metrics.yml": allow
     ".github/workflows/release.yml": allow
+    "**/.github/workflows/release.yml": allow
     ".opencode/agents/pipeline-orchestrator.md": allow
+    "**/.opencode/agents/pipeline-orchestrator.md": allow
     ".opencode/agents/pipeline-reviewer.md": allow
+    "**/.opencode/agents/pipeline-reviewer.md": allow
     ".opencode/agents/pipeline-risk-reviewer.md": allow
+    "**/.opencode/agents/pipeline-risk-reviewer.md": allow
     ".opencode/agents/pipeline-scout.md": allow
+    "**/.opencode/agents/pipeline-scout.md": allow
     ".opencode/agents/pipeline-tester.md": allow
+    "**/.opencode/agents/pipeline-tester.md": allow
     "docs/AGENT_PIPELINE.md": allow
+    "**/docs/AGENT_PIPELINE.md": allow
     "scripts/agent-pipeline.mjs": allow
+    "**/scripts/agent-pipeline.mjs": allow
     "scripts/cleanup-model-workspace.mjs": allow
+    "**/scripts/cleanup-model-workspace.mjs": allow
     "scripts/e2e-redaction.mjs": allow
+    "**/scripts/e2e-redaction.mjs": allow
     "scripts/run-e2e-shards.mjs": allow
+    "**/scripts/run-e2e-shards.mjs": allow
     "scripts/seed-model-workspace.mjs": allow
+    "**/scripts/seed-model-workspace.mjs": allow
     "scripts/summarize-verification-failure.mjs": allow
+    "**/scripts/summarize-verification-failure.mjs": allow
     "scripts/validation-manifest.mjs": allow
+    "**/scripts/validation-manifest.mjs": allow
     "scripts/wait-for-openchamber-session.mjs": allow
+    "**/scripts/wait-for-openchamber-session.mjs": allow
     "src/agent-patch-policy.test.mjs": allow
+    "**/src/agent-patch-policy.test.mjs": allow
     "src/agent-pipeline-security.test.mjs": allow
+    "**/src/agent-pipeline-security.test.mjs": allow
     "src/agent-pipeline.test.mjs": allow
+    "**/src/agent-pipeline.test.mjs": allow
     "src/e2e-redaction.test.mjs": allow
+    "**/src/e2e-redaction.test.mjs": allow
     "src/openchamber-session.test.mjs": allow
+    "**/src/openchamber-session.test.mjs": allow
     "src/release-safety.test.mjs": allow
+    "**/src/release-safety.test.mjs": allow
     "src/resume-previous-attempt.test.mjs": allow
+    "**/src/resume-previous-attempt.test.mjs": allow
     "src/validation-manifest.test.mjs": allow
+    "**/src/validation-manifest.test.mjs": allow
     "src/verification-feedback.test.mjs": allow
+    "**/src/verification-feedback.test.mjs": allow
   read:
     "*": allow
     "*.env": deny

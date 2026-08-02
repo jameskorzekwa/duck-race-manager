@@ -586,6 +586,16 @@ test("Pipeline Doctor isolates diagnosis from trusted publication", async () => 
   assert.match(agent, /task:\n\s+"\*": deny/);
   assert.match(agent, /pipeline-doctor\.yml/);
   assert.match(agent, /Do not edit application code/);
+  for (const allowed of [
+    ".github/workflows/agent-review.yml",
+    ".opencode/agents/pipeline-reviewer.md",
+    "docs/AGENT_PIPELINE.md",
+    "scripts/agent-pipeline.mjs",
+    "src/agent-pipeline-security.test.mjs",
+  ]) {
+    assert.match(agent, new RegExp(`"\\*\\*/${allowed.replaceAll(".", "\\.")}": allow`));
+  }
+  assert.doesNotMatch(agent, /"\*\*\/\.github\/workflows\/pipeline-doctor\.yml": allow/);
   const validator = await read("scripts/validate-pipeline-repair.mjs");
   assert.doesNotMatch(validator, /pipeline-doctor\.yml",/);
   assert.match(validator, /1,500-line limit/);
@@ -595,10 +605,14 @@ test("every merge lane can dispatch the release it creates", async () => {
   const review = await read(".github/workflows/agent-review.yml");
   const reviewLane = review.slice(review.indexOf("  queue-merge:"), review.indexOf("  metrics:"));
   assert.match(reviewLane, /actions: write/);
+  assert.match(reviewLane, /statuses: read/);
+  assert.doesNotMatch(reviewLane, /checks: read/);
 
   const reconcile = await read(".github/workflows/agent-reconcile.yml");
   const reconcileLane = reconcile.slice(reconcile.indexOf("  queue-next:"), reconcile.indexOf("  metrics:"));
   assert.match(reconcileLane, /actions: write/);
+  assert.match(reconcileLane, /statuses: read/);
+  assert.doesNotMatch(reconcileLane, /checks: read/);
 
   const implementation = await read("scripts/agent-pipeline.mjs");
   const slotSettlement = implementation.slice(
