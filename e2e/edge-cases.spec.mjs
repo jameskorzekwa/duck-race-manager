@@ -142,7 +142,7 @@ test.describe("race edge cases", () => {
       {
         role: "RESULT_TAKER",
         landing: "/staff/finish-line",
-        heading: "Record one official result",
+        heading: "Record and announce one result",
         navigation: ["Finish line"],
         opens: ["Finish line"],
         adminView: false,

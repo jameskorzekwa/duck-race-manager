@@ -112,9 +112,18 @@ test.describe("the heat-bag callout on the pairing page", () => {
     await page.route(`**/api/v1/staff/ducks/${secondDuck.tagToken}/assignments`, async (route) => {
       const response = await route.fetch();
       const body = await response.json();
+      const headers = response.headers();
+      // The body is deliberately rewritten below. Do not retain transport
+      // metadata for the original JSON bytes: Chromium otherwise reports a
+      // content-length/encoding resource error even though the synthetic API
+      // projection itself is valid and the pairing committed successfully.
+      delete headers["content-length"];
+      delete headers["content-encoding"];
       await route.fulfill({
-        response,
-        json: { ...body, heat: null, heatAssignmentPending: true },
+        status: response.status(),
+        headers,
+        contentType: "application/json",
+        body: JSON.stringify({ ...body, heat: null, heatAssignmentPending: true }),
       });
     });
 

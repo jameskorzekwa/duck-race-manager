@@ -109,6 +109,24 @@ test("public board stays ordered, current, and privacy-filtered through the race
   assert.deepEqual(roundOne.event.podium, []);
 
   database.exec(`
+    UPDATE heats SET status = 'AWAITING_RESULT' WHERE id = 'round-2';
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+    VALUES ('record-pending-2', 'event', 'RECORD_HEAT_RESULT', 'round-2',
+            '2026-07-26T01:05:00Z', '2026-07-26T01:05:00Z', 'staff');
+    INSERT INTO pending_heat_results
+      (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
+       result_revision, recorded_at, recorded_by_staff_profile_id, source_command_id)
+    VALUES ('pending-2', 'event', 'round-2', 'entry-2', 'assignment-2', 1,
+            1, '2026-07-26T01:05:00Z', 'staff', 'record-pending-2');
+  `);
+  const awaitingAnnouncement = await responseBoard(database);
+  assert.equal(awaitingAnnouncement.event.roundOneHeats[1].status, "AWAITING_RESULT");
+  assert.equal(awaitingAnnouncement.event.roundOneHeats[1].roster[0].place, null,
+    "a recorded but unannounced result is not public");
+  database.exec("DELETE FROM pending_heat_results WHERE heat_id = 'round-2'");
+
+  database.exec(`
     UPDATE heats SET status = 'FINALIZED', finalized_at = '2026-07-26T01:10:00Z' WHERE id = 'round-2';
     INSERT INTO heat_results
       (id, event_id, heat_id, race_entry_id, duck_assignment_id, place, revision,

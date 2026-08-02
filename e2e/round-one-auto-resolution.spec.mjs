@@ -72,7 +72,7 @@ const runHeatManually = async (token, eventId, heatId) => {
   }
   const winner = detail.roster.find((entry) => entry.eligible);
   expect(winner, `heat ${detail.heat.number} has no eligible manual winner`).toBeTruthy();
-  const finalized = await rawJson(`/api/v1/staff/events/${eventId}/heats/${heatId}/results/finalize`, {
+  const recorded = await rawJson(`/api/v1/staff/events/${eventId}/heats/${heatId}/results/finalize`, {
     token,
     method: "POST",
     body: {
@@ -81,7 +81,16 @@ const runHeatManually = async (token, eventId, heatId) => {
       results: [{ raceEntryId: winner.raceEntryId, place: 1 }],
     },
   });
-  expect(finalized.status, `finalize heat ${detail.heat.number}: ${JSON.stringify(finalized.body)}`).toBe(201);
+  expect(recorded.status, `record heat ${detail.heat.number}: ${JSON.stringify(recorded.body)}`).toBe(201);
+  const announced = await rawJson(`/api/v1/staff/events/${eventId}/heats/${heatId}/winner-announced`, {
+    token,
+    method: "POST",
+    body: { commandId: crypto.randomUUID(), revision: recorded.body.heat.revision },
+  });
+  expect(
+    announced.status,
+    `confirm heat ${detail.heat.number} winner announced: ${JSON.stringify(announced.body)}`,
+  ).toBe(201);
   return winner.raceEntryId;
 };
 

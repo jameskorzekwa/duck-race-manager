@@ -2534,12 +2534,14 @@ that slipped past the filter becomes a public-address announcement with no undo,
 while every written surface can be moderated in seconds; and the announcer needs
 the duck number, not a second ambiguous label, to line racers up.
 
-Every heat that already has a published result appears under **Recorded
-winners** with its round, heat number, winner's full name, and duck number, so
-the announcer can call the winner out as soon as the finish-line staffer records
-it. The final additionally renders the full official podium. A settled heat's
-detail is read once per heat revision, so a live signal never refetches the
-whole race, and a race-director correction is picked up immediately.
+When finish-line staff record a result, the station shows it first as **Announce
+this winner now**, with the round, heat number, winner's full name, and duck number.
+The announcer says the winner aloud; finish-line staff then press **Winner
+announced** on their station. Only that confirmation publishes the result and
+finalizes the heat. Published results appear under **Recorded winners**; the final
+additionally renders the full official podium. Heat detail is read once per heat
+revision, so a live signal never refetches the whole race, and a race-director
+correction is picked up immediately.
 
 The page subscribes to the shared live hub on the `event`, `participants`,
 `ducks`, and `heats` domains and refetches the authoritative APIs on a signal,
@@ -2556,7 +2558,7 @@ duck's current participant is an active member of that roster, the inspection
 page leads with **Mark Duck as Heat N Winner**. The
 confirmed POST revalidates the tag, assignment, roster entry, event round, heat
 revision, and sole awaiting heat inside the atomic result command before it
-publishes the winner. A role without registration PII permission receives no
+records the pending winner. A role without registration PII permission receives no
 contact details, lookup code, pairing control, or name-moderation control on that
 inspection page.
 
@@ -2588,32 +2590,42 @@ and the required-place count use, and it omits any racer with no duck assigned.
 It is rebuilt on every repaint, so a racer who withdraws while it is on screen
 leaves the list without a reload, and moving to the next heat replaces the
 options wholesale. A placeholder option leads the list, so nobody is preselected
-into an accidental publish, and choosing a name publishes nothing by itself: a
+into an accidental recording, and choosing a name writes nothing by itself: a
 separate **Record selected duck as winner** action, behind a danger confirmation
 that reads back the duck, the racer, and the heat, commits it.
 
 All of that is convenience only. The manual action posts the same command to the
 same guarded `results/finalize` endpoint the reviewed station form uses, with the
 same heat revision and a fresh RFC 4122 v4 `commandId`, so a manually selected
-winner and a scanned one are the same write: same role check, same result
-validation, same idempotent replay, same audit event, and the same promotion of
-the winner into the final. There is no second, weaker way to publish a result,
-and the server still refuses a cross-heat race entry, an ineligible racer, or a
-stale revision regardless of what the control offered.
+winner and a scanned one are the same provisional write: same role check, same
+result validation, same idempotent replay, and the same audit event. Neither path
+publishes or promotes a winner until finish-line staff confirm **Winner announced**.
+There is no second, weaker result path, and the server still refuses a cross-heat
+race entry, an ineligible racer, or a stale revision regardless of what the
+control offered.
 
 **A scanned winner returns the staffer to the finish line.** Only a committed
-publish navigates: on success the inspection page sends the browser to a fixed
+recording navigates: on success the inspection page sends the browser to a fixed
 same-origin `/staff/finish-line` path carrying the visible duck/heat numbers and
 bounded event, heat, and race-entry verification keys. The station removes that
-one-shot context from the address bar immediately and reads the exact finalized
-round-one result back through the authenticated heat-detail handler. Only a
-matching first-place race entry and visible duck number reveal the *Official
-winner saved* acknowledgement and finalists-bag reminder, so a hand-edited URL
-cannot assert success. The current and next-heat state is fetched independently
-and never derived from the query string. Every failure and every conflict stays on
-the inspection page with the server's own actionable error, re-enables the
-control, and neither navigates nor claims success. The manual fallback shows the
-same acknowledgement in place, without a navigation, because it is already there.
+one-shot context from the address bar immediately and verifies the matching
+pending first-place race entry through the authenticated heat-detail handler.
+Only a matching race entry and visible duck number reveal the acknowledgement,
+which says the result is waiting for the announcer rather than claiming it is
+official, so a hand-edited URL cannot assert success. The heat state is fetched
+independently and never derived from the query string. Every failure and every
+conflict stays on the inspection page with the server's own actionable error,
+re-enables the control, and neither navigates nor claims success. The manual
+fallback shows the same pending acknowledgement in place because it is already
+there.
+
+The finish-line **Winner announced** action appears only while the complete
+recorded result still matches the current eligible roster and duck assignments.
+If a racer leaves or an assignment changes before the announcement, both stations
+stop presenting that row as the winner; the finish line asks a race director to
+reset or repair the heat instead of offering a confirmation the server would
+refuse. Reactivation restores the action through live refresh when the recorded
+result is valid again.
 
 **A withdrawn or disqualified duck at the finish line is an expected outcome,
 not an error.** A duck that has been paired is already inside a heat bag, and
@@ -2667,7 +2679,7 @@ may be. When that count is zero:
   that is still `RUNNING` keeps its finish button, with that sentence appended,
   because those ducks are physically on the water and the heat must still be
   marked finished.
-- The staff duck inspection page, which is where round one actually publishes,
+- The staff duck inspection page, which is where round one records its winner,
   adds *Nobody in Heat N can win* to the statement about the scanned duck,
   explains that every duck in that bag will be refused, and asks for reactivation
   instead of the next scan. It answers that question by reading the same heat
@@ -2678,17 +2690,17 @@ may be. When that count is zero:
 Reactivation is the remedy on both, it is available to a race director at any
 point, and it restores the winner action on the very next scan.
 
-**The final is published by scanning too, one duck and one place at a time.**
-Round one awards a single place, so its scan publishes a winner outright. The
-final awards up to three, so the scanned duck's inspection page asks which place
-it took and offers only the places that are still open. See Final Results.
+**The final is recorded by scanning too, one duck and one place at a time.**
+Round one awards a single place, so its scan records the pending winner outright.
+The final awards up to three, so the scanned duck's inspection page asks which
+place it took and offers only the places that are still open. See Final Results.
 
 The finish-line station keeps its complete-podium form as the way to assemble a
 final podium by duck number when nothing has been scanned into it. It requires
 distinct places 1 through `min(3, eligible final roster size)` — the same count
 the server's result validation requires, so a podium reduced by a withdrawal can
-actually be published. Every selection displays place, policy-filtered
-participant name, and visible duck number before one **Submit official podium**
+actually be recorded. Every selection displays place, policy-filtered
+participant name, and visible duck number before one **Record podium**
 confirmation. Only one tag or number lookup can run at a time; the station
 discards a response if event, heat, revision, or intended place changed. The
 role-guarded result endpoint revalidates each selected registration and current
@@ -2703,24 +2715,30 @@ swap prevents; clearing every scanned place hands the form back.
 Only one heat in an event may be `RUNNING`, and no heat may start while any other
 heat in that event is `AWAITING_RESULT`. Preparing, locking, readying, and
 calling the next heat may overlap, but starting conflicts until the prior heat's
-official result is published. Every transition requires the currently loaded
-heat revision and is rechecked atomically against event round, heat state,
-pending results, and roster eligibility.
+winner announcement is confirmed and its official result is published. Every
+transition requires the currently loaded heat revision and is rechecked
+atomically against event round, heat state, pending results, and roster
+eligibility.
 
 **Operator step:** before locking, count physical ducks, compare the displayed
 roster with the bag, and verify the configured target. The server requires only
-a nonempty roster; it does not require `rosterSize == targetSize`. The announcer
-roster is a read-only list. There is no checklist-complete or announced-at
-record.
+a nonempty roster; it does not require `rosterSize == targetSize`. That operator
+check remains verbal and has no checklist record. Result announcement is a
+separate durable action: the finish-line station's **Winner announced**
+confirmation records the announcement time and publishes the pending result.
 
 ## Round-One Results and Finalist Promotion
 
 After a round-one heat reaches `AWAITING_RESULT`, a result taker, race director,
 or administrator may scan its winning duck and confirm the winner action on the
 staff inspection page, or use the explicitly last-resort manual selector when
-the permanent tag cannot be scanned. QuickDucks atomically:
+the permanent tag cannot be scanned. QuickDucks records one private pending
+first-place result linked to the current duck assignment and leaves the heat in
+`AWAITING_RESULT`. The announcer reads that result aloud and finish-line staff
+press **Winner announced**. That second guarded command atomically:
 
-- Writes one finalized first-place result linked to the current duck assignment.
+- Writes the finalized first-place result.
+- Records the announcement time and clears the pending result.
 - Changes the heat to `FINALIZED`.
 - Creates the single planned final heat if needed.
 - Adds the winner to the next final slot.
@@ -2734,11 +2752,13 @@ by the authoritative lifecycle checks instead.
 
 ## Final Results
 
-The final follows the same lock, ready, call, start, and finish transitions.
-When it reaches `AWAITING_RESULT`, a result taker, race director, or administrator must publish exactly
-places 1 through `min(3, eligible final roster size)`, using distinct finalists
-who are still `ACTIVE`. All required places are written in one atomic command and
-the final becomes `FINALIZED`.
+The final follows the same lock, ready, call, start, finish, record, and announce
+transitions. When it reaches `AWAITING_RESULT`, a result taker, race director, or
+administrator must record exactly places 1 through `min(3, eligible final roster
+size)`, using distinct finalists who are still `ACTIVE`. The complete podium
+remains private and the heat remains `AWAITING_RESULT` until finish-line staff
+press **Winner announced**; that confirmation atomically publishes every required
+place and changes the final to `FINALIZED`.
 
 ### Scanning the podium
 
@@ -2759,10 +2779,11 @@ which place that duck took instead of offering a single winner button.
 - Each recorded place is provisional. It lives in `final_podium_selections`, not
   in `heat_results`, so no reader anywhere has to filter a half-finished podium
   out of a result set and no partial podium can reach the public board.
-- **The scan that fills the last required place publishes the whole podium** in
-  one atomic command, writing every `heat_results` row, clearing the provisional
-  rows, and finalizing the heat. There is no separate submit to remember on the
-  one result everybody is waiting for.
+- **The scan that fills the last required place records the whole podium** in
+  one atomic command, moving every provisional selection into the private pending
+  result and clearing the selection rows. The finish-line station's separate
+  **Winner announced** confirmation publishes every `heat_results` row and
+  finalizes the heat.
 
 Recording a place moves the heat revision, so a station holding a stale page is
 refused and reloads rather than landing on a podium that moved. Each scan carries
@@ -2776,18 +2797,18 @@ Withdrawal and disqualification are handled exactly as they are in round one. A
 scanned duck whose racer left is refused with `DUCK_NOT_ELIGIBLE` and the page
 says so plainly instead of failing. A recorded place whose racer leaves
 afterwards stops holding that place and it reopens, because the batch that would
-publish it refuses to write them.
+record the complete result refuses to write them.
 
 **A withdrawal can also complete a podium nobody finished scanning.** If enough
 places are already recorded when the podium shrinks, the scan that would have
-published it is never coming — every duck still unscanned belongs to a racer the
+completed it is never coming — every duck still unscanned belongs to a racer the
 result paths refuse. The finish-line station therefore reports the podium as
-complete and offers **Publish official podium** for exactly the places already
+complete and offers **Record completed podium** for exactly the places already
 standing on it, rather than leaving a finished race that cannot be recorded.
 
 A heat reset throws the recorded places away with the finish they described, and
-publishing through the console or station form clears them too, so a podium
-published by hand can never be contradicted by a leftover scan.
+recording through the console or station form clears them too, so a complete
+pending podium can never be contradicted by a leftover scan.
 
 **A withdrawal shrinks the podium, and every surface counts it the same way.**
 The finish-line station and the console result form both derive the number of
@@ -2802,9 +2823,9 @@ sizes the podium at the moment it is written; completion afterwards only ever
 requires that the published podium be *at least* as deep as the current eligible
 count, never exactly equal to it. See Start Final and Complete Event.
 
-The console result form — used for the FINAL finalize, the FINAL correction, and
-the ROUND_ONE correction — offers only eligible racers in its place selects, so
-it cannot propose a winner the server refuses, and it does not preselect a
+The console result form — used for the initial FINAL recording, the FINAL
+correction, and the ROUND_ONE correction — offers only eligible racers in its
+place selects, so it cannot propose a winner the server refuses, and it does not preselect a
 published place whose racer has since left. The heat roster above it is
 unchanged: every entry is still listed, marked. A heat with no eligible racer at
 all renders a plain explanation instead of an empty, unsubmittable form, and the
@@ -2813,15 +2834,16 @@ places.
 
 The event remains `FINAL` until a race director or administrator runs `Complete event`.
 The places may be scanned in any order, but they are never published in stages:
-whichever surface publishes, every place is written in one atomic command.
+whichever surface records them, the finish-line confirmation publishes every
+place in one atomic command.
 
 ## Result Corrections
 
 All result corrections and reopens require `RACE_DIRECTOR` or a system
 administrator, a fresh heat revision, a 4-to-500-character reason, and explicit
-confirmation. Result takers and race directors may finalize the single new
-round-one winner or a new final result. A result taker cannot alter a published
-result without the director role.
+confirmation. Result takers and race directors may record the single new
+round-one winner or a new final result for announcement. A result taker cannot
+alter a published result without the director role.
 
 A correction writes new `heat_results` rows, so it is held to exactly the rule a
 first publication is: every racer it names must still be `ACTIVE` and must still

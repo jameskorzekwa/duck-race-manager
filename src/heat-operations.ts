@@ -88,6 +88,7 @@ interface HeatSummaryRow {
   finalized_at: string | null;
   roster_size: number;
   published_result_count: number;
+  pending_result_count: number;
   result_correction_allowed: number;
   result_reopen_allowed: number;
 }
@@ -101,6 +102,7 @@ const heatSummary = (row: HeatSummaryRow): Record<string, unknown> => ({
   targetSize: row.target_size,
   rosterSize: row.roster_size,
   publishedResultCount: row.published_result_count,
+  pendingResultCount: row.pending_result_count,
   resultCorrectionAllowed: row.result_correction_allowed === 1,
   resultReopenAllowed: row.result_reopen_allowed === 1,
   revision: row.revision,
@@ -204,7 +206,9 @@ const heatSummarySql = `SELECT h.id, h.event_id, h.round, h.heat_number, h.statu
        h.finished_at, h.finalized_at,
        (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) AS roster_size,
        (SELECT COUNT(*) FROM heat_results hr
-          WHERE hr.heat_id = h.id AND hr.status = 'FINALIZED') AS published_result_count,
+           WHERE hr.heat_id = h.id AND hr.status = 'FINALIZED') AS published_result_count,
+       (SELECT COUNT(*) FROM pending_heat_results pending
+          WHERE pending.heat_id = h.id) AS pending_result_count,
        CASE WHEN h.status = 'FINALIZED' AND (
          (h.round = 'ROUND_ONE' AND EXISTS (
            SELECT 1
@@ -319,6 +323,41 @@ interface PublishedResultRow {
   source_command_id: string;
 }
 
+interface PendingResultRow {
+  id: string;
+  race_entry_id: string;
+  duck_assignment_id: string;
+  place: number;
+  result_revision: number;
+  recorded_at: string;
+  recorded_by_staff_profile_id: string;
+  source_command_id: string;
+  first_name: string;
+  last_name: string;
+  registration_status: string;
+  visible_number: number;
+  assignment_current: number;
+}
+
+const pendingResults = (
+  env: Env,
+  eventId: string,
+  heatId: string,
+): Promise<D1Result<PendingResultRow>> => env.DB.prepare(
+  `SELECT pending.id, pending.race_entry_id, pending.duck_assignment_id,
+          pending.place, pending.result_revision, pending.recorded_at,
+          pending.recorded_by_staff_profile_id, pending.source_command_id,
+          r.first_name, r.last_name, r.status AS registration_status,
+          d.visible_number, CASE WHEN da.valid_to IS NULL THEN 1 ELSE 0 END AS assignment_current
+     FROM pending_heat_results pending
+     JOIN race_entries re ON re.id = pending.race_entry_id
+     JOIN registrations r ON r.id = re.registration_id
+     JOIN duck_assignments da ON da.id = pending.duck_assignment_id
+     JOIN ducks d ON d.id = da.duck_id
+    WHERE pending.event_id = ? AND pending.heat_id = ?
+    ORDER BY pending.place`,
+).bind(eventId, heatId).all<PendingResultRow>();
+
 // A published result keeps naming the racer it named when it was published, even
 // if that racer has since been disqualified. Staff need to see both facts at
 // once to decide whether to reopen or correct the result, so the current
@@ -383,12 +422,28 @@ const resultResponseRow = (row: PublishedResultRow): Record<string, unknown> => 
   duck: { visibleNumber: row.visible_number },
 });
 
+const pendingResultResponseRow = (row: PendingResultRow): Record<string, unknown> => ({
+  id: row.id,
+  raceEntryId: row.race_entry_id,
+  place: row.place,
+  resultRevision: row.result_revision,
+  recordedAt: row.recorded_at,
+  eligible: row.registration_status === "ACTIVE" && row.assignment_current === 1,
+  participant: {
+    firstName: row.first_name,
+    lastName: row.last_name,
+    registrationStatus: row.registration_status,
+  },
+  duck: { visibleNumber: row.visible_number },
+});
+
 const getHeatDetail = async (env: Env, eventId: string, heatId: string): Promise<Response> => {
   const heat = await getHeatSummary(env, eventId, heatId);
   if (heat === null) return json({ error: "Heat not found." }, 404);
-  const [roster, results, podium] = await Promise.all([
+  const [roster, results, pending, podium] = await Promise.all([
     env.DB.prepare(rosterSql).bind(eventId, heatId).all<RosterRow>(),
     publishedResults(env, eventId, heatId),
+    pendingResults(env, eventId, heatId),
     // The final builds its podium one scan at a time, so the places taken so far
     // are part of the heat a station is looking at, not a separate thing it has
     // to go and ask about. Round one has no provisional state to report, and
@@ -401,7 +456,8 @@ const getHeatDetail = async (env: Env, eventId: string, heatId: string): Promise
     heat: heatSummary(heat),
     roster: roster.results.map(rosterResponse),
     results: results.results.map(resultResponseRow),
-    podium,
+    pendingResults: pending.results.map(pendingResultResponseRow),
+    podium: pending.results.length > 0 ? null : podium,
   });
 };
 
@@ -430,7 +486,10 @@ const getHeatDetail = async (env: Env, eventId: string, heatId: string): Promise
 const announcerRoster = async (env: Env, eventId: string, heatId: string): Promise<Response> => {
   const heat = await getHeatSummary(env, eventId, heatId);
   if (heat === null) return json({ error: "Heat not found." }, 404);
-  const roster = await env.DB.prepare(rosterSql).bind(eventId, heatId).all<RosterRow>();
+  const [roster, pending] = await Promise.all([
+    env.DB.prepare(rosterSql).bind(eventId, heatId).all<RosterRow>(),
+    pendingResults(env, eventId, heatId),
+  ]);
   return json({
     heat: heatSummary(heat),
     roster: roster.results.map((row) => ({
@@ -440,6 +499,13 @@ const announcerRoster = async (env: Env, eventId: string, heatId: string): Promi
       duckNumber: row.visible_number,
       registrationStatus: row.registration_status,
       eligible: row.registration_status === "ACTIVE",
+    })),
+    pendingResults: pending.results.map((row) => ({
+      raceEntryId: row.race_entry_id,
+      place: row.place,
+      displayName: `${row.first_name} ${row.last_name}`,
+      duckNumber: row.visible_number,
+      eligible: row.registration_status === "ACTIVE" && row.assignment_current === 1,
     })),
   });
 };
@@ -621,10 +687,14 @@ export const winnerByTagIneligible = async (
          ON r.id = re.registration_id AND ${INELIGIBLE_REGISTRATION_STATUS_SQL}
       WHERE dt.token = ? AND dt.status = 'ACTIVE'
         AND ${SCANNED_RESULT_ROUND_SQL}
-        AND (SELECT COUNT(*) FROM heats awaiting
-              WHERE awaiting.event_id = e.id
-                AND awaiting.status = 'AWAITING_RESULT') = 1
-      LIMIT 1`,
+         AND (SELECT COUNT(*) FROM heats awaiting
+               WHERE awaiting.event_id = e.id
+                 AND awaiting.status = 'AWAITING_RESULT') = 1
+         AND NOT EXISTS (
+           SELECT 1 FROM pending_heat_results pending
+            WHERE pending.event_id = h.event_id AND pending.heat_id = h.id
+         )
+       LIMIT 1`,
   ).bind(token).first<{
     event_id: string;
     heat_id: string;
@@ -772,10 +842,14 @@ export const winnerByTagCandidate = async (
        JOIN registrations r ON r.id = re.registration_id AND r.status = 'ACTIVE'
       WHERE dt.token = ? AND dt.status = 'ACTIVE'
         AND ${SCANNED_RESULT_ROUND_SQL}
-        AND (SELECT COUNT(*) FROM heats awaiting
-              WHERE awaiting.event_id = e.id
-                AND awaiting.status = 'AWAITING_RESULT') = 1
-      LIMIT 1`,
+         AND (SELECT COUNT(*) FROM heats awaiting
+               WHERE awaiting.event_id = e.id
+                 AND awaiting.status = 'AWAITING_RESULT') = 1
+         AND NOT EXISTS (
+           SELECT 1 FROM pending_heat_results pending
+            WHERE pending.event_id = h.event_id AND pending.heat_id = h.id
+         )
+       LIMIT 1`,
   ).bind(token).first<{
     event_id: string;
     heat_id: string;
@@ -842,6 +916,9 @@ const finishScan = async (url: URL, env: Env, eventId: string, heatId: string): 
   if (heat === null) return json({ error: "Heat not found." }, 404);
   if (heat.status !== "AWAITING_RESULT") {
     return json({ error: "Mark this heat finished before scanning its result. Then scan the duck again." }, 409);
+  }
+  if (heat.pending_result_count > 0) {
+    return json({ error: "This heat already has a recorded result awaiting winner announcement." }, 409);
   }
 
   const selection = await env.DB.prepare(
@@ -1486,6 +1563,10 @@ const resetHeat = async (
         commandId, eventId, heatId, now, now, actor.id, requestFingerprint,
         heatId, eventId, revision,
       ),
+      // A recorded-but-unannounced result describes the running that is being
+      // discarded. Clear it before changing status; the schema deliberately
+      // blocks old Workers from stranding one outside AWAITING_RESULT.
+      clearPendingResultsStatement(env, eventId, heatId, commandId),
       env.DB.prepare(
         `UPDATE heats
             SET status = 'LOADING', started_at = NULL, finished_at = NULL,
@@ -1575,14 +1656,18 @@ const resultContext = (
           h.revision, h.roster_locked_at, h.started_at, h.finished_at, h.finalized_at,
           e.status AS event_status, e.final_heat_capacity,
           (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) AS roster_size,
-          (SELECT COUNT(*) FROM heat_results current
-            WHERE current.heat_id = h.id AND current.status = 'FINALIZED') AS published_result_count,
-          MAX(
-            COALESCE((SELECT MAX(current_history.revision) FROM heat_results current_history
-                      WHERE current_history.heat_id = h.id), 0),
-            COALESCE((SELECT MAX(old_history.revision) FROM heat_result_history old_history
-                      WHERE old_history.heat_id = h.id), 0)
-          ) AS result_revision
+           (SELECT COUNT(*) FROM heat_results current
+             WHERE current.heat_id = h.id AND current.status = 'FINALIZED') AS published_result_count,
+           (SELECT COUNT(*) FROM pending_heat_results pending
+             WHERE pending.heat_id = h.id) AS pending_result_count,
+           MAX(
+             COALESCE((SELECT MAX(current_history.revision) FROM heat_results current_history
+                       WHERE current_history.heat_id = h.id), 0),
+             COALESCE((SELECT MAX(old_history.revision) FROM heat_result_history old_history
+                       WHERE old_history.heat_id = h.id), 0),
+             COALESCE((SELECT MAX(pending.result_revision) FROM pending_heat_results pending
+                       WHERE pending.heat_id = h.id), 0)
+           ) AS result_revision
      FROM heats h JOIN events e ON e.id = h.event_id
     WHERE h.event_id = ? AND h.id = ? LIMIT 1`,
 ).bind(eventId, heatId).first<ResultContext>();
@@ -1717,8 +1802,8 @@ const activeSelectionGuardSql = (
   ) = ?`;
 
 // Provisional podium places are scratch state, so every command that ends a
-// final's wait for a result drops them: publishing turns them into the podium,
-// and resetting the heat throws away the finish they described. The delete is
+// final's wait for a result drops them: recording turns them into the complete
+// pending podium, and resetting the heat throws away the finish they described. The delete is
 // tied to the command that authorized it so a batch whose guarded command row
 // was refused cannot still erase a station's scans.
 const clearPodiumSelectionsStatement = (
@@ -1728,6 +1813,20 @@ const clearPodiumSelectionsStatement = (
   commandId: string,
 ): D1PreparedStatement => env.DB.prepare(
   `DELETE FROM final_podium_selections
+    WHERE event_id = ? AND heat_id = ?
+      AND EXISTS (
+        SELECT 1 FROM race_commands rc
+         WHERE rc.id = ? AND rc.event_id = ? AND rc.result_id = ?
+      )`,
+).bind(eventId, heatId, commandId, eventId, heatId);
+
+const clearPendingResultsStatement = (
+  env: Env,
+  eventId: string,
+  heatId: string,
+  commandId: string,
+): D1PreparedStatement => env.DB.prepare(
+  `DELETE FROM pending_heat_results
     WHERE event_id = ? AND heat_id = ?
       AND EXISTS (
         SELECT 1 FROM race_commands rc
@@ -1752,6 +1851,24 @@ const finalizedResultResponse = async (
   }, replayed ? 200 : 201);
 };
 
+const recordedResultResponse = async (
+  env: Env,
+  eventId: string,
+  heatId: string,
+  replayed: boolean,
+): Promise<Response> => {
+  const [heat, pending] = await Promise.all([
+    getHeatSummary(env, eventId, heatId),
+    pendingResults(env, eventId, heatId),
+  ]);
+  return json({
+    heat: heat === null ? null : heatSummary(heat),
+    pendingResults: pending.results.map(pendingResultResponseRow),
+    results: [],
+    replayed,
+  }, replayed ? 200 : 201);
+};
+
 const finalizeResultSet = async (
   env: Env,
   actor: StaffActor,
@@ -1767,8 +1884,8 @@ const finalizeResultSet = async (
     : { heatId, results, tagToken });
   const previous = await findCommand(env, commandId);
   if (previous !== null) {
-    return commandMatches(previous, eventId, heatId, "FINALIZE_HEAT_RESULT", requestFingerprint)
-      ? finalizedResultResponse(env, eventId, heatId, true)
+    return commandMatches(previous, eventId, heatId, "RECORD_HEAT_RESULT", requestFingerprint)
+      ? recordedResultResponse(env, eventId, heatId, true)
       : json({ error: "This command identifier was already used for another operation." }, 409);
   }
 
@@ -1788,27 +1905,15 @@ const finalizeResultSet = async (
   if (context.status !== "AWAITING_RESULT" || context.revision !== revision) {
     return json({ error: "The heat is not awaiting this result revision." }, 409);
   }
+  if (context.pending_result_count > 0) {
+    return json({ error: "This heat already has a recorded result awaiting winner announcement." }, 409);
+  }
   const validation = validateResultSet(context.round, results, rosterResult.results);
   if (validation !== null) return validation;
   if (
     (context.round === "ROUND_ONE" && context.event_status !== "ROUND_ONE")
     || (context.round === "FINAL" && context.event_status !== "FINAL")
   ) return json({ error: "The event is not in the required round." }, 409);
-
-  let finalHeat: { id: string; status: string; roster_locked_at: string | null; roster_size: number } | null = null;
-  if (context.round === "ROUND_ONE") {
-    finalHeat = await env.DB.prepare(
-      `SELECT h.id, h.status, h.roster_locked_at,
-              (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) AS roster_size
-         FROM heats h WHERE h.event_id = ? AND h.round = 'FINAL' LIMIT 1`,
-    ).bind(eventId).first<{ id: string; status: string; roster_locked_at: string | null; roster_size: number }>();
-    if (finalHeat !== null && (finalHeat.status !== "PLANNED" || finalHeat.roster_locked_at !== null)) {
-      return json({ error: "The final roster is locked and cannot accept another winner." }, 409);
-    }
-    if ((finalHeat?.roster_size ?? 0) >= context.final_heat_capacity) {
-      return json({ error: "The final heat has reached its configured capacity." }, 409);
-    }
-  }
 
   const now = new Date().toISOString();
   const resultRevision = context.result_revision + 1;
@@ -1839,9 +1944,13 @@ const finalizeResultSet = async (
     `INSERT INTO race_commands
       (id, event_id, command_type, result_id, requested_at, completed_at,
        actor_staff_profile_id, request_fingerprint)
-     SELECT ?, ?, 'FINALIZE_HEAT_RESULT', ?, ?, ?, ?, ?
-       FROM heats h JOIN events e ON e.id = h.event_id
-       WHERE h.id = ? AND h.event_id = ? AND h.status = 'AWAITING_RESULT' AND h.revision = ?
+      SELECT ?, ?, 'RECORD_HEAT_RESULT', ?, ?, ?, ?, ?
+        FROM heats h JOIN events e ON e.id = h.event_id
+        WHERE h.id = ? AND h.event_id = ? AND h.status = 'AWAITING_RESULT' AND h.revision = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM pending_heat_results pending
+             WHERE pending.event_id = h.event_id AND pending.heat_id = h.id
+          )
           AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
            OR (h.round = 'FINAL' AND e.status = 'FINAL'))
           ${activeResultGuard}
@@ -1856,45 +1965,27 @@ const finalizeResultSet = async (
   )];
   for (const result of results) {
     statements.push(env.DB.prepare(
-      `INSERT INTO heat_results
+      `INSERT INTO pending_heat_results
         (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
-         status, revision, finalized_at, recorded_by_staff_profile_id, source_command_id)
-       VALUES (?, ?, ?, ?, ?, ?, 'FINALIZED', ?, ?, ?, ?)`,
+         result_revision, recorded_at, recorded_by_staff_profile_id, source_command_id)
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE ${commandExistsSql}`,
     ).bind(
       crypto.randomUUID(), eventId, heatId, result.raceEntryId,
       assignments.get(result.raceEntryId), result.place, resultRevision, now, actor.id, commandId,
+      commandId, eventId, heatId,
     ));
   }
   if (context.round === "FINAL") {
-    // The podium is published, so the provisional places the scans collected
-    // have become the result and must not outlive it. This runs for the
+    // The podium is fully recorded, so the provisional places the scans collected
+    // have become the pending result and must not outlive it. This runs for the
     // director's recovery form as well as for the scan that completes the
-    // podium, because a director publishing a different podium by hand is
+    // podium, because a director recording a different podium by hand is
     // exactly the case where a leftover scanned place would contradict it.
     statements.push(clearPodiumSelectionsStatement(env, eventId, heatId, commandId));
   }
-  if (context.round === "ROUND_ONE") {
-    const finalHeatId = finalHeat?.id ?? crypto.randomUUID();
-    if (finalHeat === null) {
-      statements.push(env.DB.prepare(
-        `INSERT INTO heats
-          (id, event_id, round, heat_number, status, target_size, source_command_id)
-         VALUES (?, ?, 'FINAL', 1, 'PLANNED', ?, ?)`,
-      ).bind(finalHeatId, eventId, context.final_heat_capacity, commandId));
-    }
-    statements.push(env.DB.prepare(
-      `INSERT INTO heat_entries
-        (id, event_id, heat_id, race_entry_id, round, slot_number,
-         assignment_source, assigned_at, source_command_id)
-       VALUES (?, ?, ?, ?, 'FINAL', ?, 'WINNER_PROMOTION', ?, ?)`,
-    ).bind(
-      crypto.randomUUID(), eventId, finalHeatId, results[0].raceEntryId,
-      (finalHeat?.roster_size ?? 0) + 1, now, commandId,
-    ));
-  }
   statements.push(env.DB.prepare(
-    `UPDATE heats SET status = 'FINALIZED', finalized_at = ?, revision = revision + 1,
-            source_command_id = ?, updated_at = ?
+    `UPDATE heats SET revision = revision + 1, source_command_id = ?, updated_at = ?
       WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT' AND revision = ?
         AND (
           SELECT COUNT(DISTINCT selected.race_entry_id)
@@ -1905,14 +1996,14 @@ const finalizeResultSet = async (
              AND selected.race_entry_id IN (${selectedPlaceholders}) AND r.status = 'ACTIVE'
         ) = ?`,
   ).bind(
-    now, commandId, now, heatId, eventId, revision,
+    commandId, now, heatId, eventId, revision,
     ...results.map((result) => result.raceEntryId), results.length,
   ));
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id,
        actor_type, occurred_at, details_json)
-     VALUES (?, ?, ?, 'HEAT_RESULT_FINALIZED', 'HEAT', ?, 'STAFF', ?, ?)`,
+     VALUES (?, ?, ?, 'HEAT_RESULT_RECORDED', 'HEAT', ?, 'STAFF', ?, ?)`,
   ).bind(
     crypto.randomUUID(), eventId, commandId, heatId, now,
     JSON.stringify({ staff_profile_id: actor.id, result_revision: resultRevision, results }),
@@ -1920,9 +2011,9 @@ const finalizeResultSet = async (
   try {
     await env.DB.batch(statements);
   } catch {
-    return json({ error: "Result finalization conflicted with another update. Retry with the same command identifier." }, 409);
+    return json({ error: "Result recording conflicted with another update. Retry with the same command identifier." }, 409);
   }
-  return finalizedResultResponse(env, eventId, heatId, false);
+  return recordedResultResponse(env, eventId, heatId, false);
 };
 
 const finalizeResults = async (
@@ -1942,6 +2033,170 @@ const finalizeResults = async (
   return finalizeResultSet(env, actor, eventId, heatId, commandId, revision, results, null);
 };
 
+const confirmWinnerAnnouncement = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  eventId: string,
+  heatId: string,
+): Promise<Response> => {
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const revision = payload?.revision;
+  if (typeof commandId !== "string" || !isCommandId(commandId) || !validRevision(revision)) {
+    return json({ error: "Command identifier and heat revision are required." }, 400);
+  }
+  const requestFingerprint = await fingerprint({ heatId, operation: "winner-announced" });
+  const previous = await findCommand(env, commandId);
+  if (previous !== null) {
+    return commandMatches(previous, eventId, heatId, "CONFIRM_WINNER_ANNOUNCEMENT", requestFingerprint)
+      ? finalizedResultResponse(env, eventId, heatId, true)
+      : json({ error: "This command identifier was already used for another operation." }, 409);
+  }
+
+  const [context, pending] = await Promise.all([
+    resultContext(env, eventId, heatId),
+    pendingResults(env, eventId, heatId),
+  ]);
+  if (context === null) return json({ error: "Heat not found." }, 404);
+  if (context.status !== "AWAITING_RESULT" || context.revision !== revision || pending.results.length === 0) {
+    return json({ error: "The recorded winner or heat revision changed. Refresh before confirming the announcement." }, 409);
+  }
+  const expectedPlaces = context.round === "ROUND_ONE" ? 1 : pending.results.length;
+  if (
+    expectedPlaces < 1 || expectedPlaces > FINAL_PODIUM_DEPTH
+    || (context.round === "ROUND_ONE" && pending.results.length !== 1)
+    || pending.results.some((row, index) => row.place !== index + 1
+      || row.registration_status !== "ACTIVE" || row.assignment_current !== 1)
+  ) {
+    return json({ error: "The recorded result is no longer valid. Reset or repair the heat before announcing it." }, 409);
+  }
+
+  let finalHeat: { id: string; status: string; roster_locked_at: string | null; roster_size: number } | null = null;
+  if (context.round === "ROUND_ONE") {
+    finalHeat = await env.DB.prepare(
+      `SELECT h.id, h.status, h.roster_locked_at,
+              (SELECT COUNT(*) FROM heat_entries he WHERE he.heat_id = h.id) AS roster_size
+         FROM heats h WHERE h.event_id = ? AND h.round = 'FINAL' LIMIT 1`,
+    ).bind(eventId).first<{ id: string; status: string; roster_locked_at: string | null; roster_size: number }>();
+    if (finalHeat !== null && (finalHeat.status !== "PLANNED" || finalHeat.roster_locked_at !== null)) {
+      return json({ error: "The final roster is locked and cannot accept this announced winner." }, 409);
+    }
+    if ((finalHeat?.roster_size ?? 0) >= context.final_heat_capacity) {
+      return json({ error: "The final heat has reached its configured capacity." }, 409);
+    }
+  }
+
+  const now = new Date().toISOString();
+  const completePendingGuard = `AND (
+      SELECT COUNT(*) FROM pending_heat_results pending
+       WHERE pending.event_id = h.event_id AND pending.heat_id = h.id
+    ) = CASE WHEN h.round = 'ROUND_ONE' THEN 1 ELSE ${requiredPodiumPlacesSql("h.event_id", "h.id")} END
+    AND NOT EXISTS (
+      SELECT 1
+        FROM pending_heat_results pending
+        JOIN race_entries re ON re.id = pending.race_entry_id
+        JOIN registrations r ON r.id = re.registration_id
+        LEFT JOIN duck_assignments current_assignment
+          ON current_assignment.event_id = pending.event_id
+         AND current_assignment.race_entry_id = pending.race_entry_id
+         AND current_assignment.valid_to IS NULL
+       WHERE pending.event_id = h.event_id AND pending.heat_id = h.id
+         AND (r.status <> 'ACTIVE' OR current_assignment.id IS NULL
+           OR current_assignment.id <> pending.duck_assignment_id)
+    )`;
+  const statements: D1PreparedStatement[] = [env.DB.prepare(
+    `INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at,
+       actor_staff_profile_id, request_fingerprint)
+     SELECT ?, ?, 'CONFIRM_WINNER_ANNOUNCEMENT', ?, ?, ?, ?, ?
+       FROM heats h JOIN events e ON e.id = h.event_id
+      WHERE h.id = ? AND h.event_id = ? AND h.status = 'AWAITING_RESULT' AND h.revision = ?
+        AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
+          OR (h.round = 'FINAL' AND e.status = 'FINAL'))
+        ${completePendingGuard}
+        AND (h.round <> 'ROUND_ONE' OR NOT EXISTS (
+          SELECT 1 FROM heats final_heat
+           WHERE final_heat.event_id = h.event_id AND final_heat.round = 'FINAL'
+             AND (final_heat.status <> 'PLANNED' OR final_heat.roster_locked_at IS NOT NULL
+               OR (SELECT COUNT(*) FROM heat_entries final_entry
+                    WHERE final_entry.heat_id = final_heat.id) >= e.final_heat_capacity)
+        ))`,
+  ).bind(
+    commandId, eventId, heatId, now, now, actor.id, requestFingerprint,
+    heatId, eventId, revision,
+  )];
+
+  for (const row of pending.results) {
+    statements.push(env.DB.prepare(
+      `INSERT INTO heat_results
+        (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
+         status, revision, finalized_at, recorded_by_staff_profile_id, source_command_id)
+       SELECT ?, pending.event_id, pending.heat_id, pending.race_entry_id,
+              pending.duck_assignment_id, pending.place, 'FINALIZED',
+              pending.result_revision, ?, pending.recorded_by_staff_profile_id, ?
+         FROM pending_heat_results pending
+        WHERE pending.id = ? AND pending.event_id = ? AND pending.heat_id = ?
+          AND ${commandExistsSql}`,
+    ).bind(
+      crypto.randomUUID(), now, commandId, row.id, eventId, heatId,
+      commandId, eventId, heatId,
+    ));
+  }
+
+  if (context.round === "ROUND_ONE") {
+    const finalHeatId = finalHeat?.id ?? crypto.randomUUID();
+    if (finalHeat === null) {
+      statements.push(env.DB.prepare(
+        `INSERT INTO heats
+          (id, event_id, round, heat_number, status, target_size, source_command_id)
+         SELECT ?, ?, 'FINAL', 1, 'PLANNED', ?, ?
+          WHERE ${commandExistsSql}`,
+      ).bind(
+        finalHeatId, eventId, context.final_heat_capacity, commandId,
+        commandId, eventId, heatId,
+      ));
+    }
+    statements.push(env.DB.prepare(
+      `INSERT INTO heat_entries
+        (id, event_id, heat_id, race_entry_id, round, slot_number,
+         assignment_source, assigned_at, source_command_id)
+       SELECT ?, ?, ?, pending.race_entry_id, 'FINAL', ?, 'WINNER_PROMOTION', ?, ?
+         FROM pending_heat_results pending
+        WHERE pending.event_id = ? AND pending.heat_id = ? AND pending.place = 1
+          AND ${commandExistsSql}`,
+    ).bind(
+      crypto.randomUUID(), eventId, finalHeatId, (finalHeat?.roster_size ?? 0) + 1,
+      now, commandId, eventId, heatId, commandId, eventId, heatId,
+    ));
+  }
+
+  statements.push(
+    clearPendingResultsStatement(env, eventId, heatId, commandId),
+    env.DB.prepare(
+      `UPDATE heats SET status = 'FINALIZED', finalized_at = ?, revision = revision + 1,
+              source_command_id = ?, updated_at = ?
+        WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT' AND revision = ?
+          AND ${commandExistsSql}`,
+    ).bind(now, commandId, now, heatId, eventId, revision, commandId, eventId, heatId),
+    env.DB.prepare(
+      `INSERT INTO audit_events
+        (id, event_id, command_id, action, subject_type, subject_id,
+         actor_type, occurred_at, details_json)
+       VALUES (?, ?, ?, 'WINNER_ANNOUNCED', 'HEAT', ?, 'STAFF', ?, ?)`,
+    ).bind(
+      crypto.randomUUID(), eventId, commandId, heatId, now,
+      JSON.stringify({ staff_profile_id: actor.id, recorded_result_revision: pending.results[0].result_revision }),
+    ),
+  );
+  try {
+    await env.DB.batch(statements);
+  } catch {
+    return json({ error: "Winner announcement conflicted with another update. Retry with the same command identifier." }, 409);
+  }
+  return finalizedResultResponse(env, eventId, heatId, false);
+};
+
 /**
  * The places a scan is allowed to name, as spoken race-day words.
  *
@@ -1959,7 +2214,11 @@ const podiumPlaceLabel = (place: number): string => PODIUM_PLACE_LABELS[place] ?
 const scannedPodiumGuardSql = `AND h.round = 'FINAL' AND e.status = 'FINAL'
     AND (SELECT COUNT(*) FROM heats awaiting
           WHERE awaiting.event_id = h.event_id
-            AND awaiting.status = 'AWAITING_RESULT') = 1
+             AND awaiting.status = 'AWAITING_RESULT') = 1
+    AND NOT EXISTS (
+      SELECT 1 FROM pending_heat_results pending
+       WHERE pending.event_id = h.event_id AND pending.heat_id = h.id
+    )
     AND EXISTS (
       SELECT 1
         FROM heat_entries tag_selected
@@ -2014,12 +2273,12 @@ const commandExistsSql = `EXISTS (
 
 /**
  * What every scan of a final's duck returns, whether it recorded a place or
- * published the podium.
+ * completed the pending podium.
  *
  * One shape for both outcomes is deliberate. The scanning staffer does not know
  * or care which duck completes the podium — they scan the ducks that finished —
- * so the station renders the same thing each time and simply sees a finalized
- * heat and a full result set on the last one.
+ * so the station renders the same thing each time and simply sees a full pending
+ * result set on the last one.
  */
 const podiumScanResponse = async (
   env: Env,
@@ -2027,38 +2286,39 @@ const podiumScanResponse = async (
   heatId: string,
   replayed: boolean,
 ): Promise<Response> => {
-  const [heat, results] = await Promise.all([
+  const [heat, results, pending] = await Promise.all([
     getHeatSummary(env, eventId, heatId),
     publishedResults(env, eventId, heatId),
+    pendingResults(env, eventId, heatId),
   ]);
   // Read second, and only while there is a provisional podium to report. A
-  // published final has no places left to take, and answering "3 places
+  // fully recorded final has no provisional places left to take, and answering "3 places
   // required, all three still open" about a result that is already official is
   // a sentence no caller should have to know to disbelieve.
   const podium = heat !== null && heat.round === "FINAL" && heat.status === "AWAITING_RESULT"
+      && pending.results.length === 0
     ? await finalPodiumState(env, eventId, heatId, null)
     : null;
   return json({
     heat: heat === null ? null : heatSummary(heat),
     results: results.results.map(resultResponseRow),
+    pendingResults: pending.results.map(pendingResultResponseRow),
     podium,
     replayed,
   }, replayed ? 200 : 201);
 };
 
 /**
- * Record the place one scanned duck took in the final, and publish the whole
- * podium when that place was the last one it needed.
+ * Record the place one scanned duck took in the final, and record the whole
+ * pending podium when that place was the last one it needed.
  *
- * Recording and publishing are one command rather than two because the staffer
- * performs one action: they scan the duck and say where it finished. Splitting
- * them would leave a complete podium sitting unpublished behind a separate
- * button somebody has to remember to press, on the one result in the race that
- * everybody is waiting for.
+ * Recording an individual place and completing the podium are one command
+ * because the staffer performs one action: they scan the duck and say where it
+ * finished. Official publication remains the distinct Winner announced command.
  *
  * Both outcomes therefore share one request fingerprint — the heat, the duck,
  * the place, and the tag — so a retry of the scan that completed the podium
- * replays as the published result instead of being read as a new command. The
+ * replays as the pending result instead of being read as a new command. The
  * command *type* still tells the truth about what happened, which is what the
  * audit trail and every later result correction read.
  */
@@ -2079,7 +2339,7 @@ const recordFinalPodiumPlace = async (
     const replayable = previous.event_id === eventId
       && previous.result_id === heatId
       && (previous.command_type === "RECORD_FINAL_PODIUM_PLACE"
-        || previous.command_type === "FINALIZE_HEAT_RESULT")
+        || previous.command_type === "RECORD_HEAT_RESULT")
       && previous.request_fingerprint === requestFingerprint;
     return replayable
       ? podiumScanResponse(env, eventId, heatId, true)
@@ -2158,7 +2418,7 @@ const recordFinalPodiumPlace = async (
   }
 
   const now = new Date().toISOString();
-  const commandType = completesPodium ? "FINALIZE_HEAT_RESULT" : "RECORD_FINAL_PODIUM_PLACE";
+  const commandType = completesPodium ? "RECORD_HEAT_RESULT" : "RECORD_FINAL_PODIUM_PLACE";
   const assignments = new Map(rosterResult.results.map((entry) => [entry.race_entry_id, entry.duck_assignment_id]));
   const carriedGuard = carried.map(() => `AND EXISTS (
       SELECT 1 FROM final_podium_selections carried
@@ -2207,28 +2467,29 @@ const recordFinalPodiumPlace = async (
     const resultRevision = context.result_revision + 1;
     for (const result of results) {
       statements.push(env.DB.prepare(
-        `INSERT INTO heat_results
+        `INSERT INTO pending_heat_results
           (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
-           status, revision, finalized_at, recorded_by_staff_profile_id, source_command_id)
-         VALUES (?, ?, ?, ?, ?, ?, 'FINALIZED', ?, ?, ?, ?)`,
+           result_revision, recorded_at, recorded_by_staff_profile_id, source_command_id)
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+           WHERE ${commandExistsSql}`,
       ).bind(
         crypto.randomUUID(), eventId, heatId, result.raceEntryId,
         assignments.get(result.raceEntryId), result.place, resultRevision, now, actor.id, commandId,
+        commandId, eventId, heatId,
       ));
     }
     statements.push(
       clearPodiumSelectionsStatement(env, eventId, heatId, commandId),
       env.DB.prepare(
-        `UPDATE heats SET status = 'FINALIZED', finalized_at = ?, revision = revision + 1,
-                source_command_id = ?, updated_at = ?
+        `UPDATE heats SET revision = revision + 1, source_command_id = ?, updated_at = ?
           WHERE id = ? AND event_id = ? AND status = 'AWAITING_RESULT' AND revision = ?
             AND ${commandExistsSql}`,
-      ).bind(now, commandId, now, heatId, eventId, revision, commandId, eventId, heatId),
+      ).bind(commandId, now, heatId, eventId, revision, commandId, eventId, heatId),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
            actor_type, occurred_at, details_json)
-         VALUES (?, ?, ?, 'HEAT_RESULT_FINALIZED', 'HEAT', ?, 'STAFF', ?, ?)`,
+         VALUES (?, ?, ?, 'HEAT_RESULT_RECORDED', 'HEAT', ?, 'STAFF', ?, ?)`,
       ).bind(
         crypto.randomUUID(), eventId, commandId, heatId, now,
         JSON.stringify({ staff_profile_id: actor.id, result_revision: resultRevision, results }),
@@ -2448,8 +2709,8 @@ const finalizeWinnerByTag = async (
   const requestFingerprint = await fingerprint({ heatId, results, tagToken: token });
   const previous = await findCommand(env, commandId);
   if (previous !== null) {
-    return commandMatches(previous, eventId, heatId, "FINALIZE_HEAT_RESULT", requestFingerprint)
-      ? finalizedResultResponse(env, eventId, heatId, true)
+    return commandMatches(previous, eventId, heatId, "RECORD_HEAT_RESULT", requestFingerprint)
+      ? recordedResultResponse(env, eventId, heatId, true)
       : json({ error: "This command identifier was already used for another operation." }, 409);
   }
 
@@ -3050,6 +3311,11 @@ export const handleHeatOperations = async (
     const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
     if (denied !== null) return denied;
     return finalizeResults(request, env, actor, eventId, heatId);
+  }
+  if (operation === "/winner-announced" && request.method === "POST") {
+    const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);
+    if (denied !== null) return denied;
+    return confirmWinnerAnnouncement(request, env, actor, eventId, heatId);
   }
   if (operation === "/podium-place/clear" && request.method === "POST") {
     const denied = requireAnyRole(actor, ["RESULT_TAKER", "RACE_DIRECTOR"]);

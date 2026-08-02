@@ -346,27 +346,67 @@ test("result staff record a round-one winner manually when the tag cannot be sca
   const recorded = await handleAs(resultTaker, jsonRequest(finalizePath("heat-1"), "POST", manualBody));
   const recordedBody = await recorded.json();
   assert.equal(recorded.status, 201, JSON.stringify(recordedBody));
-  assert.equal(recordedBody.heat.status, "FINALIZED");
-  assert.deepEqual(recordedBody.results.map((result) => result.place), [1]);
+  assert.equal(recordedBody.heat.status, "AWAITING_RESULT");
+  assert.deepEqual(recordedBody.pendingResults.map((result) => result.place), [1]);
+  assert.deepEqual(recordedBody.results, []);
 
   // Same idempotency as every other significant mutation: the retry replays the
-  // published result rather than writing a second one.
+  // recorded result rather than writing a second one.
   const replay = await handleAs(resultTaker, jsonRequest(finalizePath("heat-1"), "POST", manualBody));
   assert.equal(replay.status, 200);
   assert.equal((await replay.json()).replayed, true);
   assert.equal(database.prepare(
-    "SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-1' AND status = 'FINALIZED'",
+    "SELECT COUNT(*) AS count FROM pending_heat_results WHERE heat_id = 'heat-1'",
   ).get().count, 1);
 
   // Same command history and the same redacted audit event a scanned winner
   // writes, attributed to the staffer who actually recorded it.
   assert.equal(database.prepare(
     `SELECT COUNT(*) AS count FROM race_commands
-      WHERE id = ? AND command_type = 'FINALIZE_HEAT_RESULT' AND actor_staff_profile_id = 'staff'`,
+      WHERE id = ? AND command_type = 'RECORD_HEAT_RESULT' AND actor_staff_profile_id = 'staff'`,
   ).get(manualCommandId).count, 1);
   assert.equal(database.prepare(
-    "SELECT COUNT(*) AS count FROM audit_events WHERE command_id = ? AND action = 'HEAT_RESULT_FINALIZED'",
+    "SELECT COUNT(*) AS count FROM audit_events WHERE command_id = ? AND action = 'HEAT_RESULT_RECORDED'",
   ).get(manualCommandId).count, 1);
+
+  const staleAnnouncement = await handleAs(resultTaker, jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/winner-announced",
+    "POST",
+    { commandId: commandId(), revision: recordedBody.heat.revision + 1 },
+  ));
+  assert.equal(staleAnnouncement.status, 409);
+  database.exec("UPDATE registrations SET status = 'WITHDRAWN' WHERE id = 'registration-1'");
+  const invalidWinnerAnnouncement = await handleAs(resultTaker, jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/winner-announced",
+    "POST",
+    { commandId: commandId(), revision: recordedBody.heat.revision },
+  ));
+  assert.equal(invalidWinnerAnnouncement.status, 409);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-1'").get().count, 0);
+  database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-1'");
+
+  const announcementPath = "/api/v1/staff/events/event/heats/heat-1/winner-announced";
+  const announcementCommand = commandId();
+  const announcementThroughApi = (origin) => {
+    const headers = new Headers({ "content-type": "application/json" });
+    if (origin !== null) headers.set("origin", origin);
+    return handleApi(new Request(`https://quickducks.com${announcementPath}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ commandId: announcementCommand, revision: recordedBody.heat.revision }),
+    }), { ...env, APP_ORIGIN: "https://quickducks.com" }, async () => cookieResultTaker);
+  };
+  assert.equal((await announcementThroughApi(null)).status, 403, "announcement requires Origin");
+  assert.equal((await announcementThroughApi("https://attacker.invalid")).status, 403, "announcement rejects hostile Origin");
+  const announced = await announcementThroughApi("https://quickducks.com");
+  assert.equal(announced.status, 201, JSON.stringify(await announced.clone().json()));
+  const announcedBody = await announced.json();
+  assert.equal(announcedBody.heat.status, "FINALIZED");
+  assert.deepEqual(announcedBody.results.map((result) => result.place), [1]);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM pending_heat_results WHERE heat_id = 'heat-1'").get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM audit_events WHERE command_id = ? AND action = 'WINNER_ANNOUNCED'",
+  ).get(announcementCommand).count, 1);
 
   // And the same promotion: once every round-one heat is settled, the final
   // exists and the manually recorded winner is in it beside the other one.
@@ -378,6 +418,13 @@ test("result staff record a round-one winner manually when the tag cannot be sca
     { commandId: commandId(), revision: secondRevision, results: [{ raceEntryId: "entry-4", place: 1 }] },
   ));
   assert.equal(secondWinner.status, 201, JSON.stringify(await secondWinner.clone().json()));
+  const secondRecorded = await secondWinner.json();
+  const secondAnnouncement = await handleAs(resultTaker, jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-2/winner-announced",
+    "POST",
+    { commandId: commandId(), revision: secondRecorded.heat.revision },
+  ));
+  assert.equal(secondAnnouncement.status, 201, JSON.stringify(await secondAnnouncement.clone().json()));
   const finalists = database.prepare(
     `SELECT he.race_entry_id FROM heat_entries he
        JOIN heats h ON h.id = he.heat_id
@@ -484,7 +531,7 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
   assert.equal(announcerBody.roster.length, 3);
   assert.equal(JSON.stringify(announcerBody).includes("email"), false);
 
-  const finalize = async (heatId, revision, winnerId) => {
+  const finalize = async (heatId, revision, winnerId, beforeConfirm = null) => {
     const id = commandId();
     const body = { commandId: id, revision, results: [{ raceEntryId: winnerId, place: 1 }] };
     const response = await handle(jsonRequest(
@@ -501,7 +548,27 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
     ));
     assert.equal(replay.status, 200);
     assert.equal((await replay.json()).replayed, true);
-    return responseBody.heat.revision;
+    assert.equal(responseBody.heat.status, "AWAITING_RESULT");
+    assert.equal(responseBody.heat.publishedResultCount, 0);
+    assert.equal(responseBody.pendingResults[0].raceEntryId, winnerId);
+    await beforeConfirm?.(responseBody);
+    const announcementId = commandId();
+    const confirmed = await handle(jsonRequest(
+      `/api/v1/staff/events/event/heats/${heatId}/winner-announced`,
+      "POST",
+      { commandId: announcementId, revision: responseBody.heat.revision },
+    ));
+    const confirmedBody = await confirmed.json();
+    assert.equal(confirmed.status, 201, JSON.stringify(confirmedBody));
+    assert.equal(confirmedBody.heat.status, "FINALIZED");
+    const confirmationReplay = await handle(jsonRequest(
+      `/api/v1/staff/events/event/heats/${heatId}/winner-announced`,
+      "POST",
+      { commandId: announcementId, revision: responseBody.heat.revision },
+    ));
+    assert.equal(confirmationReplay.status, 200);
+    assert.equal((await confirmationReplay.json()).replayed, true);
+    return confirmedBody.heat.revision;
   };
 
   const rosters = [];
@@ -511,7 +578,17 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
     ));
     rosters.push((await detail.json()).roster.map((entry) => entry.raceEntryId));
   }
-  firstRevision = await finalize(firstHeatId, firstRevision, rosters[0][0]);
+  firstRevision = await finalize(firstHeatId, firstRevision, rosters[0][0], async () => {
+    const blockedWhileUnannounced = await handle(jsonRequest(
+      `/api/v1/staff/events/event/heats/${secondHeatId}/start`,
+      "POST",
+      { commandId: commandId(), revision: secondRevision },
+    ));
+    assert.equal(blockedWhileUnannounced.status, 409);
+    assert.match((await blockedWhileUnannounced.json()).error, /previous heat|announcement|official result/i);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE round = 'FINAL'").get().count, 0);
+  });
 
   env.DB.beforeBatch = () => {
     database.exec(`UPDATE heats SET status = 'AWAITING_RESULT' WHERE id = '${firstHeatId}'`);
@@ -639,7 +716,15 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
     { commandId: commandId(), revision: finalRevision, results: podium },
   ));
   assert.equal(finalResult.status, 201);
-  finalRevision = (await finalResult.json()).heat.revision;
+  const recordedFinalBody = await finalResult.json();
+  assert.equal(recordedFinalBody.heat.status, "AWAITING_RESULT");
+  const confirmedFinal = await handle(jsonRequest(
+    `/api/v1/staff/events/event/heats/${finalHeat.id}/winner-announced`,
+    "POST",
+    { commandId: commandId(), revision: recordedFinalBody.heat.revision },
+  ));
+  assert.equal(confirmedFinal.status, 201, JSON.stringify(await confirmedFinal.clone().json()));
+  finalRevision = (await confirmedFinal.json()).heat.revision;
   assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "FINAL");
   const complete = await handleEvent(jsonRequest(
     "/api/v1/staff/events/event/complete",
@@ -707,6 +792,13 @@ test("heat operations cover the paired-heat lifecycle, results, corrections, and
     { commandId: commandId(), revision: finalRevision, results: correctedPodium },
   ));
   assert.equal(refinalize.status, 201);
+  const rerecordedFinal = await refinalize.json();
+  const reconfirm = await handle(jsonRequest(
+    `/api/v1/staff/events/event/heats/${finalHeat.id}/winner-announced`,
+    "POST",
+    { commandId: commandId(), revision: rerecordedFinal.heat.revision },
+  ));
+  assert.equal(reconfirm.status, 201, JSON.stringify(await reconfirm.clone().json()));
   assert.equal(database.prepare("SELECT status FROM events WHERE id = 'event'").get().status, "FINAL");
   const recomplete = await handleEvent(jsonRequest(
     "/api/v1/staff/events/event/complete",
@@ -756,6 +848,19 @@ test("a heat reset accepts every post-lock pre-result state and preserves its lo
               finished_at = '2026-07-26T11:05:00Z', finalized_at = '2026-07-26T11:10:00Z'
         WHERE id = 'heat-1'`,
     ).run(status);
+    if (status === "AWAITING_RESULT") {
+      database.exec(`
+        INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, actor_staff_profile_id)
+        VALUES ('reset-pending-record', 'event', 'RECORD_HEAT_RESULT', 'heat-1',
+                '2026-07-26T11:06:00Z', '2026-07-26T11:06:00Z', 'staff');
+        INSERT INTO pending_heat_results
+          (id, event_id, heat_id, race_entry_id, duck_assignment_id, place,
+           result_revision, recorded_at, recorded_by_staff_profile_id, source_command_id)
+        VALUES ('reset-pending', 'event', 'heat-1', 'entry-1', 'assignment-1', 1,
+                1, '2026-07-26T11:06:00Z', 'staff', 'reset-pending-record');
+      `);
+    }
     const revision = database.prepare("SELECT revision FROM heats WHERE id = 'heat-1'").get().revision;
     const resetCommand = commandId();
     const requestBody = { commandId: resetCommand, revision };
@@ -772,6 +877,9 @@ test("a heat reset accepts every post-lock pre-result state and preserves its lo
     assert.equal(body.heat.startedAt, null);
     assert.equal(body.heat.finishedAt, null);
     assert.equal(body.heat.finalizedAt, null);
+    assert.equal(database.prepare(
+      "SELECT COUNT(*) AS count FROM pending_heat_results WHERE heat_id = 'heat-1'",
+    ).get().count, 0, `${status} clears no stale pending result`);
 
     const stored = database.prepare(
       `SELECT status, round, revision, roster_locked_at,
@@ -1104,7 +1212,7 @@ test("a heat with no eligible racer left cannot lock, and results still require 
   assert.equal(racedFinalization.status, 409);
   assert.equal(database.prepare("SELECT status FROM heats WHERE id = 'heat-active'").get().status, "AWAITING_RESULT");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results WHERE heat_id = 'heat-active'").get().count, 0);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'RECORD_HEAT_RESULT'").get().count, 0);
 
   // Through all of it, no heat entry moved.
   assert.deepEqual(
@@ -1175,7 +1283,7 @@ test("winner-by-tag candidates require one awaiting heat, its roster, and the cu
   ), env, actor);
   assert.equal(response.status, 409);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
-  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'RECORD_HEAT_RESULT'").get().count, 0);
 });
 
 test("heat station rosters retain unassigned and withdrawn entries without exposing closed duck assignments", async (context) => {
@@ -1671,14 +1779,24 @@ test("a round-one winner who left cannot be published and is never promoted", as
     "SELECT COUNT(*) AS count FROM heat_entries WHERE round = 'FINAL'",
   ).get().count, 0);
 
-  // An eligible racer in the same heat still publishes and is promoted, which
-  // proves the refusal was about the racer and not about the heat.
-  const published = await handleHeatOperations(jsonRequest(
+  // An eligible racer can be recorded, but is not official or promoted before
+  // the announcement confirmation.
+  const recorded = await handleHeatOperations(jsonRequest(
     "/api/v1/staff/events/event/heats/heat-1/results/finalize",
     "POST",
     { commandId: commandId(), revision: 0, results: [{ raceEntryId: "entry-2", place: 1 }] },
   ), env, actor);
-  assert.equal(published.status, 201, JSON.stringify(await published.clone().json()));
+  assert.equal(recorded.status, 201, JSON.stringify(await recorded.clone().json()));
+  const recordedBody = await recorded.json();
+  assert.equal(recordedBody.heat.status, "AWAITING_RESULT");
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM heat_entries WHERE round = 'FINAL'").get().count, 0);
+  const confirmed = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-1/winner-announced",
+    "POST",
+    { commandId: commandId(), revision: recordedBody.heat.revision },
+  ), env, actor);
+  assert.equal(confirmed.status, 201, JSON.stringify(await confirmed.clone().json()));
   assert.deepEqual(
     database.prepare(
       "SELECT race_entry_id, slot_number FROM heat_entries WHERE round = 'FINAL' ORDER BY slot_number",
@@ -1787,6 +1905,13 @@ test("a published round-one result is reopenable and republishable after its win
     { commandId: commandId(), revision, results: [{ raceEntryId: "entry-5", place: 1 }] },
   ), env, actor);
   assert.equal(republished.status, 201, JSON.stringify(await republished.clone().json()));
+  const republishedBody = await republished.json();
+  const reannounced = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-2/winner-announced",
+    "POST",
+    { commandId: commandId(), revision: republishedBody.heat.revision },
+  ), env, actor);
+  assert.equal(reannounced.status, 201, JSON.stringify(await reannounced.clone().json()));
   assert.deepEqual(
     database.prepare(
       "SELECT race_entry_id, slot_number FROM heat_entries WHERE heat_id = 'heat-final' ORDER BY slot_number",
@@ -1831,12 +1956,26 @@ test("a final with a withdrawn finalist publishes a shorter podium and still com
   assert.equal(tooDeep.status, 422);
   assert.match((await tooDeep.json()).error, /exactly places 1 through 1/);
 
-  const published = await handleHeatOperations(jsonRequest(
+  const recorded = await handleHeatOperations(jsonRequest(
     "/api/v1/staff/events/event/heats/heat-final/results/finalize",
     "POST",
     { commandId: commandId(), revision: 0, results: [{ raceEntryId: "entry-4", place: 1 }] },
   ), env, actor);
-  assert.equal(published.status, 201, JSON.stringify(await published.clone().json()));
+  assert.equal(recorded.status, 201, JSON.stringify(await recorded.clone().json()));
+  const recordedBody = await recorded.json();
+  assert.equal(recordedBody.heat.status, "AWAITING_RESULT");
+  const blockedCompletion = await handleEventOperations(jsonRequest(
+    "/api/v1/staff/events/event/complete",
+    "POST",
+    { commandId: commandId() },
+  ), env, actor);
+  assert.equal(blockedCompletion.status, 409, "recording alone does not finish the final");
+  const announced = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/winner-announced",
+    "POST",
+    { commandId: commandId(), revision: recordedBody.heat.revision },
+  ), env, actor);
+  assert.equal(announced.status, 201, JSON.stringify(await announced.clone().json()));
   // The withdrawn finalist keeps their roster place; only the podium is shorter.
   assert.deepEqual(
     database.prepare(
@@ -1876,7 +2015,7 @@ const seedPublishedFinal = async (database) => {
      WHERE id = 'heat-final';
   `);
   const env = { DB: d1(database) };
-  const published = await handleHeatOperations(jsonRequest(
+  const recorded = await handleHeatOperations(jsonRequest(
     "/api/v1/staff/events/event/heats/heat-final/results/finalize",
     "POST",
     {
@@ -1884,6 +2023,13 @@ const seedPublishedFinal = async (database) => {
       revision: 0,
       results: [{ raceEntryId: "entry-1", place: 1 }, { raceEntryId: "entry-4", place: 2 }],
     },
+  ), env, actor);
+  assert.equal(recorded.status, 201, JSON.stringify(await recorded.clone().json()));
+  const recordedBody = await recorded.json();
+  const published = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/winner-announced",
+    "POST",
+    { commandId: commandId(), revision: recordedBody.heat.revision },
   ), env, actor);
   assert.equal(published.status, 201, JSON.stringify(await published.clone().json()));
   return { env, revision: (await published.json()).heat.revision };
@@ -2058,6 +2204,13 @@ test("a final result is reopenable while the event is still FINAL and the event 
     },
   ), env, actor);
   assert.equal(republished.status, 201, JSON.stringify(await republished.clone().json()));
+  const republishedFinalBody = await republished.json();
+  const reannouncedFinal = await handleHeatOperations(jsonRequest(
+    "/api/v1/staff/events/event/heats/heat-final/winner-announced",
+    "POST",
+    { commandId: commandId(), revision: republishedFinalBody.heat.revision },
+  ), env, actor);
+  assert.equal(reannouncedFinal.status, 201, JSON.stringify(await reannouncedFinal.clone().json()));
   const completion = await handleEventOperations(jsonRequest(
     "/api/v1/staff/events/event/complete",
     "POST",
@@ -2529,7 +2682,7 @@ test("the heat roster projection exposes exactly its documented identifier field
   assert.equal(detail.status, 200);
   const body = await detail.json();
 
-  assert.deepEqual(Object.keys(body).sort(), ["heat", "podium", "results", "roster"]);
+  assert.deepEqual(Object.keys(body).sort(), ["heat", "pendingResults", "podium", "results", "roster"]);
   // Round one has no provisional podium to report, so the field is null rather
   // than an empty podium a station might try to render.
   assert.equal(body.podium, null);
@@ -2560,7 +2713,7 @@ test("the heat roster projection exposes exactly its documented identifier field
   ));
   assert.equal(announcer.status, 200);
   const announcerBody = await announcer.json();
-  assert.deepEqual(Object.keys(announcerBody).sort(), ["heat", "roster"]);
+  assert.deepEqual(Object.keys(announcerBody).sort(), ["heat", "pendingResults", "roster"]);
   assert.deepEqual(Object.keys(announcerBody.roster[0]).sort(), [
     "displayName",
     "duckNumber",
@@ -2825,8 +2978,9 @@ const heatEntrySnapshot = (database) => database.prepare(
 
 const finishWriteSnapshot = (database) => ({
   results: database.prepare("SELECT COUNT(*) AS count FROM heat_results").get().count,
+  pendingResults: database.prepare("SELECT COUNT(*) AS count FROM pending_heat_results").get().count,
   commands: database.prepare(
-    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'FINALIZE_HEAT_RESULT'",
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'RECORD_HEAT_RESULT'",
   ).get().count,
   heatRevision: database.prepare("SELECT revision, status FROM heats WHERE id = 'heat-1'").get().revision,
   heatStatus: database.prepare("SELECT status FROM heats WHERE id = 'heat-1'").get().status,
@@ -2930,10 +3084,17 @@ for (const status of ["WITHDRAWN", "DISQUALIFIED"]) {
       },
     ));
     assert.equal(recorded.status, 201, JSON.stringify(await recorded.clone().json()));
+    const recordedBody = await recorded.json();
     assert.equal(
-      database.prepare("SELECT race_entry_id FROM heat_results WHERE heat_id = 'heat-1'").get().race_entry_id,
+      database.prepare("SELECT race_entry_id FROM pending_heat_results WHERE heat_id = 'heat-1'").get().race_entry_id,
       "entry-3",
     );
+    const announced = await handle(jsonRequest(
+      "/api/v1/staff/events/event/heats/heat-1/winner-announced",
+      "POST",
+      { commandId: commandId(), revision: recordedBody.heat.revision },
+    ));
+    assert.equal(announced.status, 201, JSON.stringify(await announced.clone().json()));
     // The withdrawn racer is still exactly where they were, in slot order,
     // after a winner was published around them.
     assert.deepEqual(

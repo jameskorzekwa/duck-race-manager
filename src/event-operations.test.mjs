@@ -1512,6 +1512,12 @@ test("completion readiness is monotone: leaving the race only ever lowers the po
     ],
   });
   assert.equal(republished.status, 201, JSON.stringify(await republished.clone().json()));
+  const republishedBody = await republished.json();
+  const announced = await heatOperation("winner-announced", {
+    commandId: crypto.randomUUID(),
+    revision: republishedBody.heat.revision,
+  });
+  assert.equal(announced.status, 201, JSON.stringify(await announced.clone().json()));
   assert.equal((await completionReadiness()).allowed, true, "the podium publication just accepted completes");
   // The reactivation is what raises the requirement above the published depth.
   database.exec("UPDATE registrations SET status = 'ACTIVE' WHERE id = 'registration-3'");

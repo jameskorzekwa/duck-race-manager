@@ -224,7 +224,7 @@ test.describe("a withdrawn duck at the finish line", () => {
     await expect(page.locator("[data-station-roster] li")).toHaveCount(3);
     await expect(page.locator("[data-station-message]")).toContainText("select 2 distinct ducks here");
 
-    // Two scans fill the whole podium, and Submit arms — which it never would
+    // Two scans fill the whole podium, and Record podium arms — which it never would
     // while the station demanded a third, unfillable place.
     const remaining = [roster[0], roster[2]];
     for (const entry of remaining) {
@@ -232,11 +232,23 @@ test.describe("a withdrawn duck at the finish line", () => {
       await page.getByRole("button", { name: "Add this duck" }).click();
     }
     await expect(page.locator("[data-finish-selections] .station-selection")).toHaveCount(2);
-    const submit = page.getByRole("button", { name: "Submit official podium" });
+    const submit = page.getByRole("button", { name: "Record podium" });
     await expect(submit).toBeEnabled();
     await submit.click();
     await confirmAction(page);
-    await expect(page.locator("[data-station-message]")).toContainText("Official result saved");
+    await expect(page.locator("[data-station-message]")).toContainText("Result recorded");
+
+    const pending = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${finalHeat.id}`, {
+      token: admin.token,
+    });
+    expect(pending.body.heat.status).toBe("AWAITING_RESULT");
+    expect(pending.body.results).toEqual([]);
+    expect(pending.body.pendingResults.map((result) => result.place)).toEqual([1, 2]);
+    const winnerAnnounced = page.getByRole("button", { name: "Winner announced", exact: true });
+    await expect(winnerAnnounced).toBeVisible();
+    await winnerAnnounced.click();
+    await confirmAction(page, "Winner announced");
+    await expect(page.locator("[data-station-message]")).toContainText("officially finished");
 
     const published = await rawJson(`/api/v1/staff/events/${seeded.eventId}/heats/${finalHeat.id}`, {
       token: admin.token,
@@ -373,20 +385,25 @@ test.describe("a round-one heat nobody can win", () => {
     await expect(markWinner).toBeVisible();
     await markWinner.click();
     await confirmAction(page, "Mark winner");
-    // Publishing a round-one winner hands the staffer back to the station that
-    // owns the rest of the heat, with the acknowledgement for what they just
-    // recorded and the reminder about the finalists bag. The heat is settled, so
-    // the duck page's action is gone with it.
+    // Recording a round-one winner hands the staffer back to the finish station,
+    // with the acknowledgement, finalists-bag reminder, and the separate action
+    // that officially finishes the heat after the announcement.
     await expect(page).toHaveURL(/\/staff\/finish-line$/);
     const recorded = page.locator("[data-finish-recorded]");
     await expect(recorded).toBeVisible();
     await expect(recorded).toContainText(
-      `Duck #${racers[0].visibleNumber} is the official Heat ${running.number} winner.`,
+      `Duck #${racers[0].visibleNumber} is recorded for Heat ${running.number}.`,
     );
+    await expect(recorded).toContainText("Announce the winner, then press Winner announced.");
     await expect(recorded).toContainText("Then put the winning duck in the finalists bag.");
     await expect(markWinner).toHaveCount(0);
-    // The station underneath the acknowledgement has authoritatively moved off
-    // the finalized heat; it is not reconstructed from the return parameters.
+    await expect(page.locator("[data-station-heat]")).toHaveText(
+      `Round one · Heat ${running.number}`,
+    );
+    await expect(page.getByRole("button", { name: "Winner announced", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Winner announced", exact: true }).click();
+    await confirmAction(page, "Winner announced");
+    // Only confirmation moves the station off the now-official heat.
     await expect(page.locator("[data-station-heat]")).not.toHaveText(
       `Round one · Heat ${running.number}`,
       { timeout: 20_000 },

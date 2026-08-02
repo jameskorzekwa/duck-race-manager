@@ -307,11 +307,17 @@ test("a finalist keeps advancement and the replacement tag owns the valid podium
     const detail = await body(await api(`/api/v1/staff/events/${eventId}/heats/${heat.id}`), 200, "round-one roster");
     heat.revision = detail.heat.revision;
     for (const operation of ["ready", "call", "start", "finish"]) await transition(post, eventId, heat, operation);
-    await body(await post(`/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`, {
+    const recorded = await body(await post(`/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`, {
       commandId: crypto.randomUUID(),
       revision: heat.revision,
       results: [{ raceEntryId: detail.roster[0].raceEntryId, place: 1 }],
-    }), 201, "publish round-one winner");
+    }), 201, "record round-one winner");
+    Object.assign(heat, recorded.heat);
+    const announced = await body(await post(
+      `/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`,
+      { commandId: crypto.randomUUID(), revision: heat.revision },
+    ), 201, "confirm round-one winner announced");
+    Object.assign(heat, announced.heat);
   }
   await body(await post(`/api/v1/staff/events/${eventId}/start-final`, {
     commandId: crypto.randomUUID(),

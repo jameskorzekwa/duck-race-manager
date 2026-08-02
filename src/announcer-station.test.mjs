@@ -154,6 +154,10 @@ test("the announcer page renders the reading-script shell the client binds", () 
     "data-announcer-heat",
     "data-announcer-cue",
     "data-announcer-roster",
+    "data-announcer-winner",
+    "data-announcer-winner-heat",
+    "data-announcer-winner-name",
+    "data-announcer-winner-duck",
     "data-announcer-podium",
     "data-announcer-podium-list",
     "data-announcer-progress",
@@ -321,6 +325,10 @@ const announcerHarness = (route) => {
     ["heatTitle", "announcerHeat"],
     ["cue", "announcerCue"],
     ["roster", "announcerRoster"],
+    ["winner", "announcerWinner"],
+    ["winnerHeat", "announcerWinnerHeat"],
+    ["winnerName", "announcerWinnerName"],
+    ["winnerDuck", "announcerWinnerDuck"],
     ["podium", "announcerPodium"],
     ["podiumList", "announcerPodiumList"],
     ["progress", "announcerProgress"],
@@ -334,6 +342,7 @@ const announcerHarness = (route) => {
     root.append(node);
   }
   elements.podium.hidden = true;
+  elements.winner.hidden = true;
   document.append(root);
 
   const requests = [];
@@ -381,6 +390,7 @@ const roundOneRoster = Response.json({
     { slotNumber: 2, raceEntryId: "re-2", displayName: "Bo Ng", duckNumber: 7 },
     { slotNumber: 3, raceEntryId: "re-3", displayName: "Unpaired Racer", duckNumber: null },
   ],
+  pendingResults: [],
 });
 
 test("the announcer station reads out the upcoming heat with full names and duck numbers", async () => {
@@ -424,8 +434,8 @@ test("the announcer station reads out the upcoming heat with full names and duck
   assert.equal(harness.progress.textContent, "No heat has an official result yet.");
 });
 
-test("a recorded winner appears as soon as the finish line publishes it", async () => {
-  let published = false;
+test("a recorded winner stays prominent until the finish line confirms the announcement", async () => {
+  let state = "waiting";
   const harness = announcerHarness((url) => {
     if (url === "/api/v1/staff/events") return eventsBody();
     if (url === "/api/v1/staff/events/event-1/heats") {
@@ -433,15 +443,32 @@ test("a recorded winner appears as soon as the finish line publishes it", async 
         event: { id: "event-1" },
         heats: [
           heat({
-            status: published ? "FINALIZED" : "AWAITING_RESULT",
-            revision: published ? 6 : 5,
-            publishedResultCount: published ? 1 : 0,
+            status: state === "confirmed" ? "FINALIZED" : "AWAITING_RESULT",
+            revision: state === "waiting" ? 5 : state === "recorded" ? 6 : 7,
+            publishedResultCount: state === "confirmed" ? 1 : 0,
+            pendingResultCount: ["recorded", "invalid"].includes(state) ? 1 : 0,
           }),
           heat({ id: "heat-2", number: 2, status: "PLANNED", revision: 1, publishedResultCount: 0 }),
         ],
       });
     }
-    if (url === "/api/v1/staff/events/event-1/heats/heat-1/announcer-roster") return roundOneRoster;
+    if (url === "/api/v1/staff/events/event-1/heats/heat-1/announcer-roster") return Response.json({
+      heat: heat({ status: "AWAITING_RESULT", revision: state === "recorded" ? 6 : 5 }),
+      roster: [{
+        slotNumber: 1,
+        raceEntryId: "re-1",
+        displayName: "Ada Lovelace",
+        duckNumber: 42,
+        eligible: state !== "invalid",
+      }],
+      pendingResults: ["recorded", "invalid"].includes(state) ? [{
+        place: 1,
+        raceEntryId: "re-1",
+        displayName: "Ada Lovelace",
+        duckNumber: 42,
+        eligible: state !== "invalid",
+      }] : [],
+    });
     if (url === "/api/v1/staff/events/event-1/heats/heat-2/announcer-roster") return roundOneRoster;
     if (url === "/api/v1/staff/events/event-1/heats/heat-1") {
       return Response.json({
@@ -462,10 +489,25 @@ test("a recorded winner appears as soon as the finish line publishes it", async 
   assert.equal(harness.results.children.length, 0);
   assert.equal(harness.resultsEmpty.hidden, false);
 
-  // The finish line records the official result; the announcer never refreshes.
-  published = true;
+  state = "recorded";
   await harness.refresh();
 
+  assert.equal(harness.winner.hidden, false);
+  assert.equal(harness.winnerHeat.textContent, "Round one · Heat 1 winner");
+  assert.equal(harness.winnerName.textContent, "Ada Lovelace");
+  assert.equal(harness.winnerDuck.textContent, "Duck #42");
+  assert.match(harness.cue.textContent, /Announce this winner now/);
+  assert.equal(harness.results.children.length, 0, "an unconfirmed winner is not official history");
+
+  state = "invalid";
+  await harness.refresh();
+  assert.equal(harness.winner.hidden, true, "a result that became invalid is not announced as a winner");
+  assert.equal(harness.results.children.length, 0);
+
+  state = "confirmed";
+  await harness.refresh();
+
+  assert.equal(harness.winner.hidden, true);
   assert.equal(harness.results.children.length, 1);
   assert.deepEqual(harness.results.children[0].children.map((child) => child.textContent), [
     "Round one · Heat 1",

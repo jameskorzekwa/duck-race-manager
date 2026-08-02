@@ -4,10 +4,10 @@ import {
   baseUrl,
   bootstrap,
   confirmAction,
-  finalizeHeat,
   intakeDuck,
   pairDuck,
   rejectSensitiveKeys,
+  recordHeatResult,
   seedState,
   signIn,
   transitionHeat,
@@ -261,16 +261,41 @@ test.describe("authoritative live refresh", () => {
 
     const results = runningDetail.roster.slice(0, 3)
       .map((entry, index) => ({ raceEntryId: entry.raceEntryId, place: index + 1 }));
+    await recordHeatResult(client, seeded.eventId, finalHeat, results);
+    const pendingDetail = (await client.get(
+      `/api/v1/staff/events/${seeded.eventId}/heats/${finalHeat.id}`,
+    )).body;
+    expect(pendingDetail.heat.status).toBe("AWAITING_RESULT");
+    expect(pendingDetail.results).toEqual([]);
+    expect(pendingDetail.pendingResults.map((result) => result.place)).toEqual([1, 2, 3]);
+    await announcerPage.bringToFront();
+    await expect(announcerPage.locator("[data-announcer-winner]")).toBeVisible();
+    await expect(announcerPage.locator("[data-announcer-winner-heat]")).toHaveText("The final winner");
+    await expect(announcerPage.locator("[data-announcer-winner-name]")).toHaveText(
+      `${runningDetail.roster[0].participant.firstName} ${runningDetail.roster[0].participant.lastName}`,
+    );
+    await expect(announcerPage.locator("[data-announcer-winner-duck]")).toHaveText(
+      `Duck #${runningDetail.roster[0].duck.visibleNumber}`,
+    );
+    await finishPage.bringToFront();
+    const announcedButton = finishPage.getByRole("button", { name: "Winner announced" });
+    await expect(announcedButton).toBeVisible();
+    await consolePage.bringToFront();
+    await expect(consolePage.locator("[data-heat-list]")).toContainText("Final · Heat 1 · Awaiting result");
+
     const podiumBoard = waitForJson(
       racePage,
       "/api/v1/race-board",
       (body) => body?.event?.podium?.length === results.length,
     );
-    await finalizeHeat(client, seeded.eventId, finalHeat, results);
+    await finishPage.bringToFront();
+    await announcedButton.click();
+    await confirmAction(finishPage, "Winner announced");
     await racePage.bringToFront();
     await podiumBoard;
     await expect(racePage.getByRole("heading", { name: "Winners" })).toBeVisible();
     await announcerPage.bringToFront();
+    await expect(announcerPage.locator("[data-announcer-winner]")).toBeHidden();
     await expect(announcerPage.getByRole("heading", { name: "The final is decided" })).toBeVisible();
     await finishPage.bringToFront();
     await expect(finishPage.getByRole("heading", { name: "No heat needs the finish line" })).toBeVisible();
@@ -324,6 +349,7 @@ test.describe("authoritative live refresh", () => {
     await expect(racePage.getByRole("heading", { name: "Winners" })).toBeVisible();
     await expect(registrationDesk.locator("[data-participant-list] .result-button").first()).toBeVisible();
     await expect(inventoryPage.getByRole("button", { name: /Duck #101/ })).toBeVisible();
+    expect(errors.flat()).toEqual([]);
 
     await deletePage.locator("[data-open-force-delete]").click();
     const dialog = deletePage.locator("[data-force-delete-dialog]");

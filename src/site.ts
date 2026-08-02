@@ -1719,6 +1719,12 @@ export const renderAnnouncer = (
     ${staffNav(isSystemAdmin, roles, "/staff/announcer")}
     <p class="eyebrow">Announcer station</p><h1 class="page-title">Read this out loud.</h1>
     <p class="lede" data-station-event>Finding the active event.</p>
+    <section class="station-callout announcer-winner" data-announcer-winner hidden aria-live="assertive" aria-labelledby="announcer-winner-title">
+      <p class="eyebrow">Announce this winner now</p>
+      <h2 id="announcer-winner-title" data-announcer-winner-heat></h2>
+      <p class="announcer-name" data-announcer-winner-name></p>
+      <p class="announcer-duck" data-announcer-winner-duck></p>
+    </section>
     <section class="announcer-section" aria-labelledby="announcer-now-title">
       <p class="eyebrow">On the microphone now</p>
       <h2 id="announcer-now-title" data-announcer-heat>No heat is up yet</h2>
@@ -1735,7 +1741,7 @@ export const renderAnnouncer = (
       <h2 id="announcer-decided-title">Recorded winners</h2>
       <p class="announcer-progress" data-announcer-progress>Waiting for the first official result.</p>
       <ol class="announcer-results" data-announcer-results></ol>
-      <p class="empty-state" data-announcer-results-empty>No winner has been recorded yet. Each one appears here the moment the finish line records it.</p>
+      <p class="empty-state" data-announcer-results-empty>No official winner has been confirmed yet. Each one appears here after the finish line confirms Winner announced.</p>
     </section>
     <p class="message-line muted" data-station-message aria-live="polite">This station only reads. It never changes the race.</p>
     ${interactive ? '<script src="/assets/announcer.js" defer></script>' : ""}
@@ -1757,7 +1763,7 @@ export const renderFinishLine = (
   liveNav: interactive,
   content: `<section class="page-panel station-panel staff-panel" data-finish-line${interactive ? " data-live-staff" : ""} data-system-admin="${isSystemAdmin ? "true" : "false"}" data-roles="${escapeHtml(roles.join(","))}">
     ${staffNav(isSystemAdmin, roles, "/staff/finish-line")}
-    <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record one official result.</h1>
+    <p class="eyebrow">Finish-line station</p><h1 class="page-title">Record and announce one result.</h1>
     <p class="lede" data-station-event>Finding a running heat.</p>
     <section class="station-recorded" data-finish-recorded hidden aria-live="polite" aria-label="Recorded winner"></section>
     <section class="station-callout" data-finish-callout hidden aria-live="polite" aria-label="How to record this heat's winner"></section>
@@ -1770,8 +1776,8 @@ export const renderFinishLine = (
       <div class="actions"><button class="button secondary station-control" type="submit">Add this duck</button><button class="button secondary station-control" type="button" data-start-nfc hidden>Scan NFC tag</button></div>
     </form>
     <div class="data-list" data-finish-selections></div>
-    <button class="button station-control" type="button" data-submit-result hidden disabled>Submit official result</button>
-    <p class="message-line muted" data-station-message aria-live="polite">A scan only selects a duck. Nothing is submitted until you press the final button.</p>
+    <button class="button station-control" type="button" data-submit-result hidden disabled>Record result</button>
+    <p class="message-line muted" data-station-message aria-live="polite">A scan only selects a duck. Record the complete result, then confirm Winner announced after it is read aloud.</p>
     ${interactive ? '<script src="/assets/finish-line.js" defer></script>' : ""}
     ${staffFooter(displayName)}
   </section>`,
