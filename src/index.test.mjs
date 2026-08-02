@@ -285,14 +285,34 @@ test("the inventory page is role gated and renders on every device", async () =>
   }
 });
 
-// The old Android-only station path is gone rather than redirected, so a stale
-// bookmark fails visibly instead of half working.
-test("the retired inventory intake path is no longer routed", async () => {
-  const response = await createWorker(async () => ({
+// The intake bookmark opens the same complete inventory page. It retains the
+// exact inventory authentication and role boundary rather than reviving the old
+// user-agent-gated station response.
+test("the inventory intake path shares the complete inventory authorization boundary", async () => {
+  const actor = (roles, isSystemAdmin = false) => ({
     id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Inventory Staff",
-    isSystemAdmin: true, roles: [], authentication: "bearer",
-  })).fetch(new Request("https://quickducks.com/staff/inventory-intake"), env);
-  assert.equal(response.status, 404);
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  const page = (currentActor) => createWorker(async () => currentActor).fetch(
+    new Request("https://quickducks.com/staff/inventory-intake"), env,
+  );
+
+  const anonymous = await page(null);
+  assert.equal(anonymous.status, 303);
+  assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Finventory-intake");
+
+  const denied = await page(actor(["REGISTRATION"]));
+  assert.equal(denied.status, 403);
+  assert.match(await denied.text(), /permission to use duck inventory/);
+
+  const allowed = await page(actor(["DUCK_MANAGER"]));
+  const body = await allowed.text();
+  assert.equal(allowed.status, 200);
+  assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow");
+  assert.match(body, /data-staff-inventory/);
+  assert.match(body, /data-intake-station/);
+  assert.match(body, /data-intake-controls hidden/);
+  assert.match(body, /<a href="\/staff\/inventory" aria-current="page">Inventory<\/a>/);
 });
 
 test("gates the standalone staff access page to system administrators", async () => {

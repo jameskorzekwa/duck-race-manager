@@ -2,12 +2,15 @@ import { expect, test } from "@playwright/test";
 
 import {
   bootstrap,
+  expectHorizontallyCentered,
   expectNoDocumentOverflow,
   intakeDuck,
   seedState,
   signIn,
   watchBrowserErrors,
 } from "./helpers.mjs";
+
+const mobileWidths = [320, 375, 430];
 
 const observePairingScrolls = async (page) => {
   await page.addInitScript(() => {
@@ -146,6 +149,12 @@ test.describe("search-result pairing confirmation", () => {
       focused: true,
     });
     expect(scrolls[0].reviewText).toContain(participant.lookupCode);
+
+    for (const width of mobileWidths) {
+      await page.setViewportSize({ width, height: 520 });
+      await expectHorizontallyCentered(confirm, confirmationRegion);
+      await expectNoDocumentOverflow(page);
+    }
 
     // The focused review region comes immediately before the still-unsubmitted
     // action, so one Tab advances there without activating it.

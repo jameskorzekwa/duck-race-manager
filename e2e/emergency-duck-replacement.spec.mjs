@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 import {
   bootstrap,
   confirmAction,
+  expectHorizontallyCentered,
   expectNoDocumentOverflow,
   intakeDuck,
   rawJson,
@@ -10,6 +11,8 @@ import {
   signIn,
   watchBrowserErrors,
 } from "./helpers.mjs";
+
+const mobileWidths = [320, 375, 430];
 
 const replacementPayload = (eventId, candidate, inspection, incidentType = "LOST") => ({
   commandId: crypto.randomUUID(),
@@ -59,13 +62,20 @@ const exerciseReplacement = async (page, state, spareNumber) => {
   await expect(review).toContainText(newDuckLabel);
   await expect(review).toContainText(state === "final" ? "Final · Heat" : "Round One · Heat");
   await page.getByLabel("The current duck is lost").check();
+  const replacementConfirmation = page.locator("[data-replacement-confirmation]");
+  const replacementButton = page.getByRole("button", { name: "Confirm emergency replacement" });
+  for (const width of mobileWidths) {
+    await page.setViewportSize({ width, height: 900 });
+    await expectHorizontallyCentered(replacementButton, replacementConfirmation);
+    await expectNoDocumentOverflow(page);
+  }
 
   let replacementRequests = 0;
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === `/api/v1/staff/ducks/${spare.tagToken}/replacement`
       && request.method() === "POST") replacementRequests += 1;
   });
-  await page.getByRole("button", { name: "Confirm emergency replacement" }).click();
+  await replacementButton.click();
   const dialog = page.getByRole("dialog", { name: "Confirm action" });
   await expect(dialog).toContainText(participantName);
   await expect(dialog).toContainText(oldDuckLabel);
@@ -74,7 +84,7 @@ const exerciseReplacement = async (page, state, spareNumber) => {
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   expect(replacementRequests).toBe(0);
 
-  await page.getByRole("button", { name: "Confirm emergency replacement" }).click();
+  await replacementButton.click();
   await confirmAction(page, "Replace duck");
   await expect(page.getByRole("heading", { name: `${newDuckLabel} replaced ${oldDuckLabel}` })).toBeVisible();
   await expect(page.locator("[data-staff-message]")).toContainText("Emergency replacement saved");

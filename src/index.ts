@@ -173,6 +173,7 @@ const stationPages = new Map<string, StationPage>([
 ]);
 
 const inventoryRoles: readonly OperationalRole[] = ["DUCK_MANAGER", "RACE_DIRECTOR"];
+const inventoryPagePaths = new Set(["/staff/inventory", "/staff/inventory-intake"]);
 
 // Where `/staff` sends a signed-in staffer who cannot open the Admin view, in
 // race-day priority order. `RACE_DIRECTOR` is deliberately absent from every
@@ -505,12 +506,12 @@ export const createWorker = (
       )));
     }
 
-    // Inventory is a normal staff page on every device. NFC scanning is the only
-    // part that needs Android Chrome, and the page turns that part off in the
-    // browser rather than being refused here: a device check that replaced the
-    // whole page also removed the staff navigation from it, which is how a
-    // laptop ended up on a dead end with no way back.
-    if (url.pathname === "/staff/inventory" && request.method === "GET") {
+    // Inventory is a normal staff page on every device. The intake-specific path
+    // remains a protected compatibility entry to the same complete page so a
+    // scanning-station bookmark never bypasses authentication, authorization,
+    // navigation, or ordinary inventory controls. NFC scanning is the only part
+    // that needs Android Chrome, and the browser turns only that section off.
+    if (inventoryPagePaths.has(url.pathname) && request.method === "GET") {
       const actor = await authenticateRequest(request, env);
       if (actor === null) {
         const login = new URL("/staff", env.APP_ORIGIN);

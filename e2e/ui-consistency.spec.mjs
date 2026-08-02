@@ -11,6 +11,8 @@ import {
   watchBrowserErrors,
 } from "./helpers.mjs";
 
+const mobileWidths = [320, 375, 430];
+
 test.describe("sitewide UI consistency", () => {
   test("primary staff views share one shell and app-styled control language", async ({ page }) => {
     const errors = watchBrowserErrors(page);
@@ -149,13 +151,16 @@ test.describe("sitewide UI consistency", () => {
     await expect(datetimeInput).toHaveValue(`${datetimeDate}T10:37`);
     await expect(datetimePanel).toBeHidden();
 
-    await page.setViewportSize({ width: 320, height: 720 });
+    await page.setViewportSize({ width: mobileWidths[0], height: 720 });
     await dateTrigger.click();
     await expect(datePanel).toBeVisible();
-    const mobileBox = await datePanel.boundingBox();
-    expect(mobileBox.x).toBeGreaterThanOrEqual(0);
-    expect(mobileBox.x + mobileBox.width).toBeLessThanOrEqual(320);
-    await expectNoDocumentOverflow(page);
+    for (const width of mobileWidths) {
+      await page.setViewportSize({ width, height: 720 });
+      const mobileBox = await datePanel.boundingBox();
+      expect(mobileBox.x).toBeGreaterThanOrEqual(0);
+      expect(mobileBox.x + mobileBox.width).toBeLessThanOrEqual(width);
+      await expectNoDocumentOverflow(page);
+    }
     await page.keyboard.press("Escape");
     expect(errors).toEqual([]);
   });
@@ -357,6 +362,13 @@ test.describe("sitewide UI consistency", () => {
     const dialog = adminPage.locator("[data-force-delete-dialog]");
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("heading", { name: "Permanently delete this event?" })).toBeVisible();
+    for (const width of mobileWidths) {
+      await adminPage.setViewportSize({ width, height: 720 });
+      const dialogBox = await dialog.boundingBox();
+      expect(dialogBox.x).toBeGreaterThanOrEqual(0);
+      expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(width);
+      await expectNoDocumentOverflow(adminPage);
+    }
     const finalDelete = dialog.getByRole("button", { name: "Delete event", exact: true });
     const confirmation = dialog.locator('input[name="confirmName"]');
     await expect(finalDelete).toBeDisabled();

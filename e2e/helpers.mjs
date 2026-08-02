@@ -64,6 +64,20 @@ export const expectNoDocumentOverflow = async (page) => {
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport + 1);
 };
 
+export const expectHorizontallyCentered = async (element, container) => {
+  const [elementBox, containerBox] = await Promise.all([
+    element.boundingBox(),
+    container.boundingBox(),
+  ]);
+  expect(elementBox).not.toBeNull();
+  expect(containerBox).not.toBeNull();
+  if (elementBox === null || containerBox === null) throw new Error("Centered action is not rendered.");
+  expect(elementBox.width).toBeLessThanOrEqual(containerBox.width + 1);
+  const elementCenter = elementBox.x + elementBox.width / 2;
+  const containerCenter = containerBox.x + containerBox.width / 2;
+  expect(Math.abs(elementCenter - containerCenter)).toBeLessThanOrEqual(1);
+};
+
 export const registerParticipant = async (client, eventId, index, overrides = {}) => {
   const firstName = overrides.firstName ?? `Racer${index}`;
   const lastName = overrides.lastName ?? "Example";

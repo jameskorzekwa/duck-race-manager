@@ -44,7 +44,7 @@ not authorized.
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Duck inventory intake, deletion, assignment, unassignment, and reservation | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open a staff duck inspection | `REGISTRATION`, `DUCK_MANAGER`, `RESULT_TAKER`, or `RACE_DIRECTOR`; projection stays role-narrow | Yes |
-| Open `/staff/inventory` | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Open `/staff/inventory` or its intake bookmark `/staff/inventory-intake` | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/registration` | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
 | Event list/detail context | Any operational role | Yes |
