@@ -72,6 +72,36 @@ export async function writeIssueStateIfCurrent({ github, context }, issueNumber,
 
 export const TASK_RETRY_LIMIT = 5;
 
+export function classifyTaskResult({ issue, marker, patchLength, exitStatus }) {
+  const failed = { type: "failed", numbers: [] };
+  if (exitStatus !== 0) return failed;
+
+  let match;
+  if ((match = marker.match(/^PIPELINE_TASK_READY:(\d+)$/))
+      && Number(match[1]) === issue && patchLength > 0) {
+    return { type: "ready", numbers: [issue] };
+  }
+  if ((match = marker.match(/^PIPELINE_TASK_GROUPED:(\d+)$/))
+      && Number(match[1]) !== issue && patchLength === 0) {
+    return { type: "grouped", numbers: [Number(match[1])] };
+  }
+  if ((match = marker.match(/^PIPELINE_TASK_BLOCKED:(\d+(?:,\d+)*)$/)) && patchLength === 0) {
+    const [blockedIssue, ...blockers] = match[1].split(",").map(Number);
+    if (blockedIssue === issue && blockers.length > 0
+        && !blockers.includes(issue) && new Set(blockers).size === blockers.length) {
+      return { type: "blocked", numbers: blockers };
+    }
+  }
+  if ((match = marker.match(/^PIPELINE_TASK_DUPLICATE:(\d+)$/))
+      && Number(match[1]) !== issue && patchLength === 0) {
+    return { type: "duplicate", numbers: [Number(match[1])] };
+  }
+  if ((match = marker.match(/^PIPELINE_TASK_QUESTION:(\d+)$/)) && Number(match[1]) === issue) {
+    return { type: "question", numbers: [issue] };
+  }
+  return failed;
+}
+
 // An agent:question issue resumes when James replies after the latest posted
 // question. Automation comments never count as an answer.
 export function questionAnswered(comments, trustedUserId = 38769771) {

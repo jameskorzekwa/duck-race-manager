@@ -436,9 +436,11 @@ jobs:
           git -C "$patch_repo" add -A
           node "$GITHUB_WORKSPACE/scripts/validate-agent-patch.mjs" "$patch_repo"
           git -C "$patch_repo" diff --cached --binary --full-index HEAD > "$RUNNER_TEMP/agent-task/task.patch"
-          node <<'NODE'
-          const crypto = require("node:crypto");
-          const fs = require("node:fs");
+          node --input-type=module <<'NODE'
+          import crypto from "node:crypto";
+          import fs from "node:fs";
+
+          const { classifyTaskResult } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
 
           const issue = Number(process.env.PIPELINE_ISSUE);
           const artifactDir = `${process.env.RUNNER_TEMP}/agent-task`;
@@ -456,25 +458,14 @@ jobs:
             .filter((line) => line.startsWith("PIPELINE_TASK_"));
           const marker = markerLines.length === 1 ? markerLines[0] : "";
           const patch = fs.readFileSync(`${artifactDir}/task.patch`);
-          let decision = { type: "failed", numbers: [] };
-          let match;
-          if ((match = marker.match(/^PIPELINE_TASK_READY:(\d+)$/)) && Number(match[1]) === issue && patch.length > 0) {
-            decision = { type: "ready", numbers: [issue] };
-          } else if ((match = marker.match(/^PIPELINE_TASK_GROUPED:(\d+)$/)) && Number(match[1]) !== issue && patch.length === 0) {
-            decision = { type: "grouped", numbers: [Number(match[1])] };
-          } else if ((match = marker.match(/^PIPELINE_TASK_BLOCKED:(\d+(?:,\d+)*)$/)) && patch.length === 0) {
-            const numbers = match[1].split(",").map(Number);
-            if (!numbers.includes(issue) && new Set(numbers).size === numbers.length) {
-              decision = { type: "blocked", numbers };
-            }
-          } else if ((match = marker.match(/^PIPELINE_TASK_DUPLICATE:(\d+)$/)) && Number(match[1]) !== issue && patch.length === 0) {
-            decision = { type: "duplicate", numbers: [Number(match[1])] };
-          } else if ((match = marker.match(/^PIPELINE_TASK_QUESTION:(\d+)$/)) && Number(match[1]) === issue) {
-            // A blocking question may accompany partial work; the patch is
-            // saved as the seed either way so the answer resumes, not restarts.
-            decision = { type: "question", numbers: [issue] };
-          }
-          if (exitStatus !== 0) decision = { type: "failed", numbers: [] };
+          // A blocking question may accompany partial work; the patch is saved
+          // as the seed either way so the answer resumes, not restarts.
+          const decision = classifyTaskResult({
+            issue,
+            marker,
+            patchLength: patch.length,
+            exitStatus,
+          });
           const digest = crypto.createHash("sha256").update(patch).digest("hex");
           fs.writeFileSync(`${artifactDir}/task-result.json`, JSON.stringify({
             issue,

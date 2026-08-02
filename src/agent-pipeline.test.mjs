@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, questionAnswered, recoverFailedIssue, trustedManualPullProvenance, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
+import { classifyTaskResult, closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, questionAnswered, recoverFailedIssue, trustedManualPullProvenance, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
 
 function fakeRecoveryGithub(comments) {
   const actions = { labels: [], comments: [], dispatched: 0 };
@@ -31,6 +31,27 @@ test("a fresh failure retries immediately and lands back in the queue path", asy
   assert.ok(actions.comments.some((body) => body.includes("task-retry=1")));
   assert.deepEqual(actions.labels, ["enhancement", "agent:inbox"]);
   assert.equal(actions.dispatched, 1);
+});
+
+test("a blocked task names itself first and persists only its prerequisites", () => {
+  assert.deepEqual(classifyTaskResult({
+    issue: 156,
+    marker: "PIPELINE_TASK_BLOCKED:156,155",
+    patchLength: 0,
+    exitStatus: 0,
+  }), { type: "blocked", numbers: [155] });
+  assert.deepEqual(classifyTaskResult({
+    issue: 156,
+    marker: "PIPELINE_TASK_BLOCKED:155",
+    patchLength: 0,
+    exitStatus: 0,
+  }), { type: "failed", numbers: [] });
+  assert.deepEqual(classifyTaskResult({
+    issue: 156,
+    marker: "PIPELINE_TASK_BLOCKED:156,155,155",
+    patchLength: 0,
+    exitStatus: 0,
+  }), { type: "failed", numbers: [] });
 });
 
 test("a spent retry budget parks the issue at agent:error", async () => {

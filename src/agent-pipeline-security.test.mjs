@@ -339,8 +339,11 @@ test("a blocked implementation can ask James and resume on his reply", async () 
   const workflow = await read(".github/workflows/agent-task.yml");
   const implement = workflow.slice(workflow.indexOf("  implement:"), workflow.indexOf("  verify:"));
   const publish = workflow.slice(workflow.indexOf("  publish:"));
+  const pipeline = await read("scripts/agent-pipeline.mjs");
 
-  assert.match(implement, /PIPELINE_TASK_QUESTION:\(\\d\+\)/);
+  assert.match(implement, /classifyTaskResult/);
+  assert.match(pipeline, /PIPELINE_TASK_QUESTION:\(\\d\+\)/);
+  assert.match(pipeline, /PIPELINE_TASK_BLOCKED:\(\\d\+\(\?:,\\d\+\)\*\)/);
   assert.match(publish, /result\.decision\.type === "question"/);
   assert.match(publish, /agent:question/);
   assert.match(publish, /<!-- agent-pipeline question=\$\{context\.runId\} -->/);
