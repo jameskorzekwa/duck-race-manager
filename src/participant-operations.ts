@@ -22,6 +22,8 @@ import {
 } from "./registration.ts";
 import { reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
 import type { Env } from "./types.ts";
+import { publishPendingParticipantNotifications } from "./email-notifications.ts";
+import { registrationNotificationStatements } from "./participant-notifications.ts";
 import {
   unstartedRoundOneHeatExistsSql,
   WALK_UP_ADMISSION_WITHOUT_EVENT,
@@ -624,6 +626,7 @@ const createWalkUp = async (
         eventId,
         registrationId,
       ),
+      ...registrationNotificationStatements(env, eventId, registrationId, commandId, now),
     ]);
   } catch {
     const replayCommand = await findCommand(env, commandId);
@@ -647,6 +650,7 @@ const createWalkUp = async (
       error: "Walk-up registration has closed because no unstarted Round One heat remains.",
     }, 409);
   }
+  await publishPendingParticipantNotifications(env);
   return registrationResult(created, false, 201, { privateStatusPath: `/r/${privateToken}` });
 };
 
@@ -813,7 +817,7 @@ const editRegistration = async (
     `UPDATE email_notifications
         SET status = 'CANCELLED', terminal_at = ?, status_reason = 'EMAIL_NOT_OPTED_IN',
             retry_after = NULL, last_error_code = NULL, updated_at = ?
-      WHERE registration_id = ? AND ? = 0
+      WHERE registration_id = ? AND channel = 'EMAIL' AND ? = 0
         AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
         AND EXISTS (
           SELECT 1 FROM race_commands rc
@@ -825,6 +829,25 @@ const editRegistration = async (
     now,
     registrationId,
     value.input.emailNotificationsEnabled ? 1 : 0,
+    commandId,
+    registrationId,
+  ));
+  statements.push(env.DB.prepare(
+    `UPDATE email_notifications
+        SET status = 'CANCELLED', terminal_at = ?, status_reason = 'SMS_NOT_OPTED_IN',
+            retry_after = NULL, last_error_code = NULL, updated_at = ?
+      WHERE registration_id = ? AND channel = 'SMS' AND ? = 0
+        AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
+        AND EXISTS (
+          SELECT 1 FROM race_commands rc
+           WHERE rc.id = ? AND rc.command_type = 'UPDATE_REGISTRATION'
+             AND rc.result_id = ?
+        )`,
+  ).bind(
+    now,
+    now,
+    registrationId,
+    value.input.smsNotificationsEnabled ? 1 : 0,
     commandId,
     registrationId,
   ));

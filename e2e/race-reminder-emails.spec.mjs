@@ -9,7 +9,7 @@ import {
   watchBrowserErrors,
 } from "./helpers.mjs";
 
-test("an opted-in participant receives assignment and called-heat reminders", async ({ page }) => {
+test("an opted-in participant receives assignment and authoritative next-heat reminders", async ({ page }) => {
   // Two seeded racers plus the participant registered below make one valid
   // three-duck heat. Keep this event throughout the scenario: seedState resets
   // the database and must never be used as a mid-test advancement helper.
@@ -66,6 +66,7 @@ test("an opted-in participant receives assignment and called-heat reminders", as
   await client.post(`/api/v1/staff/events/${seeded.eventId}/start-round-one`, {
     commandId: crypto.randomUUID(),
   });
+  await expect.poll(async () => (await targetEmails()).length).toBe(2);
   const heats = await client.get(`/api/v1/staff/events/${seeded.eventId}/heats`);
   const heat = heats.body.heats.find((candidate) => candidate.round === "ROUND_ONE");
   await transitionHeat(client, seeded.eventId, heat, "ready");
@@ -73,11 +74,15 @@ test("an opted-in participant receives assignment and called-heat reminders", as
 
   await expect.poll(async () => (await targetEmails()).length).toBe(2);
   const upcoming = (await targetEmails())[1];
-  expect(upcoming.subject).toContain("Round One, Heat 1 is being called now");
+  expect(upcoming.subject).toContain("Round One, Heat 1 is next to race");
   expect(upcoming.text).toContain("Please bring Duck #502 to the pond");
   expect(upcoming.text).not.toMatch(/\b\d{1,2}:\d{2}\b/);
 
   const serialized = JSON.stringify(await targetEmails());
+  const unsubscribeUrl = assignment.text.match(/Unsubscribe this email address: (\S+)/)?.[1];
+  expect(unsubscribeUrl).toBeTruthy();
+  await page.goto(unsubscribeUrl);
+  await expect(page.getByRole("heading", { name: "Email updates are off" })).toBeVisible();
   const ownershipProofs = await page.evaluate(() =>
     Object.values(JSON.parse(localStorage.getItem("quickducks.participant-ownership.v1") || "{}")));
   for (const proof of ownershipProofs) expect(serialized).not.toContain(proof);

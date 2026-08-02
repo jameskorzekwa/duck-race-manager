@@ -2,7 +2,12 @@ import type { StaffActor } from "./auth.ts";
 import { hasAnyRole, requireAnyRole } from "./authorization.ts";
 import { publicDisplayName } from "./race-board.ts";
 import { isCommandId } from "./registration.ts";
-import { publishEmailNotification } from "./email-notifications.ts";
+import { publishPendingParticipantNotifications } from "./email-notifications.ts";
+import {
+  assignmentNotificationStatements,
+  nextRunnableNotificationStatements,
+  resultNotificationStatements,
+} from "./participant-notifications.ts";
 import type { Env } from "./types.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
 
@@ -1279,19 +1284,6 @@ const transitionHeat = async (
     }
   }
 
-  const upcomingRecipients = transition === "call"
-    ? (await env.DB.prepare(
-      `SELECT r.id AS registration_id
-         FROM heat_entries he
-         JOIN race_entries re ON re.id = he.race_entry_id AND re.event_id = he.event_id
-         JOIN registrations r ON r.id = re.registration_id AND r.event_id = he.event_id
-        WHERE he.event_id = ? AND he.heat_id = ?
-          AND r.status = 'ACTIVE'
-        ORDER BY he.slot_number`,
-    ).bind(eventId, heatId).all<{ registration_id: string }>()).results
-      .filter((recipient) => typeof recipient.registration_id === "string")
-    : [];
-
   const now = new Date().toISOString();
   const commandLockGuard = transition === "lock"
     ? `AND h.roster_locked_at IS NULL
@@ -1354,7 +1346,6 @@ const transitionHeat = async (
     ${updateLockGuard} ${updateStartGuard}`;
   updateArgs.push(heatId, eventId, definition.expected, revision);
 
-  const notificationIds = upcomingRecipients.map(() => crypto.randomUUID());
   const statements: D1PreparedStatement[] = [
       env.DB.prepare(
         `INSERT INTO race_commands
@@ -1372,29 +1363,6 @@ const transitionHeat = async (
       ),
       env.DB.prepare(updateSql).bind(...updateArgs),
   ];
-  for (const [index, recipient] of upcomingRecipients.entries()) {
-    statements.push(env.DB.prepare(
-      `INSERT INTO email_notifications
-        (id, event_id, registration_id, heat_id, duck_assignment_id,
-         notification_type, status,
-         template_version, created_by_command_id, scheduled_at, updated_at)
-       SELECT ?, r.event_id, r.id, h.id, da.id,
-              'HEAT_UPCOMING', 'PENDING', 1, ?, ?, ?
-         FROM registrations r
-         JOIN race_entries re ON re.registration_id = r.id AND re.event_id = r.event_id
-         JOIN heat_entries he ON he.race_entry_id = re.id AND he.event_id = r.event_id
-         JOIN heats h ON h.id = he.heat_id AND h.event_id = r.event_id
-         JOIN events e ON e.id = h.event_id
-         JOIN duck_assignments da
-           ON da.race_entry_id = re.id AND da.event_id = r.event_id AND da.valid_to IS NULL
-        WHERE r.id = ? AND h.id = ? AND h.status = 'CALLING'
-          AND ((h.round = 'ROUND_ONE' AND e.status = 'ROUND_ONE')
-            OR (h.round = 'FINAL' AND e.status = 'FINAL'))
-          AND r.status = 'ACTIVE' AND r.email IS NOT NULL
-          AND r.email_notifications_enabled = 1
-       ON CONFLICT DO NOTHING`,
-    ).bind(notificationIds[index], commandId, now, now, recipient.registration_id, heatId));
-  }
   statements.push(
       env.DB.prepare(
         `INSERT INTO audit_events
@@ -1414,7 +1382,7 @@ const transitionHeat = async (
       : "The heat transition conflicted with another update. Refresh and try again.";
     return json({ error: message }, 409);
   }
-  await Promise.all(notificationIds.map((notificationId) => publishEmailNotification(env, notificationId)));
+  await publishPendingParticipantNotifications(env);
   const updated = await getHeatSummary(env, eventId, heatId);
   return json({ heat: updated === null ? null : heatSummary(updated), replayed: false }, 201);
 };
@@ -1521,6 +1489,26 @@ const resetHeat = async (
       // inherit places nobody scanned for it.
       clearPodiumSelectionsStatement(env, eventId, heatId, commandId),
       env.DB.prepare(
+        `UPDATE email_notifications
+            SET status = 'CANCELLED', terminal_at = ?, status_reason = 'HEAT_OCCURRENCE_RESET',
+                retry_after = NULL, updated_at = ?
+          WHERE heat_id = ? AND notification_type IN ('HEAT_UPCOMING', 'SMS_HEAT_UPCOMING')
+            AND status IN ('PENDING', 'QUEUED', 'RETRY_PENDING')
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.event_id = ? AND rc.command_type = 'RESET_HEAT'
+            )`,
+      ).bind(now, now, heatId, commandId, eventId),
+      // READY and CALLING are already part of the same "next runnable" window.
+      // Resetting either one back to LOADING must cancel its delayed reminder,
+      // but must not invent a second occurrence for the same uninterrupted
+      // window. A heat that had actually started (or finished without a result)
+      // does become runnable again after reset, so that reset is a new reminder
+      // occurrence.
+      ...(heat.status === "RUNNING" || heat.status === "AWAITING_RESULT"
+        ? nextRunnableNotificationStatements(env, eventId, heat.round, commandId, now)
+        : []),
+      env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
            actor_type, occurred_at, details_json)
@@ -1534,6 +1522,7 @@ const resetHeat = async (
     return json({ error: "The heat changed, lost its locked roster, or gained a published result. Refresh and try again." }, 409);
   }
   const updated = await getHeatSummary(env, eventId, heatId);
+  await publishPendingParticipantNotifications(env);
   return json({ heat: updated === null ? null : heatSummary(updated), replayed: false }, 201);
 };
 
@@ -1589,6 +1578,7 @@ const resultContext = (
 
 interface ResultRosterRow {
   race_entry_id: string;
+  registration_id: string;
   duck_assignment_id: string | null;
   registration_status: string;
 }
@@ -1598,7 +1588,7 @@ const resultRoster = (
   eventId: string,
   heatId: string,
 ): Promise<D1Result<ResultRosterRow>> => env.DB.prepare(
-  `SELECT he.race_entry_id, da.id AS duck_assignment_id,
+  `SELECT he.race_entry_id, r.id AS registration_id, da.id AS duck_assignment_id,
           r.status AS registration_status
      FROM heat_entries he
      JOIN race_entries re ON re.id = he.race_entry_id
@@ -1873,8 +1863,10 @@ const finalizeResultSet = async (
     // exactly the case where a leftover scanned place would contradict it.
     statements.push(clearPodiumSelectionsStatement(env, eventId, heatId, commandId));
   }
+  let promotedFinalHeatId: string | null = null;
   if (context.round === "ROUND_ONE") {
     const finalHeatId = finalHeat?.id ?? crypto.randomUUID();
+    promotedFinalHeatId = finalHeatId;
     if (finalHeat === null) {
       statements.push(env.DB.prepare(
         `INSERT INTO heats
@@ -1908,6 +1900,30 @@ const finalizeResultSet = async (
     now, commandId, now, heatId, eventId, revision,
     ...results.map((result) => result.raceEntryId), results.length,
   ));
+  statements.push(...resultNotificationStatements(
+    env,
+    eventId,
+    heatId,
+    resultRevision,
+    commandId,
+    now,
+  ));
+  if (context.round === "ROUND_ONE") {
+    const winner = rosterResult.results.find((entry) => entry.race_entry_id === results[0].raceEntryId)!;
+    statements.push(...assignmentNotificationStatements(
+      env,
+      eventId,
+      winner.registration_id,
+      promotedFinalHeatId!,
+      winner.duck_assignment_id!,
+      commandId,
+      now,
+      true,
+    ));
+    // The result that finalized this heat is the authoritative progression
+    // point at which the next unfinished heat becomes runnable.
+    statements.push(...nextRunnableNotificationStatements(env, eventId, "ROUND_ONE", commandId, now));
+  }
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id,
@@ -1922,6 +1938,7 @@ const finalizeResultSet = async (
   } catch {
     return json({ error: "Result finalization conflicted with another update. Retry with the same command identifier." }, 409);
   }
+  await publishPendingParticipantNotifications(env);
   return finalizedResultResponse(env, eventId, heatId, false);
 };
 
@@ -2234,6 +2251,14 @@ const recordFinalPodiumPlace = async (
         JSON.stringify({ staff_profile_id: actor.id, result_revision: resultRevision, results }),
       ),
     );
+    statements.push(...resultNotificationStatements(
+      env,
+      eventId,
+      heatId,
+      resultRevision,
+      commandId,
+      now,
+    ));
   } else {
     statements.push(
       // Sweep the two rows this scan is allowed to replace, and only because the
@@ -2308,6 +2333,7 @@ const recordFinalPodiumPlace = async (
         + " Scan it again and choose from the places that are still open.",
     }, 409);
   }
+  await publishPendingParticipantNotifications(env);
   return podiumScanResponse(env, eventId, heatId, false);
 };
 
@@ -2841,11 +2867,33 @@ const correctResults = async (
       }),
     ),
   );
+  statements.push(...resultNotificationStatements(
+    env,
+    eventId,
+    heatId,
+    resultRevision,
+    commandId,
+    now,
+  ));
+  if (context.round === "ROUND_ONE" && promotion !== null) {
+    const winner = roster.results.find((entry) => entry.race_entry_id === results[0].raceEntryId)!;
+    statements.push(...assignmentNotificationStatements(
+      env,
+      eventId,
+      winner.registration_id,
+      promotion.final_heat_id,
+      winner.duck_assignment_id!,
+      commandId,
+      now,
+      true,
+    ));
+  }
   try {
     await env.DB.batch(statements);
   } catch {
     return json({ error: "The result gained a dependency or changed. Refresh and try again." }, 409);
   }
+  await publishPendingParticipantNotifications(env);
   return finalizedResultResponse(env, eventId, heatId, false);
 };
 

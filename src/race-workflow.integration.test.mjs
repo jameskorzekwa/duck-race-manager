@@ -8,6 +8,7 @@ import { createWorker } from "./index.ts";
 import { LIVE_UPDATE_DOMAINS } from "./live-updates.ts";
 import { randomToken } from "./registration.ts";
 import { EmailSendError, processEmailNotification } from "./email-notifications.ts";
+import { processParticipantNotification } from "./participant-notifications.ts";
 
 class D1Statement {
   constructor(database, sql) {
@@ -123,11 +124,16 @@ const createWorkerHarness = (
   const queuedNotifications = [];
   const queueAttempts = [];
   const sentEmails = [];
+  const sentSms = [];
   let remainingQueueSendFailures = queueSendFailures;
   let env;
   const emailSender = async (email) => {
     sentEmails.push(email);
     return { providerMessageId: `test-${sentEmails.length}` };
+  };
+  const smsSender = async (sms) => {
+    sentSms.push(sms);
+    return { providerMessageId: `sms-test-${sentSms.length}` };
   };
   env = {
     APP_ORIGIN: "https://quickducks.com",
@@ -141,7 +147,10 @@ const createWorkerHarness = (
     DB: createD1(database),
     EMAIL_QUEUE: {
       async send(notificationId) {
-        if (remainingQueueSendFailures > 0) {
+        const channel = database.prepare(
+          "SELECT channel FROM email_notifications WHERE id = ?",
+        ).get(notificationId)?.channel;
+        if (remainingQueueSendFailures > 0 && channel === "EMAIL") {
           remainingQueueSendFailures -= 1;
           queueAttempts.push({ notificationId, accepted: false });
           throw new Error("simulated queue publication failure");
@@ -149,7 +158,7 @@ const createWorkerHarness = (
         queueAttempts.push({ notificationId, accepted: true });
         queuedNotifications.push(notificationId);
         if (deliverEmails) {
-          await processEmailNotification(env, notificationId, emailSender);
+          await processEmailNotification(env, notificationId, emailSender, 1, smsSender);
         }
       },
     },
@@ -166,6 +175,7 @@ const createWorkerHarness = (
     (request, currentEnv) => authenticateStaff(request, currentEnv, verifyStaffToken),
     fetch,
     emailSender,
+    smsSender,
   );
   const api = (path, options = {}) => {
     const headers = new Headers(options.headers);
@@ -188,6 +198,7 @@ const createWorkerHarness = (
     queuedNotifications,
     queueAttempts,
     sentEmails,
+    sentSms,
     updateTasks,
     post: (path, body, token = staffToken) => api(path, { method: "POST", body, token }),
   };
@@ -216,6 +227,7 @@ const raceToAwaitingFinal = async (
     queuedNotifications,
     queueAttempts,
     sentEmails,
+    sentSms,
   } = createWorkerHarness(database, { deliverEmails, queueSendFailures });
   const created = await jsonBody(await post("/api/v1/staff/events", {
     commandId: crypto.randomUUID(),
@@ -418,13 +430,14 @@ const raceToAwaitingFinal = async (
     queuedNotifications,
     queueAttempts,
     sentEmails,
+    sentSms,
   };
 };
 
-test("opted-in racers receive one assignment email and one reminder as each heat is called", async (context) => {
+test("opted-in racers receive every committed participant lifecycle notification once", async (context) => {
   const { database } = createDatabase();
   context.after(() => database.close());
-  const { env, queuedNotifications, sentEmails } = await raceToAwaitingFinal(database, {
+  const race = await raceToAwaitingFinal(database, {
     name: "Reminder Race <Pond>",
     slug: "reminder-race",
     racerCount: 3,
@@ -432,27 +445,44 @@ test("opted-in racers receive one assignment email and one reminder as each heat
     optInRegistrationIndex: 0,
     deliverEmails: true,
   });
+  const { env, queuedNotifications, sentEmails, sentSms } = race;
+  await jsonBody(await race.post(
+    `/api/v1/staff/events/${race.eventId}/heats/${race.finalHeat.id}/results/finalize`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: race.finalHeat.revision,
+      results: [{ raceEntryId: race.finalists[0].raceEntryId, place: 1 }],
+    },
+  ), 201, "publish final participant result");
 
-  assert.equal(sentEmails.length, 3, "assignment, Round One call, and Final call");
-  assert.equal(new Set(queuedNotifications).size, 3, "only opaque notification IDs are queued once");
+  assert.equal(sentEmails.length, 7, "registration through final result");
+  assert.equal(sentSms.length, 7, "email and SMS progress independently through the complete lifecycle");
+  assert.equal(new Set(queuedNotifications).size, 14, "one opaque ID per channel and lifecycle occurrence");
   assert.ok(queuedNotifications.every((value) => /^[0-9a-f-]{36}$/i.test(value)));
   assert.deepEqual(
     database.prepare(
       `SELECT n.notification_type, n.status AS status, h.round
-         FROM email_notifications n JOIN heats h ON h.id = n.heat_id
-        ORDER BY n.created_at, n.notification_type`,
+         FROM email_notifications n LEFT JOIN heats h ON h.id = n.heat_id
+        WHERE n.channel = 'EMAIL'
+        ORDER BY n.rowid`,
     ).all().map((row) => ({ ...row })),
     [
+      { notification_type: "REGISTRATION_CONFIRMATION", status: "SENT", round: null },
       { notification_type: "HEAT_ASSIGNED", status: "SENT", round: "ROUND_ONE" },
       { notification_type: "HEAT_UPCOMING", status: "SENT", round: "ROUND_ONE" },
+      { notification_type: "ROUND_RESULT", status: "SENT", round: "ROUND_ONE" },
+      { notification_type: "FINAL_ASSIGNED", status: "SENT", round: "FINAL" },
       { notification_type: "HEAT_UPCOMING", status: "SENT", round: "FINAL" },
+      { notification_type: "ROUND_RESULT", status: "SENT", round: "FINAL" },
     ],
   );
-  assert.match(sentEmails[0].subject, /Duck #1 is assigned to Round One, Heat 1/);
+  assert.match(sentEmails[0].subject, /registration is confirmed/i);
   assert.match(sentEmails[0].text, /Racer0 Example/);
-  assert.match(sentEmails[0].text, /stay near the pond/i);
-  assert.match(sentEmails[1].text, /being called now/i);
-  assert.match(sentEmails[2].subject, /Final, Heat 1 is being called now/);
+  assert.match(sentEmails[1].subject, /Duck #1 is assigned to Round One, Heat 1/);
+  assert.match(sentEmails[1].text, /stay near the pond/i);
+  assert.match(sentEmails[2].text, /next to race/i);
+  assert.match(sentEmails[5].subject, /Final, Heat 1 is next to race/);
+  assert.match(sentEmails[6].subject, /Final, Heat 1 result/);
   assert.match(sentEmails[0].html, /Reminder Race &lt;Pond&gt;/);
   assert.doesNotMatch(JSON.stringify(queuedNotifications), /racer0|example\.com|private|lookup/i);
 
@@ -463,6 +493,36 @@ test("opted-in racers receive one assignment email and one reminder as each heat
   }), "NOOP");
   assert.equal(sentEmails.length, sentBeforeDuplicate, "a duplicate queue delivery never resends");
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("the next Round One heat reminder follows official progression rather than the call control", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  await raceToAwaitingFinal(database, {
+    name: "Progression Reminder Race",
+    slug: "progression-reminder-race",
+    racerCount: 6,
+    heatCapacity: 3,
+    optInRegistrationIndexes: [0, 3],
+    deliverEmails: true,
+  });
+  assert.deepEqual(database.prepare(
+    `SELECT h.heat_number, COUNT(*) AS count
+       FROM email_notifications n JOIN heats h ON h.id = n.heat_id
+      WHERE n.channel = 'EMAIL' AND n.notification_type = 'HEAT_UPCOMING'
+        AND h.round = 'ROUND_ONE'
+      GROUP BY h.heat_number ORDER BY h.heat_number`,
+  ).all().map((row) => ({ ...row })), [
+    { heat_number: 1, count: 1 },
+    { heat_number: 2, count: 1 },
+  ]);
+  assert.equal(database.prepare(
+    `SELECT COUNT(*) AS count FROM email_notifications n
+      JOIN race_commands c ON c.id = n.created_by_command_id
+     WHERE n.channel = 'EMAIL' AND n.notification_type = 'HEAT_UPCOMING'
+       AND c.command_type = 'CALL_HEAT'`,
+  ).get().count, 0, "calling a heat is not the reminder clock");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 test("the consumer rechecks consent and bounds temporary SES retries without exposing provider details", async (context) => {
@@ -513,8 +573,15 @@ test("the consumer rechecks consent and bounds temporary SES retries without exp
   assert.equal(await processEmailNotification(env, assignment.id, temporarySender, 1), "RETRY");
   assert.deepEqual(
     { ...database.prepare("SELECT status, last_error_code FROM email_notifications WHERE id = ?").get(assignment.id) },
-    { status: "QUEUED", last_error_code: "SES_TEMPORARY_FAILURE" },
+    { status: "RETRY_PENDING", last_error_code: "SES_TEMPORARY_FAILURE" },
   );
+  database.prepare("UPDATE email_notifications SET retry_after = NULL WHERE id = ?").run(assignment.id);
+  assert.equal(await processEmailNotification(env, assignment.id, temporarySender, 5), "RETRY",
+    "a queue delivery count does not exhaust provider attempts");
+  for (let attempt = 0; attempt < 1; attempt += 1) {
+    database.prepare("UPDATE email_notifications SET retry_after = NULL WHERE id = ?").run(assignment.id);
+    assert.equal(await processEmailNotification(env, assignment.id, temporarySender, 5), "RETRY");
+  }
   database.prepare("UPDATE email_notifications SET retry_after = NULL WHERE id = ?").run(assignment.id);
   assert.equal(await processEmailNotification(env, assignment.id, temporarySender, 5), "FAILED");
   assert.deepEqual(
@@ -522,6 +589,148 @@ test("the consumer rechecks consent and bounds temporary SES retries without exp
     { status: "FAILED", last_error_code: "DELIVERY_RETRIES_EXHAUSTED" },
   );
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("email unsubscribe and SMS provider STOP suppress accepted pending work at delivery", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Suppression Race",
+    slug: "suppression-race",
+    racerCount: 3,
+    heatCapacity: 3,
+    optInRegistrationIndex: 0,
+  });
+  const emailRegistration = database.prepare(
+    `SELECT id FROM email_notifications
+      WHERE channel = 'EMAIL' AND notification_type = 'REGISTRATION_CONFIRMATION'
+      ORDER BY rowid LIMIT 1`,
+  ).get();
+  let deliveredEmail;
+  assert.equal(await processParticipantNotification(race.env, emailRegistration.id, {
+    emailSender: async (email) => {
+      deliveredEmail = email;
+      return { providerMessageId: "unsubscribe-message" };
+    },
+    emailSuppressed: async () => false,
+  }), "SENT");
+  const unsubscribeUrl = deliveredEmail.text.match(/Unsubscribe this email address: (\S+)/)?.[1];
+  assert.ok(unsubscribeUrl);
+  const unsubscribe = await race.worker.fetch(new Request(unsubscribeUrl), race.env);
+  assert.equal(unsubscribe.status, 200);
+  assert.match(await unsubscribe.text(), /Email updates are off/);
+
+  const pendingEmail = database.prepare(
+    `SELECT id FROM email_notifications
+      WHERE channel = 'EMAIL' AND registration_id = (
+        SELECT registration_id FROM email_notifications WHERE id = ?
+      ) AND notification_type = 'ROUND_RESULT' AND status = 'QUEUED'
+      ORDER BY rowid LIMIT 1`,
+  ).get(emailRegistration.id);
+  let emailSenderCalled = false;
+  assert.equal(await processParticipantNotification(race.env, pendingEmail.id, {
+    emailSender: async () => {
+      emailSenderCalled = true;
+      return { providerMessageId: "must-not-send" };
+    },
+    emailSuppressed: async () => false,
+  }), "CANCELLED");
+  assert.equal(emailSenderCalled, false);
+  assert.equal(database.prepare(
+    "SELECT status_reason FROM email_notifications WHERE id = ?",
+  ).get(pendingEmail.id).status_reason, "EMAIL_UNSUBSCRIBE");
+
+  const invalidSms = database.prepare(
+    `SELECT id, registration_id FROM email_notifications
+      WHERE channel = 'SMS' AND notification_type = 'SMS_REGISTRATION_CONFIRMATION'
+      ORDER BY rowid LIMIT 1`,
+  ).get();
+  race.env.DB = createD1(database, {
+    afterDeliveryClaim() {
+      database.prepare("UPDATE registrations SET phone = 'invalid' WHERE id = ?")
+        .run(invalidSms.registration_id);
+    },
+  });
+  let invalidSmsSenderCalled = false;
+  assert.equal(await processParticipantNotification(race.env, invalidSms.id, {
+    smsSender: async () => {
+      invalidSmsSenderCalled = true;
+      return { providerMessageId: "must-not-send" };
+    },
+    smsSuppressed: async () => false,
+  }), "CANCELLED");
+  assert.equal(invalidSmsSenderCalled, false);
+  assert.equal(database.prepare(
+    "SELECT status_reason FROM email_notifications WHERE id = ?",
+  ).get(invalidSms.id).status_reason, "SMS_DESTINATION_INVALID");
+  database.prepare("UPDATE registrations SET phone = '(817) 320-6000' WHERE id = ?")
+    .run(invalidSms.registration_id);
+  race.env.DB = createD1(database);
+
+  const pendingSms = database.prepare(
+    `SELECT id FROM email_notifications
+      WHERE channel = 'SMS' AND notification_type = 'SMS_ROUND_RESULT'
+      ORDER BY rowid LIMIT 1`,
+  ).get();
+  let smsSenderCalled = false;
+  assert.equal(await processParticipantNotification(race.env, pendingSms.id, {
+    smsSender: async () => {
+      smsSenderCalled = true;
+      return { providerMessageId: "must-not-send" };
+    },
+    smsSuppressed: async () => true,
+  }), "CANCELLED");
+  assert.equal(smsSenderCalled, false);
+  assert.equal(database.prepare(
+    "SELECT status_reason FROM email_notifications WHERE id = ?",
+  ).get(pendingSms.id).status_reason, "SMS_STOP");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a post-commit notification dispatcher read failure never replaces the domain response", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const harness = createWorkerHarness(database);
+  const created = await jsonBody(await harness.post("/api/v1/staff/events", {
+    commandId: crypto.randomUUID(),
+    slug: "dispatcher-isolation-race",
+    name: "Dispatcher Isolation Race",
+    eventDate: "2026-09-12",
+    roundOneHeatCapacity: 3,
+  }, adminToken), 201, "create dispatcher isolation event");
+  await jsonBody(await harness.post(`/api/v1/staff/events/${created.event.id}/open-registration`, {
+    commandId: crypto.randomUUID(),
+  }), 201, "open dispatcher isolation registration");
+
+  const base = createD1(database);
+  harness.env.DB = {
+    prepare(sql) {
+      const statement = base.prepare(sql);
+      if (sql.includes("ORDER BY created_at, id") && sql.includes("FROM email_notifications")) {
+        statement.all = async () => { throw new Error("simulated post-commit reconciliation read failure"); };
+      }
+      return statement;
+    },
+    batch(statements) { return base.batch(statements); },
+  };
+  const registration = await jsonBody(await harness.post(
+    `/api/v1/staff/events/${created.event.id}/registrations`,
+    {
+      commandId: crypto.randomUUID(),
+      privateToken: randomToken(),
+      firstName: "Durable",
+      lastName: "Racer",
+      email: "durable@example.test",
+      phone: null,
+      emailNotificationsEnabled: true,
+      smsNotificationsEnabled: false,
+    },
+  ), 201, "registration survives dispatcher failure");
+  assert.equal(registration.registration.firstName, "Durable");
+  assert.equal(database.prepare(
+    "SELECT status FROM email_notifications WHERE registration_id = ? AND channel = 'EMAIL'",
+  ).get(registration.registration.registrationId).status, "PENDING");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 test("a delayed upcoming reminder is cancelled after the heat starts", async (context) => {
@@ -585,16 +794,20 @@ test("a delayed upcoming reminder is cancelled after the called heat is reset", 
       assert.equal(await processEmailNotification(env, notification.id, async () => {
         senderCalled = true;
         return { providerMessageId: "must-not-send" };
-      }), "CANCELLED");
+      }), "NOOP", "the reset atomically cancelled the queued occurrence");
       assert.equal(senderCalled, false);
       assert.deepEqual({ ...database.prepare(
         "SELECT status, status_reason FROM email_notifications WHERE id = ?",
       ).get(notification.id) }, {
         status: "CANCELLED",
-        status_reason: "HEAT_NO_LONGER_UPCOMING",
+        status_reason: "HEAT_OCCURRENCE_RESET",
       });
+      assert.equal(database.prepare(
+        `SELECT COUNT(*) AS count FROM email_notifications
+          WHERE heat_id = ? AND notification_type = 'HEAT_UPCOMING'`,
+      ).get(heat.id).count, 1, "the uninterrupted next-runnable window has one reminder");
       // Continue the ordinary lifecycle after proving that reset invalidated
-      // the queued work. Logical-message uniqueness prevents another reminder.
+      // the queued work without creating a second occurrence.
       await transition(heat, "ready");
       await transition(heat, "call");
     },
@@ -816,6 +1029,7 @@ test("the durable outbox republishes a failed queue send through scheduled and q
     optInRegistrationIndex: 0,
     queueSendFailures: 1,
     afterPairing: async ({
+      post,
       env,
       worker,
       queuedNotifications,
@@ -823,12 +1037,31 @@ test("the durable outbox republishes a failed queue send through scheduled and q
       sentEmails,
     }) => {
       const notification = database.prepare(
-        "SELECT id, status FROM email_notifications WHERE notification_type = 'HEAT_ASSIGNED'",
+        "SELECT id, status FROM email_notifications WHERE channel = 'EMAIL' AND status = 'RETRY_PENDING'",
       ).get();
       assert.ok(notification);
       assert.equal(notification.status, "RETRY_PENDING");
-      assert.deepEqual(queueAttempts, [{ notificationId: notification.id, accepted: false }]);
-      assert.deepEqual(queuedNotifications, []);
+      assert.deepEqual(queueAttempts.filter((attempt) => attempt.notificationId === notification.id), [
+        { notificationId: notification.id, accepted: false },
+      ]);
+      assert.equal(queuedNotifications.includes(notification.id), false);
+
+      const earlyTasks = [];
+      await worker.scheduled({}, env, { waitUntil(promise) { earlyTasks.push(promise); } });
+      await Promise.all(earlyTasks);
+      assert.equal(
+        queueAttempts.filter((attempt) => attempt.notificationId === notification.id).length,
+        1,
+        "scheduled reconciliation does not bypass retry_after",
+      );
+      const earlySupportRetry = await post(
+        `/api/v1/staff/support/events/${database.prepare(
+          "SELECT event_id FROM email_notifications WHERE id = ?",
+        ).get(notification.id).event_id}/notifications/${notification.id}/retry`,
+        { commandId: crypto.randomUUID() },
+        adminToken,
+      );
+      assert.equal(earlySupportRetry.status, 409, "support retry cannot bypass publication backoff");
 
       // Advance the durable retry clock without waiting for wall time, then use
       // the same scheduled entry point deployed by the Worker.
@@ -839,11 +1072,11 @@ test("the durable outbox republishes a failed queue send through scheduled and q
         waitUntil(promise) { scheduledTasks.push(promise); },
       });
       await Promise.all(scheduledTasks);
-      assert.deepEqual(queueAttempts, [
+      assert.deepEqual(queueAttempts.filter((attempt) => attempt.notificationId === notification.id), [
         { notificationId: notification.id, accepted: false },
         { notificationId: notification.id, accepted: true },
       ]);
-      assert.deepEqual(queuedNotifications, [notification.id]);
+      assert.equal(queuedNotifications.includes(notification.id), true);
       assert.equal(database.prepare(
         "SELECT status FROM email_notifications WHERE id = ?",
       ).get(notification.id).status, "QUEUED");
@@ -870,6 +1103,32 @@ test("the durable outbox republishes a failed queue send through scheduled and q
       assert.equal(acknowledged, 2);
       assert.equal(retried, 0);
       assert.equal(sentEmails.length, 1);
+
+      const stale = database.prepare(
+        `SELECT id FROM email_notifications
+          WHERE id != ? AND channel = 'EMAIL' AND status = 'QUEUED'
+          ORDER BY rowid LIMIT 1`,
+      ).get(notification.id);
+      assert.ok(stale);
+      for (let publication = 0; publication < 6; publication += 1) {
+        database.prepare(
+          "UPDATE email_notifications SET queued_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+        ).run(stale.id);
+        const staleTasks = [];
+        await worker.scheduled({}, env, { waitUntil(promise) { staleTasks.push(promise); } });
+        await Promise.all(staleTasks);
+      }
+      assert.equal(database.prepare(
+        "SELECT status FROM email_notifications WHERE id = ?",
+      ).get(stale.id).status, "QUEUED", "successful stale publication never exhausts delivery");
+      await worker.queue({
+        queue: "quickducks-email",
+        messages: [{ ...queueMessage(1), body: stale.id }],
+      }, env);
+      assert.equal(database.prepare(
+        "SELECT status FROM email_notifications WHERE id = ?",
+      ).get(stale.id).status, "SENT");
+      assert.equal(sentEmails.length, 2, "many accepted publications still produce one provider send");
       recovered = true;
     },
   });
@@ -2204,6 +2463,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0019_round_one_walk_up_admission.sql",
     "0020_email_notification_assignment.sql",
     "0021_email_delivery_claim.sql",
+    "0022_participant_notification_channels.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.

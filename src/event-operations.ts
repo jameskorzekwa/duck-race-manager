@@ -5,6 +5,11 @@ import { isCommandId } from "./registration.ts";
 import { autoResolvableRoundOneHeatSql, reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
 import type { Env } from "./types.ts";
 import { unstartedRoundOneHeatExistsSql, walkUpAdmissionFor } from "./walk-up-admission.ts";
+import { publishPendingParticipantNotifications } from "./email-notifications.ts";
+import {
+  nextRunnableNotificationStatements,
+  reassignedByCommandNotificationStatements,
+} from "./participant-notifications.ts";
 
 const headers = {
   "cache-control": "no-store",
@@ -1782,7 +1787,10 @@ const lifecycleSideEffects = async (
   if (definition.action === "close-registration") {
     const plans = await planTailMerges(eventId, env);
     return {
-      statements: plans.flatMap((plan) => mergeStatements(plan, eventId, commandId, now, env)),
+      statements: [
+        ...plans.flatMap((plan) => mergeStatements(plan, eventId, commandId, now, env)),
+        ...reassignedByCommandNotificationStatements(env, eventId, commandId, now),
+      ],
       audits: plans.map((plan) => ({
         action: "ROUND_ONE_TAIL_MERGED",
         merged_heat_number: plan.tailHeatNumber,
@@ -1802,7 +1810,10 @@ const lifecycleSideEffects = async (
   if (definition.action === "reopen-registration") {
     const plans = await planTailSplits(eventId, env);
     return {
-      statements: plans.flatMap((plan) => splitStatements(plan, eventId, commandId, now, env)),
+      statements: [
+        ...plans.flatMap((plan) => splitStatements(plan, eventId, commandId, now, env)),
+        ...reassignedByCommandNotificationStatements(env, eventId, commandId, now),
+      ],
       audits: plans.map((plan) => ({
         action: "ROUND_ONE_TAIL_SPLIT",
         restored_heat_number: plan.newHeatNumber,
@@ -1822,6 +1833,7 @@ const lifecycleSideEffects = async (
     return {
       statements: [
         lockRoundStatement(round, definition.commandType, eventId, commandId, actor.id, now, env),
+        ...nextRunnableNotificationStatements(env, eventId, round, commandId, now),
       ],
       audits: [{ action: "HEAT_ROSTERS_LOCKED", round }],
       bagMoves: [],
@@ -1977,6 +1989,7 @@ const runLifecycleCommand = async (
     revision: event.revision + 1,
     updated_at: now,
   };
+  await publishPendingParticipantNotifications(env);
   // The moves are reported with the transition that made them, and only when
   // that transition genuinely committed. Every rebalance statement shares the
   // command-committed guard of `updateSql`, and the two `meta.changes` checks

@@ -25,6 +25,7 @@ const migrationNames = [
   "0019_round_one_walk_up_admission.sql",
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
+  "0022_participant_notification_channels.sql",
 ];
 
 const lifecycleStatuses = [
@@ -67,6 +68,80 @@ const createDatabase = () => {
   applyMigrations(database);
   return database;
 };
+
+test("0022 adds channel lifecycle uniqueness and durable hashed suppression compatibly", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0022_participant_notification_channels.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event-notify', 'notify-race', 'Notify Race', 'America/Denver', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, email, status, lookup_code,
+       private_token_hash, email_notifications_enabled, submitted_at, status_changed_at)
+    VALUES
+      ('registration-notify', 'event-notify', 'Pat', 'Racer', 'pat@example.test',
+       'SUBMITTED', 'NOTIFY22', '${"a".repeat(64)}', 1,
+       '2026-08-02T00:00:00.000Z', '2026-08-02T00:00:00.000Z');
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-email', 'event-notify', 'registration-notify', 'LEGACY_NOTICE', 'PENDING');
+  `);
+
+  database.exec(readFileSync(
+    new URL("../db/migrations/0022_participant_notification_channels.sql", import.meta.url),
+    "utf8",
+  ));
+  assert.deepEqual(
+    { ...database.prepare(
+      "SELECT channel, lifecycle_key, result_revision FROM email_notifications WHERE id = 'legacy-email'",
+    ).get() },
+    { channel: "EMAIL", lifecycle_key: null, result_revision: null },
+  );
+  database.exec(`INSERT INTO email_notifications
+    (id, event_id, registration_id, notification_type, status)
+    VALUES ('rolled-back-worker-email', 'event-notify', 'registration-notify',
+            'ROLLED_BACK_NOTICE', 'PENDING')`);
+  assert.equal(database.prepare(
+    "SELECT channel FROM email_notifications WHERE id = 'rolled-back-worker-email'",
+  ).get().channel, "EMAIL");
+
+  const insert = database.prepare(`INSERT INTO email_notifications
+    (id, event_id, registration_id, notification_type, channel, lifecycle_key, status)
+    VALUES (?, 'event-notify', 'registration-notify', ?, ?, 'REGISTRATION:command', 'PENDING')`);
+  insert.run("email-new", "REGISTRATION_CONFIRMATION", "EMAIL");
+  insert.run("sms-new", "SMS_REGISTRATION_CONFIRMATION", "SMS");
+  assert.throws(
+    () => insert.run("email-duplicate", "REGISTRATION_CONFIRMATION", "EMAIL"),
+    /UNIQUE constraint failed/,
+  );
+
+  const digest = "b".repeat(64);
+  database.prepare(`INSERT INTO notification_suppressions
+    (channel, destination_hash, reason_code) VALUES ('SMS', ?, 'SMS_STOP')`).run(digest);
+  database.prepare(`INSERT INTO notification_unsubscribe_tokens
+    (token_hash, destination_hash, created_at, expires_at)
+    VALUES (?, ?, '2026-08-02T00:00:00.000Z', '2027-08-02T00:00:00.000Z')`)
+    .run("c".repeat(64), digest);
+  assert.throws(
+    () => database.prepare(`INSERT INTO notification_suppressions
+      (channel, destination_hash, reason_code) VALUES ('EMAIL', 'raw@example.test', 'EMAIL_UNSUBSCRIBE')`).run(),
+    /CHECK constraint failed/,
+  );
+  database.exec(`
+    DELETE FROM email_notifications WHERE event_id = 'event-notify';
+    DELETE FROM registrations WHERE event_id = 'event-notify';
+    DELETE FROM events WHERE id = 'event-notify';
+  `);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM notification_suppressions WHERE destination_hash = ?",
+  ).get(digest).count, 1, "destination suppression survives event deletion");
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM notification_unsubscribe_tokens WHERE destination_hash = ?",
+  ).get(digest).count, 1, "unsubscribe capability has no event foreign key");
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
 
 test("fresh migrations enforce event, duck, heat, and result relationships", () => {
   const database = createDatabase();

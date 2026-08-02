@@ -44,6 +44,8 @@ import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 import { handleSupportOperations } from "./support-operations.ts";
+import { publishPendingParticipantNotifications } from "./email-notifications.ts";
+import { registrationNotificationStatements } from "./participant-notifications.ts";
 import {
   handleLiveConnection,
   mutationRefreshDomains,
@@ -449,6 +451,7 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         JSON.stringify({ created_via: "PUBLIC" }),
       ),
       ...await collectionStatements(env, collection, registrationId, now, tokenHash),
+      ...registrationNotificationStatements(env, event.id, registrationId, payload.commandId, now),
     ];
     await env.DB.batch(statements);
   } catch {
@@ -475,6 +478,8 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
     }
     return json({ error: "Registration could not be saved. Please retry with the same command identifier." }, 409);
   }
+
+  await publishPendingParticipantNotifications(env);
 
   return registrationResponse(
     registrationId,
@@ -1350,7 +1355,7 @@ const updateMyContact = async (
             SET status = 'CANCELLED', terminal_at = ?,
                 status_reason = 'EMAIL_NOT_OPTED_IN', retry_after = NULL,
                 last_error_code = NULL, updated_at = ?
-          WHERE registration_id = ? AND ? = 0
+          WHERE registration_id = ? AND channel = 'EMAIL' AND ? = 0
             AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
             AND EXISTS (
               SELECT 1 FROM race_commands rc
@@ -1362,6 +1367,26 @@ const updateMyContact = async (
         now,
         registrationId,
         value.emailNotificationsEnabled ? 1 : 0,
+        commandId,
+        registrationId,
+      ),
+      env.DB.prepare(
+        `UPDATE email_notifications
+            SET status = 'CANCELLED', terminal_at = ?,
+                status_reason = 'SMS_NOT_OPTED_IN', retry_after = NULL,
+                last_error_code = NULL, updated_at = ?
+          WHERE registration_id = ? AND channel = 'SMS' AND ? = 0
+            AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'UPDATE_PARTICIPANT_CONTACT'
+                 AND rc.result_id = ?
+            )`,
+      ).bind(
+        now,
+        now,
+        registrationId,
+        value.smsNotificationsEnabled ? 1 : 0,
         commandId,
         registrationId,
       ),

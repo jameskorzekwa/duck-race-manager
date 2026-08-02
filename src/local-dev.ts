@@ -14,12 +14,13 @@
 // origin, so a copy of this module deployed by accident serves nothing.
 import { authenticateStaff } from "./auth.ts";
 import {
-  dispatchPendingEmailNotifications,
   handleEmailQueue,
+  publishPendingParticipantNotifications,
   type EmailSender,
   type OutboundEmail,
 } from "./email-notifications.ts";
 import { createWorker } from "./index.ts";
+import { type OutboundSms, type SmsSender } from "./participant-notifications.ts";
 import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
 import { escapeHtml } from "./site.ts";
 import type { Env } from "./types.ts";
@@ -29,6 +30,7 @@ export { RaceUpdates } from "./live-updates.ts";
 const accessTokenPrefix = "localdev-";
 const refreshTokenPrefix = "localdevr-";
 const localEmails: (OutboundEmail & { sentAt: string })[] = [];
+const localSms: (OutboundSms & { sentAt: string })[] = [];
 
 // Local development remains fully offline. The queue consumer exercises the
 // production claim, rendering, status, and attempt code, while this final seam
@@ -36,6 +38,11 @@ const localEmails: (OutboundEmail & { sentAt: string })[] = [];
 const localEmailSender: EmailSender = async (email) => {
   localEmails.push({ ...email, sentAt: new Date().toISOString() });
   return { providerMessageId: `local-${crypto.randomUUID()}` };
+};
+
+const localSmsSender: SmsSender = async (sms) => {
+  localSms.push({ ...sms, sentAt: new Date().toISOString() });
+  return { providerMessageId: `local-sms-${crypto.randomUUID()}` };
 };
 
 const noStoreHtml = {
@@ -315,7 +322,7 @@ const refusal = (env: Env, requestUrl: URL): Response =>
     { status: 500, headers: noStoreHtml },
   );
 
-const worker = createWorker(localAuthenticate, localTokenFetch);
+const worker = createWorker(localAuthenticate, localTokenFetch, localEmailSender, localSmsSender);
 
 const localWorker: ExportedHandler<Env> = {
   async fetch(request, env, ctx) {
@@ -400,6 +407,16 @@ const localWorker: ExportedHandler<Env> = {
       return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
     }
 
+    if (url.pathname === "/__local/sms" && request.method === "GET") {
+      return Response.json({ messages: localSms }, {
+        headers: { "cache-control": "no-store", "x-robots-tag": "noindex, nofollow" },
+      });
+    }
+    if (url.pathname === "/__local/sms" && request.method === "DELETE") {
+      localSms.length = 0;
+      return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+    }
+
     if (url.pathname.startsWith("/__local/")) {
       return Response.json({ error: "Unknown local development endpoint." }, { status: 404 });
     }
@@ -407,10 +424,10 @@ const localWorker: ExportedHandler<Env> = {
     return worker.fetch!(request, env, ctx);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, localEmailSender);
+    await handleEmailQueue(batch, env, localEmailSender, localSmsSender);
   },
   async scheduled(_controller, env, ctx): Promise<void> {
-    ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    ctx.waitUntil(publishPendingParticipantNotifications(env));
   },
 };
 

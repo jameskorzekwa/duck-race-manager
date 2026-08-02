@@ -38,6 +38,16 @@ Resources:
               - ses:SendEmail
               - ses:SendRawEmail
             Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+          - Sid: ReadSesSuppressionAndSendTransactionalSms
+            Effect: Allow
+            Action:
+              - ses:GetSuppressedDestination
+              - sns:CheckIfPhoneNumberIsOptedOut
+              - sns:Publish
+            # These destination and direct-SMS APIs do not support resource-level
+            # IAM scoping. The boundary still grants only the three named calls;
+            # no topic management, subscription, or other SES/SNS action exists.
+            Resource: "*"
           - Sid: AdministerOnlyQuickDucksStaffPools
             Effect: Allow
             Action:

@@ -694,6 +694,80 @@ test("staff edits round-trip normalized contacts and independent consent", async
   database.close();
 });
 
+test("staff contact opt-outs cancel only the withdrawn notification channel", async (context) => {
+  const { database, env } = makeContext();
+  context.after(() => database.close());
+  env.EMAIL_QUEUE = { async send() {} };
+
+  const create = async (suffix, firstName) => {
+    const response = await handleParticipantOperations(
+      jsonRequest("https://quickducks.com/api/v1/staff/events/event-open/registrations", "POST", {
+        commandId: crypto.randomUUID(),
+        privateToken: suffix.repeat(43),
+        firstName,
+        lastName: "Channels",
+        email: `${firstName.toLowerCase()}@example.test`,
+        phone: "+15550102030",
+        emailNotificationsEnabled: true,
+        smsNotificationsEnabled: true,
+        notes: null,
+      }),
+      env,
+      staffActor,
+    );
+    const body = await response.json();
+    assert.equal(response.status, 201, JSON.stringify(body));
+    return body.registration;
+  };
+  const edit = async (registration, preferences) => {
+    const response = await handleParticipantOperations(
+      jsonRequest(
+        `https://quickducks.com/api/v1/staff/registrations/${registration.registrationId}`,
+        "PATCH",
+        {
+          commandId: crypto.randomUUID(),
+          expectedRevision: 0,
+          ...preferences,
+        },
+      ),
+      env,
+      staffActor,
+    );
+    assert.equal(response.status, 200, await response.clone().text());
+  };
+  const notificationRows = (registrationId) => database.prepare(`
+    SELECT channel, status, status_reason
+      FROM email_notifications
+     WHERE registration_id = ?
+     ORDER BY channel
+  `).all(registrationId).map((row) => ({ ...row }));
+
+  const emailOptOut = await create("e", "StaffEmailChannel");
+  const beforeEmailOptOut = notificationRows(emailOptOut.registrationId);
+  assert.deepEqual(beforeEmailOptOut.map((row) => row.channel), ["EMAIL", "SMS"]);
+  await edit(emailOptOut, { emailNotificationsEnabled: false });
+  const afterEmailOptOut = notificationRows(emailOptOut.registrationId);
+  assert.deepEqual(afterEmailOptOut[0], {
+    channel: "EMAIL",
+    status: "CANCELLED",
+    status_reason: "EMAIL_NOT_OPTED_IN",
+  });
+  assert.deepEqual(afterEmailOptOut[1], beforeEmailOptOut[1], "email opt-out leaves SMS pending");
+
+  const smsOptOut = await create("s", "StaffSmsChannel");
+  const beforeSmsOptOut = notificationRows(smsOptOut.registrationId);
+  assert.deepEqual(beforeSmsOptOut.map((row) => row.channel), ["EMAIL", "SMS"]);
+  await edit(smsOptOut, { smsNotificationsEnabled: false });
+  const afterSmsOptOut = notificationRows(smsOptOut.registrationId);
+  assert.deepEqual(afterSmsOptOut[0], beforeSmsOptOut[0], "SMS opt-out leaves email pending");
+  assert.deepEqual(afterSmsOptOut[1], {
+    channel: "SMS",
+    status: "CANCELLED",
+    status_reason: "SMS_NOT_OPTED_IN",
+  });
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("staff create and edit reject invalid contacts and consent without a valid channel", async () => {
   const { database, env } = makeContext();
   const createBase = {

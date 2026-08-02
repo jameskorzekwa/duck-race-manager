@@ -374,6 +374,68 @@ test("owned contact reads are bounded by their dedicated limiter", async (contex
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
+test("public contact opt-outs cancel only the withdrawn notification channel", async (context) => {
+  const { api, database } = harness(context);
+  const notificationRows = (registrationId) => database.prepare(`
+    SELECT channel, status, status_reason
+      FROM email_notifications
+     WHERE registration_id = ?
+     ORDER BY channel
+  `).all(registrationId).map((row) => ({ ...row }));
+  const update = (owner, body) => api(contactPath(owner.registrationId), {
+    method: "PATCH",
+    cookie: owner.cookie,
+    headers: proofHeaders(owner.privateToken, "https://quickducks.com"),
+    body: {
+      commandId: crypto.randomUUID(),
+      expectedRevision: 0,
+      email: `${body.name.toLowerCase()}@example.test`,
+      phone: "+15550102030",
+      emailNotificationsEnabled: body.emailNotificationsEnabled,
+      smsNotificationsEnabled: body.smsNotificationsEnabled,
+    },
+  });
+
+  const emailOptOut = await register(api, context, "EmailChannel", {
+    emailNotificationsEnabled: true,
+    smsNotificationsEnabled: true,
+  });
+  const beforeEmailOptOut = notificationRows(emailOptOut.registrationId);
+  assert.deepEqual(beforeEmailOptOut.map((row) => row.channel), ["EMAIL", "SMS"]);
+  await jsonBody(await update(emailOptOut, {
+    name: "EmailChannel",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: true,
+  }), 200, "public email opt-out");
+  const afterEmailOptOut = notificationRows(emailOptOut.registrationId);
+  assert.deepEqual(afterEmailOptOut[0], {
+    channel: "EMAIL",
+    status: "CANCELLED",
+    status_reason: "EMAIL_NOT_OPTED_IN",
+  });
+  assert.deepEqual(afterEmailOptOut[1], beforeEmailOptOut[1], "email opt-out leaves SMS pending");
+
+  const smsOptOut = await register(api, context, "SmsChannel", {
+    emailNotificationsEnabled: true,
+    smsNotificationsEnabled: true,
+  });
+  const beforeSmsOptOut = notificationRows(smsOptOut.registrationId);
+  assert.deepEqual(beforeSmsOptOut.map((row) => row.channel), ["EMAIL", "SMS"]);
+  await jsonBody(await update(smsOptOut, {
+    name: "SmsChannel",
+    emailNotificationsEnabled: true,
+    smsNotificationsEnabled: false,
+  }), 200, "public SMS opt-out");
+  const afterSmsOptOut = notificationRows(smsOptOut.registrationId);
+  assert.deepEqual(afterSmsOptOut[0], beforeSmsOptOut[0], "SMS opt-out leaves email pending");
+  assert.deepEqual(afterSmsOptOut[1], {
+    channel: "SMS",
+    status: "CANCELLED",
+    status_reason: "SMS_NOT_OPTED_IN",
+  });
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
 test("contact mutation validates transport and private projections stay isolated", async (context) => {
   const { api, database } = harness(context);
   const owner = await register(api, context, "Private", {

@@ -120,6 +120,7 @@ test.describe("the heat assignment in the participant detail panel", () => {
     const finalHeat = heats.body.heats.find((heat) => heat.round === "FINAL");
     expect(finalHeat).toBeTruthy();
     await transitionHeat(client, seeded.eventId, finalHeat, "start");
+    expect(finalHeat.status).toBe("RUNNING");
 
     const listed = await rawJson(
       `/api/v1/staff/events/${seeded.eventId}/registrations?limit=200`,
@@ -168,6 +169,10 @@ test.describe("the heat assignment in the participant detail panel", () => {
     // place was released. The non-finalist is the open card here, so selecting
     // the finalist again is a fresh authoritative read rather than a repaint.
     await changeRegistrationStatus(admin.token, finalist.registrationId, "withdraw");
+    // Let the participant-domain refresh settle before opening a different row.
+    // Otherwise a refresh that began for the withdrawal can race this click and
+    // repaint the detail that was open before it.
+    await expect(participantRow(page, finalist.lookupCode)).toContainText("Withdrawn");
     await selectParticipant(page, finalist.lookupCode);
     await expect(heatValue(page)).toHaveText(
       `Final · Heat ${final.heatNumber} (current) · advanced from Round One · Heat ${roundOne.heatNumber} (completed)`,
