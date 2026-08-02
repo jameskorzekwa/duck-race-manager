@@ -320,6 +320,11 @@ test.describe("authoritative live refresh", () => {
     await signIn(registrationDesk, admin.email, "/staff/registration");
     await inventoryPage.goto("/staff/inventory");
     await deletePage.goto("/staff");
+    // The Admin page also loads support and notification history. Let that
+    // initial event-scoped read set finish before deleting its event, so this
+    // scenario observes only the deletion-driven refresh rather than an older
+    // page-load request racing the destructive command.
+    await expect(deletePage.locator("[data-console-message]")).toHaveText("All operation areas are current.");
     await expect(homePage.locator("[data-live-summary-title]")).toHaveText("Harbor Duck Derby");
     await expect(racePage.getByRole("heading", { name: "Winners" })).toBeVisible();
     await expect(registrationDesk.locator("[data-participant-list] .result-button").first()).toBeVisible();

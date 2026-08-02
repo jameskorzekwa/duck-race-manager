@@ -4,6 +4,9 @@ export interface Env {
   AWS_REGION: string;
   AWS_SECRET_ACCESS_KEY: string;
   EMAIL_FROM_ADDRESS: string;
+  SMS_ORIGINATION_IDENTITY?: string;
+  SMS_OPT_OUT_LIST_NAME?: string;
+  NOTIFICATION_SIGNING_SECRET?: string;
   COGNITO_USER_POOL_ID: string;
   COGNITO_USER_POOL_CLIENT_ID: string;
   COGNITO_DOMAIN: string;

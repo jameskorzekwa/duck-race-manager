@@ -38,6 +38,17 @@ Resources:
               - ses:SendEmail
               - ses:SendRawEmail
             Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+          - Sid: ReadQuickDucksContactPreferences
+            Effect: Allow
+            Action: ses:GetContact
+            Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:contact-list/quickducks-participants
+          - Sid: ParticipantSuppressionAndSms
+            Effect: Allow
+            Action:
+              - ses:GetSuppressedDestination
+              - sms-voice:DescribeOptedOutNumbers
+              - sms-voice:SendTextMessage
+            Resource: "*"
           - Sid: AdministerOnlyQuickDucksStaffPools
             Effect: Allow
             Action:
@@ -249,6 +260,21 @@ Resources:
                       - Commit
                   "Null":
                     aws:TagKeys: "false"
+              - Sid: ManageQuickDucksContactList
+                Effect: Allow
+                Action:
+                  - ses:CreateContactList
+                  - ses:DeleteContactList
+                  - ses:GetContactList
+                  - ses:ListTagsForResource
+                  - ses:TagResource
+                  - ses:UntagResource
+                  - ses:UpdateContactList
+                Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:contact-list/quickducks-participants
+              - Sid: ListSesContactLists
+                Effect: Allow
+                Action: ses:ListContactLists
+                Resource: "*"
         - PolicyName: QuickDucksWorkerIamUser
           PolicyDocument:
             Version: "2012-10-17"

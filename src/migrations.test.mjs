@@ -25,6 +25,7 @@ const migrationNames = [
   "0019_round_one_walk_up_admission.sql",
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
+  "0022_participant_notification_delivery.sql",
 ];
 
 const lifecycleStatuses = [
@@ -1266,6 +1267,72 @@ test("0021 adds unique nullable delivery claims without breaking older notificat
   assert.throws(() => database.prepare(
     "UPDATE email_notifications SET delivery_claim_token = ? WHERE id = ?",
   ).run("", "claim-notification-2"), /CHECK constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0022 adds channel lifecycle uniqueness and durable hashed suppression compatibly", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0022_participant_notification_delivery.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('notify-event', 'notify-race', 'Notify Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code,
+       private_token_hash, submitted_at, status_changed_at)
+    VALUES ('notify-registration', 'notify-event', 'Daisy', 'Duck', 'ACTIVE',
+            'DAISY123', 'notify-hash', '2026-08-02T00:00:00Z', '2026-08-02T00:00:00Z');
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-notification', 'notify-event', 'notify-registration', 'HEAT_ASSIGNED', 'PENDING');
+  `);
+  applyMigrations(database, ["0022_participant_notification_delivery.sql"]);
+
+  assert.deepEqual({ ...database.prepare(
+    "SELECT channel, lifecycle_key, publication_failure_count FROM email_notifications",
+  ).get() }, { channel: "EMAIL", lifecycle_key: "", publication_failure_count: 0 });
+  // The previous Worker writes an empty lifecycle key and keys repeated reminder
+  // types by heat. The fallback expression preserves that rollout-time shape.
+  database.exec(`
+    INSERT INTO heats (id, event_id, round, heat_number)
+    VALUES ('notify-heat-1', 'notify-event', 'ROUND_ONE', 1),
+           ('notify-heat-2', 'notify-event', 'ROUND_ONE', 2);
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, heat_id, notification_type, status)
+    VALUES
+      ('old-reminder-1', 'notify-event', 'notify-registration', 'notify-heat-1',
+       'HEAT_UPCOMING', 'PENDING'),
+      ('old-reminder-2', 'notify-event', 'notify-registration', 'notify-heat-2',
+       'HEAT_UPCOMING', 'PENDING');
+  `);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM email_notifications WHERE notification_type = 'HEAT_UPCOMING'",
+  ).get().count, 2);
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, channel, lifecycle_key)
+    VALUES
+      ('email-registration', 'notify-event', 'notify-registration', 'REGISTRATION_CONFIRMED',
+       'EMAIL', 'registration:notify-registration'),
+      ('sms-registration', 'notify-event', 'notify-registration', 'SMS_REGISTRATION_CONFIRMED',
+       'SMS', 'registration:notify-registration');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, channel, lifecycle_key)
+    VALUES ('duplicate-sms', 'notify-event', 'notify-registration', 'SMS_REGISTRATION_CONFIRMED',
+            'SMS', 'registration:notify-registration');
+  `), /UNIQUE constraint failed/);
+  database.exec(`
+    INSERT INTO participant_notification_suppressions (channel, contact_hash, source)
+    VALUES ('SMS', '${"a".repeat(64)}', 'SMS_STOP');
+    DELETE FROM email_notifications WHERE event_id = 'notify-event';
+    DELETE FROM heats WHERE event_id = 'notify-event';
+    DELETE FROM registrations WHERE event_id = 'notify-event';
+    DELETE FROM events WHERE id = 'notify-event';
+  `);
+  assert.equal(count(database, "participant_notification_suppressions"), 1);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

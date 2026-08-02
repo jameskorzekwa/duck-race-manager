@@ -15,6 +15,8 @@
 | Email dead-letter queue | Cloudflare Queue `quickducks-email-dlq` | Wrangler consumer retry exhaustion |
 | Staff identity | Cognito user pool `quickducks-staff` in `us-east-1` | CloudFormation |
 | Transactional email identity | Amazon SES identity `quickducks.com` in `us-east-1` | CloudFormation plus DNS |
+| Email preferences | SES contact list `quickducks-participants` / topic `operational-race-updates` | CloudFormation and signed Worker checks |
+| Transactional SMS | AWS End User Messaging SMS in `us-east-1` | AWS origination registration, Worker adapter, and provider opt-out list |
 | Worker AWS identity | IAM user `quickducks-worker-ses` | Application CloudFormation stack; bootstrap-owned permissions boundary; key stored as Worker secrets |
 | Registration challenge | Cloudflare Turnstile widget for `quickducks.com` | Cloudflare dashboard plus Worker variable/secret |
 
@@ -37,11 +39,15 @@ are production resources. Do not create substitutes during a release.
   `quickducks-worker-ses-boundary`. The application stack can attach only that
   boundary to the exact Worker user; it cannot create or alter boundary policy
   versions or remove the boundary. The boundary fixes effective SES access to
-  `SendEmail` and `SendRawEmail` on only the `quickducks.com` identity and
-  staff-administration access to only the production Cognito pool.
-- The Worker's runtime AWS key pair and both Turnstile keys exist only as
-  encrypted Cloudflare Worker secrets. They are not GitHub Actions secrets and
-  the release does not replace them.
+  email send/contact-suppression access for QuickDucks, AWS End User Messaging
+  SMS send/opt-out reads, and staff-administration access to only the production
+  Cognito pool. SMS APIs that do not support resource-level IAM restriction
+  remain action- and permissions-boundary-limited; the configured origination
+  identity is also checked by the Worker.
+- The Worker's runtime AWS key pair, notification signing/callback secret, SMS
+  origination identity, and both Turnstile keys exist only as encrypted
+  Cloudflare Worker secrets. They are not GitHub Actions secrets and the release
+  does not replace them.
 - All third-party actions are pinned to full commit SHAs. The adjacent version
   comment is informational; review and repin the SHA when upgrading an action.
 - Workflow permissions are job-scoped. Only the deployment job can request an
@@ -409,13 +415,17 @@ The template creates or updates:
   the committed callback/logout origins.
 - A Cognito managed-login domain and default branding.
 - The `quickducks.com` SES identity with Easy DKIM and custom MAIL FROM.
+- The `quickducks-participants` SES contact list and its operational-update topic.
 - The `quickducks-worker-ses` IAM user and an inline policy limited to sending
-  from the QuickDucks SES identity and managing staff identities in this user
-  pool, capped by the independently bootstrap-managed permissions boundary.
+  from the QuickDucks SES identity, reading email/SMS suppression state, sending
+  transactional SMS, and managing staff identities in this user pool, capped by
+  the independently bootstrap-managed permissions boundary.
 
-The stack deliberately does not create an IAM access key. The user pool and
-managed-login branding have retain policies, and the pool has deletion
-protection. Never delete the stack as a rollback procedure.
+The stack deliberately does not create an IAM access key. The user pool,
+managed-login branding, and participant contact list have retain policies, and
+the pool has deletion protection. Retaining the contact list preserves provider
+unsubscribe state across replacement or stack removal. Never delete the stack
+as a rollback procedure.
 
 Read the stack outputs after the first deployment:
 
@@ -453,7 +463,7 @@ missing recorded object, shallow/incomplete history, older source commit,
 divergent history, or Git ancestry error fails closed. Only the first release,
 where both stack tags are absent, has no prior ancestry to prove.
 
-### Cognito and SES Gates
+### Cognito, SES, and SMS Gates
 
 Public Cognito sign-up remains disabled. The application verifies the access
 token and requires a matching active `staff_profiles` row; a Cognito identity
@@ -469,6 +479,20 @@ records shown by SES, and publish the organization's DMARC policy at
 verified. New SES accounts are region-specific sandboxes; request production
 access in `us-east-1` and complete a controlled send, bounce, and complaint
 test before enabling race notifications.
+
+AWS does provide production SMS through **AWS End User Messaging SMS**. It is a
+metered carrier service, not a permanently free channel. Before enabling SMS,
+request production access and an appropriate US origination identity, complete
+the applicable brand/campaign or toll-free registration, set conservative spend
+limits, create the `quickducks-participants` provider opt-out list, associate it
+with the approved origination identity, and exercise STOP and START handling with
+controlled numbers. Trial credits are suitable only for
+development; consumer email-to-SMS gateways and self-hosted phones are not a
+reliable or compliant production alternative. Store the approved origination
+identity as the encrypted Worker secret `SMS_ORIGINATION_IDENTITY`, not in the
+repository. Store a separate random value of at least 32 characters as
+`NOTIFICATION_SIGNING_SECRET` and configure the authenticated provider callback
+to `POST /api/v1/notifications/sms-opt-out` without logging its request body.
 
 ## Cloudflare Bootstrap
 
@@ -559,35 +583,47 @@ them normally but offers no further Round One walk-ups.
 The Worker sends only opaque notification IDs to `quickducks-email` through the
 `EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
 with five bounded queue attempts and `quickducks-email-dlq` attached. A one-minute
-cron republishes durable `PENDING` work and queue-publication failures, closing
-the D1-commit/queue-publication gap without putting email delivery inside a race
+cron republishes durable `PENDING` work, due failures, and stale accepted queue
+work, closing the D1-commit/queue-publication gap without putting provider delivery inside a race
 control request. Queue duplicates are expected and safe: a D1 claim and the
 logical-message unique index prevent an ordinary duplicate delivery from
-sending twice. Migration `0021_email_delivery_claim.sql` adds the nullable,
+sending twice. Successful stale-work republication does not consume a failure
+budget; queue publication failures and provider attempts have separate durable
+bounded backoff. Migration `0021_email_delivery_claim.sql` adds the nullable,
 unique token used to own an active delivery claim; it remains compatible with
 the previous Worker. A stale claim is terminally recorded as
 `DELIVERY_OUTCOME_UNKNOWN` and is not automatically or manually retried, because
 it may represent SES acceptance followed by a failed D1 finalization. This
-at-most-once recovery policy can miss a reminder after a pre-send Worker stop,
+at-most-once recovery policy can miss a message after a pre-send Worker stop,
 but cannot duplicate a message whose post-send persistence was ambiguous.
 
-The consumer signs a structured SES v2 `SendEmail` request with the Worker's
+Migration `0022_participant_notification_delivery.sql` adds channel and stable
+lifecycle identity, dispatch recovery fields, and the destination-hash
+suppression table. Its defaults preserve old Worker email inserts. The table is
+not event-scoped, so deleting a race cannot erase unsubscribe/STOP compliance
+state; rollback retains the additive migration and pauses the consumer before
+rolling back Worker code.
+
+The consumer signs structured SES v2 and AWS End User Messaging SMS requests with the Worker's
 encrypted AWS key. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
 `race@quickducks.com`; it remains under the verified `quickducks.com` identity.
-Current consent, address, assignment, and heat state are loaded only after the
+Current consent, destination validity, assignment/result applicability, durable
+unsubscribe/STOP state, SES suppression/contact-list preference, and AWS SMS
+opt-out state are loaded only after the
 opaque ID is received. Migration `0020_email_notification_assignment.sql` adds
 a nullable assignment reference so the previous Worker remains deployable; new
 notifications pin their originating assignment, while null legacy work and any
 replacement mismatch are cancelled instead of being rendered with a different
 duck. Automatic invocation logs remain disabled, and raw SES responses,
 recipient addresses, rendered bodies, and credentials must not be logged or
-persisted as errors. SES acceptance is recorded honestly as `SENT`;
-delivery/bounce/complaint callbacks are not currently implemented.
+persisted as errors. Provider acceptance is recorded honestly as `SENT`.
 
-After deployment, use a synthetic controlled registration to opt into email,
-pair it, and call its heat. Confirm the support view reaches `SENT` for the
-assignment and upcoming notification and that the controlled mailbox receives
-the expected text. Do not use participant data for this canary. Inspect the main
+After deployment, use a synthetic controlled registration to opt independently
+into email and SMS, pair it, and start its round. Confirm the support view reaches
+`SENT` for registration, assignment, and next-heat notifications and that the
+controlled mailbox/phone receive the expected text. Verify email unsubscribe and
+SMS STOP suppress an already queued controlled message. Do not use participant
+data for this canary. Inspect the main
 queue and DLQ metrics for retries. If sending misbehaves, pause the queue
 consumer first (or remove its consumer binding in a reviewed Worker rollback),
 then revoke the Worker SES key if containment requires it. Retain D1 notification
@@ -697,6 +733,8 @@ The Worker needs this exact encrypted-secret set:
 | --- | --- |
 | `AWS_ACCESS_KEY_ID` | Access key created for CloudFormation output `SesIamUser` |
 | `AWS_SECRET_ACCESS_KEY` | Matching secret access key, available only at creation |
+| `NOTIFICATION_SIGNING_SECRET` | Independent random value of at least 32 characters for unsubscribe capabilities and authenticated SMS callbacks |
+| `SMS_ORIGINATION_IDENTITY` | Approved AWS End User Messaging SMS origination identity |
 | `TURNSTILE_SECRET_KEY` | Turnstile widget secret |
 | `TURNSTILE_SITE_KEY` | Turnstile widget site key; intentionally encrypted in current production |
 
@@ -721,7 +759,7 @@ printing it or writing it to disk:
 If the bulk operation fails, immediately list and delete the newly created IAM
 key before retrying; AWS will never show its secret value again. Never place
 these runtime keys in `wrangler.jsonc`, `.dev.vars`, GitHub, logs, issues, or
-release notes. Confirm all four secrets with `npx wrangler secret list`, which
+release notes. Confirm all six secrets with `npx wrangler secret list`, which
 shows names but not values. Every release performs this name-only check before
 CloudFormation, D1, or Worker mutation.
 
@@ -759,7 +797,7 @@ historical bootstrap gates, not approval steps to repeat for every merge:
   committed `RaceUpdates` class migration.
 - All existing migrations pass locally and production contains no manually
   modified schema that is absent from `db/migrations`.
-- The Worker's four encrypted runtime secret names exist.
+- The Worker's six encrypted runtime secret names exist.
 - Both custom hostnames are active and Turnstile allows the production host.
 - The reviewed change enabling `RaceUpdates` migration `v1` records that there
   is no rollback path to a pre-migration Worker and has a forward-fix recovery
@@ -817,7 +855,7 @@ no manual tag, but deployment requires production-environment approval:
 6. After James approves the `production` environment, the deployment refetches
    the default branch and fails if the validated SHA is no longer its current
    tip. It then verifies the exact account, region, stack and bootstrap role ARN
-   shapes, all four Worker secret names, D1 legacy-role safety, the existing
+   shapes, all six Worker secret names, D1 legacy-role safety, the existing
    named CloudFormation stack, current Cognito outputs and `AppOrigin`, monotonic
    stack version, and source ancestry. It validates both templates, deploys
    CloudFormation with the dedicated execution role, verifies the result,
@@ -945,10 +983,11 @@ bookmark, stopped writes where practical, and post-restore validation. It is
 not part of an automatic release rollback.
 
 To reverse an AWS configuration change, revert the template change, review the
-resulting CloudFormation change set, and deploy a new version. Preserve Cognito
-and SES identities unless an AWS incident procedure explicitly requires their
-replacement. DNS, Turnstile, queue, and SES-account changes are manual platform
-changes and must be rolled back through their platform audit history.
+resulting CloudFormation change set, and deploy a new version. Preserve Cognito,
+SES identities, and the retained participant contact list unless an AWS incident
+procedure explicitly requires their replacement. DNS, Turnstile, queue, and
+SES-account changes are manual platform changes and must be rolled back through
+their platform audit history.
 
 If only automatic tag or GitHub release publication fails after successful smoke
 tests, production is already deployed and the failure is forward-recoverable.

@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: QuickDucks Cognito staff authentication and SES sending identity
+Description: QuickDucks Cognito staff authentication and participant email/SMS delivery
 
 Parameters:
   AppOrigin:
@@ -103,6 +103,24 @@ Resources:
         - Key: Environment
           Value: production
 
+  ParticipantContactList:
+    Type: AWS::SES::ContactList
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ContactListName: quickducks-participants
+      Description: Participant-controlled operational race notifications
+      Topics:
+        - TopicName: operational-race-updates
+          DisplayName: Operational race updates
+          Description: Assignments, next-heat reminders, and official results
+          DefaultSubscriptionStatus: OPT_IN
+      Tags:
+        - Key: Project
+          Value: quickducks
+        - Key: Environment
+          Value: production
+
   WorkerSesUser:
     Type: AWS::IAM::User
     Properties:
@@ -123,6 +141,16 @@ Resources:
                   - ses:SendEmail
                   - ses:SendRawEmail
                 Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/quickducks.com
+              - Effect: Allow
+                Action:
+                  - ses:GetContact
+                Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:contact-list/quickducks-participants
+              - Effect: Allow
+                Action:
+                  - ses:GetSuppressedDestination
+                  - sms-voice:DescribeOptedOutNumbers
+                  - sms-voice:SendTextMessage
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - cognito-idp:AdminCreateUser

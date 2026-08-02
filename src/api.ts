@@ -45,6 +45,11 @@ import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 import { handleSupportOperations } from "./support-operations.ts";
 import {
+  handleSmsOptOut,
+  publishEmailNotification,
+  registrationNotificationStatements,
+} from "./email-notifications.ts";
+import {
   handleLiveConnection,
   mutationRefreshDomains,
   scheduleRaceUpdate,
@@ -404,6 +409,13 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   const lookupCode = randomLookupCode();
   const value = validation.value;
   const collection = await prepareBrowserCollection(request, env);
+  const registrationNotifications = registrationNotificationStatements(
+    env,
+    event.id,
+    registrationId,
+    payload.commandId,
+    now,
+  );
 
   try {
     const statements = [
@@ -449,6 +461,7 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         JSON.stringify({ created_via: "PUBLIC" }),
       ),
       ...await collectionStatements(env, collection, registrationId, now, tokenHash),
+      ...registrationNotifications.statements,
     ];
     await env.DB.batch(statements);
   } catch {
@@ -475,6 +488,8 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
     }
     return json({ error: "Registration could not be saved. Please retry with the same command identifier." }, 409);
   }
+
+  await Promise.all(registrationNotifications.ids.map((id) => publishEmailNotification(env, id)));
 
   return registrationResponse(
     registrationId,
@@ -1346,11 +1361,15 @@ const updateMyContact = async (
         registrationId,
       ),
       env.DB.prepare(
-        `UPDATE email_notifications
+       `UPDATE email_notifications
             SET status = 'CANCELLED', terminal_at = ?,
-                status_reason = 'EMAIL_NOT_OPTED_IN', retry_after = NULL,
+                status_reason = CASE channel
+                  WHEN 'EMAIL' THEN 'EMAIL_NOT_OPTED_IN'
+                  ELSE 'SMS_NOT_OPTED_IN' END,
+                retry_after = NULL,
                 last_error_code = NULL, updated_at = ?
-          WHERE registration_id = ? AND ? = 0
+          WHERE registration_id = ?
+            AND ((channel = 'EMAIL' AND ? = 0) OR (channel = 'SMS' AND ? = 0))
             AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
             AND EXISTS (
               SELECT 1 FROM race_commands rc
@@ -1362,6 +1381,7 @@ const updateMyContact = async (
         now,
         registrationId,
         value.emailNotificationsEnabled ? 1 : 0,
+        value.smsNotificationsEnabled ? 1 : 0,
         commandId,
         registrationId,
       ),
@@ -1657,6 +1677,10 @@ const handleApiRequest = async (
   const url = new URL(request.url);
 
   if (url.pathname === "/api/v1/live") return handleLiveConnection(request, env);
+
+  if (url.pathname === "/api/v1/notifications/sms-opt-out") {
+    return handleSmsOptOut(request, env);
+  }
 
   if (url.pathname.startsWith("/api/v1/staff/")) {
     const actor = await authenticate(request, env);

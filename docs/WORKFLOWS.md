@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0019_round_one_walk_up_admission.sql`, browser
+the Worker, D1 migrations through `0022_participant_notification_delivery.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -671,9 +671,47 @@ corresponding valid address. Invalid non-empty contact is rejected even with its
 opt-in off. The same validation and controls apply during public registration,
 staff walk-up registration, and staff participant edits. Audit history records
 only the changed field names, never old or new contact values or ownership
-proof. Email consent participates in the implemented operational-email workflow.
-SMS consent is captured independently, but SMS delivery is not implemented and
-the choice does not enqueue an SMS.
+proof. Email and SMS consent independently control the implemented participant
+notification workflow. Enabling both channels creates one durable message for
+each; a failure or opt-out on one does not affect the other.
+
+### Participant Notifications
+
+**Implemented:** successful public and staff registrations, round-one heat
+assignment, final qualification/assignment, authoritative next-runnable heat
+progression, and each committed official round result create channel-specific
+outbox rows in the same D1 transaction as the domain change. The first reminder
+is created when a round starts. Later reminders are created when the preceding
+official result or automatic skip makes the heat next runnable; manually calling
+a heat does not create another reminder and no wall-clock start estimate is used.
+Result corrections have their own result revision and therefore produce one new
+official-result event without duplicating the earlier revision.
+
+The outbox key covers participant, channel, type, and stable lifecycle
+occurrence. Command replay, queue duplication, cron reconciliation, and stale
+queue republication therefore cannot create or deliver a second copy. Queue
+payloads contain only the opaque outbox ID. Provider work runs after commit, so
+provider latency or failure cannot roll back registration or race progression.
+Cron republishes due publication/provider retries and stale accepted queue work;
+successful republication never spends the provider-attempt budget. Queue
+publication failures and provider delivery attempts use separate bounded
+exponential backoff. Because SES and AWS SMS do not supply a message-idempotency
+key for these calls, an interrupted post-acceptance D1 write is terminally marked
+as an unknown outcome rather than risking a duplicate send.
+
+Immediately before either provider call the consumer reloads current contact,
+channel consent, race applicability, application suppression, and provider
+suppression/opt-out state. A changed invalid contact, withdrawn consent, email
+unsubscribe, SES suppression, SMS STOP, or AWS SMS opt-out cancels pending work.
+Email contains a signed two-step unsubscribe link; link scanners only see the
+confirmation form, while the POST stores a destination hash and cancels pending
+email work. Authenticated SMS STOP callbacks store only a destination hash and
+cancel pending SMS. An authenticated provider START event removes only that STOP
+suppression; the independently stored application consent flag must still be
+enabled. Support
+projections expose channel, fixed safe failure codes, and attempt state, never
+destinations, message bodies, provider response bodies, or unsubscribe
+credentials.
 
 The privacy notice warns that anyone with access to the originating browser
 profile may view or edit its owned contact details. Cancel discards an edit,

@@ -21,6 +21,10 @@ import {
   type RegistrationInput,
 } from "./registration.ts";
 import { reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
+import {
+  publishEmailNotification,
+  registrationNotificationStatements,
+} from "./email-notifications.ts";
 import type { Env } from "./types.ts";
 import {
   unstartedRoundOneHeatExistsSql,
@@ -554,6 +558,13 @@ const createWalkUp = async (
   const requestedAt = typeof payload.clientTimestamp === "string" && !Number.isNaN(Date.parse(payload.clientTimestamp))
     ? new Date(payload.clientTimestamp).toISOString()
     : now;
+  const registrationNotifications = registrationNotificationStatements(
+    env,
+    eventId,
+    registrationId,
+    commandId,
+    now,
+  );
   try {
     await env.DB.batch([
       env.DB.prepare(
@@ -624,6 +635,7 @@ const createWalkUp = async (
         eventId,
         registrationId,
       ),
+      ...registrationNotifications.statements,
     ]);
   } catch {
     const replayCommand = await findCommand(env, commandId);
@@ -647,6 +659,7 @@ const createWalkUp = async (
       error: "Walk-up registration has closed because no unstarted Round One heat remains.",
     }, 409);
   }
+  await Promise.all(registrationNotifications.ids.map((id) => publishEmailNotification(env, id)));
   return registrationResult(created, false, 201, { privateStatusPath: `/r/${privateToken}` });
 };
 
@@ -811,9 +824,13 @@ const editRegistration = async (
   ];
   statements.push(env.DB.prepare(
     `UPDATE email_notifications
-        SET status = 'CANCELLED', terminal_at = ?, status_reason = 'EMAIL_NOT_OPTED_IN',
+        SET status = 'CANCELLED', terminal_at = ?,
+            status_reason = CASE channel
+              WHEN 'EMAIL' THEN 'EMAIL_NOT_OPTED_IN'
+              ELSE 'SMS_NOT_OPTED_IN' END,
             retry_after = NULL, last_error_code = NULL, updated_at = ?
-      WHERE registration_id = ? AND ? = 0
+      WHERE registration_id = ?
+        AND ((channel = 'EMAIL' AND ? = 0) OR (channel = 'SMS' AND ? = 0))
         AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
         AND EXISTS (
           SELECT 1 FROM race_commands rc
@@ -825,6 +842,7 @@ const editRegistration = async (
     now,
     registrationId,
     value.input.emailNotificationsEnabled ? 1 : 0,
+    value.input.smsNotificationsEnabled ? 1 : 0,
     commandId,
     registrationId,
   ));

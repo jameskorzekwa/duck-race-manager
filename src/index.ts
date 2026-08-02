@@ -27,9 +27,12 @@ import {
 import { isLocalPreviewOrigin } from "./local-preview.ts";
 import {
   dispatchPendingEmailNotifications,
+  handleEmailUnsubscribe,
   handleEmailQueue,
   sendEmailWithSes,
+  sendSmsWithAws,
   type EmailSender,
+  type SmsSender,
 } from "./email-notifications.ts";
 import {
   phaseAllowsRaceStatus,
@@ -193,6 +196,7 @@ export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
   emailSender: EmailSender = sendEmailWithSes,
+  smsSender: SmsSender = sendSmsWithAws,
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -323,6 +327,18 @@ export const createWorker = (
           "content-type": "text/plain; charset=utf-8",
         },
       });
+    }
+
+    const unsubscribeMatch = url.pathname.match(
+      /^\/notifications\/unsubscribe\/([A-Za-z0-9_-]{1,128})\/([0-9a-f]{64})$/,
+    );
+    if (unsubscribeMatch !== null && (request.method === "GET" || request.method === "POST")) {
+      return withSecurityHeaders(await handleEmailUnsubscribe(
+        request,
+        env,
+        unsubscribeMatch[1],
+        unsubscribeMatch[2],
+      ));
     }
 
     if (url.pathname === "/health") {
@@ -638,7 +654,7 @@ export const createWorker = (
     return html(renderNotFound(), 404, true);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, emailSender);
+    await handleEmailQueue(batch, env, emailSender, smsSender);
   },
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(dispatchPendingEmailNotifications(env));

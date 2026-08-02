@@ -6,6 +6,11 @@ import {
 } from "./heat-operations.ts";
 import type { Env } from "./types.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
+import {
+  heatNotificationStatement,
+  nextHeatReminderStatement,
+  publishPendingParticipantNotifications,
+} from "./email-notifications.ts";
 
 // A Round One heat stops being a race when the racers in it leave. Withdrawal
 // and disqualification never touch a roster — the duck is sealed in a numbered
@@ -212,6 +217,7 @@ const skipStatements = (
       reason: "NO_ELIGIBLE_RACER",
     }),
   ),
+  nextHeatReminderStatement(env, eventId, "ROUND_ONE", candidate.heat_number, commandId, now),
 ];
 
 const uncontestedStatements = (
@@ -367,6 +373,26 @@ const uncontestedStatements = (
         place: 1,
       }),
     ),
+    heatNotificationStatement(
+      env,
+      eventId,
+      candidate.id,
+      "HEAT_RESULT",
+      `result:${candidate.id}:${commandId}`,
+      commandId,
+      now,
+    ),
+    heatNotificationStatement(
+      env,
+      eventId,
+      finalHeatId,
+      "FINAL_ASSIGNED",
+      `final-assignment:${finalHeatId}`,
+      commandId,
+      now,
+      raceEntryId,
+    ),
+    nextHeatReminderStatement(env, eventId, "ROUND_ONE", candidate.heat_number, commandId, now),
   );
   return statements;
 };
@@ -434,6 +460,7 @@ export const reconcileRoundOneHeats = async (
       "SELECT id FROM race_commands WHERE id = ? AND event_id = ? LIMIT 1",
     ).bind(commandId, eventId).first<{ id: string }>().catch(() => null);
     if (committed === null) continue;
+    await publishPendingParticipantNotifications(env);
     resolutions.push({
       heatId: candidate.id,
       heatNumber: candidate.heat_number,

@@ -236,6 +236,8 @@ const seedFullEventDataset = (database, status) => {
     VALUES ('notification', 'event_test', 'registration', 'heat', 'HEAT_ASSIGNED', 'PENDING');
     INSERT INTO email_attempts (id, event_id, notification_id, attempt_number, stage, status, started_at)
     VALUES ('attempt', 'event_test', 'notification', 1, 'QUEUE', 'PENDING', '2026-07-26T02:00:00Z');
+    INSERT INTO participant_notification_suppressions (channel, contact_hash, source)
+    VALUES ('EMAIL', '${"a".repeat(64)}', 'EMAIL_UNSUBSCRIBE');
     INSERT INTO browser_registration_collections (id, token_hash, created_at, last_seen_at, expires_at)
     VALUES ('collection', 'collection-hash', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', '2027-07-26T00:00:00Z');
     INSERT INTO browser_collection_registrations (collection_id, registration_id, added_at)
@@ -498,6 +500,8 @@ for (const status of [
     assert.equal(count(database, "staff_profiles"), 2);
     assert.equal(count(database, "staff_role_assignments"), 1);
     assert.equal(count(database, "organization_event_defaults"), 1);
+    assert.equal(count(database, "participant_notification_suppressions"), 1,
+      "event deletion retains compliance suppression");
 
     const replay = await handleEventOperations(
       forceDeleteRequest({ commandId, revision: 0, confirmName: "Test Duck Race" }),

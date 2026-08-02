@@ -7,7 +7,7 @@ import { authenticateStaff } from "./auth.ts";
 import { createWorker } from "./index.ts";
 import { LIVE_UPDATE_DOMAINS } from "./live-updates.ts";
 import { randomToken } from "./registration.ts";
-import { EmailSendError, processEmailNotification } from "./email-notifications.ts";
+import { EmailSendError, processEmailNotification, sendSmsWithAws } from "./email-notifications.ts";
 
 class D1Statement {
   constructor(database, sql) {
@@ -123,11 +123,16 @@ const createWorkerHarness = (
   const queuedNotifications = [];
   const queueAttempts = [];
   const sentEmails = [];
+  const sentSms = [];
   let remainingQueueSendFailures = queueSendFailures;
   let env;
   const emailSender = async (email) => {
     sentEmails.push(email);
     return { providerMessageId: `test-${sentEmails.length}` };
+  };
+  const smsSender = async (sms) => {
+    sentSms.push(sms);
+    return { providerMessageId: `test-sms-${sentSms.length}` };
   };
   env = {
     APP_ORIGIN: "https://quickducks.com",
@@ -135,6 +140,9 @@ const createWorkerHarness = (
     AWS_REGION: "us-east-1",
     AWS_SECRET_ACCESS_KEY: "test-secret-key",
     EMAIL_FROM_ADDRESS: "race@quickducks.com",
+    NOTIFICATION_SIGNING_SECRET: "test-notification-signing-secret-which-is-long-enough",
+    SMS_ORIGINATION_IDENTITY: "test-origin",
+    SMS_OPT_OUT_LIST_NAME: "quickducks-participants",
     COGNITO_USER_POOL_ID: "us-east-1_example",
     COGNITO_USER_POOL_CLIENT_ID: "client-example",
     COGNITO_DOMAIN: "https://quickducks-staff.example.com",
@@ -149,7 +157,7 @@ const createWorkerHarness = (
         queueAttempts.push({ notificationId, accepted: true });
         queuedNotifications.push(notificationId);
         if (deliverEmails) {
-          await processEmailNotification(env, notificationId, emailSender);
+          await processEmailNotification(env, notificationId, emailSender, 1, smsSender);
         }
       },
     },
@@ -166,6 +174,7 @@ const createWorkerHarness = (
     (request, currentEnv) => authenticateStaff(request, currentEnv, verifyStaffToken),
     fetch,
     emailSender,
+    smsSender,
   );
   const api = (path, options = {}) => {
     const headers = new Headers(options.headers);
@@ -188,6 +197,7 @@ const createWorkerHarness = (
     queuedNotifications,
     queueAttempts,
     sentEmails,
+    sentSms,
     updateTasks,
     post: (path, body, token = staffToken) => api(path, { method: "POST", body, token }),
   };
@@ -421,7 +431,7 @@ const raceToAwaitingFinal = async (
   };
 };
 
-test("opted-in racers receive one assignment email and one reminder as each heat is called", async (context) => {
+test("opted-in racers receive every committed participant lifecycle notification once", async (context) => {
   const { database } = createDatabase();
   context.after(() => database.close());
   const { env, queuedNotifications, sentEmails } = await raceToAwaitingFinal(database, {
@@ -433,26 +443,30 @@ test("opted-in racers receive one assignment email and one reminder as each heat
     deliverEmails: true,
   });
 
-  assert.equal(sentEmails.length, 3, "assignment, Round One call, and Final call");
-  assert.equal(new Set(queuedNotifications).size, 3, "only opaque notification IDs are queued once");
+  assert.equal(sentEmails.length, 6, "registration, assignment, round reminder/result, final assignment/reminder");
+  assert.equal(new Set(queuedNotifications).size, 12, "both independent channels queue opaque IDs once");
   assert.ok(queuedNotifications.every((value) => /^[0-9a-f-]{36}$/i.test(value)));
   assert.deepEqual(
     database.prepare(
       `SELECT n.notification_type, n.status AS status, h.round
          FROM email_notifications n JOIN heats h ON h.id = n.heat_id
-        ORDER BY n.created_at, n.notification_type`,
+        WHERE n.channel = 'EMAIL'
+        ORDER BY n.rowid`,
     ).all().map((row) => ({ ...row })),
     [
       { notification_type: "HEAT_ASSIGNED", status: "SENT", round: "ROUND_ONE" },
       { notification_type: "HEAT_UPCOMING", status: "SENT", round: "ROUND_ONE" },
+      { notification_type: "HEAT_RESULT", status: "SENT", round: "ROUND_ONE" },
+      { notification_type: "FINAL_ASSIGNED", status: "SENT", round: "FINAL" },
       { notification_type: "HEAT_UPCOMING", status: "SENT", round: "FINAL" },
     ],
   );
-  assert.match(sentEmails[0].subject, /Duck #1 is assigned to Round One, Heat 1/);
-  assert.match(sentEmails[0].text, /Racer0 Example/);
-  assert.match(sentEmails[0].text, /stay near the pond/i);
-  assert.match(sentEmails[1].text, /being called now/i);
-  assert.match(sentEmails[2].subject, /Final, Heat 1 is being called now/);
+  assert.match(sentEmails[0].subject, /registration confirmed/i);
+  assert.match(sentEmails[1].subject, /Duck #1 is assigned to Round One, Heat 1/);
+  assert.match(sentEmails[1].text, /Racer0 Example/);
+  assert.match(sentEmails[1].text, /stay near the pond/i);
+  assert.match(sentEmails[2].text, /next runnable heat/i);
+  assert.match(sentEmails[5].subject, /Final, Heat 1 is next/);
   assert.match(sentEmails[0].html, /Reminder Race &lt;Pond&gt;/);
   assert.doesNotMatch(JSON.stringify(queuedNotifications), /racer0|example\.com|private|lookup/i);
 
@@ -463,6 +477,33 @@ test("opted-in racers receive one assignment email and one reminder as each heat
   }), "NOOP");
   assert.equal(sentEmails.length, sentBeforeDuplicate, "a duplicate queue delivery never resends");
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("official progression reminds each later round-one heat exactly when it becomes next", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  await raceToAwaitingFinal(database, {
+    name: "Progression Reminder Race",
+    slug: "progression-reminder-race",
+    racerCount: 6,
+    heatCapacity: 3,
+    optInRegistrationIndexes: [0, 3],
+    deliverEmails: true,
+  });
+
+  assert.deepEqual(database.prepare(
+    `SELECT h.heat_number, COUNT(*) AS notification_count
+       FROM email_notifications n
+       JOIN heats h ON h.id = n.heat_id
+      WHERE n.channel = 'EMAIL' AND n.notification_type = 'HEAT_UPCOMING'
+        AND h.round = 'ROUND_ONE'
+      GROUP BY h.heat_number
+      ORDER BY h.heat_number`,
+  ).all().map((row) => ({ ...row })), [
+    { heat_number: 1, notification_count: 1 },
+    { heat_number: 2, notification_count: 1 },
+  ]);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 test("the consumer rechecks consent and bounds temporary SES retries without exposing provider details", async (context) => {
@@ -476,7 +517,7 @@ test("the consumer rechecks consent and bounds temporary SES retries without exp
     optInRegistrationIndex: 0,
   });
   const assignment = database.prepare(
-    "SELECT id, registration_id FROM email_notifications WHERE notification_type = 'HEAT_ASSIGNED'",
+    "SELECT id, registration_id FROM email_notifications WHERE notification_type = 'HEAT_ASSIGNED' AND channel = 'EMAIL'",
   ).get();
   assert.ok(assignment);
 
@@ -513,14 +554,192 @@ test("the consumer rechecks consent and bounds temporary SES retries without exp
   assert.equal(await processEmailNotification(env, assignment.id, temporarySender, 1), "RETRY");
   assert.deepEqual(
     { ...database.prepare("SELECT status, last_error_code FROM email_notifications WHERE id = ?").get(assignment.id) },
-    { status: "QUEUED", last_error_code: "SES_TEMPORARY_FAILURE" },
+    { status: "RETRY_PENDING", last_error_code: "SES_TEMPORARY_FAILURE" },
   );
+  database.prepare("UPDATE email_notifications SET retry_after = NULL WHERE id = ?").run(assignment.id);
+  assert.equal(await processEmailNotification(env, assignment.id, temporarySender, 5), "RETRY",
+    "queue transport attempts do not exhaust provider attempts");
+  database.prepare("UPDATE email_notifications SET retry_after = NULL WHERE id = ?").run(assignment.id);
+  assert.equal(await processEmailNotification(env, assignment.id, temporarySender, 5), "RETRY");
   database.prepare("UPDATE email_notifications SET retry_after = NULL WHERE id = ?").run(assignment.id);
   assert.equal(await processEmailNotification(env, assignment.id, temporarySender, 5), "FAILED");
   assert.deepEqual(
     { ...database.prepare("SELECT status, last_error_code FROM email_notifications WHERE id = ?").get(assignment.id) },
     { status: "FAILED", last_error_code: "DELIVERY_RETRIES_EXHAUSTED" },
   );
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("an authenticated SMS STOP is durable and suppresses a queued delivery at send time", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "SMS Stop Race",
+    slug: "sms-stop-race",
+    racerCount: 3,
+    heatCapacity: 3,
+    optInRegistrationIndex: 0,
+  });
+  const notification = database.prepare(
+    "SELECT id FROM email_notifications WHERE notification_type = 'SMS_HEAT_ASSIGNED' AND channel = 'SMS'",
+  ).get();
+  assert.ok(notification);
+  assert.equal((await race.api("/api/v1/notifications/sms-opt-out", {
+    method: "POST",
+    body: { eventType: "STOP", phone: "+1 817 320 6000" },
+  })).status, 401);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM participant_notification_suppressions",
+  ).get().count, 0);
+  await jsonBody(await race.api("/api/v1/notifications/sms-opt-out", {
+    method: "POST",
+    headers: { authorization: "Bearer test-notification-signing-secret-which-is-long-enough" },
+    body: { eventType: "STOP", phone: "+1 817 320 6000" },
+  }), 200, "authenticated STOP callback");
+  assert.deepEqual({ ...database.prepare(
+    "SELECT channel, source, length(contact_hash) AS hash_length FROM participant_notification_suppressions",
+  ).get() }, { channel: "SMS", source: "SMS_STOP", hash_length: 64 });
+  assert.doesNotMatch(JSON.stringify(database.prepare(
+    "SELECT * FROM participant_notification_suppressions",
+  ).get()), /817|6000/);
+  // Simulate an already accepted queue message racing the callback. The
+  // consumer still reloads the durable STOP immediately before its sender.
+  database.prepare(
+    `UPDATE email_notifications
+        SET status = 'QUEUED', terminal_at = NULL, status_reason = NULL
+      WHERE id = ?`,
+  ).run(notification.id);
+  let smsCalled = false;
+  assert.equal(await processEmailNotification(race.env, notification.id, async () => {
+    assert.fail("an SMS row never calls the email adapter");
+  }, 1, async () => {
+    smsCalled = true;
+    return { providerMessageId: "must-not-send" };
+  }), "CANCELLED", "an accepted pre-STOP queue message is suppressed at delivery time");
+  assert.equal(smsCalled, false);
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("SMS delivery rechecks a changed phone and the AWS opt-out list after claiming", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "SMS Delivery Recheck Race",
+    slug: "sms-delivery-recheck-race",
+    racerCount: 3,
+    heatCapacity: 3,
+    optInRegistrationIndex: 0,
+  });
+  const rows = database.prepare(
+    `SELECT id, registration_id, heat_id
+       FROM email_notifications
+      WHERE notification_type = 'SMS_FINAL_ASSIGNED' AND channel = 'SMS'
+      ORDER BY rowid`,
+  ).all();
+  assert.equal(rows.length, 1);
+  database.prepare("UPDATE heats SET status = 'READY' WHERE id = ?").run(rows[0].heat_id);
+
+  race.env.DB = createD1(database, {
+    afterDeliveryClaim() {
+      database.prepare("UPDATE registrations SET phone = 'invalid' WHERE id = ?")
+        .run(rows[0].registration_id);
+    },
+  });
+  let senderCalled = false;
+  assert.equal(await processEmailNotification(race.env, rows[0].id, async () => {
+    assert.fail("an SMS row never calls the email adapter");
+  }, 1, async () => {
+    senderCalled = true;
+    return { providerMessageId: "must-not-send" };
+  }), "CANCELLED");
+  assert.equal(senderCalled, false);
+  assert.equal(database.prepare(
+    "SELECT status_reason FROM email_notifications WHERE id = ?",
+  ).get(rows[0].id).status_reason, "SMS_NOT_OPTED_IN");
+
+  database.prepare("UPDATE registrations SET phone = '+18173206000' WHERE id = ?")
+    .run(rows[0].registration_id);
+  database.prepare(
+    `UPDATE email_notifications
+        SET status = 'QUEUED', terminal_at = NULL, status_reason = NULL
+      WHERE id = ?`,
+  ).run(rows[0].id);
+  race.env.DB = createD1(database);
+  race.env.AWS_ACCESS_KEY_ID = "AKIDEXAMPLE1234567";
+  race.env.AWS_SECRET_ACCESS_KEY = "test-secret-key-that-is-long-enough-for-sigv4";
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let requestCount = 0;
+  globalThis.fetch = async () => {
+    requestCount += 1;
+    return Response.json({
+      OptedOutNumbers: [{ OptedOutNumber: "+18173206000" }],
+    });
+  };
+  assert.equal(await processEmailNotification(
+    race.env,
+    rows[0].id,
+    async () => { assert.fail("an SMS row never calls the email adapter"); },
+    1,
+    sendSmsWithAws,
+  ), "CANCELLED");
+  assert.equal(requestCount, 1, "the opt-out match prevents a SendTextMessage request");
+  assert.equal(database.prepare(
+    "SELECT status_reason FROM email_notifications WHERE id = ?",
+  ).get(rows[0].id).status_reason, "PROVIDER_SUPPRESSED");
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("the email unsubscribe capability durably suppresses accepted pending work", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Unsubscribe Race",
+    slug: "unsubscribe-race",
+    racerCount: 3,
+    heatCapacity: 3,
+    optInRegistrationIndex: 0,
+    deliverEmails: true,
+  });
+  const unsubscribeUrl = race.sentEmails[0].text.match(/Stop email updates: (https:\/\/\S+)/)?.[1];
+  assert.ok(unsubscribeUrl);
+  const page = await race.worker.fetch(new Request(unsubscribeUrl), race.env, { waitUntil() {} });
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Stop email updates/);
+  const pending = database.prepare(
+    "SELECT id FROM email_notifications WHERE channel = 'EMAIL' AND notification_type = 'HEAT_ASSIGNED'",
+  ).get();
+  // The harness delivered this row to obtain complete message coverage. Put it
+  // back into the accepted-pending state whose unsubscribe behavior this test
+  // exercises before submitting the signed confirmation.
+  database.prepare(
+    `UPDATE email_notifications
+        SET status = 'QUEUED', sent_at = NULL, terminal_at = NULL, status_reason = NULL
+      WHERE id = ?`,
+  ).run(pending.id);
+  const confirmed = await race.worker.fetch(new Request(unsubscribeUrl, { method: "POST" }), race.env, { waitUntil() {} });
+  assert.equal(confirmed.status, 200);
+  assert.match(await confirmed.text(), /Email preference received/);
+
+  assert.deepEqual({ ...database.prepare(
+    "SELECT status, status_reason FROM email_notifications WHERE id = ?",
+  ).get(pending.id) }, { status: "CANCELLED", status_reason: "EMAIL_UNSUBSCRIBE" });
+  // Simulate an already accepted queue message racing the unsubscribe POST.
+  // The delivery-time suppression check must still stop it.
+  database.prepare(
+    `UPDATE email_notifications
+        SET status = 'QUEUED', sent_at = NULL, terminal_at = NULL, status_reason = NULL
+      WHERE id = ?`,
+  ).run(pending.id);
+  let senderCalled = false;
+  assert.equal(await processEmailNotification(race.env, pending.id, async () => {
+    senderCalled = true;
+    return { providerMessageId: "must-not-send" };
+  }), "CANCELLED");
+  assert.equal(senderCalled, false);
+  assert.deepEqual({ ...database.prepare(
+    "SELECT channel, source FROM participant_notification_suppressions WHERE channel = 'EMAIL'",
+  ).get() }, { channel: "EMAIL", source: "EMAIL_UNSUBSCRIBE" });
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
 });
 
@@ -540,7 +759,7 @@ test("a delayed upcoming reminder is cancelled after the heat starts", async (co
       assert.equal(heat.status, "RUNNING");
       const notification = database.prepare(
         `SELECT id FROM email_notifications
-          WHERE heat_id = ? AND notification_type = 'HEAT_UPCOMING'`,
+          WHERE heat_id = ? AND notification_type = 'HEAT_UPCOMING' AND channel = 'EMAIL'`,
       ).get(heat.id);
       assert.ok(notification);
       let senderCalled = false;
@@ -576,7 +795,7 @@ test("a delayed upcoming reminder is cancelled after the called heat is reset", 
       cancellationChecked = true;
       const notification = database.prepare(
         `SELECT id FROM email_notifications
-          WHERE heat_id = ? AND notification_type = 'HEAT_UPCOMING'`,
+          WHERE heat_id = ? AND notification_type = 'HEAT_UPCOMING' AND channel = 'EMAIL'`,
       ).get(heat.id);
       assert.ok(notification);
       await transition(heat, "reset");
@@ -593,8 +812,8 @@ test("a delayed upcoming reminder is cancelled after the called heat is reset", 
         status: "CANCELLED",
         status_reason: "HEAT_NO_LONGER_UPCOMING",
       });
-      // Continue the ordinary lifecycle after proving that reset invalidated
-      // the queued work. Logical-message uniqueness prevents another reminder.
+      // Continue after proving reset invalidated the old occurrence. The reset
+      // has its own one-time reminder, which remains queued for its consumer.
       await transition(heat, "ready");
       await transition(heat, "call");
     },
@@ -618,7 +837,7 @@ test("the consumer claims before reloading contact, assignment, and heat state",
        FROM email_notifications n
        JOIN registrations r ON r.id = n.registration_id
        JOIN race_entries re ON re.registration_id = r.id
-      WHERE n.notification_type = 'HEAT_ASSIGNED'
+       WHERE n.notification_type = 'HEAT_ASSIGNED' AND n.channel = 'EMAIL'
       ORDER BY r.first_name`,
   ).all();
   assert.equal(assignments.length, 3);
@@ -683,7 +902,7 @@ test("the consumer claims before reloading contact, assignment, and heat state",
   const legacy = database.prepare(
     `SELECT n.id
        FROM email_notifications n JOIN heats h ON h.id = n.heat_id
-      WHERE n.notification_type = 'HEAT_UPCOMING' AND n.registration_id = ?
+       WHERE n.notification_type = 'HEAT_UPCOMING' AND n.channel = 'EMAIL' AND n.registration_id = ?
         AND h.round = 'ROUND_ONE'`,
   ).get(assignments[0].registration_id);
   assert.ok(legacy);
@@ -703,7 +922,7 @@ test("the consumer claims before reloading contact, assignment, and heat state",
   const upcoming = database.prepare(
     `SELECT n.id, n.heat_id
       FROM email_notifications n JOIN heats h ON h.id = n.heat_id
-      WHERE n.notification_type = 'HEAT_UPCOMING' AND n.registration_id = ?
+      WHERE n.notification_type = 'HEAT_UPCOMING' AND n.channel = 'EMAIL' AND n.registration_id = ?
         AND h.round = 'FINAL'`,
   ).get(assignments[0].registration_id);
   assert.ok(upcoming);
@@ -770,7 +989,7 @@ test("a queued notification is cancelled when a real handler replaces its origin
   const notification = database.prepare(
     `SELECT id, duck_assignment_id
        FROM email_notifications
-      WHERE registration_id = ? AND notification_type = 'HEAT_ASSIGNED'`,
+       WHERE registration_id = ? AND notification_type = 'HEAT_ASSIGNED' AND channel = 'EMAIL'`,
   ).get(participant.registrationId);
   assert.ok(notification);
   assert.equal(notification.duck_assignment_id, participant.assignmentId);
@@ -818,17 +1037,35 @@ test("the durable outbox republishes a failed queue send through scheduled and q
     afterPairing: async ({
       env,
       worker,
+      post,
+      eventId,
       queuedNotifications,
       queueAttempts,
       sentEmails,
     }) => {
       const notification = database.prepare(
-        "SELECT id, status FROM email_notifications WHERE notification_type = 'HEAT_ASSIGNED'",
+        "SELECT id, status FROM email_notifications WHERE notification_type = 'REGISTRATION_CONFIRMED' AND channel = 'EMAIL'",
       ).get();
       assert.ok(notification);
       assert.equal(notification.status, "RETRY_PENDING");
-      assert.deepEqual(queueAttempts, [{ notificationId: notification.id, accepted: false }]);
-      assert.deepEqual(queuedNotifications, []);
+      const targetAttempts = () => queueAttempts.filter((attempt) => attempt.notificationId === notification.id);
+      assert.deepEqual(targetAttempts(), [{ notificationId: notification.id, accepted: false }]);
+      assert.equal(queuedNotifications.includes(notification.id), false);
+
+      const earlyTasks = [];
+      await worker.scheduled({}, env, {
+        waitUntil(promise) { earlyTasks.push(promise); },
+      });
+      await Promise.all(earlyTasks);
+      assert.deepEqual(targetAttempts(), [{ notificationId: notification.id, accepted: false }],
+        "cron does not bypass retry_after");
+      const earlySupportRetry = await post(
+        `/api/v1/staff/support/events/${eventId}/notifications/${notification.id}/retry`,
+        { commandId: crypto.randomUUID() },
+        adminToken,
+      );
+      assert.equal(earlySupportRetry.status, 409, "support retry cannot reset a future backoff");
+      assert.deepEqual(targetAttempts(), [{ notificationId: notification.id, accepted: false }]);
 
       // Advance the durable retry clock without waiting for wall time, then use
       // the same scheduled entry point deployed by the Worker.
@@ -839,14 +1076,29 @@ test("the durable outbox republishes a failed queue send through scheduled and q
         waitUntil(promise) { scheduledTasks.push(promise); },
       });
       await Promise.all(scheduledTasks);
-      assert.deepEqual(queueAttempts, [
+      assert.deepEqual(targetAttempts(), [
         { notificationId: notification.id, accepted: false },
         { notificationId: notification.id, accepted: true },
       ]);
-      assert.deepEqual(queuedNotifications, [notification.id]);
+      assert.equal(queuedNotifications.filter((id) => id === notification.id).length, 1);
       assert.equal(database.prepare(
         "SELECT status FROM email_notifications WHERE id = ?",
       ).get(notification.id).status, "QUEUED");
+
+      for (let replay = 0; replay < 6; replay += 1) {
+        database.prepare(
+          "UPDATE email_notifications SET last_published_at = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+        ).run(notification.id);
+        const staleTasks = [];
+        await worker.scheduled({}, env, { waitUntil(promise) { staleTasks.push(promise); } });
+        await Promise.all(staleTasks);
+      }
+      assert.equal(queuedNotifications.filter((id) => id === notification.id).length, 7,
+        "stale accepted work remains recoverable through repeated republication");
+      assert.deepEqual({ ...database.prepare(
+        "SELECT status, publication_failure_count FROM email_notifications WHERE id = ?",
+      ).get(notification.id) }, { status: "QUEUED", publication_failure_count: 1 },
+      "successful stale republication does not consume the publication-failure budget");
 
       let acknowledged = 0;
       let retried = 0;
@@ -877,6 +1129,95 @@ test("the durable outbox republishes a failed queue send through scheduled and q
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
 });
 
+test("a failed support publication replay honors backoff and reconciliation delivers once", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Support Retry Backoff Race",
+    slug: "support-retry-backoff-race",
+    racerCount: 3,
+    heatCapacity: 3,
+    optInRegistrationIndex: 0,
+  });
+  const notification = database.prepare(
+    "SELECT id FROM email_notifications WHERE notification_type = 'REGISTRATION_CONFIRMED' AND channel = 'EMAIL'",
+  ).get();
+  assert.ok(notification);
+  database.prepare(
+    `UPDATE email_notifications
+        SET status = 'FAILED', terminal_at = ?, last_error_code = 'SES_REJECTED',
+            retry_after = NULL
+      WHERE id = ?`,
+  ).run(new Date().toISOString(), notification.id);
+
+  const publicationAttempts = [];
+  let failNextPublication = true;
+  race.env.EMAIL_QUEUE = {
+    async send(notificationId) {
+      publicationAttempts.push(notificationId);
+      if (failNextPublication) {
+        failNextPublication = false;
+        throw new Error("simulated support queue publication failure");
+      }
+    },
+  };
+  const commandId = crypto.randomUUID();
+  const retryPath = `/api/v1/staff/support/events/${race.eventId}/notifications/${notification.id}/retry`;
+  const first = await race.post(retryPath, { commandId }, adminToken);
+  assert.equal(first.status, 503, await first.clone().text());
+  assert.equal(publicationAttempts.length, 1);
+  const deferred = database.prepare(
+    "SELECT status, retry_after FROM email_notifications WHERE id = ?",
+  ).get(notification.id);
+  assert.equal(deferred.status, "RETRY_PENDING");
+  assert.ok(deferred.retry_after > new Date().toISOString());
+
+  const replay = await jsonBody(
+    await race.post(retryPath, { commandId }, adminToken),
+    202,
+    "early support retry replay",
+  );
+  assert.equal(replay.replayed, true);
+  assert.equal(publicationAttempts.length, 1, "the command replay cannot bypass retry_after");
+  const earlyTasks = [];
+  await race.worker.scheduled({}, race.env, { waitUntil(promise) { earlyTasks.push(promise); } });
+  await Promise.all(earlyTasks);
+  assert.equal(publicationAttempts.length, 1, "reconciliation also waits for retry_after");
+
+  database.prepare(
+    "UPDATE email_notifications SET retry_after = '2000-01-01T00:00:00.000Z' WHERE id = ?",
+  ).run(notification.id);
+  const recoveryTasks = [];
+  await race.worker.scheduled({}, race.env, { waitUntil(promise) { recoveryTasks.push(promise); } });
+  await Promise.all(recoveryTasks);
+  assert.equal(publicationAttempts.length, 2);
+  assert.equal(database.prepare(
+    "SELECT status FROM email_notifications WHERE id = ?",
+  ).get(notification.id).status, "QUEUED");
+
+  let acknowledged = 0;
+  let retried = 0;
+  const message = () => ({
+    body: notification.id,
+    attempts: 1,
+    ack() { acknowledged += 1; },
+    retry() { retried += 1; },
+  });
+  await race.worker.queue({ queue: "quickducks-email", messages: [message()] }, race.env);
+  await race.worker.queue({ queue: "quickducks-email", messages: [message()] }, race.env);
+  assert.equal(acknowledged, 2);
+  assert.equal(retried, 0);
+  assert.equal(race.sentEmails.length, 1, "duplicate accepted queue messages deliver at most once");
+  const completedReplay = await jsonBody(
+    await race.post(retryPath, { commandId }, adminToken),
+    200,
+    "completed support retry replay",
+  );
+  assert.equal(completedReplay.status, "SENT");
+  assert.equal(publicationAttempts.length, 2, "a recovered command replay does not republish completed work");
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
 test("a unique delivery claim prevents a concurrent consumer from sending the same notification", async (context) => {
   const { database } = createDatabase();
   context.after(() => database.close());
@@ -888,7 +1229,7 @@ test("a unique delivery claim prevents a concurrent consumer from sending the sa
     optInRegistrationIndex: 0,
   });
   const notification = database.prepare(
-    "SELECT id, heat_id FROM email_notifications WHERE notification_type = 'HEAT_ASSIGNED'",
+    "SELECT id, heat_id FROM email_notifications WHERE notification_type = 'HEAT_ASSIGNED' AND channel = 'EMAIL'",
   ).get();
   assert.ok(notification);
   database.prepare("UPDATE heats SET status = 'READY' WHERE id = ?").run(notification.heat_id);
@@ -1012,7 +1353,7 @@ test("an SES acceptance followed by D1 failure is never sent again", async (cont
     optInRegistrationIndex: 0,
   });
   const notification = database.prepare(
-    "SELECT id, heat_id FROM email_notifications WHERE notification_type = 'HEAT_ASSIGNED'",
+    "SELECT id, heat_id FROM email_notifications WHERE notification_type = 'HEAT_ASSIGNED' AND channel = 'EMAIL'",
   ).get();
   assert.ok(notification);
   database.prepare("UPDATE heats SET status = 'READY' WHERE id = ?").run(notification.heat_id);
@@ -2204,6 +2545,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0019_round_one_walk_up_admission.sql",
     "0020_email_notification_assignment.sql",
     "0021_email_delivery_claim.sql",
+    "0022_participant_notification_delivery.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.

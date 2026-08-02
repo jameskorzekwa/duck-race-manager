@@ -52,6 +52,7 @@ test("CloudFormation execution role is limited to application resource types and
     "AWS::Cognito::UserPoolDomain",
     "AWS::Cognito::ManagedLoginBranding",
     "AWS::SES::EmailIdentity",
+    "AWS::SES::ContactList",
     "AWS::IAM::User",
   ]);
 
@@ -61,7 +62,11 @@ test("CloudFormation execution role is limited to application resource types and
     .slice(1)
     .filter((statement) => /Resource: "\*"/.test(statement))
     .map((statement) => statement.slice(0, statement.indexOf("\n")));
-  assert.deepEqual(wildcardStatements, ["CreateTaggedUserPool", "DescribeUserPoolDomainByName"]);
+  assert.deepEqual(wildcardStatements, [
+    "CreateTaggedUserPool",
+    "DescribeUserPoolDomainByName",
+    "ListSesContactLists",
+  ]);
 
   assert.match(executionRole, /aws:RequestTag\/Project: quickducks/);
   assert.match(executionRole, /aws:RequestTag\/Environment: production/);
@@ -70,6 +75,9 @@ test("CloudFormation execution role is limited to application resource types and
   assert.match(executionRole, /identity\/quickducks\.com/);
   assert.match(executionRole, /user\/quickducks-worker-ses/);
   assert.match(application, /UserName: quickducks-worker-ses[\s\S]*Key: Environment\n\s+Value: production/);
+  const contactList = section(application, "  ParticipantContactList:", "  WorkerSesUser:");
+  assert.match(contactList, /DeletionPolicy: Retain/);
+  assert.match(contactList, /UpdateReplacePolicy: Retain/);
   assert.match(
     application,
     /PermissionsBoundary: !Sub arn:\$\{AWS::Partition\}:iam::\$\{AWS::AccountId\}:policy\/quickducks-worker-ses-boundary/,
@@ -79,6 +87,9 @@ test("CloudFormation execution role is limited to application resource types and
   assert.match(boundary, /ManagedPolicyName: quickducks-worker-ses-boundary/);
   assert.match(boundary, /- ses:SendEmail\n\s+- ses:SendRawEmail/);
   assert.match(boundary, /identity\/quickducks\.com/);
+  assert.match(boundary, /contact-list\/quickducks-participants/);
+  assert.match(boundary, /sms-voice:SendTextMessage/);
+  assert.match(boundary, /sms-voice:DescribeOptedOutNumbers/);
   assert.match(boundary, /userpool\/\$\{StaffUserPoolId\}/);
   assert.doesNotMatch(boundary, /userpool\/\*/);
   assert.doesNotMatch(boundary, /ses:\*/);

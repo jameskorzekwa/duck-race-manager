@@ -938,6 +938,11 @@ test("staff pairs the scanned duck with a code-selected participant atomically",
   assert.match(sql, /INSERT INTO heats/);
   assert.match(sql, /INSERT INTO heat_entries/);
   assert.doesNotMatch(sql, /heat_assignment_mode/);
+  const assignmentNotification = db.batches[0].find((statement) =>
+    statement.sql.includes("INSERT INTO email_notifications"));
+  assert.ok(assignmentNotification);
+  assert.match(assignmentNotification.sql, /\? IS NULL OR re\.id = \?/);
+  assert.deepEqual(assignmentNotification.args.slice(-2), ["entry_test", "entry_test"]);
 });
 
 // Deleting a duck mid-race hands its participant back to the pairing queue with

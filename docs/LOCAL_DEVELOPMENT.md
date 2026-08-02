@@ -39,9 +39,9 @@ devices](#testing-on-other-devices).
 
 ## What makes this work
 
-Three things in production need the network: Cognito, which authenticates staff;
-Turnstile, which protects public registration; and SES, which sends race
-reminders. Local development replaces exactly those external boundaries while
+Four things in production need the network: Cognito, which authenticates staff;
+Turnstile, which protects public registration; SES email, and AWS End User
+Messaging SMS. Local development replaces exactly those external boundaries while
 retaining their application-side authorization, queue, and persistence paths.
 
 `wrangler.local.jsonc` differs from `wrangler.jsonc` in four ways:
@@ -69,13 +69,14 @@ It supplies the two seams `createWorker` already accepts:
 It also serves a stand-in for the Cognito hosted UI at `/oauth2/authorize`, which
 lists the staff accounts in the local database and lets you pick one.
 
-The local email queue has its own `quickducks-email-local` and
+The local participant-notification queue has its own `quickducks-email-local` and
 `quickducks-email-local-dlq` identities. Its consumer runs the production D1
 claim, consent checks, rendering, attempt recording, and retry logic, then stores
-the synthetic message in memory instead of contacting SES. Browser tests inspect
-that mailbox at `GET /__local/emails` and clear it with
-`DELETE /__local/emails`; both routes exist only in `src/local-dev.ts` and are
-refused outside a configured local origin.
+the synthetic message in memory instead of contacting either AWS provider.
+Browser tests inspect email at `GET /__local/emails` and SMS at
+`GET /__local/sms`, and clear them with the corresponding `DELETE` request.
+All four routes exist only in `src/local-dev.ts` and are refused outside a
+configured local origin.
 
 Everything else is the real thing. Sign-in still runs the production PKCE flow,
 sets the same `__Host-` cookies, refreshes the same way, and — crucially — still
@@ -261,8 +262,9 @@ or when a local database drifted while a migration was being written.
 
 ## What is still not local
 
-- **Outbound email.** The queue producer runs, but there is no consumer and no
-  SES path in any environment, so nothing sends.
+- **Real provider delivery.** The local queue consumer records synthetic email
+  and SMS in the local inspection endpoints; it never calls SES, AWS End User
+  Messaging SMS, or either provider's suppression API.
 - **Real NFC writing**, unless you serve the site to an Android phone with
   `npm run dev:network` and a `mkcert` certificate the phone trusts. That is only
   the scanning station on `/staff/inventory`; the rest of that page works on any

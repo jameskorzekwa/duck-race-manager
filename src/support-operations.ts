@@ -179,6 +179,7 @@ interface NotificationListRow {
   id: string;
   registration_id: string;
   notification_type: string;
+  channel: string;
   status: string;
   template_version: number;
   scheduled_at: string | null;
@@ -219,7 +220,7 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
   if (before !== null) args.push(before);
   args.push(limit);
   const rows = await env.DB.prepare(
-    `SELECT n.id, n.registration_id, n.notification_type, n.status,
+    `SELECT n.id, n.registration_id, n.notification_type, n.channel, n.status,
             n.template_version, n.scheduled_at, n.queued_at, n.sent_at,
             n.terminal_at, n.status_reason, n.last_error_code, n.created_at,
             r.first_name, r.last_name, h.heat_number, h.round,
@@ -246,7 +247,10 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
       id: row.id,
       registrationId: row.registration_id,
       participantName: `${row.first_name} ${row.last_name}`,
-      type: row.notification_type,
+      type: row.channel === "SMS" && row.notification_type.startsWith("SMS_")
+        ? row.notification_type.slice(4)
+        : row.notification_type,
+      channel: row.channel,
       status: row.status,
       terminal: terminalNotificationStatuses.has(row.status),
       templateVersion: row.template_version,
@@ -326,6 +330,27 @@ const publishRetry = async (
   }
 
   const now = new Date().toISOString();
+  const due = await env.DB.prepare(
+    `SELECT status, retry_after, publication_failure_count FROM email_notifications
+      WHERE id = ? AND event_id = ? LIMIT 1`,
+  ).bind(notificationId, eventId).first<{
+    status: string;
+    retry_after: string | null;
+    publication_failure_count: number;
+  }>();
+  // Reconciliation may have recovered a failed publication using a separate
+  // durable queue attempt. The original support attempt then still says
+  // TEMPORARY_FAILURE, so the notification itself is the authority: once it has
+  // moved past pending publication, replaying this command must not publish it
+  // again merely to rewrite that older attempt.
+  if (due === null || (due.status !== "PENDING" && due.status !== "RETRY_PENDING")) {
+    return due === null
+      ? json({ error: "The notification is no longer available." }, 409)
+      : json({ notificationId, status: due.status, replayed: true });
+  }
+  if (due.retry_after !== null && due.retry_after > now) {
+    return json({ notificationId, status: "RETRY_PENDING", replayed: true }, 202);
+  }
   try {
     // The consumer receives no participant data or private token, only this durable record ID.
     await env.EMAIL_QUEUE.send(notificationId);
@@ -337,13 +362,17 @@ const publishRetry = async (
       ).bind(now, attempt.id, eventId),
       env.DB.prepare(
         `UPDATE email_notifications
-            SET status = 'QUEUED', queued_at = ?, retry_after = NULL,
+            SET status = 'QUEUED', queued_at = ?, last_published_at = ?, retry_after = NULL,
                 last_error_code = NULL, updated_at = ?
           WHERE id = ? AND event_id = ? AND status IN ('PENDING', 'RETRY_PENDING')`,
-      ).bind(now, now, notificationId, eventId),
+      ).bind(now, now, now, notificationId, eventId),
     ]);
     return json({ notificationId, status: "QUEUED", replayed }, replayed ? 200 : 202);
   } catch {
+    const failureCount = Math.min(20, Number(due?.publication_failure_count ?? 0) + 1);
+    const retryAfter = new Date(
+      Date.now() + Math.min(15 * 60_000, 60_000 * (2 ** Math.min(failureCount - 1, 4))),
+    ).toISOString();
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE email_attempts
@@ -352,9 +381,11 @@ const publishRetry = async (
       ).bind(now, attempt.id, eventId),
       env.DB.prepare(
         `UPDATE email_notifications
-            SET status = 'RETRY_PENDING', last_error_code = 'QUEUE_PUBLISH_FAILED', updated_at = ?
-          WHERE id = ? AND event_id = ? AND status = 'PENDING'`,
-      ).bind(now, notificationId, eventId),
+            SET status = 'RETRY_PENDING', last_error_code = 'QUEUE_PUBLISH_FAILED',
+                publication_failure_count = MIN(publication_failure_count + 1, 20),
+                retry_after = ?, updated_at = ?
+             WHERE id = ? AND event_id = ? AND status IN ('PENDING', 'RETRY_PENDING')`,
+      ).bind(retryAfter, now, notificationId, eventId),
     ]);
     return json({ error: "The retry is saved but could not be queued. Retry the same command." }, 503);
   }
@@ -403,18 +434,20 @@ const retryNotification = async (
          SELECT ?, n.event_id, 'RETRY_NOTIFICATION', n.id, ?, ?
            FROM email_notifications n
           WHERE n.id = ? AND n.event_id = ?
-            AND n.status IN ('FAILED', 'RETRY_PENDING')
-            AND COALESCE(n.last_error_code, '') != 'DELIVERY_OUTCOME_UNKNOWN'`,
-      ).bind(commandId, now, now, notificationId, eventId),
+             AND n.status IN ('FAILED', 'RETRY_PENDING')
+             AND (n.retry_after IS NULL OR n.retry_after <= ?)
+             AND COALESCE(n.last_error_code, '') != 'DELIVERY_OUTCOME_UNKNOWN'`,
+      ).bind(commandId, now, now, notificationId, eventId, now),
       env.DB.prepare(
         `UPDATE email_notifications
             SET status = 'PENDING', terminal_at = NULL, status_reason = NULL,
                 last_error_code = NULL, retry_after = NULL, updated_at = ?
           WHERE id = ? AND event_id = ?
             AND status IN ('FAILED', 'RETRY_PENDING')
+            AND (retry_after IS NULL OR retry_after <= ?)
             AND COALESCE(last_error_code, '') != 'DELIVERY_OUTCOME_UNKNOWN'
             AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'RETRY_NOTIFICATION')`,
-      ).bind(now, notificationId, eventId, commandId),
+      ).bind(now, notificationId, eventId, now, commandId),
       env.DB.prepare(
         `INSERT INTO email_attempts
           (id, event_id, notification_id, attempt_number, stage, status,

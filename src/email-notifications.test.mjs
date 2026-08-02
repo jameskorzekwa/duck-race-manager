@@ -7,6 +7,7 @@ import {
   EmailSendError,
   handleEmailQueue,
   sendEmailWithSes,
+  sendSmsWithAws,
 } from "./email-notifications.ts";
 import worker from "./index.ts";
 
@@ -113,6 +114,10 @@ test("SES v2 requests have a deterministic SigV4 signature and structured UTF-8 
   const expectedBody = JSON.stringify({
     FromEmailAddress: outboundEmail.from,
     Destination: { ToAddresses: [outboundEmail.to] },
+    ListManagementOptions: {
+      ContactListName: "quickducks-participants",
+      TopicName: "operational-race-updates",
+    },
     Content: {
       Simple: {
         Subject: { Data: outboundEmail.subject, Charset: "UTF-8" },
@@ -207,4 +212,51 @@ test("invalid or missing SES configuration fails closed before fetch", async (co
     await expectSendError(sendEmailWithSes(outboundEmail, env), "SES_CONFIGURATION_INVALID", false);
   }
   assert.equal(fetchCalled, false);
+});
+
+test("AWS End User Messaging SMS sends only transactional text through an approved origin", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return Response.json({ MessageId: "sms-message-123" });
+  };
+  const result = await sendSmsWithAws({
+    to: "(817) 320-6150",
+    text: "QuickDucks: Round One, Heat 2 is next. Reply STOP to stop SMS updates.",
+  }, { ...sesEnv, SMS_ORIGINATION_IDENTITY: "origination-id" });
+  assert.deepEqual(result, { providerMessageId: "sms-message-123" });
+  assert.equal(request.url, "https://sms-voice.us-east-1.amazonaws.com/v2/sms-voice/text-message");
+  assert.deepEqual(JSON.parse(request.options.body), {
+    DestinationPhoneNumber: "+18173206150",
+    MessageBody: "QuickDucks: Round One, Heat 2 is next. Reply STOP to stop SMS updates.",
+    MessageType: "TRANSACTIONAL",
+    OriginationIdentity: "origination-id",
+  });
+  assert.doesNotMatch(JSON.stringify(request.options.headers), /8173206150|Round One/);
+});
+
+test("AWS SMS classifies retryable and permanent failures without reading provider bodies", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const sms = { to: "(817) 320-6150", text: "QuickDucks: Test. Reply STOP to stop SMS updates." };
+  const env = { ...sesEnv, SMS_ORIGINATION_IDENTITY: "origination-id" };
+  for (const [status, safeCode, retryable] of [
+    [429, "SMS_TEMPORARY_FAILURE", true],
+    [503, "SMS_TEMPORARY_FAILURE", true],
+    [400, "SMS_REJECTED", false],
+  ]) {
+    let bodyRead = false;
+    globalThis.fetch = async () => ({
+      ok: false,
+      status,
+      async json() { bodyRead = true; return { phone: sms.to }; },
+      async text() { bodyRead = true; return sms.text; },
+    });
+    await expectSendError(sendSmsWithAws(sms, env), safeCode, retryable);
+    assert.equal(bodyRead, false);
+  }
 });

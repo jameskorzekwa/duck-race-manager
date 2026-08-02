@@ -600,6 +600,14 @@ test("public registration captures independent contact consent and canonical pho
     email_notifications_enabled: 0,
     sms_notifications_enabled: 1,
   });
+  assert.deepEqual(database.prepare(`
+    SELECT channel, notification_type, status
+      FROM email_notifications WHERE registration_id = ?
+  `).all(owner.registrationId).map((notification) => ({ ...notification })), [{
+    channel: "SMS",
+    notification_type: "SMS_REGISTRATION_CONFIRMED",
+    status: "QUEUED",
+  }]);
   const contact = await jsonBody(await api(contactPath(owner.registrationId), {
     cookie: owner.cookie,
     headers: proofHeaders(owner.privateToken),

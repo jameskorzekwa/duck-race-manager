@@ -162,6 +162,9 @@ test("notification retry creates a durable attempt and queues only its notificat
     if (sql.includes("FROM email_attempts") && sql.includes("source_command_id")) {
       return { id: "attempt_test", notification_id: "notification_test", status: "PENDING", attempt_number: 2 };
     }
+    if (sql.includes("SELECT status, retry_after, publication_failure_count")) {
+      return { status: "PENDING", retry_after: null, publication_failure_count: 0 };
+    }
     return null;
   });
   const response = await handleSupportOperations(

@@ -18,6 +18,8 @@ import {
   handleEmailQueue,
   type EmailSender,
   type OutboundEmail,
+  type OutboundSms,
+  type SmsSender,
 } from "./email-notifications.ts";
 import { createWorker } from "./index.ts";
 import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
@@ -29,6 +31,7 @@ export { RaceUpdates } from "./live-updates.ts";
 const accessTokenPrefix = "localdev-";
 const refreshTokenPrefix = "localdevr-";
 const localEmails: (OutboundEmail & { sentAt: string })[] = [];
+const localSmsMessages: (OutboundSms & { sentAt: string })[] = [];
 
 // Local development remains fully offline. The queue consumer exercises the
 // production claim, rendering, status, and attempt code, while this final seam
@@ -36,6 +39,11 @@ const localEmails: (OutboundEmail & { sentAt: string })[] = [];
 const localEmailSender: EmailSender = async (email) => {
   localEmails.push({ ...email, sentAt: new Date().toISOString() });
   return { providerMessageId: `local-${crypto.randomUUID()}` };
+};
+
+const localSmsSender: SmsSender = async (sms) => {
+  localSmsMessages.push({ ...sms, sentAt: new Date().toISOString() });
+  return { providerMessageId: `local-sms-${crypto.randomUUID()}` };
 };
 
 const noStoreHtml = {
@@ -400,6 +408,16 @@ const localWorker: ExportedHandler<Env> = {
       return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
     }
 
+    if (url.pathname === "/__local/sms" && request.method === "GET") {
+      return Response.json({ messages: localSmsMessages }, {
+        headers: { "cache-control": "no-store", "x-robots-tag": "noindex, nofollow" },
+      });
+    }
+    if (url.pathname === "/__local/sms" && request.method === "DELETE") {
+      localSmsMessages.length = 0;
+      return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+    }
+
     if (url.pathname.startsWith("/__local/")) {
       return Response.json({ error: "Unknown local development endpoint." }, { status: 404 });
     }
@@ -407,7 +425,7 @@ const localWorker: ExportedHandler<Env> = {
     return worker.fetch!(request, env, ctx);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, localEmailSender);
+    await handleEmailQueue(batch, env, localEmailSender, localSmsSender);
   },
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(dispatchPendingEmailNotifications(env));
