@@ -1647,6 +1647,15 @@ preference, and staff notes. Edits are allowed while the event is `REGISTRATION_
 `REGISTRATION_CLOSED`, `ROUND_ONE`, or `FINAL` and require the currently loaded
 registration revision.
 
+The selected-participant details also name every heat place held by that race
+entry with both round and heat number. An entry with no heat explicitly reads
+**Not assigned to a heat**. A promoted finalist shows the Final place first and
+retains the completed Round One origin; each place is marked **upcoming**,
+**current**, or **completed** from authoritative event and heat lifecycle state.
+Participant, duck, and heat live signals re-fetch both the list and any open
+details panel, so pairing, promotion, withdrawal/reactivation, and emergency duck
+replacement update the displayed assignment without closing and reopening it.
+
 Audits record which field names changed and revision metadata, not the old or
 new contact values. The participant's private token and lookup code do not
 change.

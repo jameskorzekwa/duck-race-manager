@@ -6663,6 +6663,47 @@ const participantDuckFact = (registration) => {
   return participantIsCurrentlyPaired(registration) ? "Paired" : "Unassigned";
 };
 
+// Which numbered heat bag this participant's duck is actually in, named the way
+// the bags themselves are: a round and a heat, never a bare number. "Heat 3" on
+// its own is ambiguous the moment a final exists, and a staffer acting on the
+// wrong one sends a duck to the wrong bank of the pond.
+//
+// A participant who won their round-one heat holds two places at once. Both are
+// stated, because the round-one heat is where the duck came from and the final
+// is where it is going. The event and heat lifecycle decide whether each place
+// is upcoming, current, or completed; merely having a Final place does not make
+// it current before that heat starts.
+//
+// Like every other fact here this runs inside no try block, so an older or
+// malformed projection degrades to the unassigned wording rather than throwing
+// and dropping every control rendered after it.
+const participantHeatFact = (registration) => {
+  const assignments = Array.isArray(registration.heatAssignments) ? registration.heatAssignments : [];
+  const label = (assignment) =>
+    (assignment.round === "FINAL" ? "Final" : "Round One") + " · Heat " + assignment.heatNumber;
+  const timing = (assignment) => {
+    const eventStatus = currentEvent && typeof currentEvent.status === "string" ? currentEvent.status : null;
+    if (eventStatus === "COMPLETED") return "completed";
+    if (assignment.round === "ROUND_ONE" && eventStatus === "FINAL") return "completed";
+    if (assignment.round === "FINAL" && eventStatus === "ROUND_ONE") return "upcoming";
+    if (["FINALIZED", "CANCELLED"].includes(assignment.status)) return "completed";
+    if (["RUNNING", "AWAITING_RESULT"].includes(assignment.status)) {
+      return "current";
+    }
+    return "upcoming";
+  };
+  const timedLabel = (assignment) => label(assignment) + " (" + timing(assignment) + ")";
+  const placed = assignments.filter((assignment) =>
+    assignment && typeof assignment.heatNumber === "number"
+  );
+  const final = placed.find((assignment) => assignment.round === "FINAL");
+  const roundOne = placed.find((assignment) => assignment.round === "ROUND_ONE");
+  if (final && roundOne) return timedLabel(final) + " · advanced from " + timedLabel(roundOne);
+  if (final) return timedLabel(final);
+  if (roundOne) return timedLabel(roundOne);
+  return "Not assigned to a heat";
+};
+
 // The event statuses the delete endpoint accepts at all, mirroring
 // DELETABLE_EVENT_STATUSES in registration.ts. Outside them nothing about the
 // participant is the reason — the race itself is — and saying anything about
@@ -6797,6 +6838,7 @@ const renderParticipantDetail = (registration) => {
     ["Phone", registration.phone || "Not provided"],
     ["Created via", humanize(registration.createdVia)],
     ["Duck", participantDuckFact(registration)],
+    ["Heat", participantHeatFact(registration)],
     ["Duck name", participantDuckNameFact(registration)],
     ["Race entry", registration.raceEntryId],
     ["Revision", registration.revision],
