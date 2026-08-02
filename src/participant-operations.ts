@@ -398,6 +398,9 @@ const validateParticipant = (
   if (hasOwn(payload, "emailNotificationsEnabled") && typeof payload.emailNotificationsEnabled !== "boolean") {
     errors.emailNotificationsEnabled = "Must be true or false.";
   }
+  if (hasOwn(payload, "smsNotificationsEnabled") && typeof payload.smsNotificationsEnabled !== "boolean") {
+    errors.smsNotificationsEnabled = "Must be true or false.";
+  }
   const noteValue = hasOwn(payload, "notes") ? payload.notes : current?.staff_notes ?? null;
   const staffNotes = typeof noteValue === "string" ? noteValue.trim() || null : null;
   if (staffNotes !== null && staffNotes.length > 2000) errors.notes = "Use 2000 characters or fewer.";
@@ -407,17 +410,53 @@ const validateParticipant = (
   const lastName = hasOwn(payload, "lastName") ? payload.lastName : current?.last_name;
   const email = hasOwn(payload, "email") ? payload.email : current?.email;
   const phone = hasOwn(payload, "phone") ? payload.phone : current?.phone;
-  const notifications = hasOwn(payload, "emailNotificationsEnabled")
+  // Legacy rows predate strict contact validation. A partial staff edit must not
+  // force an unrelated cleanup, but changing either a channel or its consent
+  // validates that complete channel before it can be saved again.
+  const validateEmailChannel = current === undefined
+    || hasOwn(payload, "email") || hasOwn(payload, "emailNotificationsEnabled");
+  const validatePhoneChannel = current === undefined
+    || hasOwn(payload, "phone") || hasOwn(payload, "smsNotificationsEnabled");
+  const emailNotifications = hasOwn(payload, "emailNotificationsEnabled")
     ? payload.emailNotificationsEnabled
-    : current?.email_notifications_enabled === 1;
+    : email === null ? false : current?.email_notifications_enabled === 1;
+  const smsNotifications = hasOwn(payload, "smsNotificationsEnabled")
+    ? payload.smsNotificationsEnabled
+    : phone === null ? false : current?.sms_notifications_enabled === 1;
   const form = new FormData();
   if (typeof firstName === "string") form.set("first_name", firstName);
   if (typeof lastName === "string") form.set("last_name", lastName);
-  if (typeof email === "string") form.set("email", email);
-  if (typeof phone === "string") form.set("phone", phone);
-  if (notifications === true) form.set("email_notifications_enabled", "on");
+  if (validateEmailChannel) {
+    if (typeof email === "string") form.set("email", email);
+    if (emailNotifications === true) form.set("email_notifications_enabled", "on");
+  } else {
+    form.set("email", "legacy-contact@example.invalid");
+  }
+  if (validatePhoneChannel) {
+    if (typeof phone === "string") form.set("phone", phone);
+    if (smsNotifications === true) form.set("sms_notifications_enabled", "on");
+  } else {
+    form.set("phone", "2025550100");
+  }
   const validation = validateRegistration(form, emailRequired);
-  if (validation.value === undefined) return { errors: validation.errors };
+  if (validation.value === undefined) {
+    for (const [field, message] of Object.entries(validation.errors)) {
+      errors[field === "first_name" ? "firstName"
+        : field === "last_name" ? "lastName"
+        : field === "email_notifications_enabled" ? "emailNotificationsEnabled"
+        : field === "sms_notifications_enabled" ? "smsNotificationsEnabled"
+        : field] = message;
+    }
+    return { errors };
+  }
+  if (!validateEmailChannel && current !== undefined) {
+    validation.value.email = current.email;
+    validation.value.emailNotificationsEnabled = current.email_notifications_enabled === 1;
+  }
+  if (!validatePhoneChannel && current !== undefined) {
+    validation.value.phone = current.phone;
+    validation.value.smsNotificationsEnabled = current.sms_notifications_enabled === 1;
+  }
   return { value: { input: validation.value, staffNotes }, errors };
 };
 
@@ -467,6 +506,7 @@ const createWalkUp = async (
     email: value.input.email,
     phone: value.input.phone,
     emailNotificationsEnabled: value.input.emailNotificationsEnabled,
+    smsNotificationsEnabled: value.input.smsNotificationsEnabled,
     notes: value.staffNotes,
   }));
   const previous = await findCommand(env, commandId);
@@ -534,11 +574,11 @@ const createWalkUp = async (
         eventId, now, now,
       ),
       env.DB.prepare(
-        `INSERT INTO registrations
+         `INSERT INTO registrations
           (id, event_id, first_name, last_name, email, phone, status, lookup_code,
-           private_token_hash, email_notifications_enabled, created_via, staff_notes,
-           submitted_at, status_changed_at)
-         SELECT ?, rc.event_id, ?, ?, ?, ?, 'SUBMITTED', ?, ?, ?, 'STAFF', ?, ?, ?
+            private_token_hash, email_notifications_enabled, sms_notifications_enabled, created_via, staff_notes,
+            submitted_at, status_changed_at)
+          SELECT ?, rc.event_id, ?, ?, ?, ?, 'SUBMITTED', ?, ?, ?, ?, 'STAFF', ?, ?, ?
            FROM race_commands rc
           WHERE rc.id = ? AND rc.event_id = ?
             AND rc.command_type = 'CREATE_STAFF_REGISTRATION' AND rc.result_id = ?`,
@@ -551,6 +591,7 @@ const createWalkUp = async (
         lookupCode,
         tokenHash,
         value.input.emailNotificationsEnabled ? 1 : 0,
+        value.input.smsNotificationsEnabled ? 1 : 0,
         value.staffNotes,
         now,
         now,
@@ -671,37 +712,55 @@ const editRegistration = async (
     "email",
     "phone",
     "emailNotificationsEnabled",
+    "smsNotificationsEnabled",
     "notes",
   ];
   if (!editableFields.some((field) => hasOwn(payload, field))) {
     return json({ error: "At least one editable registration field is required." }, 400);
   }
 
-  const previous = await findCommand(env, commandId);
-  if (previous !== null) {
-    if (previous.command_type !== "UPDATE_REGISTRATION" || previous.result_id !== registrationId) {
-      return json({ error: "This command identifier was already used for another operation." }, 409);
-    }
-    const replay = await getRegistration(env, registrationId);
-    return replay === null
-      ? json({ error: "Registration not found." }, 404)
-      : registrationResult(replay, true);
-  }
-
   const current = await getRegistration(env, registrationId);
   if (current === null) return json({ error: "Registration not found." }, 404);
-  if (!mutableEventStatuses.includes(current.event_status)) {
-    return json({ error: "Participant details cannot be changed in this event state." }, 409);
-  }
-  if (current.registration_revision !== expectedRevision) {
-    return json({ error: "Registration changed since it was loaded.", currentRevision: current.registration_revision }, 409);
-  }
   const validation = validateParticipant(payload, current.email_required === 1, current);
   if (validation.value === undefined) {
     return json({ error: "Registration validation failed.", fields: validation.errors }, 422);
   }
 
   const value = validation.value;
+  // Fingerprint the normalized complete edit rather than the raw JSON. Exact
+  // retries therefore survive harmless email case, whitespace, and phone
+  // punctuation differences, while changing any resulting contact, consent,
+  // name, note, target, or expected revision cannot reuse this command. The
+  // digest is one-way so command history never becomes another store of PII.
+  const requestFingerprint = await hashToken(JSON.stringify({
+    registrationId,
+    expectedRevision,
+    firstName: value.input.firstName,
+    lastName: value.input.lastName,
+    email: value.input.email,
+    phone: value.input.phone,
+    emailNotificationsEnabled: value.input.emailNotificationsEnabled,
+    smsNotificationsEnabled: value.input.smsNotificationsEnabled,
+    notes: value.staffNotes,
+  }));
+  const previous = await findCommand(env, commandId);
+  if (previous !== null) {
+    if (
+      previous.command_type !== "UPDATE_REGISTRATION"
+      || previous.result_id !== registrationId
+      || previous.request_fingerprint !== requestFingerprint
+    ) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    return registrationResult(current, true);
+  }
+  if (!mutableEventStatuses.includes(current.event_status)) {
+    return json({ error: "Participant details cannot be changed in this event state." }, 409);
+  }
+  if (current.registration_revision !== expectedRevision) {
+    return json({ error: "Registration changed since it was loaded.", currentRevision: current.registration_revision }, 409);
+  }
+
   const changedFields: string[] = [];
   if (value.input.firstName !== current.first_name) changedFields.push("first_name");
   if (value.input.lastName !== current.last_name) changedFields.push("last_name");
@@ -710,7 +769,7 @@ const editRegistration = async (
   if ((value.input.emailNotificationsEnabled ? 1 : 0) !== current.email_notifications_enabled) {
     changedFields.push("email_notifications_enabled");
   }
-  if (value.input.phone === null && current.sms_notifications_enabled === 1) {
+  if ((value.input.smsNotificationsEnabled ? 1 : 0) !== current.sms_notifications_enabled) {
     changedFields.push("sms_notifications_enabled");
   }
   if (value.staffNotes !== current.staff_notes) changedFields.push("staff_notes");
@@ -719,18 +778,17 @@ const editRegistration = async (
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO race_commands
-        (id, event_id, command_type, result_id, requested_at, completed_at)
-       SELECT ?, r.event_id, 'UPDATE_REGISTRATION', r.id, ?, ?
-         FROM registrations r
-         JOIN events e ON e.id = r.event_id
-        WHERE r.id = ? AND r.revision = ?
-          AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
-    ).bind(commandId, now, now, registrationId, expectedRevision),
+        (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
+       SELECT ?, r.event_id, 'UPDATE_REGISTRATION', r.id, ?, ?, ?
+          FROM registrations r
+          JOIN events e ON e.id = r.event_id
+         WHERE r.id = ? AND r.revision = ?
+           AND e.status IN ('REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
+    ).bind(commandId, now, now, requestFingerprint, registrationId, expectedRevision),
     env.DB.prepare(
       `UPDATE registrations
-          SET first_name = ?, last_name = ?, email = ?, phone = ?,
-              email_notifications_enabled = ?,
-              sms_notifications_enabled = CASE WHEN ? IS NULL THEN 0 ELSE sms_notifications_enabled END,
+           SET first_name = ?, last_name = ?, email = ?, phone = ?,
+               email_notifications_enabled = ?, sms_notifications_enabled = ?,
               staff_notes = ?,
               updated_at = ?, revision = revision + 1
         WHERE id = ? AND revision = ?
@@ -744,13 +802,32 @@ const editRegistration = async (
       value.input.email,
       value.input.phone,
       value.input.emailNotificationsEnabled ? 1 : 0,
-      value.input.phone,
+      value.input.smsNotificationsEnabled ? 1 : 0,
       value.staffNotes,
       now,
       registrationId,
       expectedRevision,
     ),
   ];
+  statements.push(env.DB.prepare(
+    `UPDATE email_notifications
+        SET status = 'CANCELLED', terminal_at = ?, status_reason = 'EMAIL_NOT_OPTED_IN',
+            retry_after = NULL, last_error_code = NULL, updated_at = ?
+      WHERE registration_id = ? AND ? = 0
+        AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
+        AND EXISTS (
+          SELECT 1 FROM race_commands rc
+           WHERE rc.id = ? AND rc.command_type = 'UPDATE_REGISTRATION'
+             AND rc.result_id = ?
+        )`,
+  ).bind(
+    now,
+    now,
+    registrationId,
+    value.input.emailNotificationsEnabled ? 1 : 0,
+    commandId,
+    registrationId,
+  ));
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id,
@@ -774,7 +851,11 @@ const editRegistration = async (
     await env.DB.batch(statements);
   } catch {
     const replayCommand = await findCommand(env, commandId);
-    if (replayCommand?.command_type === "UPDATE_REGISTRATION" && replayCommand.result_id === registrationId) {
+    if (
+      replayCommand?.command_type === "UPDATE_REGISTRATION"
+      && replayCommand.result_id === registrationId
+      && replayCommand.request_fingerprint === requestFingerprint
+    ) {
       const replay = await getRegistration(env, registrationId);
       if (replay !== null) return registrationResult(replay, true);
     }

@@ -52,6 +52,31 @@ const renderedPages = [
 
 const style = renderedPages[0].match(/<style>([\s\S]+)<\/style>/)?.[1];
 
+test("public and staff participant forms expose independent contact consent controls", () => {
+  const publicForm = renderRegistration(undefined, "REGISTRATION")
+    .match(/<form[^>]*data-registration-form[^>]*>[\s\S]*?<\/form>/)?.[0];
+  assert.ok(publicForm);
+  assert.match(publicForm, /name="phone"[^>]*inputmode="tel"[^>]*placeholder="\(817\) 320-6150"/);
+  assert.match(publicForm, /name="email_notifications_enabled" type="checkbox" disabled/);
+  assert.match(publicForm, /name="sms_notifications_enabled" type="checkbox" disabled/);
+  assert.match(publicForm, /data-contact-error="email"/);
+  assert.match(publicForm, /data-contact-error="phone"/);
+
+  for (const markup of [
+    renderStaffHome("Administrator", true, []),
+    renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]),
+  ]) {
+    for (const formHook of ["data-walkup-form", "data-participant-edit-form"]) {
+      const form = markup.match(new RegExp(`<form ${formHook}>[\\s\\S]*?<\\/form>`))?.[0];
+      assert.ok(form, formHook);
+      assert.match(form, /name="emailNotificationsEnabled" type="checkbox" disabled/);
+      assert.match(form, /name="smsNotificationsEnabled" type="checkbox" disabled/);
+      assert.match(form, /data-contact-error="email"/);
+      assert.match(form, /data-contact-error="phone"/);
+    }
+  }
+});
+
 test("the private status page shows a scannable QR beside the readable lookup code", () => {
   const status = renderStatus({
     first_name: "Daisy",

@@ -23,7 +23,7 @@
 // closed.
 //
 // The binding *shapes* must stay identical to production, because that is what
-// Wrangler simulates. Dropping the rate limiter in particular would make the
+// Wrangler simulates. Dropping either rate limiter in particular would make the
 // public search and My Ducks routes throw: `src/api.ts` reads it with no
 // undefined guard.
 {
@@ -90,6 +90,14 @@
     "crons": ["*/1 * * * *"]
   },
   "ratelimits": [
+    {
+      "name": "PARTICIPANT_CONTACT_READ_RATE_LIMITER",
+      "namespace_id": "2002",
+      "simple": {
+        "limit": 300,
+        "period": 60
+      }
+    },
     {
       "name": "PUBLIC_SEARCH_RATE_LIMITER",
       "namespace_id": "2001",

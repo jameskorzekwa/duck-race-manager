@@ -72,6 +72,7 @@ const localEnv = (database) => ({
   COGNITO_DOMAIN: localOrigin,
   DB: createD1(database),
   EMAIL_QUEUE: { async send() {} },
+  PARTICIPANT_CONTACT_READ_RATE_LIMITER: { async limit() { return { success: true }; } },
   PUBLIC_SEARCH_RATE_LIMITER: { async limit() { return { success: true }; } },
 });
 
@@ -121,7 +122,7 @@ test("the local configuration is loopback-only and binds no production resource"
   assert.notEqual(local.queues.consumers[0].dead_letter_queue, production.queues.consumers[0].dead_letter_queue);
 
   // The binding *shapes* must still match production, or local behaviour
-  // diverges. The rate limiter in particular is read without an undefined guard.
+  // diverges. Both rate limiters in particular are read without an undefined guard.
   assert.deepEqual(
     local.d1_databases.map((database) => database.binding),
     production.d1_databases.map((database) => database.binding),

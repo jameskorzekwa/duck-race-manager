@@ -5,6 +5,7 @@ import {
   announcerHelpersScript,
   announcerScript,
   confirmationDialogScript,
+  contactInputHelpersScript,
   duckDetailHelpersScript,
   eventLifecycleHelpersScript,
   eventSlugHelpersScript,
@@ -47,6 +48,49 @@ const eventSlugHelpers = () => new Function(
 const participantQrHelpers = () => new Function(
   `${participantQrHelpersScript}; return { qrParseParticipantPayload, qrScannerSupported, qrNativeDetection, qrCameraProblem, qrCropFrame };`,
 )();
+
+test("contact input helpers progressively format validated US phone numbers", () => {
+  const scope = {};
+  const documentRef = { activeElement: null };
+  const contact = new Function(
+    "globalThis",
+    "document",
+    `${contactInputHelpersScript}; return globalThis.quickDucksContact;`,
+  )(scope, documentRef);
+  assert.deepEqual([
+    "8", "81", "817", "8173", "81732", "817320", "8173206", "81732061", "817320615", "8173206150",
+  ].map(contact.formatValue), [
+    "(8", "(81", "(817", "(817) 3", "(817) 32", "(817) 320", "(817) 320-6", "(817) 320-61",
+    "(817) 320-615", "(817) 320-6150",
+  ]);
+  for (const value of ["817-320-6150", "+1 (817) 320-6150", "817.320.6150"]) {
+    assert.equal(contact.formatValue(value), "(817) 320-6150");
+    assert.equal(contact.validPhone(value), true);
+  }
+  for (const value of ["817320615", "81732061500", "817-CALL-NOW", "+44 817 320 6150"]) {
+    assert.equal(contact.validPhone(value), false, value);
+  }
+  assert.equal(contact.validPhone(""), true);
+  assert.equal(contact.validEmail("racer@example.test"), true);
+  assert.equal(contact.validEmail("racer@"), false);
+
+  const input = {
+    value: "(817) 320-615",
+    selectionStart: 13,
+    setSelectionRange(start, end) { this.selection = [start, end]; },
+  };
+  documentRef.activeElement = input;
+  input.value += "0";
+  input.selectionStart = input.value.length;
+  contact.formatInput(input);
+  assert.equal(input.value, "(817) 320-6150");
+  assert.deepEqual(input.selection, [14, 14]);
+
+  input.value = "(897) 320-6150";
+  input.selectionStart = 3;
+  contact.formatInput(input);
+  assert.equal(input.value, "(897) 320-6150");
+});
 
 test("participant ownership proofs remain participant-scoped and out of URLs", () => {
   const values = new Map();
@@ -2259,7 +2303,7 @@ test("saving contact details keeps the owned card while the authoritative refres
   let contact = {
     registrationId,
     email: "owned.contact@example.test",
-    phone: "+15550107777",
+    phone: "(555) 010-7777",
     emailNotificationsEnabled: false,
     smsNotificationsEnabled: false,
     revision: 0,
@@ -2298,7 +2342,7 @@ test("saving contact details keeps the owned card while the authoritative refres
   assert.equal(harness.awaiting.track.children[0], originalCard);
   assert.ok(originalCard.descendants().includes(originalPanel));
   assert.match(originalPanel.text(), /Email: owned\.updated@example\.test/);
-  assert.match(originalPanel.text(), /Phone: \+15550108888/);
+  assert.match(originalPanel.text(), /Phone: \(555\) 010-8888/);
   assert.match(originalPanel.text(), /Email updates: Opted in/);
   assert.match(originalPanel.text(), /SMS updates: Opted in/);
   assert.equal(originalPanel.querySelector("[data-contact-form]").hidden, true);
