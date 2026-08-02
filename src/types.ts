@@ -9,6 +9,7 @@ export interface Env {
   COGNITO_DOMAIN: string;
   DB: D1Database;
   EMAIL_QUEUE: Queue;
+  PARTICIPANT_CONTACT_READ_RATE_LIMITER: RateLimit;
   PUBLIC_SEARCH_RATE_LIMITER: RateLimit;
   RACE_UPDATES?: DurableObjectNamespace;
   TURNSTILE_SITE_KEY?: string;

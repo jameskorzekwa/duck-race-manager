@@ -182,6 +182,7 @@ const consoleParts = {
   loadInventory: fromInventory(/const loadInventory = async \(\) => \{[\s\S]*?\n\};/),
   loadDuckDetail: fromInventory(/const loadDuckDetail = async \(duckId, trigger = null, focusDetail = false\) => \{[\s\S]*?\n\};/),
   loadParticipantDetail: fromConsole(/const loadParticipantDetail = async \(registrationId\) => \{[\s\S]*?\n\};/),
+  participantEditInProgress: fromConsole(/const participantEditInProgress = \(\) =>[\s\S]*?;\n/),
   revealConsoleSection: fromConsole(/const revealConsoleSection = \(view\) => \{[\s\S]*?\n\};/),
   participantIsDeletable: fromConsole(/const participantIsDeletable = \(registration\) => .*;\n/),
   participantIsCurrentlyPaired: fromConsole(/const participantIsCurrentlyPaired = \(registration\) =>[\s\S]*?;\n/),
@@ -570,6 +571,7 @@ const heatHarness = ({ roster, results = [], canRegistration = true, canInventor
   const heatName = document.hook("[data-heat-name]", "h3");
   const participants = document.hook("#participants", "section");
   const participantDetail = document.hook("[data-participant-detail]", "article");
+  const participantEditForm = document.hook("[data-participant-edit-form]", "form");
   const opened = [];
   const navigations = [];
   const appliedViews = [];
@@ -583,6 +585,7 @@ const heatHarness = ({ roster, results = [], canRegistration = true, canInventor
       "text",
       "humanize",
       "empty",
+      "participantEditInProgress",
       "revealConsoleSection",
       "openRosterParticipant",
       "openRosterDuck",
@@ -606,6 +609,7 @@ const heatHarness = ({ roster, results = [], canRegistration = true, canInventor
       heatFacts,
       heatResults,
       participantDetail,
+      participantEditForm,
       selectedHeat: null,
       currentEvent: { id: "event" },
       currentEventId: () => "event",
@@ -1091,7 +1095,9 @@ const registrationDetail = (overrides = {}) => {
     firstName: "Ada",
     lastName: "Lovelace",
     email: "ada@example.com",
-    phone: "555-0100",
+    phone: "(817) 320-6150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: false,
     status: "ACTIVE",
     lookupCode: "ADAA2345",
     createdVia: "PUBLIC",
@@ -1146,6 +1152,8 @@ const participantDetailHarness = ({
       lastName: { value: "" },
       email: { value: "" },
       phone: { value: "" },
+      emailNotificationsEnabled: { checked: false },
+      smsNotificationsEnabled: { checked: false },
       notes: { value: "" },
     },
     reset() {},
@@ -1178,6 +1186,7 @@ const participantDetailHarness = ({
       participantFacts,
       participantActions,
       participantEditForm,
+      participantEditContact: { sync() {} },
       participantDuckNameForm,
       selectedRegistration: null,
       showFacts: (container, entries) => facts.push(...entries),
@@ -1715,6 +1724,7 @@ const participantListHarness = () => {
       "text",
       "humanize",
       "empty",
+      "participantEditInProgress",
       // A double for the detail renderer: this harness is about which
       // participant is open, not about how the card is drawn.
       "const renderParticipantDetail = (registration) => {\n"

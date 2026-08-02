@@ -352,8 +352,9 @@ test("staff walk-up creation is event-guarded, audited, and idempotent", async (
     firstName: "  Della ",
     lastName: " Duck ",
     email: "DELLA@example.com",
-    phone: "555-0110",
+    phone: "+1 817 320 6110",
     emailNotificationsEnabled: true,
+    smsNotificationsEnabled: true,
     notes: "Call guardian before racing",
   };
   const create = await handleParticipantOperations(
@@ -365,6 +366,9 @@ test("staff walk-up creation is event-guarded, audited, and idempotent", async (
   assert.equal(create.status, 201);
   assert.equal(created.registration.firstName, "Della");
   assert.equal(created.registration.email, "della@example.com");
+  assert.equal(created.registration.phone, "(817) 320-6110");
+  assert.equal(created.registration.emailNotificationsEnabled, true);
+  assert.equal(created.registration.smsNotificationsEnabled, true);
   assert.equal(created.registration.createdVia, "STAFF");
   assert.equal("duckKeepPreference" in created.registration, false);
   assert.equal(created.privateStatusPath, `/r/${privateToken}`);
@@ -562,7 +566,7 @@ test("partial participant edits ignore legacy preference data and omit PII from 
     jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-one", "PATCH", {
       commandId: crypto.randomUUID(),
       expectedRevision: 0,
-      phone: "555-0199",
+      phone: "817-320-6150",
     }),
     env,
     staffActor,
@@ -610,6 +614,145 @@ test("staff clearing a phone also clears SMS consent without breaking older edit
     ).get(commandId).details_json).changed_fields,
     ["phone", "sms_notifications_enabled"],
   );
+  database.close();
+});
+
+test("staff edits round-trip normalized contacts and independent consent", async () => {
+  const { database, env } = makeContext();
+  const commandId = crypto.randomUUID();
+  const payload = {
+    commandId,
+    expectedRevision: 0,
+    email: " DONALD.UPDATED@EXAMPLE.TEST ",
+    phone: "+1 817 320 6150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: true,
+  };
+  const response = await handleParticipantOperations(
+    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-two", "PATCH", payload),
+    env,
+    staffActor,
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(body.registration.email, "donald.updated@example.test");
+  assert.equal(body.registration.phone, "(817) 320-6150");
+  assert.equal(body.registration.emailNotificationsEnabled, false);
+  assert.equal(body.registration.smsNotificationsEnabled, true);
+  const detail = await handleParticipantOperations(
+    new Request("https://quickducks.com/api/v1/staff/registrations/registration-two"),
+    env,
+    staffActor,
+  );
+  const persisted = (await detail.json()).registration;
+  assert.deepEqual({
+    email: persisted.email,
+    phone: persisted.phone,
+    emailNotificationsEnabled: persisted.emailNotificationsEnabled,
+    smsNotificationsEnabled: persisted.smsNotificationsEnabled,
+  }, {
+    email: "donald.updated@example.test",
+    phone: "(817) 320-6150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: true,
+  });
+
+  // Idempotency compares normalized complete edit material: equivalent contact
+  // formatting is an exact replay, but changing either the contact or consent
+  // under the same command identifier is a conflict rather than a false success.
+  const normalizedReplay = await handleParticipantOperations(
+    jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-two", "PATCH", {
+      ...payload,
+      email: "donald.updated@example.test",
+      phone: "(817) 320-6150",
+    }),
+    env,
+    staffActor,
+  );
+  assert.equal(normalizedReplay.status, 200, await normalizedReplay.clone().text());
+  assert.equal((await normalizedReplay.json()).replayed, true);
+  for (const changedMaterial of [
+    { ...payload, smsNotificationsEnabled: false },
+    { ...payload, phone: "(817) 320-6151" },
+  ]) {
+    const conflict = await handleParticipantOperations(
+      jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-two", "PATCH", changedMaterial),
+      env,
+      staffActor,
+    );
+    assert.equal(conflict.status, 409, await conflict.clone().text());
+  }
+  const command = database.prepare(
+    "SELECT request_fingerprint FROM race_commands WHERE id = ?",
+  ).get(commandId);
+  assert.match(command.request_fingerprint, /^[0-9a-f]{64}$/);
+  assert.equal(command.request_fingerprint.includes("donald.updated@example.test"), false);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM audit_events WHERE command_id = ?",
+  ).get(commandId).count, 1);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("staff create and edit reject invalid contacts and consent without a valid channel", async () => {
+  const { database, env } = makeContext();
+  const createBase = {
+    commandId: crypto.randomUUID(),
+    privateToken: "v".repeat(43),
+    firstName: "Valid",
+    lastName: "Contact",
+    email: "valid@example.test",
+    phone: "8173206150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: false,
+    notes: null,
+  };
+  for (const [label, change, field] of [
+    ["invalid email", { email: "missing-domain@" }, "email"],
+    ["incomplete phone", { phone: "817320" }, "phone"],
+    ["email consent without email", { email: null, emailNotificationsEnabled: true }, "emailNotificationsEnabled"],
+    ["SMS consent without phone", { phone: null, smsNotificationsEnabled: true }, "smsNotificationsEnabled"],
+  ]) {
+    const response = await handleParticipantOperations(
+      jsonRequest("https://quickducks.com/api/v1/staff/events/event-open/registrations", "POST", {
+        ...createBase,
+        ...change,
+        commandId: crypto.randomUUID(),
+      }),
+      env,
+      staffActor,
+    );
+    const body = await response.json();
+    assert.equal(response.status, 422, label);
+    assert.ok(body.fields[field], label);
+  }
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM registrations WHERE first_name = 'Valid'",
+  ).get().count, 0);
+
+  for (const [label, change, field] of [
+    ["invalid email edit", { email: "not-email", emailNotificationsEnabled: false }, "email"],
+    ["incomplete phone edit", { phone: "81732", smsNotificationsEnabled: false }, "phone"],
+    ["email consent edit", { email: null, emailNotificationsEnabled: true }, "emailNotificationsEnabled"],
+    ["SMS consent edit", { phone: null, smsNotificationsEnabled: true }, "smsNotificationsEnabled"],
+  ]) {
+    const response = await handleParticipantOperations(
+      jsonRequest("https://quickducks.com/api/v1/staff/registrations/registration-two", "PATCH", {
+        commandId: crypto.randomUUID(),
+        expectedRevision: 0,
+        ...change,
+      }),
+      env,
+      staffActor,
+    );
+    const body = await response.json();
+    assert.equal(response.status, 422, label);
+    assert.ok(body.fields[field], label);
+  }
+  assert.equal(database.prepare(
+    "SELECT revision FROM registrations WHERE id = 'registration-two'",
+  ).get().revision, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });
 

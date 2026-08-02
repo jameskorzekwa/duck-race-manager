@@ -871,6 +871,24 @@ test("registration desk has no advance duck disposition controls", () => {
   assert.doesNotMatch(staffHomeScript, /duckKeepPreference|duck_keep_preference/);
 });
 
+test("registration desk creates and edits independent contact consent", () => {
+  const markup = renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]);
+  for (const hook of ["data-walkup-form", "data-participant-edit-form"]) {
+    const form = markup.match(new RegExp(`<form ${hook}>[\\s\\S]*?<\\/form>`))?.[0];
+    assert.ok(form, hook);
+    assert.match(form, /name="emailNotificationsEnabled" type="checkbox"/);
+    assert.match(form, /name="smsNotificationsEnabled" type="checkbox"/);
+    assert.match(form, /data-contact-error="email"/);
+    assert.match(form, /data-contact-error="phone"/);
+  }
+  assert.match(staffHomeScript, /emailNotificationsEnabled: values\.get\("emailNotificationsEnabled"\) === "on"/);
+  assert.match(staffHomeScript, /smsNotificationsEnabled: values\.get\("smsNotificationsEnabled"\) === "on"/);
+  assert.match(staffHomeScript, /participantEditForm\.elements\.emailNotificationsEnabled\.checked = registration\.emailNotificationsEnabled/);
+  assert.match(staffHomeScript, /participantEditForm\.elements\.smsNotificationsEnabled\.checked = registration\.smsNotificationsEnabled/);
+  assert.match(staffHomeScript, /quickDucksContact\.bindForm\(walkUpForm\)/);
+  assert.match(staffHomeScript, /quickDucksContact\.bindForm\(participantEditForm\)/);
+});
+
 // The live hub admits a bounded number of connections and fans every signal out
 // to every subscriber that names a matching domain, so a page that subscribes to
 // a domain it cannot repaint spends a refresh — and, per registration device, a
