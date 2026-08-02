@@ -4,6 +4,7 @@ import { localPreviewTurnstileToken } from "../src/local-preview.ts";
 import { createClient, randomToken, seed } from "../scripts/seed-local.mjs";
 
 export const baseUrl = process.env.E2E_BASE_URL ?? "http://localhost:8787";
+export const mobileWidths = [320, 375, 430];
 
 export const seedState = (state, options = {}) => seed({
   url: baseUrl,
@@ -62,6 +63,37 @@ export const expectNoDocumentOverflow = async (page) => {
   }));
   expect(dimensions.document).toBeLessThanOrEqual(dimensions.viewport + 1);
   expect(dimensions.body).toBeLessThanOrEqual(dimensions.viewport + 1);
+};
+
+export const expectContained = async (locator, container) => {
+  const [box, boundary] = await Promise.all([
+    locator.boundingBox(),
+    container === undefined
+      ? locator.evaluate(() => ({ x: 0, y: 0, width: innerWidth, height: innerHeight }))
+      : container.boundingBox(),
+  ]);
+  expect(box).not.toBeNull();
+  expect(boundary).not.toBeNull();
+  expect(box.x).toBeGreaterThanOrEqual(boundary.x - 1);
+  expect(box.x + box.width).toBeLessThanOrEqual(boundary.x + boundary.width + 1);
+  const overflow = await locator.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(overflow.scrollWidth).toBeLessThanOrEqual(overflow.clientWidth + 1);
+};
+
+export const expectCentered = async (locator, container = locator.locator("xpath=..")) => {
+  const [box, boundary] = await Promise.all([locator.boundingBox(), container.boundingBox()]);
+  expect(box).not.toBeNull();
+  expect(boundary).not.toBeNull();
+  expect(Math.abs((box.x + box.width / 2) - (boundary.x + boundary.width / 2))).toBeLessThanOrEqual(2);
+};
+
+export const expectTouchTarget = async (locator) => {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box.height).toBeGreaterThanOrEqual(44);
 };
 
 export const registerParticipant = async (client, eventId, index, overrides = {}) => {

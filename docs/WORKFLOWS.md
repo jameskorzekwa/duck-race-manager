@@ -44,7 +44,7 @@ not authorized.
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Duck inventory intake, deletion, assignment, unassignment, and reservation | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open a staff duck inspection | `REGISTRATION`, `DUCK_MANAGER`, `RESULT_TAKER`, or `RACE_DIRECTOR`; projection stays role-narrow | Yes |
-| Open `/staff/inventory` | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Open `/staff/inventory` or the standalone `/staff/inventory-intake` entry | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/registration` | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Take over another operator's abandoned pending sticker provisioning | `RACE_DIRECTOR`, after 10 minutes | Yes, after 10 minutes |
 | Event list/detail context | Any operational role | Yes |
@@ -615,7 +615,7 @@ collection.
 
 While registration is open, **Register another participant** sits in the
 Awaiting Duck Assignment heading row instead of below the complete page. The
-row wraps the action below the heading on narrow screens.
+row wraps and centers the action below the heading on narrow screens.
 
 After the registration redirect, the page scrolls the matching card into view.
 The card itself is rendered exactly as it is on a plain refresh: it carries no
@@ -1146,8 +1146,10 @@ provisioning and participant QR scanning remain separate from the finish station
 Response headers continue to disable browser camera access at the finish station;
 only the duck-pairing page enables the camera.
 
-The blank-sticker station is the **Scan ducks** section of `/staff/inventory`. A
-duck manager, race director, or administrator selects the working event and
+The blank-sticker station is the **Scan ducks** section of `/staff/inventory`.
+The standalone `/staff/inventory-intake` entry renders that same complete,
+role-gated inventory workflow rather than a reduced or device-gated page. A duck
+manager, race director, or administrator selects the working event and
 optional station location and presses Start once. That user gesture starts one
 `NDEFReader.scan()` in current Android Chrome over HTTPS; the top-level page must
 remain visible. Each subsequent physical reading writes and confirms one sticker
@@ -1960,9 +1962,10 @@ or logs.
 
 ### The Inventory Page
 
-`/staff/inventory` holds all of inventory on one page: a working-event select,
-the blank-sticker scanning station, the **Add a duck by hand** form, the duck
-list, and the duck detail panel. It accepts `?duck=<id>` and `?raceEntry=<id>`,
+`/staff/inventory` and its standalone `/staff/inventory-intake` entry hold all of
+inventory on one page: a working-event select, the blank-sticker scanning
+station, the **Add a duck by hand** form, the duck list, and the duck detail
+panel. The canonical inventory URL accepts `?duck=<id>` and `?raceEntry=<id>`,
 so the console's heat roster and participant detail panel hand work to it: a
 `duck` opens that duck's detail panel, and a `raceEntry` fills the assignment
 form. Each is consumed once, so a later refresh does not keep pulling the panel

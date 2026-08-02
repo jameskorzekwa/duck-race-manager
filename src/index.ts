@@ -505,12 +505,13 @@ export const createWorker = (
       )));
     }
 
-    // Inventory is a normal staff page on every device. NFC scanning is the only
-    // part that needs Android Chrome, and the page turns that part off in the
-    // browser rather than being refused here: a device check that replaced the
-    // whole page also removed the staff navigation from it, which is how a
+    // Inventory is a normal staff page on every device. The focused intake URL
+    // is a second entry to this same complete page and authorization boundary.
+    // NFC scanning is the only part that needs Android Chrome, and the page turns
+    // that part off in the browser rather than being refused here: a device
+    // check that replaced the whole page also removed the staff navigation from it, which is how a
     // laptop ended up on a dead end with no way back.
-    if (url.pathname === "/staff/inventory" && request.method === "GET") {
+    if ((url.pathname === "/staff/inventory" || url.pathname === "/staff/inventory-intake") && request.method === "GET") {
       const actor = await authenticateRequest(request, env);
       if (actor === null) {
         const login = new URL("/staff", env.APP_ORIGIN);

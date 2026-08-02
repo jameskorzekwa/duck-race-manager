@@ -795,7 +795,7 @@ test("Register again sits on the Awaiting Duck Assignment header row and wraps o
   // wraps instead of overflowing.
   assert.match(markup, /\.participant-section-head \{[^}]*flex-wrap:wrap;/);
   assert.match(markup, /\.participant-section-head-actions \{[^}]*flex-wrap:wrap;[^}]*min-width:0;/);
-  assert.match(markup, /@media \(max-width:43\.99rem\)[^@]*\.participant-section-head-actions \{ flex-basis:100%; justify-content:flex-start; \}/);
+  assert.match(markup, /@media \(max-width:43\.99rem\)[^@]*\.participant-section-head-actions \{ flex-basis:100%; justify-content:center; \}/);
 });
 
 // --- private data ------------------------------------------------------------

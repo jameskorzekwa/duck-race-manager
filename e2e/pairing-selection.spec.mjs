@@ -2,8 +2,11 @@ import { expect, test } from "@playwright/test";
 
 import {
   bootstrap,
+  expectCentered,
   expectNoDocumentOverflow,
+  expectTouchTarget,
   intakeDuck,
+  mobileWidths,
   seedState,
   signIn,
   watchBrowserErrors,
@@ -110,7 +113,7 @@ test.describe("search-result pairing confirmation", () => {
     const errors = watchBrowserErrors(page);
     await page.emulateMedia({ reducedMotion: "reduce" });
     await observePairingScrolls(page);
-    const { waiting, duck } = await openLongPairingList(page, { width: 390, height: 520 });
+    const { waiting, duck } = await openLongPairingList(page, { width: 320, height: 520 });
     const posts = pairingPostCounter(page, duck.tagToken);
     const search = page.getByLabel("Participant code, name, phone, or email");
     const confirmationRegion = page.locator("[data-pairing-confirmation]");
@@ -152,7 +155,12 @@ test.describe("search-result pairing confirmation", () => {
     await page.keyboard.press("Tab");
     await expect(confirm).toBeFocused();
     expect(posts.count).toBe(0);
-    await expectNoDocumentOverflow(page);
+    for (const width of mobileWidths) {
+      await page.setViewportSize({ width, height: 900 });
+      await expectCentered(confirm, confirmationRegion);
+      await expectTouchTarget(confirm);
+      await expectNoDocumentOverflow(page);
+    }
     expect(errors).toEqual([]);
   });
 });

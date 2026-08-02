@@ -34,6 +34,20 @@ const visibleViews = async (page) => {
 const participantRow = (page, name) =>
   page.locator("[data-participant-list] button", { hasText: name }).first();
 
+// Participant mutations repaint both the open detail and the list from separate
+// authoritative reads. A list button can therefore be replaced between pointer
+// dispatch and its click listener. Retry the harmless selection until the detail
+// confirms which participant actually opened; mutation buttons remain untouched.
+const selectParticipant = async (page, name) => {
+  const detailName = page.locator("[data-participant-name]");
+  await expect.poll(async () => {
+    if ((await detailName.textContent()) !== name) {
+      await participantRow(page, name).click().catch(() => {});
+    }
+    return detailName.textContent();
+  }).toBe(name);
+};
+
 const actionLabels = async (page) =>
   page.locator("[data-participant-actions] button").allTextContents();
 
@@ -316,7 +330,7 @@ test.describe("staff roles and the Admin views", () => {
     // of it: a never-paired no-show is exactly who a desk needs to withdraw, and
     // the endpoint accepts it, so hiding Withdraw here would leave destroying
     // the registration as the only way to record that they did not turn up.
-    await participantRow(page, `${unpaired.firstName} ${unpaired.lastName}`).click();
+    await selectParticipant(page, `${unpaired.firstName} ${unpaired.lastName}`);
     await expect(page.locator("[data-participant-detail]")).toBeVisible();
     await expect.poll(() => actionLabels(page)).toContain("Delete registration");
     expect(await actionLabels(page)).toContain("Withdraw");
@@ -326,7 +340,7 @@ test.describe("staff roles and the Admin views", () => {
 
     // Paired: the duck is sealed in a heat bag, so it stays in the race and only
     // eligibility can change. Delete is not offered at all, and the card says why.
-    await participantRow(page, `${paired.firstName} ${paired.lastName}`).click();
+    await selectParticipant(page, `${paired.firstName} ${paired.lastName}`);
     // "Withdraw" is also offered for the previously selected unpaired racer, so
     // polling on it can pass while the pane still shows the old selection. Wait
     // for a paired-only signal before asserting which actions are absent.
@@ -340,7 +354,7 @@ test.describe("staff roles and the Admin views", () => {
 
     // Withdrawing keeps the pairing, so the rule survives the status change: a
     // withdrawn paired participant is still undeletable.
-    await page.getByRole("button", { name: "Withdraw", exact: true }).click();
+    await page.locator("[data-participant-actions]").getByRole("button", { name: "Withdraw", exact: true }).click();
     await confirmAction(page);
     await expect.poll(() => actionLabels(page)).toContain("Reactivate");
     expect(await actionLabels(page)).not.toContain("Delete registration");
@@ -348,15 +362,15 @@ test.describe("staff roles and the Admin views", () => {
 
     // Withdrawing the never-paired racer keeps the registration and leaves
     // Delete standing, because the server would still accept it.
-    await participantRow(page, `${unpaired.firstName} ${unpaired.lastName}`).click();
-    await page.getByRole("button", { name: "Withdraw", exact: true }).click();
+    await selectParticipant(page, `${unpaired.firstName} ${unpaired.lastName}`);
+    await page.locator("[data-participant-actions]").getByRole("button", { name: "Withdraw", exact: true }).click();
     await confirmAction(page);
     await expect.poll(() => actionLabels(page)).toContain("Reactivate");
     expect(await actionLabels(page)).toContain("Delete registration");
     await expect(page.locator("[data-participant-action-note]")).toHaveCount(0);
 
     // Deleting the unpaired registration really removes it from the list.
-    await page.getByRole("button", { name: "Delete registration", exact: true }).click();
+    await page.locator("[data-participant-actions]").getByRole("button", { name: "Delete registration", exact: true }).click();
     await confirmAction(page);
     await expect(
       page.locator("[data-participant-list] button", { hasText: `${unpaired.firstName} ${unpaired.lastName}` }),
