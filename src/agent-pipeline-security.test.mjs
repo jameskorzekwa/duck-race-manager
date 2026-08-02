@@ -148,6 +148,7 @@ test("review publishes a candidate-SHA check without privileged candidate execut
 test("local model agents deny unspecified and executable tools", async () => {
   const paths = [
     ".opencode/agents/pipeline-orchestrator.md",
+    ".opencode/agents/pipeline-doctor.md",
     ".opencode/agents/pipeline-reviewer.md",
     ".opencode/agents/pipeline-risk-reviewer.md",
     ".opencode/agents/pipeline-scout.md",
@@ -553,4 +554,56 @@ test("reconciliation is deterministic and model-free", async () => {
     queue.indexOf("github.rest.pulls.merge") < queue.lastIndexOf('workflow_id: "release.yml"'),
     "the exact-head merge must complete before its release is dispatched",
   );
+});
+
+test("Pipeline Doctor isolates diagnosis from trusted publication", async () => {
+  const workflow = await read(".github/workflows/pipeline-doctor.yml");
+  const diagnose = workflow.slice(workflow.indexOf("  diagnose:"), workflow.indexOf("  verify:"));
+  const verify = workflow.slice(workflow.indexOf("  verify:"), workflow.indexOf("  publish:"));
+  const publish = workflow.slice(workflow.indexOf("  publish:"), workflow.indexOf("  metrics:"));
+
+  assert.match(workflow, /workflow_run:\n\s+workflows: \[Agent Task, Agent Review, Agent Reconcile, Release\]/);
+  assert.match(workflow, /schedule:\n\s+- cron:/);
+  assert.match(workflow, /permissions: \{\}/);
+  assert.match(workflow, /pipeline:incident/);
+  assert.match(workflow, /doctorIncidentMarker/);
+  assert.match(workflow, /attempts >= 2/);
+  assert.match(diagnose, /runs-on: \[self-hosted, macOS, ARM64, quickducks-implement\]/);
+  assert.match(diagnose, /openchamber session create/);
+  assert.match(diagnose, /--agent pipeline-doctor/);
+  assert.match(diagnose, /scripts\/validate-pipeline-repair\.mjs/);
+  assert.doesNotMatch(diagnose, /contents: write|issues: write|pull-requests: write|actions: write|GITHUB_TOKEN:/);
+  assert.match(verify, /rhysd\/actionlint@sha256:[0-9a-f]{64}/);
+  assert.match(verify, /npm test/);
+  assert.doesNotMatch(verify, /contents: write|issues: write|pull-requests: write/);
+  assert.match(publish, /actions: write/);
+  assert.match(publish, /contents: write/);
+  assert.match(publish, /pull-requests: write/);
+  assert.match(publish, /gh workflow run ci\.yml --ref "\$branch"/);
+  assert.doesNotMatch(publish, /openchamber|runs-on: \[self-hosted/);
+
+  const agent = await read(".opencode/agents/pipeline-doctor.md");
+  assert.match(agent, /task:\n\s+"\*": deny/);
+  assert.match(agent, /pipeline-doctor\.yml/);
+  assert.match(agent, /Do not edit application code/);
+  const validator = await read("scripts/validate-pipeline-repair.mjs");
+  assert.doesNotMatch(validator, /pipeline-doctor\.yml",/);
+  assert.match(validator, /1,500-line limit/);
+});
+
+test("every merge lane can dispatch the release it creates", async () => {
+  const review = await read(".github/workflows/agent-review.yml");
+  const reviewLane = review.slice(review.indexOf("  queue-merge:"), review.indexOf("  metrics:"));
+  assert.match(reviewLane, /actions: write/);
+
+  const reconcile = await read(".github/workflows/agent-reconcile.yml");
+  const reconcileLane = reconcile.slice(reconcile.indexOf("  queue-next:"), reconcile.indexOf("  metrics:"));
+  assert.match(reconcileLane, /actions: write/);
+
+  const implementation = await read("scripts/agent-pipeline.mjs");
+  const slotSettlement = implementation.slice(
+    implementation.indexOf("if (!active && deployedRun)"),
+    implementation.indexOf("} else if (!active && completed)"),
+  );
+  assert.match(slotSettlement, /state: "closed", state_reason: "completed"/);
 });

@@ -34,6 +34,8 @@ permission:
     "**/opencode.json": deny
     "scripts/agent-pipeline.mjs": deny
     "**/scripts/agent-pipeline.mjs": deny
+    "scripts/pipeline-doctor.mjs": deny
+    "**/scripts/pipeline-doctor.mjs": deny
     "scripts/cleanup-model-workspace.mjs": deny
     "**/scripts/cleanup-model-workspace.mjs": deny
     "scripts/seed-model-workspace.mjs": deny
@@ -42,6 +44,8 @@ permission:
     "**/scripts/summarize-verification-failure.mjs": deny
     "scripts/validate-agent-patch.mjs": deny
     "**/scripts/validate-agent-patch.mjs": deny
+    "scripts/validate-pipeline-repair.mjs": deny
+    "**/scripts/validate-pipeline-repair.mjs": deny
     "scripts/wait-for-openchamber-session.mjs": deny
     "**/scripts/wait-for-openchamber-session.mjs": deny
   read:

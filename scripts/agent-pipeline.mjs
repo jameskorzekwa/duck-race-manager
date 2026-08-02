@@ -436,6 +436,9 @@ export async function reconcileAgentPipeline({ github, context, core }) {
           `<!-- agent-pipeline deployed=${pr.merge_commit_sha} -->`,
           `Production release succeeded for PR #${pr.number} at \`${pr.merge_commit_sha}\`.`,
         );
+        await github.rest.issues.update({
+          owner, repo, issue_number: issueNumber, state: "closed", state_reason: "completed",
+        });
       } else if (!active && completed) {
         await setState(issueNumber, "agent:failed");
         await commentOnce(

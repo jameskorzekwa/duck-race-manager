@@ -31,6 +31,13 @@ jobs:
           pattern: agent-review-*
           path: source-metrics/review
 
+      - name: Download doctor metrics
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: pipeline-doctor-${{ github.run_id }}-*
+          path: source-metrics/doctor
+
       - name: Collect durations and model usage
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -67,7 +74,7 @@ jobs:
               for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
                 const file = path.join(directory, entry.name);
                 if (entry.isDirectory()) visit(file);
-                else if (["task-result.json", "review-result.json"].includes(entry.name)) {
+                else if (["task-result.json", "review-result.json", "doctor-result.json"].includes(entry.name)) {
                   try {
                     const value = JSON.parse(fs.readFileSync(file, "utf8"));
                     if (value.modelMetrics) modelRuns.push(value.modelMetrics);

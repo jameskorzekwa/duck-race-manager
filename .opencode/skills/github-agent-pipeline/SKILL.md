@@ -38,6 +38,12 @@ General labels such as `bug`, `enhancement`, `documentation`, and `duplicate` ma
 9. Production credentials remain solely in the `production` GitHub environment.
 10. Paid-provider OAuth remains inside the local OpenChamber runtime; it is never copied into GitHub Actions, artifacts, or repository files.
 11. Reconciliation is deterministic, idempotent, bounded, and based on current GitHub state; it never calls a model.
+12. Pipeline Doctor deduplicates failed control-plane runs by failure signature and SHA, cannot edit application code or itself, and publishes only hosted-verified repair PRs for normal review.
+
+Infrastructure incidents use `pipeline:incident`; verified doctor PRs use
+`pipeline:repair`. `pipeline:application` routes failures back to the feature
+loop, while `pipeline:external` records a terminal external diagnosis without
+retry churn.
 
 ## GitHub Operations
 

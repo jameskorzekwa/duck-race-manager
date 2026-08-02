@@ -32,6 +32,8 @@ Artifact promotion or fallback validation -> production approval -> deploy and s
         |
         v
 deterministic Agent Reconcile -> agent:deployed or agent:failed -> next slot
+        |
+        +-> failed control-plane run -> Pipeline Doctor incident -> verified repair PR
 ```
 
 OpenChamber is the local model control plane and the local/mobile observability
@@ -69,6 +71,12 @@ Grouped issues also receive one marker:
 
 Blocked issues similarly use one `<!-- agent-pipeline blocked-by=12,34 -->`
 marker. These markers let reconciliation resume without depending on model memory.
+
+Pipeline infrastructure incidents use separate labels rather than overloading a
+feature's state: `pipeline:incident` is the deduplicated incident ledger,
+`pipeline:repair` identifies a verified repair PR, `pipeline:application` records
+that the existing feature loop owns the failure, and `pipeline:external` records
+a terminal provider, service, authentication, quota, runner, or network diagnosis.
 
 ## Trusted Intake
 
@@ -163,6 +171,33 @@ local actions, agent instructions, `opencode.json`, `AGENTS.md`, or pipeline
 helpers; `validate-agent-patch.mjs` rejects those outright rather than routing
 them to a human approval.
 
+## Pipeline Doctor
+
+`pipeline-doctor.yml` listens for completed failures from Agent Task, Agent
+Review, Agent Reconcile, and Release. A staggered schedule is a backstop for
+missed `workflow_run` delivery, and James can dispatch one failed run by ID. A
+SHA-bound hash of the workflow path plus failed jobs and steps deduplicates each
+incident. Hosted Agent Task verification failures are not diagnosed again: they
+already feed their complete failure index to the same feature implementation
+session.
+
+Each incident is a GitHub issue carrying `pipeline:incident`. The model receives
+only a plain trusted-main snapshot and bounded, credential-redacted failed-job
+evidence. It classifies the failure as application, pipeline, external, or
+already repaired. The dedicated `pipeline-doctor` agent cannot run commands,
+launch subagents, edit application code, or edit its own workflow, contract,
+classifier, or validator.
+
+A pipeline repair may touch only an explicit control-plane allowlist. A copied
+trusted validator rejects other paths, binary files, symlinks, gitlinks, broad
+new workflow authority, unpinned actions, oversized patches, and more than 12
+changed files. A hosted read-only job then runs the pinned actionlint container,
+dependency audit, typecheck, unit/integration tests, and Wrangler validation.
+Only after those checks pass can a separate model-free job publish a
+`pipeline:repair` PR and explicitly dispatch CI. Doctor PRs never auto-merge;
+normal review and branch protection remain required. Two failed diagnoses stop
+without retry churn, and external incidents stay open with a terminal diagnosis.
+
 Any review-dismissal event runs a separate non-concurrent hosted workflow that
 removes approval state, the merge slot, and auto-merge without launching a paid
 model session. Because the merge decision no longer depends on a human review,
@@ -194,7 +229,7 @@ SHA is stale.
 
 ## Recovery
 
-`agent-reconcile.yml` runs twice per hour and on demand. It is deterministic and
+`agent-reconcile.yml` runs every ten minutes and on demand. It is deterministic and
 does not call a model. It:
 
 - Settles successful or failed releases for the merge-slot PR.
@@ -263,13 +298,16 @@ opencode.json
 .github/workflows/agent-review.yml
 .github/workflows/agent-review-revoke.yml
 .github/workflows/agent-reconcile.yml
+.github/workflows/pipeline-doctor.yml
 .github/workflows/pipeline-metrics.yml
 scripts/agent-pipeline.mjs
 scripts/cleanup-model-workspace.mjs
 scripts/run-e2e-shards.mjs
+scripts/pipeline-doctor.mjs
 scripts/seed-model-workspace.mjs
 scripts/summarize-verification-failure.mjs
 scripts/validate-agent-patch.mjs
+scripts/validate-pipeline-repair.mjs
 scripts/validation-manifest.mjs
 scripts/wait-for-openchamber-session.mjs
 ```
@@ -375,6 +413,8 @@ never requires a commit and takes effect on the next run:
 | `AGENT_IMPLEMENT_MODEL` | Implementation lead session | `openai/gpt-5.6-sol` |
 | `AGENT_IMPLEMENT_VARIANT` | Implementation reasoning variant | `xhigh` |
 | `AGENT_REVIEW_MODEL` | Independent review session | `anthropic/claude-opus-4-8` |
+| `AGENT_DOCTOR_MODEL` | Pipeline maintainer session | `openai/gpt-5.6-sol` |
+| `AGENT_DOCTOR_VARIANT` | Pipeline maintainer reasoning variant | `xhigh` |
 
 Set them in Settings -> Secrets and variables -> Actions -> Variables, or:
 
@@ -426,8 +466,10 @@ gh pr list --state all --label agent:merge-slot
 gh run list --workflow agent-task.yml
 gh run list --workflow agent-review.yml
 gh run list --workflow agent-reconcile.yml
+gh run list --workflow pipeline-doctor.yml
 gh run list --workflow release.yml
 gh workflow run agent-reconcile.yml
+gh workflow run pipeline-doctor.yml -f run=<failed-run-id>
 gh api repos/jameskorzekwa/duck-race-manager/actions/runners
 openchamber status
 openchamber session list --dir <runner-workspace> --with-status
