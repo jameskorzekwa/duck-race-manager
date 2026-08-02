@@ -405,6 +405,37 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   assert.doesNotMatch(directorConsole.body, /data-event-create-form|data-event-config-form|data-force-delete-form/);
   assert.equal((await staffPage(actors.director, "/staff/access")).status, 403);
 
+  // The focused intake URL is a second entry into the complete inventory page,
+  // not a client-side or device-based bypass. Exercise the real Worker route
+  // with actors loaded from migrated D1 so authentication and least privilege
+  // stay identical to /staff/inventory.
+  const anonymousIntake = await staffPage(null, "/staff/inventory-intake");
+  assert.equal(anonymousIntake.status, 303);
+  assert.equal(anonymousIntake.location, "/staff?returnTo=%2Fstaff%2Finventory-intake");
+  for (const [label, deniedActor] of [
+    ["registration", actors.registration],
+    ["announcer", actors.announcer],
+    ["heat runner", actors.heats],
+    ["result taker", actors.results],
+    ["roleless actor", actors.none],
+  ]) {
+    const deniedIntake = await staffPage(deniedActor, "/staff/inventory-intake");
+    assert.equal(deniedIntake.status, 403, `${label} cannot open standalone intake`);
+    assert.doesNotMatch(deniedIntake.body, /data-intake-station|data-start-intake-nfc/, label);
+  }
+  for (const [label, allowedActor] of [
+    ["duck manager", actors.ducks],
+    ["race director", actors.director],
+    ["administrator", actors.admin],
+  ]) {
+    const allowedIntake = await staffPage(allowedActor, "/staff/inventory-intake");
+    assert.equal(allowedIntake.status, 200, `${label} opens standalone intake`);
+    assert.match(allowedIntake.body, /data-intake-station/, label);
+    assert.match(allowedIntake.body, /data-intake-runtime/, label);
+    assert.match(allowedIntake.body, /data-start-intake-nfc/, label);
+    assert.match(allowedIntake.body, /data-inventory-list/, label);
+  }
+
   // Absent markup is a rendering fact, not a permission. This change is exactly
   // the one that put a race director on the page those two administrator-only
   // controls used to live on, so the matrix pins the API refusal itself: a

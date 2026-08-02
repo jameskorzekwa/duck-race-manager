@@ -3,8 +3,12 @@ import { expect, test } from "@playwright/test";
 import {
   bootstrap,
   confirmAction,
+  expectCentered,
+  expectContained,
   expectNoDocumentOverflow,
+  expectTouchTarget,
   intakeDuck,
+  mobileWidths,
   rawJson,
   seedState,
   signIn,
@@ -60,6 +64,20 @@ const exerciseReplacement = async (page, state, spareNumber) => {
   await expect(review).toContainText(state === "final" ? "Final · Heat" : "Round One · Heat");
   await page.getByLabel("The current duck is lost").check();
 
+  const replacementConfirmation = page.locator("[data-replacement-confirmation]");
+  const replacementButton = page.locator("[data-confirm-replacement]");
+  for (const width of mobileWidths) {
+    await page.setViewportSize({ width, height: 900 });
+    await expectContained(replacementConfirmation);
+    await expectContained(page.locator(".emergency-warning"));
+    await expectCentered(replacementButton, replacementConfirmation);
+    await expectTouchTarget(replacementButton);
+    for (const reason of await page.locator(".replacement-reasons label").all()) {
+      await expectTouchTarget(reason);
+    }
+    await expectNoDocumentOverflow(page);
+  }
+
   let replacementRequests = 0;
   page.on("request", (request) => {
     if (new URL(request.url()).pathname === `/api/v1/staff/ducks/${spare.tagToken}/replacement`
@@ -71,6 +89,15 @@ const exerciseReplacement = async (page, state, spareNumber) => {
   await expect(dialog).toContainText(oldDuckLabel);
   await expect(dialog).toContainText(newDuckLabel);
   await expect(dialog).toContainText("last resort for a lost or damaged duck");
+  for (const width of mobileWidths) {
+    await page.setViewportSize({ width, height: 720 });
+    await expectContained(dialog);
+    await expectContained(dialog.locator(".app-confirmation-actions"));
+    for (const action of await dialog.locator(".app-confirmation-actions .button").all()) {
+      await expectTouchTarget(action);
+    }
+    await expectNoDocumentOverflow(page);
+  }
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   expect(replacementRequests).toBe(0);
 
@@ -91,8 +118,10 @@ const exerciseReplacement = async (page, state, spareNumber) => {
   expect(oldInspection.body.assignment).toBeNull();
   expect(oldInspection.body.winnerAction).toBeNull();
 
-  await page.setViewportSize({ width: 320, height: 900 });
-  await expectNoDocumentOverflow(page);
+  for (const width of mobileWidths) {
+    await page.setViewportSize({ width, height: 900 });
+    await expectNoDocumentOverflow(page);
+  }
   await page.setViewportSize({ width: 1280, height: 900 });
   await expectNoDocumentOverflow(page);
   expect(errors).toEqual([]);

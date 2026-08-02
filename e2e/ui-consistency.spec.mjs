@@ -3,8 +3,12 @@ import { expect, test } from "@playwright/test";
 import {
   baseUrl,
   bootstrap,
+  expectCentered,
+  expectContained,
   expectNoDocumentOverflow,
+  expectTouchTarget,
   intakeDuck,
+  mobileWidths,
   pairDuck,
   seedState,
   signIn,
@@ -149,14 +153,24 @@ test.describe("sitewide UI consistency", () => {
     await expect(datetimeInput).toHaveValue(`${datetimeDate}T10:37`);
     await expect(datetimePanel).toBeHidden();
 
-    await page.setViewportSize({ width: 320, height: 720 });
-    await dateTrigger.click();
-    await expect(datePanel).toBeVisible();
-    const mobileBox = await datePanel.boundingBox();
-    expect(mobileBox.x).toBeGreaterThanOrEqual(0);
-    expect(mobileBox.x + mobileBox.width).toBeLessThanOrEqual(320);
-    await expectNoDocumentOverflow(page);
-    await page.keyboard.press("Escape");
+    for (const width of mobileWidths) {
+      await page.setViewportSize({ width, height: 720 });
+      await dateTrigger.click();
+      await expect(datePanel).toBeVisible();
+      await expectContained(datePanel);
+      await expectNoDocumentOverflow(page);
+      const dateTargets = datePanel.locator(
+        ".app-date-month-button:visible,.app-date-day:visible,.app-date-actions .button:visible",
+      );
+      for (let index = 0; index < await dateTargets.count(); index += 1) {
+        await expectTouchTarget(dateTargets.nth(index));
+      }
+      const dateActions = datePanel.locator(".app-date-actions");
+      if (await dateActions.count()) await expectContained(dateActions);
+      await page.keyboard.press("Escape");
+      await expect(datePanel).toBeHidden();
+      await expect(dateTrigger).toBeFocused();
+    }
     expect(errors).toEqual([]);
   });
 
@@ -353,8 +367,22 @@ test.describe("sitewide UI consistency", () => {
     await expect(adminPage.getByText("Delete empty draft", { exact: true })).toHaveCount(0);
     await expect(adminPage.locator("[data-delete-draft-card], [data-delete-draft-form]")).toHaveCount(0);
     await expect(adminPage.locator("details[data-force-delete-card]")).toHaveCount(0);
-    await open.click();
     const dialog = adminPage.locator("[data-force-delete-dialog]");
+    for (const width of mobileWidths) {
+      await adminPage.setViewportSize({ width, height: 720 });
+      await open.click();
+      await expect(dialog).toBeVisible();
+      await expectContained(dialog);
+      await expect(dialog.locator(".app-confirmation-message")).toContainText("This cannot be undone.");
+      await expectContained(dialog.locator(".app-confirmation-actions"));
+      for (const button of await dialog.locator(".app-confirmation-actions .button").all()) {
+        await expectTouchTarget(button);
+      }
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(dialog).toBeHidden();
+      await expect(open).toBeFocused();
+    }
+    await open.click();
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("heading", { name: "Permanently delete this event?" })).toBeVisible();
     const finalDelete = dialog.getByRole("button", { name: "Delete event", exact: true });
@@ -592,7 +620,7 @@ test.describe("sitewide UI consistency", () => {
     // This is the populated awaiting card, not only the empty My Ducks shell.
     // Keep its exact guidance visible and its carousel contained at every
     // responsive width the public suite supports.
-    for (const width of [320, 390, 768, 1280]) {
+    for (const width of mobileWidths) {
       await page.setViewportSize({ width, height: 900 });
       await expect(card).toBeVisible();
       await expect(
@@ -602,6 +630,9 @@ test.describe("sitewide UI consistency", () => {
       for (const label of ["Assigned heat", "Race activity", "Race status"]) {
         await expect(card.getByText(label, { exact: true })).toHaveCount(0);
       }
+      const registerAgain = page.locator("[data-register-another]");
+      await expectCentered(registerAgain, page.locator(".participant-section-head-actions"));
+      await expectTouchTarget(registerAgain);
       await expectNoDocumentOverflow(page);
     }
 
@@ -656,7 +687,7 @@ test.describe("sitewide UI consistency", () => {
     await expect(pairedCard).toHaveCSS("background-color", plainBackground);
     await expect(pairedCard.locator(".success-tag")).toHaveCount(0);
     await expect(pairedCard).not.toContainText("Just registered");
-    for (const width of [320, 1280]) {
+    for (const width of mobileWidths) {
       await page.setViewportSize({ width, height: 900 });
       await expect(pairedCard).toBeVisible();
       await expect(pairedCard.locator("dt")).toHaveText([

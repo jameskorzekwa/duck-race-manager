@@ -128,9 +128,18 @@ test("mobile staff controls retain touch targets and wrapping containment", () =
   assert.match(css, /\.role-tag \{[^}]*max-width:100%[^}]*overflow-wrap:anywhere/);
   assert.match(css, /@media \(max-width:43\.99rem\)[^{]*\{[^}]*\.shell \{ width:min\(100% - 1rem,40rem\); \}/);
   assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.button\.small \{ min-height:2\.75rem; \}/);
+  assert.match(css, /\.console-nav a \{[^}]*min-height:2\.75rem/);
+  assert.match(css, /\.app-date-day,\.app-date-blank \{[^}]*min-height:2\.75rem/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.actions \{[^}]*justify-content:center/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.participant-section-head-actions \{[^}]*justify-content:center/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*form > \.button:not\(\.small\),\.page-panel > \.button,[^}]*margin-inline:auto/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.pairing-confirmation > \.button \{ justify-content:center; \}/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.console-nav \{[^}]*flex-wrap:wrap;[^}]*overflow-x:visible/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.app-confirmation-actions \{ display:grid;/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.notice,\.privacy,\.emergency-warning \{[^}]*overflow-wrap:anywhere/);
   assert.match(css, /\.button\.small:active:not\(:disabled\) \{ transform:translate\(2px,2px\); \}/);
   assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.role-set > \.check \{ min-height:2\.75rem; \}/);
-  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.site-head \{ flex-wrap:wrap; \}[\s\S]*\.nav \{ width:100%; \}[\s\S]*\.nav a \{ flex:1 1 0;/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.site-head \{[^}]*flex-wrap:wrap;[^}]*\}[\s\S]*\.nav \{[^}]*width:100%;[^}]*\}[\s\S]*\.nav a \{[^}]*flex:1 1 0;/);
   assert.match(css, /\.staff-role-controls > select,\.staff-role-controls > fieldset \{ min-width:0;/);
 });
 

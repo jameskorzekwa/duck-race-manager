@@ -285,14 +285,35 @@ test("the inventory page is role gated and renders on every device", async () =>
   }
 });
 
-// The old Android-only station path is gone rather than redirected, so a stale
-// bookmark fails visibly instead of half working.
-test("the retired inventory intake path is no longer routed", async () => {
-  const response = await createWorker(async () => ({
+// The standalone intake URL renders the same complete inventory workflow. Its
+// server-side gate is identical to /staff/inventory; browser capability checks
+// only decide whether the NFC controls open after authorization succeeds.
+test("the standalone inventory intake path uses the complete inventory authorization boundary", async () => {
+  const actor = (roles, isSystemAdmin = false) => ({
     id: "staff", cognitoSub: "sub", email: "staff@example.com", displayName: "Inventory Staff",
-    isSystemAdmin: true, roles: [], authentication: "bearer",
-  })).fetch(new Request("https://quickducks.com/staff/inventory-intake"), env);
-  assert.equal(response.status, 404);
+    isSystemAdmin, roles, authentication: "bearer",
+  });
+  const page = (currentActor) => createWorker(async () => currentActor).fetch(
+    new Request("https://quickducks.com/staff/inventory-intake"), env,
+  );
+
+  const anonymous = await page(null);
+  assert.equal(anonymous.status, 303);
+  assert.equal(anonymous.headers.get("location"), "/staff?returnTo=%2Fstaff%2Finventory-intake");
+
+  const denied = await page(actor(["REGISTRATION"]));
+  assert.equal(denied.status, 403);
+  assert.doesNotMatch(await denied.text(), /data-intake-station|data-start-intake-nfc/);
+
+  for (const currentActor of [actor(["DUCK_MANAGER"]), actor(["RACE_DIRECTOR"]), actor([], true)]) {
+    const allowed = await page(currentActor);
+    const body = await allowed.text();
+    assert.equal(allowed.status, 200);
+    assert.match(body, /data-intake-station/);
+    assert.match(body, /data-intake-runtime/);
+    assert.match(body, /data-start-intake-nfc/);
+    assert.match(body, /data-inventory-list/);
+  }
 });
 
 test("gates the standalone staff access page to system administrators", async () => {

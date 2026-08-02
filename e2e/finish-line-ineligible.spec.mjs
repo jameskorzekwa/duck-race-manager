@@ -5,6 +5,10 @@ import {
   bootstrap,
   changeRegistrationStatus,
   confirmAction,
+  expectContained,
+  expectNoDocumentOverflow,
+  expectTouchTarget,
+  mobileWidths,
   rawJson,
   seedState,
   signIn,
@@ -119,7 +123,16 @@ test.describe("a withdrawn duck at the finish line", () => {
     await expect(ineligibleBlock(page))
       .toContainText(`Duck #${withdrawnEntry.duck.visibleNumber} is Withdrawn`);
     await expect(ineligibleBlock(page)).toContainText("Scan the next duck to pass the finish line.");
+    await expect(ineligibleBlock(page)).toHaveAttribute("aria-label", "Duck that cannot be recorded");
     await expect(page.locator("[data-finish-selections] .station-selection")).toHaveCount(0);
+
+    for (const width of mobileWidths) {
+      await page.setViewportSize({ width, height: 900 });
+      await expectContained(ineligibleBlock(page));
+      await expectTouchTarget(page.getByLabel("Tag URL or duck number"));
+      await expectTouchTarget(page.getByRole("button", { name: "Add this duck" }));
+      await expectNoDocumentOverflow(page);
+    }
 
     // Still armed: the heat, the scan field, and the NFC button are untouched,
     // and nothing has to be dismissed first.

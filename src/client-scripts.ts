@@ -5687,9 +5687,16 @@ const intakeRecoverSelected = async () => {
   intakeMachine.resetForEvent();
   if (!intakeCanProvision()) return;
   const pending = await intakeMachine.recover();
+  // Event loading can finish recovery just after the operator presses Start.
+  // Do not let that older, pre-start read overwrite the station's active Ready
+  // instruction. A recovered pending sticker still takes priority because it is
+  // the only sticker the active reader may safely accept next.
+  const active = intakeNfcStation?.isActive() === true;
   intakeSetMessage(pending
-    ? "A pending sticker is waiting. Press Start, then retap that same sticker."
-    : "Press Start once, then tap one sticker per duck.", false);
+    ? active
+      ? "A pending sticker was recovered. Retap that same sticker to finish it before using another."
+      : "A pending sticker is waiting. Press Start, then retap that same sticker."
+    : active ? "Ready. Tap a sticker." : "Press Start once, then tap one sticker per duck.", false);
 };
 
 // ---------------------------------------------------------------------------

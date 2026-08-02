@@ -76,7 +76,7 @@ test("date picker styling uses the shared control, card, focus, and touch-target
 
   assert.match(markup, /\.app-date-trigger \{[^}]*min-height:3\.2rem;[^}]*border:2px solid var\(--ink\); border-radius:\.65rem; background:#fff;/);
   assert.match(markup, /\.app-date-panel \{ position:absolute; z-index:70;[^}]*padding:var\(--space-md\);[^}]*border:3px solid var\(--ink\); border-radius:\.9rem; background:var\(--paper\); box-shadow:5px 5px 0 var\(--ink\); \}/);
-  assert.match(markup, /\.app-date-day,\.app-date-blank \{[^}]*min-height:2\.6rem;/);
+  assert.match(markup, /\.app-date-day,\.app-date-blank \{[^}]*min-height:2\.75rem;/);
   assert.match(markup, /\.app-date-day\[aria-pressed="true"\] \{[^}]*background:var\(--yellow\);/);
   assert.match(markup, /\.app-date-time-fields \{ display:grid; grid-template-columns:repeat|\.app-date-time-fields \{ display:grid; grid-template-columns:minmax/);
   assert.match(markup, /input\.app-date-native \{ position:absolute; width:1px; height:1px;[^}]*clip-path:inset\(50%\); opacity:0;/);
