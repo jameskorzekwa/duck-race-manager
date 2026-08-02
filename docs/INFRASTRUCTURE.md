@@ -556,11 +556,11 @@ to add a new racer after Round One starts. Rollback is Worker-only: retain the
 migration and any admitted roster entries; the previous Worker reads and races
 them normally but offers no further Round One walk-ups.
 
-The Worker sends only opaque notification IDs to `quickducks-email` through the
-`EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
+The Worker sends only opaque participant-notification IDs to `quickducks-email`
+through the compatibility-named `EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
 with five bounded queue attempts and `quickducks-email-dlq` attached. A one-minute
-cron republishes durable `PENDING` work and queue-publication failures, closing
-the D1-commit/queue-publication gap without putting email delivery inside a race
+cron republishes durable `PENDING` work, due publication failures, and stale
+successfully queued work, closing the D1-commit/queue-publication gap without putting provider delivery inside a race
 control request. Queue duplicates are expected and safe: a D1 claim and the
 logical-message unique index prevent an ordinary duplicate delivery from
 sending twice. Migration `0021_email_delivery_claim.sql` adds the nullable,
@@ -570,24 +570,64 @@ the previous Worker. A stale claim is terminally recorded as
 it may represent SES acceptance followed by a failed D1 finalization. This
 at-most-once recovery policy can miss a reminder after a pre-send Worker stop,
 but cannot duplicate a message whose post-send persistence was ambiguous.
+Migration `0022_participant_notifications.sql` adds the channel-neutral outbox,
+attempt and keyed-suppression tables plus stable heat run sequences. Its
+registration, assignment, result, and progression triggers execute in the same
+D1 transaction as the facts they describe. Logical uniqueness is participant,
+channel, lifecycle type, and a stable occurrence key. Upcoming keys are heat and
+run sequence, never a command ID. The migration is additive; a previous Worker
+continues writing its legacy email outbox, while a forward deployment recovers
+the generic rows. Force delete removes event outbox and attempts before race
+parents; global unsubscribe hashes remain so deleting an event cannot silently
+resubscribe an address.
 
-The consumer signs a structured SES v2 `SendEmail` request with the Worker's
+The consumer signs structured SES v2 and AWS End User Messaging SMS requests with the Worker's
 encrypted AWS key. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
 `race@quickducks.com`; it remains under the verified `quickducks.com` identity.
-Current consent, address, assignment, and heat state are loaded only after the
+Current consent, address, assignment, result, and heat state are loaded only after the
 opaque ID is received. Migration `0020_email_notification_assignment.sql` adds
 a nullable assignment reference so the previous Worker remains deployable; new
 notifications pin their originating assignment, while null legacy work and any
 replacement mismatch are cancelled instead of being rendered with a different
 duck. Automatic invocation logs remain disabled, and raw SES responses,
 recipient addresses, rendered bodies, and credentials must not be logged or
-persisted as errors. SES acceptance is recorded honestly as `SENT`;
+persisted as errors. SES/SMS acceptance is recorded honestly as `SENT`;
 delivery/bounce/complaint callbacks are not currently implemented.
 
-After deployment, use a synthetic controlled registration to opt into email,
-pair it, and call its heat. Confirm the support view reaches `SENT` for the
-assignment and upcoming notification and that the controlled mailbox receives
-the expected text. Do not use participant data for this canary. Inspect the main
+AWS supplies SMS through **AWS End User Messaging SMS** (formerly Pinpoint SMS
+and Voice v2); it is paid and US carrier registration/origination charges apply.
+There is no production-safe free SMS substitute. Before enabling SMS, provision
+and approve a US origination phone number or pool in `us-east-1`, create the
+managed opt-out list named `quickducks`, attach the identity to that list, enable
+managed STOP handling, set conservative spend/protect limits, and move the
+account out of the SMS sandbox. Store the exact phone-number/pool identity in the
+Worker secret `SMS_ORIGINATION_IDENTITY`. The committed
+`SMS_OPT_OUT_LIST_NAME=quickducks` is non-secret. Runtime IAM permits only
+`SendTextMessage` from account phone/pool identities and
+`DescribeOptedOutNumbers` on that exact list; lookup failure is fail-closed and
+does not send.
+
+`NOTIFICATION_HMAC_KEY` is a dedicated random Worker secret used only for keyed
+destination identifiers and email-unsubscribe capabilities. Never reuse an AWS,
+Turnstile, or participant token secret. For rotation, first install the new key
+as `NOTIFICATION_HMAC_KEY` and retain the old value as optional
+`NOTIFICATION_HMAC_PREVIOUS_KEY`; the Worker checks both for existing
+suppressions and old unsubscribe links while creating only new-key identifiers.
+Do not remove the previous key while an old suppression or unsubscribe link must
+remain effective. A D1 export contains no raw destination from which these
+identifiers can be recreated.
+
+The bootstrap permissions boundary must be updated before the application stack
+adds SES suppression and SMS permissions. Production secret preflight now
+requires `NOTIFICATION_HMAC_KEY` and `SMS_ORIGINATION_IDENTITY` in addition to
+the existing AWS and Turnstile names. Provider setup is a release prerequisite;
+do not use placeholders or participant contact for a canary.
+
+After deployment, use synthetic controlled email and phone destinations to opt
+into each channel and run the lifecycle. Confirm redacted support facts reach
+`SENT` for every trigger and the controlled destinations receive each event once.
+Also withdraw each consent, exercise email unsubscribe and managed SMS STOP, and
+confirm already-pending work is suppressed. Do not use participant data for this canary. Inspect the main
 queue and DLQ metrics for retries. If sending misbehaves, pause the queue
 consumer first (or remove its consumer binding in a reviewed Worker rollback),
 then revoke the Worker SES key if containment requires it. Retain D1 notification
@@ -917,12 +957,20 @@ A Worker rollback does not roll back D1, Durable Object class migrations,
 queues, bindings, secrets, DNS, Cognito, IAM, or SES. Every rollback target must
 therefore be from a deployment at or after `RaceUpdates` migration `v1`, retain
 the recorded class lifecycle, and operate correctly with the current D1 schema.
-While the email consumer and cron bindings are active, the target must also
+While the participant-notification consumer and cron bindings are active, the target must also
 export compatible `queue` and `scheduled` handlers; do not roll directly to a
 pre-email Worker. Pause or remove the consumer through a reviewed deployment
 before selecting such a target, then restore it only after a compatible forward
 release. If no compatible target exists, fix forward. Never select code that
 cannot operate on the current schemas and bindings.
+
+Migration `0022` remains compatible with the immediately previous email Worker.
+On a rollback, generic rows remain durable and unpublished, or stale `QUEUED`
+after an old consumer safely acknowledges an unknown ID; the next compatible
+forward Worker rediscovers both. Pause the consumer before a longer rollback so
+the DLQ does not fill, retain all outbox/attempt rows and queue messages, and do
+not delete or replay notification IDs manually. The old Worker may continue its
+legacy email rows, but it cannot deliver SMS or the new lifecycle templates.
 
 If live updates fail while HTTP and D1 remain healthy, do not restore D1 or
 alter race rows. Disconnected clients continue their five-second polling

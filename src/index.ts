@@ -27,10 +27,17 @@ import {
 import { isLocalPreviewOrigin } from "./local-preview.ts";
 import {
   dispatchPendingEmailNotifications,
-  handleEmailQueue,
+  processEmailNotification,
   sendEmailWithSes,
   type EmailSender,
 } from "./email-notifications.ts";
+import {
+  defaultParticipantNotificationAdapters,
+  dispatchPendingParticipantNotifications,
+  handleEmailUnsubscribe,
+  processParticipantNotification,
+  type ParticipantNotificationAdapters,
+} from "./participant-notifications.ts";
 import {
   phaseAllowsRaceStatus,
   phaseShowsMyDucks,
@@ -193,6 +200,10 @@ export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
   emailSender: EmailSender = sendEmailWithSes,
+  notificationAdapters: ParticipantNotificationAdapters = {
+    ...defaultParticipantNotificationAdapters,
+    emailSender,
+  },
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -234,6 +245,9 @@ export const createWorker = (
         },
       });
     }
+
+    const unsubscribe = await handleEmailUnsubscribe(request, env);
+    if (unsubscribe !== null) return unsubscribe;
 
     if (url.pathname === "/favicon.svg" || url.pathname === "/favicon.ico") {
       return new Response(faviconSvg, {
@@ -638,10 +652,29 @@ export const createWorker = (
     return html(renderNotFound(), 404, true);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, emailSender);
+    for (const message of batch.messages) {
+      if (typeof message.body !== "string") {
+        message.ack();
+        continue;
+      }
+      try {
+        const result = await processParticipantNotification(env, message.body, notificationAdapters);
+        if (result === "NOT_FOUND") {
+          await processEmailNotification(env, message.body, emailSender, message.attempts);
+        }
+        message.ack();
+      } catch {
+        // Durable reconciliation owns recovery and prevents an ambiguous
+        // provider acceptance from being replayed by the transport.
+        message.ack();
+      }
+    }
   },
   async scheduled(_controller, env, ctx): Promise<void> {
-    ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    ctx.waitUntil(Promise.all([
+      dispatchPendingEmailNotifications(env),
+      dispatchPendingParticipantNotifications(env),
+    ]).then(() => undefined));
   },
 });
 

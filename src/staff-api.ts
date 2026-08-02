@@ -1319,9 +1319,11 @@ const pairDuck = async (
   // The notification row is part of the same authoritative command as the
   // assignment and heat slot. Contact details never enter the queue payload;
   // the consumer rechecks the current address, consent, assignment, and heat.
-  // Re-pairing into an existing slot is harmless because the schema permits one
-  // HEAT_ASSIGNED message for this participant and heat.
-  const notificationId = assignedHeatId === null ? null : crypto.randomUUID();
+  // Replacing a deleted duck keeps the participant's existing heat place and is
+  // not another heat-assignment lifecycle event.
+  const notificationId = assignedHeatId === null || context.existing_heat !== null
+    ? null
+    : crypto.randomUUID();
   if (notificationId !== null) {
     statements.push(env.DB.prepare(
       `INSERT INTO email_notifications

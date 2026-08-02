@@ -127,12 +127,15 @@ const operationalSummary = async (env: Env, eventId: string): Promise<Response> 
     ).bind(eventId).first<Record<string, unknown>>(),
     env.DB.prepare(
       `SELECT COUNT(*) AS total_count,
-              SUM(CASE WHEN status NOT IN ('SENT', 'DELIVERED', 'FAILED', 'BOUNCED', 'COMPLAINED', 'SUPPRESSED', 'CANCELLED') THEN 1 ELSE 0 END) AS nonterminal_count,
-              SUM(CASE WHEN status IN ('FAILED', 'BOUNCED', 'COMPLAINED') THEN 1 ELSE 0 END) AS failed_count,
-              SUM(CASE WHEN status = 'RETRY_PENDING' THEN 1 ELSE 0 END) AS retry_pending_count
-         FROM email_notifications
-        WHERE event_id = ?`,
-    ).bind(eventId).first<Record<string, unknown>>(),
+               SUM(CASE WHEN status NOT IN ('SENT', 'DELIVERED', 'FAILED', 'BOUNCED', 'COMPLAINED', 'SUPPRESSED', 'CANCELLED') THEN 1 ELSE 0 END) AS nonterminal_count,
+               SUM(CASE WHEN status IN ('FAILED', 'BOUNCED', 'COMPLAINED') THEN 1 ELSE 0 END) AS failed_count,
+               SUM(CASE WHEN status = 'RETRY_PENDING' THEN 1 ELSE 0 END) AS retry_pending_count
+          FROM (
+            SELECT status FROM email_notifications WHERE event_id = ?
+            UNION ALL
+            SELECT status FROM participant_notifications WHERE event_id = ?
+          ) all_notifications`,
+    ).bind(eventId, eventId).first<Record<string, unknown>>(),
   ]);
 
   const registrationBlockers = numberValue(registrations?.unpaired_count);
@@ -179,6 +182,7 @@ interface NotificationListRow {
   id: string;
   registration_id: string;
   notification_type: string;
+  channel: string;
   status: string;
   template_version: number;
   scheduled_at: string | null;
@@ -219,26 +223,45 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
   if (before !== null) args.push(before);
   args.push(limit);
   const rows = await env.DB.prepare(
-    `SELECT n.id, n.registration_id, n.notification_type, n.status,
-            n.template_version, n.scheduled_at, n.queued_at, n.sent_at,
-            n.terminal_at, n.status_reason, n.last_error_code, n.created_at,
-            r.first_name, r.last_name, h.heat_number, h.round,
-            (SELECT COUNT(*) FROM email_attempts count_attempt
-              WHERE count_attempt.notification_id = n.id) AS attempt_count,
-            last_attempt.status AS last_attempt_status,
-            last_attempt.error_code AS last_attempt_error_code
-       FROM email_notifications n
-       JOIN registrations r ON r.id = n.registration_id AND r.event_id = n.event_id
-       LEFT JOIN heats h ON h.id = n.heat_id AND h.event_id = n.event_id
-       LEFT JOIN email_attempts last_attempt ON last_attempt.id = (
-         SELECT ea.id FROM email_attempts ea
-          WHERE ea.notification_id = n.id
-          ORDER BY ea.attempt_number DESC, ea.created_at DESC
-          LIMIT 1
-       )
+    `SELECT n.* FROM (
+       SELECT legacy.id, legacy.event_id, legacy.registration_id,
+              legacy.notification_type, 'EMAIL' AS channel, legacy.status,
+              legacy.template_version, legacy.scheduled_at, legacy.queued_at,
+              legacy.sent_at, legacy.terminal_at, legacy.status_reason,
+              legacy.last_error_code, legacy.created_at,
+              r.first_name, r.last_name, h.heat_number, h.round,
+              (SELECT COUNT(*) FROM email_attempts count_attempt
+                WHERE count_attempt.notification_id = legacy.id) AS attempt_count,
+              (SELECT ea.status FROM email_attempts ea
+                WHERE ea.notification_id = legacy.id
+                ORDER BY ea.attempt_number DESC, ea.created_at DESC LIMIT 1) AS last_attempt_status,
+              (SELECT ea.error_code FROM email_attempts ea
+                WHERE ea.notification_id = legacy.id
+                ORDER BY ea.attempt_number DESC, ea.created_at DESC LIMIT 1) AS last_attempt_error_code
+         FROM email_notifications legacy
+         JOIN registrations r ON r.id = legacy.registration_id AND r.event_id = legacy.event_id
+         LEFT JOIN heats h ON h.id = legacy.heat_id AND h.event_id = legacy.event_id
+       UNION ALL
+       SELECT current.id, current.event_id, current.registration_id,
+              current.notification_type, current.channel, current.status,
+              current.template_version, NULL AS scheduled_at, current.queued_at,
+              current.sent_at, current.terminal_at, current.status_reason,
+              current.last_error_code, current.created_at,
+              r.first_name, r.last_name, h.heat_number, h.round,
+              (SELECT COUNT(*) FROM participant_notification_attempts count_attempt
+                WHERE count_attempt.notification_id = current.id) AS attempt_count,
+              (SELECT pa.status FROM participant_notification_attempts pa
+                WHERE pa.notification_id = current.id
+                ORDER BY pa.attempt_number DESC, pa.created_at DESC LIMIT 1) AS last_attempt_status,
+              (SELECT pa.error_code FROM participant_notification_attempts pa
+                WHERE pa.notification_id = current.id
+                ORDER BY pa.attempt_number DESC, pa.created_at DESC LIMIT 1) AS last_attempt_error_code
+         FROM participant_notifications current
+         JOIN registrations r ON r.id = current.registration_id AND r.event_id = current.event_id
+         LEFT JOIN heats h ON h.id = current.heat_id AND h.event_id = current.event_id
+     ) n
       WHERE n.event_id = ? ${statusClause} ${beforeClause}
-      ORDER BY n.created_at DESC, n.id DESC
-      LIMIT ?`,
+      ORDER BY n.created_at DESC, n.id DESC LIMIT ?`,
   ).bind(...args).all<NotificationListRow>();
 
   return json({
@@ -247,6 +270,7 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
       registrationId: row.registration_id,
       participantName: `${row.first_name} ${row.last_name}`,
       type: row.notification_type,
+      channel: row.channel,
       status: row.status,
       terminal: terminalNotificationStatuses.has(row.status),
       templateVersion: row.template_version,
@@ -282,13 +306,20 @@ const listNotificationAttempts = async (
   eventId: string,
   notificationId: string,
 ): Promise<Response> => {
-  const notification = await env.DB.prepare(
+  let notification = await env.DB.prepare(
     "SELECT id, status FROM email_notifications WHERE id = ? AND event_id = ? LIMIT 1",
   ).bind(notificationId, eventId).first<{ id: string; status: string }>();
+  let participant = false;
+  if (notification === null) {
+    notification = await env.DB.prepare(
+      "SELECT id, status FROM participant_notifications WHERE id = ? AND event_id = ? LIMIT 1",
+    ).bind(notificationId, eventId).first<{ id: string; status: string }>();
+    participant = notification !== null;
+  }
   if (notification === null) return json({ error: "Notification not found." }, 404);
   const attempts = await env.DB.prepare(
     `SELECT id, attempt_number, stage, status, started_at, completed_at, error_code
-       FROM email_attempts
+       FROM ${participant ? "participant_notification_attempts" : "email_attempts"}
       WHERE notification_id = ? AND event_id = ?
       ORDER BY attempt_number DESC, created_at DESC
       LIMIT 100`,
@@ -352,9 +383,10 @@ const publishRetry = async (
       ).bind(now, attempt.id, eventId),
       env.DB.prepare(
         `UPDATE email_notifications
-            SET status = 'RETRY_PENDING', last_error_code = 'QUEUE_PUBLISH_FAILED', updated_at = ?
+            SET status = 'RETRY_PENDING', last_error_code = 'QUEUE_PUBLISH_FAILED',
+                retry_after = ?, updated_at = ?
           WHERE id = ? AND event_id = ? AND status = 'PENDING'`,
-      ).bind(now, notificationId, eventId),
+      ).bind(new Date(Date.now() + 60_000).toISOString(), now, notificationId, eventId),
     ]);
     return json({ error: "The retry is saved but could not be queued. Retry the same command." }, 503);
   }
@@ -371,6 +403,14 @@ const retryNotification = async (
   const commandId = payload?.commandId;
   if (typeof commandId !== "string" || !isCommandId(commandId)) {
     return json({ error: "A valid command identifier is required." }, 400);
+  }
+
+  const retryClock = await env.DB.prepare(
+    "SELECT retry_after FROM email_notifications WHERE id = ? AND event_id = ? LIMIT 1",
+  ).bind(notificationId, eventId).first<{ retry_after: string | null }>();
+  if (retryClock?.retry_after !== null && retryClock?.retry_after !== undefined
+    && retryClock.retry_after > new Date().toISOString()) {
+    return json({ error: "This notification is still inside its retry backoff window." }, 409);
   }
 
   const existing = await findCommand(env, commandId);
@@ -546,6 +586,113 @@ const terminalNotificationAction = async (
     : json({ notificationId, status: targetStatus, replayed: false }, 201);
 };
 
+const participantNotificationAction = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  eventId: string,
+  notificationId: string,
+  action: "retry" | "suppress" | "cancel",
+): Promise<Response> => {
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const reason = typeof payload?.reason === "string" ? payload.reason.trim().replace(/\s+/g, " ") : "";
+  if (typeof commandId !== "string" || !isCommandId(commandId)
+    || (action !== "retry" && (reason.length < 4 || reason.length > 500))) {
+    return json({ error: action === "retry"
+      ? "A valid command identifier is required."
+      : "A valid command and reason between 4 and 500 characters are required." }, 400);
+  }
+  const commandType = action === "retry"
+    ? "RETRY_NOTIFICATION"
+    : action === "suppress" ? "SUPPRESS_NOTIFICATION" : "CANCEL_NOTIFICATION";
+  const targetStatus = action === "retry" ? "PENDING" : action === "suppress" ? "SUPPRESSED" : "CANCELLED";
+  const existing = await findCommand(env, commandId);
+  if (existing !== null) {
+    if (existing.event_id !== eventId || existing.command_type !== commandType || existing.result_id !== notificationId) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    const replay = await env.DB.prepare(
+      "SELECT status FROM participant_notifications WHERE id = ? AND event_id = ?",
+    ).bind(notificationId, eventId).first<{ status: string }>();
+    const replayMatches = action === "retry"
+      ? replay !== null && new Set(["PENDING", "QUEUED", "SENDING", "SENT"]).has(replay.status)
+      : replay?.status === targetStatus;
+    return replayMatches
+      ? json({ notificationId, status: replay!.status, replayed: true })
+      : json({ error: "The replayed command does not match this request." }, 409);
+  }
+  const target = await env.DB.prepare(
+    `SELECT status, retry_after, last_error_code
+       FROM participant_notifications WHERE id = ? AND event_id = ? LIMIT 1`,
+  ).bind(notificationId, eventId).first<{
+    status: string;
+    retry_after: string | null;
+    last_error_code: string | null;
+  }>();
+  if (target === null) return json({ error: "Notification not found." }, 404);
+  const now = new Date().toISOString();
+  if (action === "retry") {
+    if (target.retry_after !== null && target.retry_after > now) {
+      return json({ error: "This notification is still inside its retry backoff window." }, 409);
+    }
+    if (!new Set(["FAILED", "RETRY_PENDING"]).has(target.status)
+      || target.last_error_code === "DELIVERY_OUTCOME_UNKNOWN") {
+      return json({ error: "Only safely retryable failed notifications can be retried." }, 409);
+    }
+  } else if (!new Set(["PENDING", "QUEUED", "RETRY_PENDING", "FAILED"]).has(target.status)) {
+    return json({ error: `This notification cannot be ${action === "suppress" ? "suppressed" : "cancelled"}.` }, 409);
+  }
+  const eligible = action === "retry"
+    ? "('FAILED', 'RETRY_PENDING')"
+    : "('PENDING', 'QUEUED', 'RETRY_PENDING', 'FAILED')";
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at)
+         SELECT ?, event_id, ?, id, ?, ? FROM participant_notifications
+          WHERE id = ? AND event_id = ? AND status IN ${eligible}`,
+      ).bind(commandId, commandType, now, now, notificationId, eventId),
+      env.DB.prepare(
+        `UPDATE participant_notifications SET status = ?, terminal_at = ?, status_reason = ?,
+                last_error_code = NULL, retry_after = NULL, sending_started_at = NULL,
+                delivery_claim_token = NULL, updated_at = ?
+          WHERE id = ? AND event_id = ? AND status IN ${eligible}
+            AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = ?)`,
+      ).bind(
+        targetStatus,
+        action === "retry" ? null : now,
+        action === "retry" ? null : reason,
+        now,
+        notificationId,
+        eventId,
+        commandId,
+        commandType,
+      ),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
+         SELECT ?, ?, ?, ?, 'PARTICIPANT_NOTIFICATION', ?, 'STAFF', ?, ?
+           FROM race_commands WHERE id = ? AND event_id = ? AND command_type = ?`,
+      ).bind(
+        crypto.randomUUID(), eventId, commandId,
+        action === "retry" ? "NOTIFICATION_RETRY_REQUESTED"
+          : action === "suppress" ? "NOTIFICATION_SUPPRESSED" : "NOTIFICATION_CANCELLED",
+        notificationId, now,
+        JSON.stringify({ staff_profile_id: actor.id, ...(action === "retry" ? {} : { reason_recorded: true }) }),
+        commandId, eventId, commandType,
+      ),
+    ]);
+  } catch {
+    return json({ error: "The notification update conflicted with another operation." }, 409);
+  }
+  if (await findCommand(env, commandId) === null) {
+    return json({ error: "The notification changed before this support action committed." }, 409);
+  }
+  return json({ notificationId, status: targetStatus, replayed: false }, 201);
+};
+
 interface AuditTimelineRow {
   id: string;
   source: string;
@@ -582,19 +729,29 @@ const auditTimeline = async (url: URL, env: Env, eventId: string): Promise<Respo
              ON sp.id = json_extract(a.details_json, '$.staff_profile_id')
           WHERE a.event_id = ?
          UNION ALL
-         SELECT ea.id, 'NOTIFICATION_ATTEMPT' AS source,
+          SELECT ea.id, 'NOTIFICATION_ATTEMPT' AS source,
                 'NOTIFICATION_' || ea.stage || '_' || ea.status AS action,
                 'EMAIL_NOTIFICATION' AS subject_type, ea.notification_id AS subject_id,
                 'SYSTEM' AS actor_type, NULL AS actor_display_name,
                 COALESCE(ea.completed_at, ea.started_at) AS occurred_at,
                 ea.error_code AS safe_code
            FROM email_attempts ea
-          WHERE ea.event_id = ?
-       ) timeline
+           WHERE ea.event_id = ?
+         UNION ALL
+         SELECT pa.id, 'NOTIFICATION_ATTEMPT' AS source,
+                'NOTIFICATION_' || pa.stage || '_' || pa.status AS action,
+                'PARTICIPANT_NOTIFICATION' AS subject_type,
+                pa.notification_id AS subject_id, 'SYSTEM' AS actor_type,
+                NULL AS actor_display_name,
+                COALESCE(pa.completed_at, pa.started_at) AS occurred_at,
+                pa.error_code AS safe_code
+           FROM participant_notification_attempts pa
+          WHERE pa.event_id = ?
+        ) timeline
       WHERE (? IS NULL OR timeline.occurred_at < ?)
       ORDER BY timeline.occurred_at DESC, timeline.id DESC
       LIMIT ?`,
-  ).bind(eventId, eventId, before, before, limit).all<AuditTimelineRow>();
+  ).bind(eventId, eventId, eventId, before, before, limit).all<AuditTimelineRow>();
 
   return json({
     events: rows.results.map((row) => ({
@@ -649,6 +806,19 @@ export const handleSupportOperations = async (
     if (denied !== null) return denied;
     const [, eventId, notificationId, action] = notificationActionMatch;
     if (!validPathId(eventId) || !validPathId(notificationId)) return json({ error: "Invalid path identifier." }, 400);
+    const participant = await env.DB.prepare(
+      "SELECT 1 AS present FROM participant_notifications WHERE id = ? AND event_id = ? LIMIT 1",
+    ).bind(notificationId, eventId).first<{ present: number }>();
+    if (participant !== null) {
+      return participantNotificationAction(
+        request,
+        env,
+        actor,
+        eventId,
+        notificationId,
+        action as "retry" | "suppress" | "cancel",
+      );
+    }
     if (action === "retry") return retryNotification(request, env, actor, eventId, notificationId);
     return terminalNotificationAction(
       request,

@@ -13,12 +13,8 @@
 // a private network address over https — and the request arrived on that same
 // origin, so a copy of this module deployed by accident serves nothing.
 import { authenticateStaff } from "./auth.ts";
-import {
-  dispatchPendingEmailNotifications,
-  handleEmailQueue,
-  type EmailSender,
-  type OutboundEmail,
-} from "./email-notifications.ts";
+import { type EmailSender, type OutboundEmail } from "./email-notifications.ts";
+import type { OutboundSms, ParticipantNotificationAdapters } from "./participant-notifications.ts";
 import { createWorker } from "./index.ts";
 import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
 import { escapeHtml } from "./site.ts";
@@ -29,6 +25,7 @@ export { RaceUpdates } from "./live-updates.ts";
 const accessTokenPrefix = "localdev-";
 const refreshTokenPrefix = "localdevr-";
 const localEmails: (OutboundEmail & { sentAt: string })[] = [];
+const localSmsMessages: (OutboundSms & { sentAt: string })[] = [];
 
 // Local development remains fully offline. The queue consumer exercises the
 // production claim, rendering, status, and attempt code, while this final seam
@@ -36,6 +33,16 @@ const localEmails: (OutboundEmail & { sentAt: string })[] = [];
 const localEmailSender: EmailSender = async (email) => {
   localEmails.push({ ...email, sentAt: new Date().toISOString() });
   return { providerMessageId: `local-${crypto.randomUUID()}` };
+};
+
+const localNotificationAdapters: ParticipantNotificationAdapters = {
+  emailSender: localEmailSender,
+  async smsSender(sms) {
+    localSmsMessages.push({ ...sms, sentAt: new Date().toISOString() });
+    return { providerMessageId: `local-sms-${crypto.randomUUID()}` };
+  },
+  async emailSuppression() { return false; },
+  async smsSuppression() { return false; },
 };
 
 const noStoreHtml = {
@@ -315,7 +322,7 @@ const refusal = (env: Env, requestUrl: URL): Response =>
     { status: 500, headers: noStoreHtml },
   );
 
-const worker = createWorker(localAuthenticate, localTokenFetch);
+const worker = createWorker(localAuthenticate, localTokenFetch, localEmailSender, localNotificationAdapters);
 
 const localWorker: ExportedHandler<Env> = {
   async fetch(request, env, ctx) {
@@ -400,17 +407,28 @@ const localWorker: ExportedHandler<Env> = {
       return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
     }
 
+    if (url.pathname === "/__local/notifications" && request.method === "GET") {
+      return Response.json({ emails: localEmails, sms: localSmsMessages }, {
+        headers: { "cache-control": "no-store", "x-robots-tag": "noindex, nofollow" },
+      });
+    }
+    if (url.pathname === "/__local/notifications" && request.method === "DELETE") {
+      localEmails.length = 0;
+      localSmsMessages.length = 0;
+      return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+    }
+
     if (url.pathname.startsWith("/__local/")) {
       return Response.json({ error: "Unknown local development endpoint." }, { status: 404 });
     }
 
     return worker.fetch!(request, env, ctx);
   },
-  async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, localEmailSender);
+  async queue(batch, env, ctx): Promise<void> {
+    await worker.queue!(batch, env, ctx);
   },
   async scheduled(_controller, env, ctx): Promise<void> {
-    ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    await worker.scheduled!(_controller, env, ctx);
   },
 };
 

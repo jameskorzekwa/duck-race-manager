@@ -44,6 +44,8 @@ import { handleParticipantOperations } from "./participant-operations.ts";
 import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 import { handleSupportOperations } from "./support-operations.ts";
+import { dispatchPendingEmailNotifications } from "./email-notifications.ts";
+import { dispatchPendingParticipantNotifications } from "./participant-notifications.ts";
 import {
   handleLiveConnection,
   mutationRefreshDomains,
@@ -1779,6 +1781,16 @@ export const handleApi = async (
 ): Promise<Response> => {
   const response = await handleApiRequest(request, env, authenticate);
   const refreshDomains = mutationRefreshDomains(request);
-  if (response.ok && refreshDomains !== null) scheduleRaceUpdate(env, ctx, refreshDomains);
+  if (response.ok && refreshDomains !== null) {
+    scheduleRaceUpdate(env, ctx, refreshDomains);
+    // Queue publication happens only after the authoritative handler returned a
+    // committed success. Both dispatchers catch their own D1/queue failures, so
+    // notification infrastructure can never replace that domain response.
+    const publication = Promise.all([
+      dispatchPendingEmailNotifications(env),
+      dispatchPendingParticipantNotifications(env),
+    ]).then(() => undefined);
+    await publication;
+  }
   return response;
 };

@@ -14,6 +14,7 @@
     "APP_ORIGIN": "https://quickducks.com",
     "AWS_REGION": "us-east-1",
     "EMAIL_FROM_ADDRESS": "race@quickducks.com",
+    "SMS_OPT_OUT_LIST_NAME": "quickducks",
     "COGNITO_USER_POOL_ID": "REPLACE_AFTER_AWS_DEPLOY",
     "COGNITO_USER_POOL_CLIENT_ID": "REPLACE_AFTER_AWS_DEPLOY",
     "COGNITO_DOMAIN": "REPLACE_AFTER_AWS_DEPLOY"

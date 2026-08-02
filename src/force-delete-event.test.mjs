@@ -264,6 +264,8 @@ const eventLinkedTables = [
   "final_podium_selections",
   "email_notifications",
   "email_attempts",
+  "participant_notifications",
+  "participant_notification_attempts",
   "browser_registration_collections",
   "browser_collection_registrations",
   "race_commands",

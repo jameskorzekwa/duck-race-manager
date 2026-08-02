@@ -228,7 +228,7 @@ test("audit timeline selects only redacted fields", async () => {
   assert.equal(body.events[0].code, "MAILBOX_REJECTED");
   assert.doesNotMatch(sql, /private_token|provider_message_id|error_detail/);
   assert.doesNotMatch(sql, /SELECT\s+[^;]*details_json\s+FROM/i);
-  assert.deepEqual(db.statements[0].args.slice(0, 2), ["event_test", "event_test"]);
+  assert.deepEqual(db.statements[0].args.slice(0, 3), ["event_test", "event_test", "event_test"]);
 });
 
 test("the migrated schema enforces terminal notifications and retired the purge claim", () => {

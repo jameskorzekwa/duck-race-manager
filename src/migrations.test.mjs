@@ -25,6 +25,7 @@ const migrationNames = [
   "0019_round_one_walk_up_admission.sql",
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
+  "0022_participant_notifications.sql",
 ];
 
 const lifecycleStatuses = [
@@ -1266,6 +1267,72 @@ test("0021 adds unique nullable delivery claims without breaking older notificat
   assert.throws(() => database.prepare(
     "UPDATE email_notifications SET delivery_claim_token = ? WHERE id = ?",
   ).run("", "claim-notification-2"), /CHECK constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0022 adds channel lifecycle uniqueness and durable keyed suppression compatibly", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0022_participant_notifications.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('notify-event', 'notify-race', 'Notify Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, email, phone, status, lookup_code,
+       private_token_hash, email_notifications_enabled, sms_notifications_enabled,
+       submitted_at, status_changed_at)
+    VALUES ('notify-registration', 'notify-event', 'Daisy', 'Duck', 'daisy@example.test',
+            '(817) 555-0100', 'ACTIVE', 'DAISY123', 'notify-hash', 1, 1,
+            '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-notification', 'notify-event', 'notify-registration', 'HEAT_ASSIGNED', 'PENDING');
+  `);
+
+  applyMigrations(database, ["0022_participant_notifications.sql"]);
+  assert.equal(count(database, "participant_notifications"), 0, "migration invents no historical sends");
+
+  // A rolled-back Worker can still omit every new column and table.
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-after-migration', 'notify-event', 'notify-registration', 'HEAT_UPCOMING', 'PENDING');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, email, phone, status, lookup_code,
+       private_token_hash, email_notifications_enabled, sms_notifications_enabled,
+       submitted_at, status_changed_at)
+    VALUES ('new-registration', 'notify-event', 'Donald', 'Duck', 'donald@example.test',
+            '(817) 555-0101', 'SUBMITTED', 'DONALD12', 'new-notify-hash', 1, 1,
+            '2026-08-01T00:01:00Z', '2026-08-01T00:01:00Z');
+  `);
+  assert.deepEqual(database.prepare(
+    `SELECT channel, notification_type, lifecycle_key
+       FROM participant_notifications WHERE registration_id = 'new-registration'
+      ORDER BY channel`,
+  ).all().map((row) => ({ ...row })), [
+    { channel: "EMAIL", notification_type: "REGISTRATION_CONFIRMATION", lifecycle_key: "new-registration" },
+    { channel: "SMS", notification_type: "REGISTRATION_CONFIRMATION", lifecycle_key: "new-registration" },
+  ]);
+  assert.throws(() => database.exec(`
+    INSERT INTO participant_notifications
+      (id, event_id, registration_id, channel, notification_type, lifecycle_key)
+    VALUES ('duplicate-lifecycle', 'notify-event', 'new-registration', 'EMAIL',
+            'REGISTRATION_CONFIRMATION', 'new-registration');
+  `), /UNIQUE constraint failed/);
+
+  const keyed = "a".repeat(64);
+  database.prepare(
+    `INSERT INTO participant_notification_suppressions (channel, destination_hash, reason)
+     VALUES ('EMAIL', ?, 'EMAIL_UNSUBSCRIBE')`,
+  ).run(keyed);
+  assert.deepEqual({ ...database.prepare(
+    "SELECT channel, destination_hash, reason FROM participant_notification_suppressions",
+  ).get() }, { channel: "EMAIL", destination_hash: keyed, reason: "EMAIL_UNSUBSCRIBE" });
+  assert.throws(() => database.exec(`
+    INSERT INTO participant_notification_suppressions (channel, destination_hash, reason)
+    VALUES ('SMS', 'daisy@example.test', 'SMS_STOP');
+  `), /CHECK constraint failed/);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

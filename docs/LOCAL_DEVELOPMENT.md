@@ -40,8 +40,8 @@ devices](#testing-on-other-devices).
 ## What makes this work
 
 Three things in production need the network: Cognito, which authenticates staff;
-Turnstile, which protects public registration; and SES, which sends race
-reminders. Local development replaces exactly those external boundaries while
+Turnstile, which protects public registration; and AWS email/SMS, which sends
+participant notifications. Local development replaces exactly those external boundaries while
 retaining their application-side authorization, queue, and persistence paths.
 
 `wrangler.local.jsonc` differs from `wrangler.jsonc` in four ways:
@@ -69,12 +69,13 @@ It supplies the two seams `createWorker` already accepts:
 It also serves a stand-in for the Cognito hosted UI at `/oauth2/authorize`, which
 lists the staff accounts in the local database and lets you pick one.
 
-The local email queue has its own `quickducks-email-local` and
+The local participant-notification queue has its own `quickducks-email-local` and
 `quickducks-email-local-dlq` identities. Its consumer runs the production D1
 claim, consent checks, rendering, attempt recording, and retry logic, then stores
-the synthetic message in memory instead of contacting SES. Browser tests inspect
-that mailbox at `GET /__local/emails` and clear it with
-`DELETE /__local/emails`; both routes exist only in `src/local-dev.ts` and are
+synthetic email and SMS messages in memory instead of contacting AWS. Browser
+tests inspect both at `GET /__local/notifications` and clear them with
+`DELETE /__local/notifications`; the compatibility email-only endpoint remains
+at `/__local/emails`. These routes exist only in `src/local-dev.ts` and are
 refused outside a configured local origin.
 
 Everything else is the real thing. Sign-in still runs the production PKCE flow,

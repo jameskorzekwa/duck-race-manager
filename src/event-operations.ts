@@ -2068,6 +2068,8 @@ const forceDeleteEvent = async (
       ).bind(commandId, now, now, fingerprint, eventId, revision, eventId),
       scoped("email_attempts"),
       scoped("email_notifications"),
+      scoped("participant_notification_attempts"),
+      scoped("participant_notifications"),
       // Provisional podium places reference the heat, its roster entry, the
       // duck assignment, and the command that recorded them, so they go before
       // any of those. Their foreign keys cascade, which makes this delete

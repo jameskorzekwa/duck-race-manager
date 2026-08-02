@@ -671,9 +671,34 @@ corresponding valid address. Invalid non-empty contact is rejected even with its
 opt-in off. The same validation and controls apply during public registration,
 staff walk-up registration, and staff participant edits. Audit history records
 only the changed field names, never old or new contact values or ownership
-proof. Email consent participates in the implemented operational-email workflow.
-SMS consent is captured independently, but SMS delivery is not implemented and
-the choice does not enqueue an SMS.
+proof. Email and SMS consent independently control implemented participant
+notifications. Opting into both sends both; opting into neither sends neither.
+
+### Participant Notifications
+
+Registration confirmation, Round One assignment, final assignment, the official
+result for each applicable round, and an **up next** reminder are durable
+lifecycle events. The first heat becomes up next when its round starts; each
+later heat becomes up next only after authoritative race progression finishes or
+cancels every earlier heat. A reset creates a new run occurrence and therefore
+one new reminder, while command retries, result corrections that do not reset a
+run, queue redelivery, and reconciliation reuse the existing occurrence.
+
+The domain transaction writes an outbox row without a destination or rendered
+message. Queue publication and provider delivery happen afterwards and cannot
+roll back registration, pairing, progression, or results. Delivery reloads the
+current participant, contact, consent, roster, result, and heat occurrence. It
+also checks the application email-unsubscribe record, SES account suppression,
+and the configured AWS SMS opt-out list immediately before provider submission.
+Cleared or invalid contact, withdrawn consent, changed lifecycle state, an email
+unsubscribe, or SMS STOP cancels/suppresses pending work without sending it.
+
+Email contains a signed no-login unsubscribe link and one-click unsubscribe
+headers. GET displays a confirmation form and never mutates; POST records only a
+secret-keyed destination identifier. SMS tells the participant to reply STOP;
+AWS managed opt-outs put that number in the configured opt-out list. Contact
+values, rendered bodies, unsubscribe capabilities, and provider response bodies
+are absent from outbox, attempt, audit, queue, and public API records.
 
 The privacy notice warns that anyone with access to the originating browser
 profile may view or edit its owned contact details. Cancel discards an edit,
