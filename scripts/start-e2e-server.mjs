@@ -13,6 +13,7 @@ if (!Number.isSafeInteger(inspectorPort) || inspectorPort < 1024 || inspectorPor
 const shardId = String(process.env.E2E_SHARD_ID ?? "default");
 if (!/^[A-Za-z0-9_-]+$/.test(shardId)) throw new Error("E2E_SHARD_ID is invalid.");
 const persistPath = `.wrangler/e2e-${shardId}`;
+const origin = `http://localhost:${port}`;
 const wrangler = process.platform === "win32" ? "npx.cmd" : "npx";
 const environment = {
   ...process.env,
@@ -34,6 +35,7 @@ const server = spawn(wrangler, [
   "wrangler", "dev", "--config", "wrangler.local.jsonc",
   "--persist-to", persistPath, "--ip", "127.0.0.1", "--port", String(port),
   "--inspector-port", String(inspectorPort),
+  "--var", `APP_ORIGIN:${origin}`, "--var", `COGNITO_DOMAIN:${origin}`,
 ], { env: environment, stdio: ["ignore", "pipe", "pipe"] });
 
 const forwardRedacted = (stream, output) => {
