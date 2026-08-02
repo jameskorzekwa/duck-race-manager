@@ -289,7 +289,7 @@ test.describe("staff roles and the Admin views", () => {
       );
       expect(listed.status).toBe(200);
       return listed.body.registrations[0]?.phone;
-    }).toBe("+15550209999");
+    }).toBe("(555) 020-9999");
 
     // The desk has no Admin menu bar and no Admin link at all.
     await expect(page.locator(".console-nav")).toHaveCount(0);

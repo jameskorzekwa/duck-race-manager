@@ -295,7 +295,8 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     `/api/v1/staff/events/${eventId}/registrations`,
     {
       commandId: command(), privateToken: "c".repeat(43), firstName: "Daisy", lastName: "Duck",
-      email: "daisy@example.com", phone: "555-0100", emailNotificationsEnabled: true,
+      email: "daisy@example.com", phone: "8173206150", emailNotificationsEnabled: true,
+      smsNotificationsEnabled: true,
       notes: "Role matrix test",
     },
   ), 201, "registration creates walk-up");
@@ -360,7 +361,7 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     actors.announcer, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}`,
   ), 200, "announcer reads heat detail");
   assert.equal(JSON.stringify(announcerDetail).includes("daisy@example.com"), false);
-  assert.equal(JSON.stringify(announcerDetail).includes("555-0100"), false);
+  assert.equal(JSON.stringify(announcerDetail).includes("(817) 320-6150"), false);
   assert.equal((await post(actors.announcer, `/api/v1/staff/events/${eventId}/heats/${roundOneHeatId}/lock`, {
     commandId: command(), revision: 0,
   })).status, 403);

@@ -6,6 +6,7 @@ export interface RegistrationInput {
   email: string | null;
   phone: string | null;
   emailNotificationsEnabled: boolean;
+  smsNotificationsEnabled: boolean;
 }
 
 export interface RegistrationValidation {
@@ -26,6 +27,7 @@ export interface ContactPreferencesValidation {
 }
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const phonePunctuationPattern = /^[0-9()+.\-\s]+$/;
 const tokenAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 const cleanName = (value: string | File | null): string =>
@@ -37,20 +39,36 @@ const cleanOptional = (value: string | File | null): string | null => {
   return cleaned === "" ? null : cleaned;
 };
 
+// Contact numbers are US numbers throughout the application. Punctuation is a
+// display concern: every write validates the digits, accepts an optional US
+// country code, and stores the same readable representation the forms show.
+export const normalizeUsPhone = (value: string): string | null => {
+  const cleaned = value.trim();
+  if (cleaned.length === 0 || !phonePunctuationPattern.test(cleaned)) return null;
+  let digits = cleaned.replace(/\D/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) digits = digits.slice(1);
+  if (digits.length !== 10) return null;
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+};
+
 export const validateContactPreferences = (
   input: ContactPreferencesInput,
   emailRequired: boolean,
 ): ContactPreferencesValidation => {
   const email = input.email?.trim().toLowerCase() || null;
-  const phone = input.phone?.trim() || null;
+  const suppliedPhone = input.phone?.trim() || null;
+  const phone = suppliedPhone === null ? null : normalizeUsPhone(suppliedPhone);
   const errors: Record<string, string> = {};
 
   if (emailRequired && email === null) errors.email = "Email is required for this race.";
-  if (email !== null && (email.length > 254 || !emailPattern.test(email))) {
+  const validEmail = email !== null && email.length <= 254 && emailPattern.test(email);
+  if (email !== null && !validEmail) {
     errors.email = "Enter a valid email address.";
   }
-  if (phone !== null && phone.length > 32) errors.phone = "Use 32 characters or fewer.";
-  if (input.emailNotificationsEnabled && email === null) {
+  if (suppliedPhone !== null && phone === null) {
+    errors.phone = "Enter a valid 10-digit US phone number.";
+  }
+  if (input.emailNotificationsEnabled && !validEmail) {
     errors.emailNotificationsEnabled = "Add an email address before choosing email updates.";
   }
   if (input.smsNotificationsEnabled && phone === null) {
@@ -83,12 +101,19 @@ export const validateRegistration = (
   if (lastName.length === 0) errors.last_name = "Enter a last name.";
   if (lastName.length > 80) errors.last_name = "Use 80 characters or fewer.";
 
-  if (emailRequired && email === null) errors.email = "Email is required for this race.";
-  if (email !== null && (email.length > 254 || !emailPattern.test(email))) {
-    errors.email = "Enter a valid email address.";
+  const contact = validateContactPreferences({
+    email,
+    phone,
+    emailNotificationsEnabled: form.get("email_notifications_enabled") === "on",
+    smsNotificationsEnabled: form.get("sms_notifications_enabled") === "on",
+  }, emailRequired);
+  for (const [field, message] of Object.entries(contact.errors)) {
+    errors[field === "emailNotificationsEnabled"
+      ? "email_notifications_enabled"
+      : field === "smsNotificationsEnabled"
+        ? "sms_notifications_enabled"
+        : field] = message;
   }
-
-  if (phone !== null && phone.length > 32) errors.phone = "Use 32 characters or fewer.";
 
   if (Object.keys(errors).length > 0) return { errors };
 
@@ -97,9 +122,10 @@ export const validateRegistration = (
     value: {
       firstName,
       lastName,
-      email,
-      phone,
-      emailNotificationsEnabled: email !== null && form.get("email_notifications_enabled") === "on",
+      email: contact.value!.email,
+      phone: contact.value!.phone,
+      emailNotificationsEnabled: contact.value!.emailNotificationsEnabled,
+      smsNotificationsEnabled: contact.value!.smsNotificationsEnabled,
     },
   };
 };

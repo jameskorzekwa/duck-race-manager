@@ -55,6 +55,11 @@ const makeDb = (first, all = () => ({ results: [] })) => {
 const makeEnv = (db, extras = {}) => ({
   APP_ORIGIN: "https://quickducks.com",
   DB: db,
+  PARTICIPANT_CONTACT_READ_RATE_LIMITER: {
+    async limit() {
+      return { success: true };
+    },
+  },
   PUBLIC_SEARCH_RATE_LIMITER: {
     async limit() {
       return { success: true };
@@ -255,6 +260,35 @@ test("rate limits anonymous name search", async () => {
   );
 
   assert.equal(response.status, 429);
+  assert.equal(db.statements.length, 0);
+});
+
+test("rate limits participant contact reads before hashing proofs or querying D1", async () => {
+  const db = makeDb(() => assert.fail("rate-limited contact reads must not query D1"));
+  const response = await handleApi(
+    new Request(
+      "https://quickducks.com/api/v1/registrations/mine/11111111-1111-4111-8111-111111111111/contact",
+      {
+        headers: {
+          "cf-connecting-ip": "192.0.2.44",
+          "x-quickducks-ownership-proof": randomToken(),
+        },
+      },
+    ),
+    makeEnv(db, {
+      PARTICIPANT_CONTACT_READ_RATE_LIMITER: {
+        async limit({ key }) {
+          assert.equal(key, "contact-read:192.0.2.44");
+          return { success: false };
+        },
+      },
+    }),
+  );
+
+  assert.equal(response.status, 429);
+  assert.deepEqual(await response.json(), {
+    error: "Too many contact requests. Please wait and try again.",
+  });
   assert.equal(db.statements.length, 0);
 });
 
@@ -839,7 +873,9 @@ test("creates registration, race-entry, command, and audit records atomically", 
         firstName: "Daisy",
         lastName: "Duck",
         email: "DAISY@example.com",
+        phone: "817.320.6150",
         emailNotificationsEnabled: true,
+        smsNotificationsEnabled: true,
         duckKeepPreference: "KEEP",
         turnstileToken: "verified-test-token",
       }),
@@ -873,6 +909,9 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.equal(db.batches[0].length, 6);
   assert.match(db.batches[0][0].sql, /INSERT INTO race_commands/);
   assert.match(db.batches[0][1].sql, /INSERT INTO registrations/);
+  assert.match(db.batches[0][1].sql, /email_notifications_enabled, sms_notifications_enabled/);
+  assert.equal(db.batches[0][1].args.includes("(817) 320-6150"), true);
+  assert.deepEqual(db.batches[0][1].args.slice(8, 10), [1, 1]);
   assert.match(db.batches[0][2].sql, /INSERT INTO race_entries/);
   assert.doesNotMatch(db.batches[0][2].sql, /duck_keep_preference/);
   assert.equal(db.batches[0][2].args.length, 3);
@@ -891,6 +930,41 @@ test("creates registration, race-entry, command, and audit records atomically", 
   await assert.doesNotReject(publicationTask);
   assert.equal(publicationCalls, 1);
   assert.deepEqual(JSON.parse(publicationFrame).domains, ["participants"]);
+});
+
+test("public registration rejects invalid contacts and ungated consent before Turnstile", async () => {
+  const base = {
+    eventId: openEvent.id,
+    commandId: crypto.randomUUID(),
+    privateToken: randomToken(),
+    firstName: "Daisy",
+    lastName: "Duck",
+    email: "daisy@example.test",
+    phone: "8173206150",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: false,
+    turnstileToken: "not-reached",
+  };
+  for (const [label, change, field] of [
+    ["invalid email", { email: "daisy@" }, "email"],
+    ["incomplete phone", { phone: "817320" }, "phone"],
+    ["email consent without email", { email: null, emailNotificationsEnabled: true }, "email_notifications_enabled"],
+    ["SMS consent without phone", { phone: null, smsNotificationsEnabled: true }, "sms_notifications_enabled"],
+  ]) {
+    const db = makeDb((sql) => sql.includes("status = 'REGISTRATION_OPEN'") ? openEvent : null);
+    const response = await handleApi(
+      new Request("https://quickducks.com/api/v1/registrations", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "https://quickducks.com" },
+        body: JSON.stringify({ ...base, ...change, commandId: crypto.randomUUID() }),
+      }),
+      makeEnv(db, { TURNSTILE_SECRET_KEY: "test-secret" }),
+    );
+    const body = await response.json();
+    assert.equal(response.status, 422, label);
+    assert.ok(body.fields[field], label);
+    assert.equal(db.batches.length, 0, label);
+  }
 });
 
 test("rejects a Turnstile result for a different hostname", async (context) => {

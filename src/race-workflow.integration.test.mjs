@@ -248,9 +248,11 @@ const raceToAwaitingFinal = async (
       firstName: `Racer${index}`,
       lastName: "Example",
       email: `racer${index}@example.com`,
+      phone: `+1 817 320 ${String(6000 + index).padStart(4, "0")}`,
       emailNotificationsEnabled: optInRegistrationIndexes === null
         ? index === optInRegistrationIndex
         : optInRegistrationIndexes.includes(index),
+      smsNotificationsEnabled: index === 0,
     }), 201, `walk-up registration ${index}`);
     const participant = {
       registrationId: registration.registration.registrationId,
@@ -378,6 +380,12 @@ const raceToAwaitingFinal = async (
   finalHeat.revision = finalDetail.heat.revision;
   for (const operation of ["ready", "call", "start", "finish"]) await transition(finalHeat, operation);
   assert.equal(finalHeat.status, "AWAITING_RESULT");
+  const retainedContact = (await jsonBody(await api(
+    `/api/v1/staff/registrations/${participants[0].registrationId}`,
+    { token: staffToken },
+  ), 200, "contact consent survives the race lifecycle")).registration;
+  assert.equal(retainedContact.phone, "(817) 320-6000");
+  assert.equal(retainedContact.smsNotificationsEnabled, true);
 
   // The participant record for each finalist, in the roster order the promotion
   // wrote, so a caller can name a podium finisher by position.

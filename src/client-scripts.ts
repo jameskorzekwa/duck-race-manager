@@ -217,13 +217,138 @@ const registrationOwnershipStoreProof = (storage, registrationId, proof) => {
 };
 `;
 
-export const registrationScript = registrationHandoffHelpersScript + registrationOwnershipProofHelpersScript + String.raw`
+// One formatter and validator is embedded into every contact-entry client. It
+// lives on one namespaced global so classic scripts can safely coexist, while
+// the server remains authoritative for direct requests.
+export const contactInputHelpersScript = String.raw`
+globalThis.quickDucksContact ||= (() => {
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const phonePunctuationPattern = /^[0-9()+.\-\s]*$/;
+  const phoneDigits = (value) => {
+    const raw = String(value == null ? "" : value).trim();
+    if (raw === "") return "";
+    if (!phonePunctuationPattern.test(raw)) return null;
+    let digits = raw.replace(/\D/g, "");
+    if (digits.length === 11 && digits.startsWith("1")) digits = digits.slice(1);
+    return digits.length <= 10 ? digits : null;
+  };
+  const formatDigits = (digits) => {
+    if (digits.length === 0) return "";
+    if (digits.length <= 3) return "(" + digits;
+    if (digits.length <= 6) return "(" + digits.slice(0, 3) + ") " + digits.slice(3);
+    return "(" + digits.slice(0, 3) + ") " + digits.slice(3, 6) + "-" + digits.slice(6);
+  };
+  const formatValue = (value) => {
+    const digits = phoneDigits(value);
+    return digits === null ? null : formatDigits(digits);
+  };
+  const validPhone = (value) => {
+    const digits = phoneDigits(value);
+    return String(value == null ? "" : value).trim() === "" || (digits !== null && digits.length === 10);
+  };
+  const validEmail = (value) => {
+    const email = String(value == null ? "" : value).trim();
+    return email === "" || (email.length <= 254 && emailPattern.test(email));
+  };
+  const caretAfterDigits = (value, count) => {
+    if (count <= 0) return 0;
+    let seen = 0;
+    for (let index = 0; index < value.length; index += 1) {
+      if (/\d/.test(value[index])) seen += 1;
+      if (seen === count) return index + 1;
+    }
+    return value.length;
+  };
+  const formatInput = (input) => {
+    const raw = input.value;
+    const formatted = formatValue(raw);
+    if (formatted === null) return formatted;
+    const selection = typeof input.selectionStart === "number" ? input.selectionStart : raw.length;
+    let digitPosition = raw.slice(0, selection).replace(/\D/g, "").length;
+    if (raw.replace(/\D/g, "").length === 11 && raw.replace(/\D/g, "").startsWith("1")) {
+      digitPosition = Math.max(0, digitPosition - 1);
+    }
+    input.value = formatted;
+    if (typeof input.setSelectionRange === "function" && document.activeElement === input) {
+      const next = caretAfterDigits(formatted, digitPosition);
+      input.setSelectionRange(next, next);
+    }
+    return formatted;
+  };
+  const showServerErrors = (form, fields) => {
+    if (!form) return;
+    for (const target of form.querySelectorAll("[data-contact-error]")) target.textContent = "";
+    for (const [name, message] of Object.entries(fields || {})) {
+      const target = form.querySelector("[data-contact-error='" + name + "']");
+      if (target) target.textContent = String(message);
+    }
+  };
+  const bindForm = (form, names = {}) => {
+    if (!form) return null;
+    const fieldNames = {
+      email: names.email || "email",
+      phone: names.phone || "phone",
+      emailConsent: names.emailConsent || "emailNotificationsEnabled",
+      smsConsent: names.smsConsent || "smsNotificationsEnabled",
+    };
+    const email = form.elements[fieldNames.email];
+    const phone = form.elements[fieldNames.phone];
+    const emailConsent = form.elements[fieldNames.emailConsent];
+    const smsConsent = form.elements[fieldNames.smsConsent];
+    if (!email || !phone || !emailConsent || !smsConsent) return null;
+    const setError = (name, message) => {
+      const target = form.querySelector("[data-contact-error='" + name + "']");
+      if (target) target.textContent = message;
+    };
+    const sync = () => {
+      formatInput(phone);
+      const emailOkay = validEmail(email.value);
+      const phoneOkay = validPhone(phone.value);
+      const emailPresent = email.value.trim() !== "";
+      const phonePresent = phone.value.trim() !== "";
+      const emailMessage = emailPresent && !emailOkay ? "Enter a valid email address." : "";
+      const phoneMessage = phonePresent && !phoneOkay ? "Enter a valid 10-digit US phone number." : "";
+      if (typeof email.setCustomValidity === "function") email.setCustomValidity(emailMessage);
+      if (typeof phone.setCustomValidity === "function") phone.setCustomValidity(phoneMessage);
+      setError(fieldNames.email, emailMessage);
+      setError(fieldNames.phone, phoneMessage);
+      emailConsent.disabled = !emailPresent || !emailOkay;
+      smsConsent.disabled = !phonePresent || !phoneOkay;
+      if (emailConsent.disabled) emailConsent.checked = false;
+      if (smsConsent.disabled) smsConsent.checked = false;
+      if (!emailConsent.checked) setError(fieldNames.emailConsent, "");
+      if (!smsConsent.checked) setError(fieldNames.smsConsent, "");
+      return emailOkay && phoneOkay;
+    };
+    email.addEventListener("input", sync);
+    phone.addEventListener("input", sync);
+    form.addEventListener("reset", () => queueMicrotask(sync));
+    sync();
+    return {
+      sync,
+      validate() {
+        const valid = sync();
+        if (!valid && typeof form.reportValidity === "function") form.reportValidity();
+        return valid;
+      },
+      showErrors(fields) { showServerErrors(form, fields); },
+    };
+  };
+  return { bindForm, formatInput, formatValue, phoneDigits, showServerErrors, validEmail, validPhone };
+})();
+`;
+
+export const registrationScript = registrationHandoffHelpersScript + registrationOwnershipProofHelpersScript + contactInputHelpersScript + String.raw`
 const form = document.querySelector("[data-registration-form]");
 const eventName = document.querySelector("[data-event-name]");
 const eventDate = document.querySelector("[data-event-date]");
 const formMessage = document.querySelector("[data-form-message]");
 const submitButton = form.querySelector("button[type='submit']");
 const emailInput = form.elements.email;
+const registrationContact = globalThis.quickDucksContact.bindForm(form, {
+  emailConsent: "email_notifications_enabled",
+  smsConsent: "sms_notifications_enabled",
+});
 const emailLabel = document.querySelector("[data-email-label]");
 const publicNamePolicy = document.querySelector("[data-public-name-policy]");
 const firstNameInput = form.elements.first_name;
@@ -339,6 +464,10 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearFieldErrors();
   if (!currentEvent || currentEvent.status !== "REGISTRATION_OPEN" || !protectionReady) return;
+  if (!registrationContact.validate()) {
+    setMessage("Correct the email or phone number before registering.", true);
+    return;
+  }
 
   const turnstileToken = form.querySelector("[name='cf-turnstile-response']")?.value || "";
   if (!turnstileToken) {
@@ -358,7 +487,8 @@ form.addEventListener("submit", async (event) => {
     lastName: data.get("last_name"),
     email: data.get("email"),
     phone: data.get("phone"),
-    emailNotificationsEnabled: false,
+    emailNotificationsEnabled: data.get("email_notifications_enabled") === "on",
+    smsNotificationsEnabled: data.get("sms_notifications_enabled") === "on",
     turnstileToken,
     clientTimestamp: new Date().toISOString(),
   };
@@ -442,7 +572,7 @@ const participantConsumeHandoff = (storage, expectedRegistrationId, appOrigin) =
 };
 `;
 
-export const participantScript = participantHandoffHelpersScript + ownershipProofHelpersScript + String.raw`
+export const participantScript = participantHandoffHelpersScript + ownershipProofHelpersScript + contactInputHelpersScript + String.raw`
 const participantNav = document.querySelector("[data-my-ducks-nav]");
 const participantRoot = document.querySelector("[data-my-ducks-page]");
 const participantError = document.querySelector("[data-my-ducks-error]");
@@ -1060,7 +1190,9 @@ const participantPaintContact = (panel, registration) => {
   emailInput.maxLength = 254;
   emailInput.autocomplete = "email";
   emailInput.value = contact.email || "";
-  emailLabel.append(emailInput);
+  const emailError = participantText("span", "", "field-error");
+  emailError.dataset.contactError = "email";
+  emailLabel.append(emailInput, emailError);
   const phoneLabel = participantText("label", "Phone");
   const phoneInput = document.createElement("input");
   phoneInput.type = "tel";
@@ -1068,19 +1200,29 @@ const participantPaintContact = (panel, registration) => {
   phoneInput.maxLength = 32;
   phoneInput.autocomplete = "tel";
   phoneInput.value = contact.phone || "";
-  phoneLabel.append(phoneInput);
+  const phoneError = participantText("span", "", "field-error");
+  phoneError.dataset.contactError = "phone";
+  phoneLabel.append(phoneInput, phoneError);
   const emailChoice = participantText("label", "", "check");
   const emailCheckbox = document.createElement("input");
   emailCheckbox.type = "checkbox";
   emailCheckbox.name = "emailNotificationsEnabled";
   emailCheckbox.checked = contact.emailNotificationsEnabled;
-  emailChoice.append(emailCheckbox, participantText("span", "Send operational race updates by email"));
+  const emailChoiceError = participantText("span", "", "field-error");
+  emailChoiceError.dataset.contactError = "emailNotificationsEnabled";
+  const emailChoiceText = participantText("span", "Send operational race updates by email");
+  emailChoiceText.append(emailChoiceError);
+  emailChoice.append(emailCheckbox, emailChoiceText);
   const smsChoice = participantText("label", "", "check");
   const smsCheckbox = document.createElement("input");
   smsCheckbox.type = "checkbox";
   smsCheckbox.name = "smsNotificationsEnabled";
   smsCheckbox.checked = contact.smsNotificationsEnabled;
-  smsChoice.append(smsCheckbox, participantText("span", "Send operational race updates by SMS"));
+  const smsChoiceError = participantText("span", "", "field-error");
+  smsChoiceError.dataset.contactError = "smsNotificationsEnabled";
+  const smsChoiceText = participantText("span", "Send operational race updates by SMS");
+  smsChoiceText.append(smsChoiceError);
+  smsChoice.append(smsCheckbox, smsChoiceText);
   const feedback = participantText("p", "", "message-line muted");
   feedback.dataset.contactFeedback = registration.registrationId;
   feedback.setAttribute("role", "status");
@@ -1092,6 +1234,16 @@ const participantPaintContact = (panel, registration) => {
   const actions = participantText("div", "", "actions");
   actions.append(save, cancel);
   form.append(emailLabel, phoneLabel, emailChoice, smsChoice, actions, feedback);
+  // HTMLFormElement supplies this collection in browsers. The fallback keeps
+  // the same explicit controls usable in minimal DOM harnesses without changing
+  // the production path.
+  if (!form.elements) form.elements = {
+    email: emailInput,
+    phone: phoneInput,
+    emailNotificationsEnabled: emailCheckbox,
+    smsNotificationsEnabled: smsCheckbox,
+  };
+  const contactControls = globalThis.quickDucksContact.bindForm(form);
 
   const setDirty = () => { form.dataset.liveDirty = "true"; };
   emailInput.addEventListener("input", setDirty);
@@ -1115,6 +1267,7 @@ const participantPaintContact = (panel, registration) => {
     phoneInput.value = contact.phone || "";
     emailCheckbox.checked = contact.emailNotificationsEnabled;
     smsCheckbox.checked = contact.smsNotificationsEnabled;
+    contactControls.sync();
     feedback.hidden = true;
     delete form.dataset.liveDirty;
     edit.focus();
@@ -1124,6 +1277,7 @@ const participantPaintContact = (panel, registration) => {
   let pendingCommandId = null;
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (!contactControls.validate()) return;
     const proof = participantOwnershipProofs.get(registration.registrationId);
     if (!proof) {
       feedback.textContent = "Private contact access is unavailable. Refresh and try again.";
@@ -1158,6 +1312,7 @@ const participantPaintContact = (panel, registration) => {
       );
       const body = await response.json();
       if (!response.ok || !participantValidContact(body, registration.registrationId)) {
+        contactControls.showErrors(body && body.fields);
         feedback.textContent = body && typeof body.error === "string"
           ? body.error
           : "Contact details could not be saved. Please try again.";
@@ -5656,7 +5811,7 @@ const createHeatRosterEntry = ({ entry, text, openParticipant, openDuck }) => {
 };
 `;
 
-export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + heatRosterHelpersScript + String.raw`
+export const staffHomeScript = eventLifecycleHelpersScript + eventSlugHelpersScript + timezonePickerHelpersScript + heatRosterHelpersScript + contactInputHelpersScript + String.raw`
 const operationsRoot = document.querySelector("[data-operations-root]");
 const isSystemAdmin = operationsRoot.dataset.systemAdmin === "true";
 const assignedRoles = new Set((operationsRoot.dataset.roles || "").split(",").filter(Boolean));
@@ -5742,7 +5897,11 @@ const api = async (url, options) => {
       body = null;
     }
   }
-  if (!response.ok) throw new Error(body && body.error ? body.error : "Request failed.");
+  if (!response.ok) {
+    const error = new Error(body && body.error ? body.error : "Request failed.");
+    error.fields = body && body.fields ? body.fields : null;
+    throw error;
+  }
   return body;
 };
 
@@ -5757,6 +5916,7 @@ const perform = async (button, loadingMessage, operation) => {
     setMessage("Saved. Current data has been refreshed.");
     return result;
   } catch (error) {
+    globalThis.quickDucksContact.showServerErrors(button.form, error.fields);
     if (error.message !== "signed-out") setMessage(error.message, true);
     return null;
   } finally {
@@ -6496,6 +6656,8 @@ const participantEditForm = document.querySelector("[data-participant-edit-form]
 const participantActions = document.querySelector("[data-participant-actions]");
 const walkUpCard = document.querySelector("[data-walkup-card]");
 const walkUpForm = document.querySelector("[data-walkup-form]");
+const walkUpContact = globalThis.quickDucksContact.bindForm(walkUpForm);
+const participantEditContact = globalThis.quickDucksContact.bindForm(participantEditForm);
 const walkUpAvailability = document.querySelector("[data-walkup-availability]");
 const walkUpGuide = document.querySelector("[data-walkup-guide]");
 let currentWalkUpAdmission = { allowed: false, reason: "Checking walk-up availability…" };
@@ -6503,6 +6665,15 @@ let pendingWalkUpCommand = null;
 // The participants surface is rendered by both the Admin console's Participants
 // view and the registration desk, so it is always all-or-nothing on a page.
 const participantsPresent = Boolean(participantFilterForm && participantList && participantDetail);
+
+// A participant-list refresh and a participant-detail refresh start in parallel.
+// Either response may have been requested before staff began correcting the
+// form, so both paint paths must preserve an edit that became dirty while their
+// requests were in flight. The live hub blocks new refreshes for dirty controls,
+// but cannot cancel one that already started.
+const participantEditInProgress = () => Boolean(participantEditForm)
+  && (participantEditForm.dataset.liveDirty === "true"
+    || Boolean(participantEditForm.querySelector("[data-live-dirty='true']")));
 
 const renderWalkUpAvailability = (admission) => {
   if (!walkUpCard || !walkUpForm || !walkUpAvailability) return;
@@ -6555,7 +6726,7 @@ const toggleParticipantDetail = (registrationId) => {
     markParticipantSelection();
     return;
   }
-  loadParticipantDetail(registrationId)
+  return loadParticipantDetail(registrationId)
     .then(markParticipantSelection)
     .catch((error) => setMessage(error.message, true));
 };
@@ -6591,6 +6762,7 @@ const loadParticipants = async (pruneSelection = false) => {
     pruneSelection
     && selectedRegistration !== null
     && !body.registrations.some((registration) => registration.registrationId === selectedRegistration.registrationId)
+    && !participantEditInProgress()
   ) {
     clearParticipantDetail();
   }
@@ -6836,6 +7008,8 @@ const renderParticipantDetail = (registration) => {
     ["Lookup code", registration.lookupCode],
     ["Email", registration.email || "Not provided"],
     ["Phone", registration.phone || "Not provided"],
+    ["Email updates", registration.emailNotificationsEnabled ? "Opted in" : "Not opted in"],
+    ["SMS updates", registration.smsNotificationsEnabled ? "Opted in" : "Not opted in"],
     ["Created via", humanize(registration.createdVia)],
     ["Duck", participantDuckFact(registration)],
     ["Heat", participantHeatFact(registration)],
@@ -6847,6 +7021,9 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.lastName.value = registration.lastName;
   participantEditForm.elements.email.value = registration.email || "";
   participantEditForm.elements.phone.value = registration.phone || "";
+  participantEditForm.elements.emailNotificationsEnabled.checked = registration.emailNotificationsEnabled;
+  participantEditForm.elements.smsNotificationsEnabled.checked = registration.smsNotificationsEnabled;
+  participantEditContact.sync();
   participantEditForm.elements.notes.value = registration.notes || "";
   // Naming needs a duck to name *now*, and the endpoint refuses without a
   // current assignment, so this is the pairing question rather than the
@@ -6921,8 +7098,7 @@ const loadParticipantDetail = async (registrationId) => {
     !participantDetailRequest.isCurrent(request)
     || document.hidden
     || currentEvent?.id !== eventId
-    || Boolean(document.querySelector?.("[data-participant-edit-form]")
-      ?.querySelector?.("[data-live-dirty='true']"))
+    || participantEditInProgress()
   ) return;
   renderParticipantDetail(body.registration);
 };
@@ -6943,6 +7119,7 @@ walkUpForm?.addEventListener("submit", async (event) => {
     resultTarget.textContent = currentWalkUpAdmission.reason;
     return;
   }
+  if (!walkUpContact.validate()) return;
   const values = new FormData(form);
   pendingWalkUpCommand ??= { commandId: crypto.randomUUID(), privateToken: randomPrivateToken() };
   await perform(button, "Creating walk-up registration…", async () => {
@@ -6956,7 +7133,8 @@ walkUpForm?.addEventListener("submit", async (event) => {
         lastName: String(values.get("lastName")),
         email: String(values.get("email")) || null,
         phone: String(values.get("phone")) || null,
-        emailNotificationsEnabled: false,
+        emailNotificationsEnabled: values.get("emailNotificationsEnabled") === "on",
+        smsNotificationsEnabled: values.get("smsNotificationsEnabled") === "on",
         notes: String(values.get("notes")) || null,
         clientTimestamp: new Date().toISOString(),
       }),
@@ -6968,14 +7146,19 @@ walkUpForm?.addEventListener("submit", async (event) => {
     resultTarget.replaceChildren(text("strong", "Lookup code: " + result.registration.lookupCode + " · "), link);
     pendingWalkUpCommand = null;
     form.reset();
-    await loadParticipants();
+    walkUpContact.sync();
+    // Paint the committed response before the follow-up list refresh. The list
+    // is useful for selection state, but a slow or failed refresh must not hide
+    // the participant staff just created or delay the edit controls.
     renderParticipantDetail(result.registration);
+    await loadParticipants();
   });
   if (!currentWalkUpAdmission.allowed) button.disabled = true;
 });
 
 participantEditForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!participantEditContact.validate()) return;
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const values = new FormData(form);
@@ -6989,7 +7172,8 @@ participantEditForm?.addEventListener("submit", async (event) => {
         lastName: String(values.get("lastName")),
         email: String(values.get("email")) || null,
         phone: String(values.get("phone")) || null,
-        emailNotificationsEnabled: false,
+        emailNotificationsEnabled: values.get("emailNotificationsEnabled") === "on",
+        smsNotificationsEnabled: values.get("smsNotificationsEnabled") === "on",
         notes: String(values.get("notes")) || null,
       }),
     );

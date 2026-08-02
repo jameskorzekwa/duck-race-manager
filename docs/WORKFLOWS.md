@@ -461,10 +461,21 @@ The participant enters:
 - First name, required, normalized to single spaces, maximum 80 characters.
 - Last name, required, normalized to single spaces, maximum 80 characters.
 - Email, optional or required by event configuration, maximum 254 characters.
-- Phone, optional, maximum 32 characters.
-- Email for staff contact when supplied. The routine UI does not offer an email
-  notification preference while outbound delivery remains non-operational.
+- Phone, optional, but when supplied it must normalize to exactly ten US digits.
+  The browser formats it progressively as `(817) 320-6150` for typing, paste,
+  deletion, and in-place edits; punctuation is not part of validation.
+- Independent email-notification and SMS-notification choices. Each choice is
+  available only while its own valid contact address is present.
 - A successful Turnstile response.
+
+Email and phone may both be blank unless the event requires email. Any non-empty
+contact is validated even when its notification choice is off. The API repeats
+the same checks, rejects an opt-in without its valid channel, lowercases email,
+and stores newly submitted phone numbers in the displayed US format. Clearing a
+channel clears its choice in the browser, while a contradictory direct request
+is rejected rather than persisting consent without a destination. Existing rows
+remain readable and all consent columns default to not opted in unless a choice
+was explicitly captured.
 
 The safe current-event response includes the configured public-name policy. The
 form applies it to the entered name and states the exact public display, while
@@ -526,7 +537,8 @@ closing timestamp has passed.
 **Implemented:** `REGISTRATION`, `RACE_DIRECTOR`, and system-administrator
 accounts can create a walk-up while the event
 is `REGISTRATION_OPEN` and inside its configured registration window. The same
-field and email rules apply. Staff may also add notes of up to 2,000 characters.
+contact-validation and independent-consent rules apply to both walk-up creation
+and later staff participant edits. Staff may also add notes of up to 2,000 characters.
 The registration is marked `created_via = STAFF` and starts as `SUBMITTED`.
 
 The console displays the new lookup code and a one-time link to open the private
@@ -534,8 +546,8 @@ status page. A staff walk-up is not automatically added to the participant's
 browser collection.
 
 **Operator step:** give the participant the displayed lookup code or private
-link before leaving the result. QuickDucks has no email delivery or later
-verified private-link recovery workflow.
+link before leaving the result. QuickDucks has no later verified private-link
+recovery workflow.
 
 ## Participant Status and Recovery
 
@@ -653,11 +665,15 @@ Contact updates require the exact application Origin, a current registration
 revision, and a UUID command ID. A retry with the same participant, revision,
 proof, and normalized four-field material replays without another write; command
 reuse for different material is rejected. Email is lowercased, blank contact
-values become null, the event's required-email policy still applies, and an
-email or SMS opt-in requires its corresponding address. Audit history records
+values become null, new phone values normalize to `(817) 320-6150`, the event's
+required-email policy still applies, and an email or SMS opt-in requires its
+corresponding valid address. Invalid non-empty contact is rejected even with its
+opt-in off. The same validation and controls apply during public registration,
+staff walk-up registration, and staff participant edits. Audit history records
 only the changed field names, never old or new contact values or ownership
-proof. SMS and email delivery remain non-operational; these preferences do not
-enqueue a message.
+proof. Email consent participates in the implemented operational-email workflow.
+SMS consent is captured independently, but SMS delivery is not implemented and
+the choice does not enqueue an SMS.
 
 The privacy notice warns that anyone with access to the originating browser
 profile may view or edit its owned contact details. Cancel discards an edit,

@@ -88,7 +88,9 @@ test.describe("complete race journey", () => {
       await form.getByLabel("First name").fill("Browser");
       await form.getByLabel("Last name").fill("Racer");
       await form.getByLabel(/Email/).fill("browser.racer@example.test");
-      await form.getByLabel("Phone (optional)").fill("+15550200000");
+      await form.getByLabel("Phone (optional)").fill("8173206000");
+      await form.getByRole("checkbox", { name: "Send operational race updates by email" }).check();
+      await form.getByRole("checkbox", { name: "Send operational race updates by SMS" }).check();
       await form.getByRole("button", { name: "Register participant" }).click();
       await expect(page).toHaveURL(`${baseUrl}/my-ducks`);
       const registrations = (await client.get(
@@ -96,6 +98,9 @@ test.describe("complete race journey", () => {
       )).body.registrations;
       const firstBody = registrations.find((registration) => registration.email === "browser.racer@example.test");
       expect(firstBody).toBeTruthy();
+      expect(firstBody.phone).toBe("(817) 320-6000");
+      expect(firstBody.emailNotificationsEnabled).toBe(true);
+      expect(firstBody.smsNotificationsEnabled).toBe(true);
       participants.push({
         firstName: "Browser",
         lastName: "Racer",
