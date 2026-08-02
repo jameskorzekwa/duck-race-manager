@@ -492,6 +492,7 @@ test("My Ducks keeps the registration action while sections stay gated until dat
   assert.doesNotMatch(myDucks, /No participants are waiting for a duck|No paired ducks are saved on this device yet/);
   assert.match(myDucks, /<p class="empty-state" data-my-ducks-empty hidden>No registrations are saved on this device yet\./);
   assert.match(myDucks, /<h2 id="awaiting-participants-title">Awaiting Duck Assignment<\/h2>/);
+  assert.match(myDucks, /<h2 id="awaiting-participants-title">Awaiting Duck Assignment<\/h2>\s*<div class="participant-section-head-actions">\s*<a class="button small" href="\/register" data-register-another>Register another participant<\/a>/);
   assert.match(myDucks, /<h2 id="paired-participants-title">My Ducks<\/h2>/);
   assert.match(myDucks, /data-carousel-controls hidden/);
   assert.match(myDucks, /data-participant-track tabindex="0" aria-label="Awaiting duck assignment registrations" hidden/);

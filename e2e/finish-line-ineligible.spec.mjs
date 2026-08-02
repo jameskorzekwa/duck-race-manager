@@ -5,6 +5,7 @@ import {
   bootstrap,
   changeRegistrationStatus,
   confirmAction,
+  expectNoDocumentOverflow,
   rawJson,
   seedState,
   signIn,
@@ -120,6 +121,15 @@ test.describe("a withdrawn duck at the finish line", () => {
       .toContainText(`Duck #${withdrawnEntry.duck.visibleNumber} is Withdrawn`);
     await expect(ineligibleBlock(page)).toContainText("Scan the next duck to pass the finish line.");
     await expect(page.locator("[data-finish-selections] .station-selection")).toHaveCount(0);
+    for (const width of [320, 375, 430]) {
+      await page.setViewportSize({ width, height: 900 });
+      const warningBox = await ineligibleBlock(page).boundingBox();
+      expect(warningBox).not.toBeNull();
+      expect(warningBox.x).toBeGreaterThanOrEqual(0);
+      expect(warningBox.x + warningBox.width).toBeLessThanOrEqual(width);
+      await expect(ineligibleBlock(page).locator("strong")).toBeVisible();
+      await expectNoDocumentOverflow(page);
+    }
 
     // Still armed: the heat, the scan field, and the NFC button are untouched,
     // and nothing has to be dismissed first.

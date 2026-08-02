@@ -121,6 +121,24 @@ test("My Ducks sections and app dialogs keep the shared spacing rhythm", () => {
   assert.match(css, /\.app-confirmation-actions \{ display:flex; flex-wrap:wrap; justify-content:flex-end; gap:\.8rem; \}/);
 });
 
+test("Register again stays in the Awaiting Duck Assignment header and wraps intentionally", () => {
+  const markup = renderMyDucks("REGISTRATION");
+  const css = stylesheetFrom(markup);
+  const awaitingHeader = markup.slice(
+    markup.indexOf('<div class="participant-section-head">', markup.indexOf('data-participant-section="awaiting"')),
+    markup.indexOf("</div>", markup.indexOf('data-participant-section="awaiting"')) + "</div>".length,
+  );
+
+  assert.match(awaitingHeader, /<h2 id="awaiting-participants-title">Awaiting Duck Assignment<\/h2>/);
+  assert.match(awaitingHeader, /<a class="button small" href="\/register" data-register-another>Register another participant<\/a>/);
+  assert.ok(awaitingHeader.indexOf("Awaiting Duck Assignment") < awaitingHeader.indexOf("Register another participant"));
+  assert.match(css, /\.participant-section-head h2 \{ flex:1 1 12rem;[^}]*overflow-wrap:anywhere; \}/);
+  assert.match(css, /\.participant-section-head-actions \{[^}]*flex-wrap:wrap;[^}]*min-width:0; \}/);
+  assert.match(css, /\.participant-section-head-actions > \.button \{ flex:0 1 auto; \}/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.participant-section-head \{ align-items:center; gap:var\(--space-xs\); \}/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.participant-section-head-actions \{ flex-basis:100%; justify-content:center; \}/);
+});
+
 test("mobile staff controls retain touch targets and wrapping containment", () => {
   const css = stylesheetFrom(renderStaffHome("Spacing Test", true, []));
 
@@ -130,8 +148,23 @@ test("mobile staff controls retain touch targets and wrapping containment", () =
   assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.button\.small \{ min-height:2\.75rem; \}/);
   assert.match(css, /\.button\.small:active:not\(:disabled\) \{ transform:translate\(2px,2px\); \}/);
   assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.role-set > \.check \{ min-height:2\.75rem; \}/);
-  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.site-head \{ flex-wrap:wrap; \}[\s\S]*\.nav \{ width:100%; \}[\s\S]*\.nav a \{ flex:1 1 0;/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.site-head \{[^}]*flex-wrap:wrap;[^}]*\}[\s\S]*\.nav \{[^}]*width:100%;[^}]*\}[\s\S]*\.nav a \{[^}]*flex:1 1 0;/);
   assert.match(css, /\.staff-role-controls > select,\.staff-role-controls > fieldset \{ min-width:0;/);
+});
+
+test("mobile surfaces share gutters, compact nesting, centered actions, and readable notices", () => {
+  const css = stylesheetFrom(renderStaffHome("Spacing Test", true, []));
+
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.page-panel \{ margin:var\(--space-xs\) auto 2rem; padding:var\(--space-md\);/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.operations-panel,\.station-panel \{ padding:var\(--space-md\); \}/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.console-section,\.announcer-section \{ margin:var\(--space-lg\) 0; padding:var\(--space-sm\); \}/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.actions \{[^}]*width:100%; justify-content:center;/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*form > \.button[^}]*margin-inline:auto; justify-self:center;/);
+  assert.match(css, /\.notice \{ max-width:100%;[^}]*overflow-wrap:anywhere; \}/);
+  assert.match(css, /\.notice > strong:first-child \{ display:block; margin-bottom:var\(--space-xs\); \}/);
+  assert.match(css, /\.field-error:not\(:empty\) \{[^}]*border-left:\.3rem solid #9f261c; background:#fff3f1; \}/);
+  assert.match(css, /\.message-line\[role="alert"\]:not\(:empty\)[^}]*background:#fff3f1;/);
+  assert.match(css, /@media \(max-width:43\.99rem\)[\s\S]*\.app-confirmation \{[^}]*max-height:calc\(100dvh - 1\.5rem\);/);
 });
 
 test("every primary staff view uses one shared panel size, color, padding, and title scale", () => {

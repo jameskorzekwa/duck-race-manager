@@ -88,6 +88,7 @@ test.describe("sitewide UI consistency", () => {
     await expect(datePanel).toBeVisible();
     await datePanel.getByRole("button", { name: "Next month" }).click();
     const targetDate = await datePanel.locator(".app-date-day").filter({ hasText: /^15$/ }).getAttribute("data-date-value");
+    expect(targetDate).not.toBeNull();
     await datePanel.locator(`[data-date-value="${targetDate}"]`).click();
     await expect(datePanel).toBeHidden();
     await expect(dateInput).toHaveValue(targetDate);
@@ -149,14 +150,21 @@ test.describe("sitewide UI consistency", () => {
     await expect(datetimeInput).toHaveValue(`${datetimeDate}T10:37`);
     await expect(datetimePanel).toBeHidden();
 
-    await page.setViewportSize({ width: 320, height: 720 });
-    await dateTrigger.click();
-    await expect(datePanel).toBeVisible();
-    const mobileBox = await datePanel.boundingBox();
-    expect(mobileBox.x).toBeGreaterThanOrEqual(0);
-    expect(mobileBox.x + mobileBox.width).toBeLessThanOrEqual(320);
-    await expectNoDocumentOverflow(page);
-    await page.keyboard.press("Escape");
+    for (const width of [320, 375, 430]) {
+      await page.setViewportSize({ width, height: 720 });
+      await dateTrigger.click();
+      await expect(datePanel).toBeVisible();
+      const mobileBox = await datePanel.boundingBox();
+      expect(mobileBox).not.toBeNull();
+      expect(mobileBox.x).toBeGreaterThanOrEqual(0);
+      expect(mobileBox.x + mobileBox.width).toBeLessThanOrEqual(width);
+      const dayBox = await datePanel.locator(".app-date-day").first().boundingBox();
+      expect(dayBox).not.toBeNull();
+      expect(dayBox.height).toBeGreaterThanOrEqual(44);
+      await expectNoDocumentOverflow(page);
+      await page.keyboard.press("Escape");
+      await expect(datePanel).toBeHidden();
+    }
     expect(errors).toEqual([]);
   });
 
@@ -359,6 +367,20 @@ test.describe("sitewide UI consistency", () => {
     await expect(dialog.getByRole("heading", { name: "Permanently delete this event?" })).toBeVisible();
     const finalDelete = dialog.getByRole("button", { name: "Delete event", exact: true });
     const confirmation = dialog.locator('input[name="confirmName"]');
+    for (const width of [320, 375, 430]) {
+      await adminPage.setViewportSize({ width, height: 760 });
+      const dialogBox = await dialog.boundingBox();
+      expect(dialogBox).not.toBeNull();
+      expect(dialogBox.x).toBeGreaterThanOrEqual(0);
+      expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(width);
+      await expect(dialog.locator(".app-confirmation-message")).toBeVisible();
+      for (const button of await dialog.locator(".button").all()) {
+        const buttonBox = await button.boundingBox();
+        expect(buttonBox).not.toBeNull();
+        expect(buttonBox.height).toBeGreaterThanOrEqual(44);
+      }
+      await expectNoDocumentOverflow(adminPage);
+    }
     await expect(finalDelete).toBeDisabled();
     await confirmation.fill("Wrong event");
     await expect(finalDelete).toBeDisabled();
@@ -572,6 +594,14 @@ test.describe("sitewide UI consistency", () => {
     await expect(
       awaitingSection.getByRole("heading", { level: 2, name: "Awaiting Duck Assignment", exact: true }),
     ).toBeVisible();
+    const awaitingHeader = awaitingSection.locator(".participant-section-head");
+    const registerAgain = awaitingHeader.getByRole("link", { name: "Register another participant", exact: true });
+    await expect(registerAgain).toBeVisible();
+    expect(await registerAgain.evaluate((link) =>
+      link.parentElement?.classList.contains("participant-section-head-actions")
+      && link.parentElement.parentElement?.classList.contains("participant-section-head")
+    ))
+      .toBe(true);
     await expect(page.getByRole("heading", { name: "Awaiting Participants", exact: true })).toHaveCount(0);
     await expect(
       card.getByText("Show this code to staff at registration table to get your duck!", { exact: true }),
@@ -592,13 +622,21 @@ test.describe("sitewide UI consistency", () => {
     // This is the populated awaiting card, not only the empty My Ducks shell.
     // Keep its exact guidance visible and its carousel contained at every
     // responsive width the public suite supports.
-    for (const width of [320, 390, 768, 1280]) {
+    for (const width of [320, 375, 430, 768, 1280]) {
       await page.setViewportSize({ width, height: 900 });
       await expect(card).toBeVisible();
       await expect(
         card.getByText("Show this code to staff at registration table to get your duck!", { exact: true }),
       ).toBeVisible();
       await expect(card.locator("dt")).toHaveText(["Duck"]);
+      await expect(registerAgain).toHaveCSS("text-align", "center");
+      if (width <= 430) {
+        await expect(registerAgain.locator("xpath=..")).toHaveCSS("justify-content", "center");
+      }
+      const registerBox = await registerAgain.boundingBox();
+      expect(registerBox).not.toBeNull();
+      expect(registerBox.x).toBeGreaterThanOrEqual(0);
+      expect(registerBox.x + registerBox.width).toBeLessThanOrEqual(width);
       for (const label of ["Assigned heat", "Race activity", "Race status"]) {
         await expect(card.getByText(label, { exact: true })).toHaveCount(0);
       }
@@ -656,7 +694,7 @@ test.describe("sitewide UI consistency", () => {
     await expect(pairedCard).toHaveCSS("background-color", plainBackground);
     await expect(pairedCard.locator(".success-tag")).toHaveCount(0);
     await expect(pairedCard).not.toContainText("Just registered");
-    for (const width of [320, 1280]) {
+    for (const width of [320, 375, 430, 1280]) {
       await page.setViewportSize({ width, height: 900 });
       await expect(pairedCard).toBeVisible();
       await expect(pairedCard.locator("dt")).toHaveText([

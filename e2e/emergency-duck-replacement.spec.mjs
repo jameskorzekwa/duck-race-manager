@@ -28,6 +28,27 @@ const replacementPayload = (eventId, candidate, inspection, incidentType = "LOST
   incidentType,
 });
 
+const expectReplacementMobileLayout = async (page, selectors) => {
+  for (const width of [320, 375, 430]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expectNoDocumentOverflow(page);
+    for (const selector of selectors) {
+      const element = page.locator(selector);
+      if (!await element.isVisible()) continue;
+      const box = await element.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box.x, selector).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width, selector).toBeLessThanOrEqual(width);
+    }
+    for (const button of await page.locator("[data-replacement-work] .button, .app-confirmation .button").all()) {
+      if (!await button.isVisible()) continue;
+      const box = await button.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box.height).toBeGreaterThanOrEqual(44);
+    }
+  }
+};
+
 const exerciseReplacement = async (page, state, spareNumber) => {
   const seeded = await seedState(state, { participants: 9, heatSize: 3 });
   const { admin, client } = await bootstrap();
@@ -48,6 +69,12 @@ const exerciseReplacement = async (page, state, spareNumber) => {
   await expect(page.getByRole("heading", { name: `Last resort for a lost or damaged duck` })).toBeVisible();
   await expect(page.getByText("This is only a last resort for a lost or damaged duck.", { exact: false })).toBeVisible();
   await expect(page.locator("[data-replacement-duck]")).toContainText(`Duck #${spare.visibleNumber}`);
+  await expectReplacementMobileLayout(page, [
+    "[data-replacement-work]",
+    ".emergency-warning",
+    "[data-replacement-search]",
+    ".replacement-reasons",
+  ]);
 
   const search = page.getByLabel("Paired participant name or current duck number");
   await search.fill(participantName);
@@ -71,6 +98,12 @@ const exerciseReplacement = async (page, state, spareNumber) => {
   await expect(dialog).toContainText(oldDuckLabel);
   await expect(dialog).toContainText(newDuckLabel);
   await expect(dialog).toContainText("last resort for a lost or damaged duck");
+  await expectReplacementMobileLayout(page, [
+    "[data-replacement-work]",
+    "[data-replacement-review]",
+    ".replacement-reasons",
+    ".app-confirmation",
+  ]);
   await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
   expect(replacementRequests).toBe(0);
 
@@ -91,8 +124,7 @@ const exerciseReplacement = async (page, state, spareNumber) => {
   expect(oldInspection.body.assignment).toBeNull();
   expect(oldInspection.body.winnerAction).toBeNull();
 
-  await page.setViewportSize({ width: 320, height: 900 });
-  await expectNoDocumentOverflow(page);
+  await expectReplacementMobileLayout(page, [".page-panel", "[data-winner-action]"]);
   await page.setViewportSize({ width: 1280, height: 900 });
   await expectNoDocumentOverflow(page);
   expect(errors).toEqual([]);
