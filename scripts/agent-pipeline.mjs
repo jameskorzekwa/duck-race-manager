@@ -149,6 +149,12 @@ export function verificationSignatures(comments) {
     .map((match) => match[1]));
 }
 
+export function infrastructureFailures(comments) {
+  return comments.flatMap(({ body }) => [...String(body ?? "")
+    .matchAll(/<!-- agent-pipeline infrastructure-failure=([a-z-]+) -->/g)]
+    .map((match) => match[1]));
+}
+
 export function markerNumbers(comments, name) {
   return markerGroups(comments, name).flat();
 }
@@ -290,6 +296,15 @@ export async function recoverFailedIssue({ github, context }, issueNumber) {
     await commentOnce(
       `<!-- agent-pipeline repeated-verification=${verification.at(-1).slice(0, 12)} -->`,
       "Two consecutive repairs produced the same hosted verification failures, so automatic retries stopped.",
+    );
+    await setState("agent:error");
+    return "error";
+  }
+  const infrastructure = infrastructureFailures(recoveryComments);
+  if (infrastructure.length >= 2 && infrastructure.at(-1) === infrastructure.at(-2)) {
+    await commentOnce(
+      `<!-- agent-pipeline repeated-infrastructure=${infrastructure.at(-1)} -->`,
+      "Two consecutive attempts failed before producing a task artifact, so automatic retries stopped.",
     );
     await setState("agent:error");
     return "error";

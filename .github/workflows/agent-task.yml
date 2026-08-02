@@ -371,7 +371,8 @@ jobs:
             process.stdout.write(value);
           ')"
           model_dir="${resume_dir:-$workspace_root/task-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
-          rm -rf "$model_dir"
+          node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
+            "$state_path" "$state_root/runners" "$model_dir"
           mkdir -p "$model_dir"
           git archive "$EXPECTED_BASE" | tar -x -C "$model_dir"
           resumed=false
@@ -570,7 +571,7 @@ jobs:
             --marker-offset "$marker_offset"
 
       - name: Upload immutable task artifact
-        if: always()
+        if: steps.result.conclusion == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agent-task-${{ github.run_id }}-${{ github.run_attempt }}
@@ -586,7 +587,7 @@ jobs:
         run: |
           set -euo pipefail
           state_root="$HOME/.local/state/quickducks-agent-runner"
-          if [[ -n "${PIPELINE_MODEL_DIR:-}" ]] && command -v openchamber > /dev/null; then
+          if [[ -n "${PIPELINE_MODEL_DIR:-}" && -n "${PIPELINE_MODEL_STATE:-}" ]] && command -v openchamber > /dev/null; then
             node "$GITHUB_WORKSPACE/scripts/wait-for-openchamber-session.mjs" \
               --mode idle \
               --dir "$PIPELINE_MODEL_DIR" \
@@ -595,8 +596,9 @@ jobs:
             node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
               "$PIPELINE_MODEL_STATE" "$state_root/runners" "$PIPELINE_MODEL_DIR"
           fi
+          temp_state="${PIPELINE_MODEL_STATE:-$RUNNER_TEMP/agent-task/cleanup-state.json}"
           node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
-            "$PIPELINE_MODEL_STATE" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-task"
+            "$temp_state" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-task"
 
   verify:
     needs: [prepare, implement]
@@ -990,6 +992,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           ATTEMPT_DIGEST: ${{ needs.implement.outputs.digest }}
+          IMPLEMENT_RESULT: ${{ needs.implement.result }}
           ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
           PR_NUMBER: ${{ steps.publication.outputs.pr }}
         with:
@@ -1011,6 +1014,11 @@ jobs:
             const attemptDigest = String(process.env.ATTEMPT_DIGEST ?? "").trim();
             const digestMarker = /^[0-9a-f]{64}$/.test(attemptDigest)
               ? ` <!-- agent-pipeline attempt-digest=${attemptDigest} -->`
+              : "";
+            const infrastructureFailure = process.env.IMPLEMENT_RESULT !== "success"
+              && !attemptDigest && !verification ? "pre-artifact" : "";
+            const infrastructureMarker = infrastructureFailure
+              ? ` <!-- agent-pipeline infrastructure-failure=${infrastructureFailure} -->`
               : "";
             const verificationSignature = pipeline.verificationFailureSignature(verification);
             const verificationMarker = verificationSignature
@@ -1054,7 +1062,7 @@ jobs:
               owner, repo, issue_number: issueNumber,
               body: published
                 ? `<!-- agent-pipeline gate-dispatch-failed=${context.runId} pr=${pr.number} -->\nCandidate PR #${pr.number} was published, but gate dispatch failed. Reconciliation will recover missing gates. [Agent Task run](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})`
-                : `<!-- agent-pipeline run-failed=${context.runId} -->${digestMarker}${verificationMarker}\n[Agent Task failed](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})${evidence}`,
+                : `<!-- agent-pipeline run-failed=${context.runId} -->${digestMarker}${verificationMarker}${infrastructureMarker}\n[Agent Task failed](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})${evidence}`,
             });
             // Retry immediately instead of waiting for the reconciliation sweep.
             // The shared policy decides: requeue with the saved seed, or park at

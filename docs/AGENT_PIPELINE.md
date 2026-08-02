@@ -236,7 +236,10 @@ Each runner records active model state outside the Actions workspace. State and
 workspaces are runner-scoped so two implementation sessions and one review can
 run concurrently without sharing mutable records. Workspaces are deleted only
 after all matching sessions report `idle`, so a timed-out turn cannot race
-cleanup or contaminate another patch.
+cleanup or contaminate another patch. Retry reconstruction first restores owner
+write permission on the deliberately read-only preserved tree, then rebuilds it
+from trusted `main` plus the saved patch. Two consecutive failures before a task
+artifact exists stop automatically instead of consuming the full repair budget.
 
 ## Install In Another Repository
 
