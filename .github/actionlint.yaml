@@ -1,6 +1,7 @@
 self-hosted-runner:
   labels:
-    - quickducks-model
+    - quickducks-implement
+    - quickducks-review
 paths:
   .github/workflows/release.yml:
     ignore:

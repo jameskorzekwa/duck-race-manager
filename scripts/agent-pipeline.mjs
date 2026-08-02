@@ -16,6 +16,18 @@ const STATE_LABELS = [
   "agent:failed",
   "agent:error",
 ];
+const AUTOMATION_USER_ID = 41898282;
+
+function trustedAutomationComments(comments) {
+  return comments.filter((comment) => comment.user?.id === AUTOMATION_USER_ID);
+}
+
+function commentsAfterLatestMarker(comments, name) {
+  const trusted = trustedAutomationComments(comments);
+  const marker = `<!-- agent-pipeline ${name}=`;
+  const index = trusted.findLastIndex((comment) => String(comment.body ?? "").includes(marker));
+  return index < 0 ? trusted : trusted.slice(index + 1);
+}
 
 export function closingIssueNumbers(body) {
   const matches = [...String(body ?? "").matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/gi)];
@@ -49,7 +61,7 @@ export async function firstDeployedRelease(github, owner, repo, releaseRuns, mer
 // it, leaving a live implementation labelled failed. Every state write from a
 // run therefore proves it is still the current owner first.
 export function latestTaskRun(comments) {
-  const runs = markerNumbers(comments, "task-run");
+  const runs = markerNumbers(trustedAutomationComments(comments), "task-run");
   return runs.length > 0 ? runs.at(-1) : null;
 }
 
@@ -71,6 +83,36 @@ export async function writeIssueStateIfCurrent({ github, context }, issueNumber,
 }
 
 export const TASK_RETRY_LIMIT = 5;
+
+export function classifyTaskResult({ issue, marker, patchLength, exitStatus }) {
+  const failed = { type: "failed", numbers: [] };
+  if (exitStatus !== 0) return failed;
+
+  let match;
+  if ((match = marker.match(/^PIPELINE_TASK_READY:(\d+)$/))
+      && Number(match[1]) === issue && patchLength > 0) {
+    return { type: "ready", numbers: [issue] };
+  }
+  if ((match = marker.match(/^PIPELINE_TASK_GROUPED:(\d+)$/))
+      && Number(match[1]) !== issue && patchLength === 0) {
+    return { type: "grouped", numbers: [Number(match[1])] };
+  }
+  if ((match = marker.match(/^PIPELINE_TASK_BLOCKED:(\d+(?:,\d+)*)$/)) && patchLength === 0) {
+    const [blockedIssue, ...blockers] = match[1].split(",").map(Number);
+    if (blockedIssue === issue && blockers.length > 0
+        && !blockers.includes(issue) && new Set(blockers).size === blockers.length) {
+      return { type: "blocked", numbers: blockers };
+    }
+  }
+  if ((match = marker.match(/^PIPELINE_TASK_DUPLICATE:(\d+)$/))
+      && Number(match[1]) !== issue && patchLength === 0) {
+    return { type: "duplicate", numbers: [Number(match[1])] };
+  }
+  if ((match = marker.match(/^PIPELINE_TASK_QUESTION:(\d+)$/)) && Number(match[1]) === issue) {
+    return { type: "question", numbers: [issue] };
+  }
+  return failed;
+}
 
 // An agent:question issue resumes when James replies after the latest posted
 // question. Automation comments never count as an answer.
@@ -134,6 +176,21 @@ function pipelinePullProvenance(pr, defaultBranch) {
     && Number(branch[1]) === linked[0]
     && marker[1] === branch[2]
     && marker[2] === branch[1];
+}
+
+export function pipelineValidationProvenance(pr) {
+  const task = (pr.body ?? "").match(/<!-- agent-pipeline task-run=(\d+) issue=(\d+) base=([0-9a-f]{40}) -->/);
+  const validation = (pr.body ?? "").match(
+    /<!-- agent-pipeline validation-run=(\d+) attempt=(\d+) artifact=(\d+) digest=([0-9a-f]{64}) tree=([0-9a-f]{40}) -->/,
+  );
+  if (!task || !validation || task[1] !== validation[1]) return null;
+  return {
+    runId: Number(validation[1]),
+    runAttempt: Number(validation[2]),
+    artifactId: Number(validation[3]),
+    artifactDigest: validation[4],
+    treeSha: validation[5],
+  };
 }
 
 // A trusted same-repository PR may recover a saved artifact or repair a rejected
@@ -205,11 +262,12 @@ export async function recoverFailedIssue({ github, context }, issueNumber) {
     owner, repo, issue_number: issueNumber, per_page: 100,
   });
   const commentOnce = async (marker, body) => {
-    if (comments.some((comment) => comment.body?.includes(marker))) return;
+    if (trustedAutomationComments(comments).some((comment) => comment.body?.includes(marker))) return;
     await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: `${marker}\n${body}` });
   };
 
-  const retries = markerNumbers(comments, "task-retry").length;
+  const recoveryComments = commentsAfterLatestMarker(comments, "recovery-reset");
+  const retries = markerNumbers(recoveryComments, "task-retry").length;
   if (retries >= TASK_RETRY_LIMIT) {
     await commentOnce(
       "<!-- agent-pipeline task-exhausted -->",
@@ -218,7 +276,7 @@ export async function recoverFailedIssue({ github, context }, issueNumber) {
     await setState("agent:error");
     return "error";
   }
-  const digests = attemptDigests(comments);
+  const digests = attemptDigests(recoveryComments);
   if (digests.length >= 2 && digests.at(-1) === digests.at(-2)) {
     await commentOnce(
       `<!-- agent-pipeline no-progress=${digests.at(-1).slice(0, 12)} -->`,
@@ -227,7 +285,7 @@ export async function recoverFailedIssue({ github, context }, issueNumber) {
     await setState("agent:error");
     return "error";
   }
-  const verification = verificationSignatures(comments);
+  const verification = verificationSignatures(recoveryComments);
   if (verification.length >= 2 && verification.at(-1) === verification.at(-2)) {
     await commentOnce(
       `<!-- agent-pipeline repeated-verification=${verification.at(-1).slice(0, 12)} -->`,
@@ -271,7 +329,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
   });
   const commentOnce = async (issueNumber, marker, body) => {
     const comments = await commentsFor(issueNumber);
-    if (comments.some((comment) => comment.body?.includes(marker))) return;
+    if (trustedAutomationComments(comments).some((comment) => comment.body?.includes(marker))) return;
     await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: `${marker}\n${body}` });
   };
   const dispatch = (issueNumber) => github.rest.actions.createWorkflowDispatch({
@@ -345,7 +403,6 @@ export async function reconcileAgentPipeline({ github, context, core }) {
         owner,
         repo,
         workflow_id: "release.yml",
-        event: "push",
         per_page: 100,
       });
       const runs = releaseRuns.data.workflow_runs
@@ -384,7 +441,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
 
   for (const issue of await issuesWithLabel("agent:grouped")) {
     const comments = await commentsFor(issue.number);
-    const canonical = markerNumbers(comments, "canonical-issue");
+    const canonical = markerNumbers(trustedAutomationComments(comments), "canonical-issue");
     if (canonical.length !== 1) {
       await setState(issue.number, "agent:failed");
       await commentOnce(
@@ -407,9 +464,9 @@ export async function reconcileAgentPipeline({ github, context, core }) {
 
   for (const issue of await issuesWithLabel("agent:blocked")) {
     const comments = await commentsFor(issue.number);
-    const blockerGroups = markerGroups(comments, "blocked-by");
-    const blockers = blockerGroups[0] ?? [];
-    if (blockerGroups.length !== 1 || blockers.length === 0 || new Set(blockers).size !== blockers.length) {
+    const blockerGroups = markerGroups(trustedAutomationComments(comments), "blocked-by");
+    const blockers = blockerGroups.at(-1) ?? [];
+    if (blockers.length === 0 || new Set(blockers).size !== blockers.length) {
       await setState(issue.number, "agent:failed");
       await commentOnce(
         issue.number,
@@ -421,12 +478,17 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     const blockerIssues = await Promise.all(blockers.map((number) => github.rest.issues.get({
       owner, repo, issue_number: number,
     })));
-    if (!blockerIssues.every(({ data }) => data.state === "closed")) continue;
+    const ready = blockerIssues.every(({ data }) => {
+      const labels = labelNames(data);
+      const pipelineIssue = [...labels].some((label) => label.startsWith("agent:"));
+      return pipelineIssue ? labels.has("agent:deployed") : data.state === "closed";
+    });
+    if (!ready) continue;
     await setState(issue.number, "agent:inbox");
     await commentOnce(
       issue.number,
       `<!-- agent-pipeline blockers-cleared=${blockers.join(",")} -->`,
-      `All blockers (${blockers.map((number) => `#${number}`).join(", ")}) are closed; work is released.`,
+      `All blockers (${blockers.map((number) => `#${number}`).join(", ")}) are deployed or closed; work is released.`,
     );
     await dispatch(issue.number);
   }
@@ -445,37 +507,31 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
     if (!labelNames(issue).has("agent:review")) continue;
 
-    const ciRuns = await github.rest.actions.listWorkflowRuns({
-      owner, repo, workflow_id: "ci.yml", event: "workflow_dispatch", head_sha: pr.head.sha, per_page: 100,
-    });
-    const reviewChecks = await github.rest.checks.listForRef({
-      owner, repo, ref: pr.head.sha, check_name: "Agent Review / Exact SHA", per_page: 100,
+    const reviewStatuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+      owner, repo, ref: pr.head.sha, per_page: 100,
     });
     const reviewRuns = await github.rest.actions.listWorkflowRuns({
       owner, repo, workflow_id: "agent-review.yml", event: "workflow_dispatch", branch: defaultBranch, per_page: 100,
     });
-    const ciSettled = ciRuns.data.workflow_runs.some((run) => run.status !== "completed"
-      || ["success", "failure"].includes(run.conclusion));
     const reviewTitle = `Agent Review PR #${pr.number}`;
     const activeReview = reviewRuns.data.workflow_runs.some((run) => run.display_title === reviewTitle
       && run.head_branch === defaultBranch && run.head_sha === pr.base.sha && run.status !== "completed");
-    const decidedReview = reviewChecks.data.check_runs.some((check) => check.status === "completed");
-    const needsCi = !ciSettled;
+    const decidedReview = reviewStatuses.some((status) => status.context === "Agent Review / Exact SHA"
+      && status.state === "success");
     const needsReview = !activeReview && !decidedReview;
-    if (!needsCi && !needsReview) continue;
+    if (!needsReview) continue;
 
     const comments = await commentsFor(issueNumber);
     // A gate that is still waiting for the single model runner has not failed.
     // Counting sweeps as attempts while reviews queue behind implementations
     // parked healthy PRs at agent:error, so wait patiently while any dispatched
     // gate run is queued or in progress.
-    const pendingGate = (await Promise.all(["agent-review.yml", "ci.yml"].map(async (workflowId) => {
-      const runs = await github.rest.actions.listWorkflowRuns({
-        owner, repo, workflow_id: workflowId, per_page: 50,
-      });
-      return runs.data.workflow_runs.some((run) => ["queued", "in_progress", "waiting", "pending", "requested"].includes(run.status)
-        && (workflowId === "ci.yml" ? run.head_branch === pr.head.ref : true));
-    }))).some(Boolean);
+    const pendingRuns = await github.rest.actions.listWorkflowRuns({
+      owner, repo, workflow_id: "agent-review.yml", per_page: 50,
+    });
+    const pendingGate = pendingRuns.data.workflow_runs.some(
+      (run) => ["queued", "in_progress", "waiting", "pending", "requested"].includes(run.status),
+    );
     if (pendingGate) continue;
 
     const recoveryPrefix = `<!-- agent-pipeline gate-recovery=${pr.number}-${pr.head.sha}-`;
@@ -496,11 +552,6 @@ export async function reconcileAgentPipeline({ github, context, core }) {
       issue_number: issueNumber,
       body: `${recoveryPrefix}${attempts + 1} -->\nRecovery attempt ${attempts + 1} is dispatching missing gates for PR #${pr.number} at \`${pr.head.sha}\`.`,
     });
-    if (needsCi) {
-      await github.rest.actions.createWorkflowDispatch({
-        owner, repo, workflow_id: "ci.yml", ref: pr.head.ref,
-      });
-    }
     if (needsReview) {
       await github.rest.actions.createWorkflowDispatch({
         owner, repo, workflow_id: "agent-review.yml", ref: defaultBranch,
@@ -520,7 +571,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     const comments = await commentsFor(issueNumber);
     if (!STATE_LABELS.some((label) => labelNames(issue).has(label)) && latestTaskRun(comments) === null) continue;
     releaseRuns ??= (await github.rest.actions.listWorkflowRuns({
-      owner, repo, workflow_id: "release.yml", event: "push", per_page: 100,
+      owner, repo, workflow_id: "release.yml", per_page: 100,
     })).data.workflow_runs;
     const deployedRun = await firstDeployedRelease(github, owner, repo, releaseRuns, pr.merge_commit_sha);
     if (!deployedRun) continue;
@@ -537,7 +588,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
       const latest = closedPulls.find((pr) => closingIssueNumbers(pr.body).includes(issue.number));
       if (latest?.merged_at) {
         const releaseRuns = await github.rest.actions.listWorkflowRuns({
-          owner, repo, workflow_id: "release.yml", event: "push", per_page: 100,
+          owner, repo, workflow_id: "release.yml", per_page: 100,
         });
         // Settle by ancestry, not by an exact SHA match. When another merge
         // lands moments later, this PR's own release aborts on the freshness
@@ -576,7 +627,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
         continue;
       }
       const comments = await commentsFor(issue.number);
-      const retries = markerNumbers(comments, "orphan-retry").length;
+    const retries = markerNumbers(commentsAfterLatestMarker(comments, "recovery-reset"), "orphan-retry").length;
       if (retries >= 3) {
         await setState(issue.number, "agent:error");
         await commentOnce(
@@ -602,7 +653,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
   // now runs on every completed pipeline run as well as the cron backstop.
   for (const issue of await issuesWithLabel("agent:queued")) {
     const comments = await commentsFor(issue.number);
-    const taskRuns = markerNumbers(comments, "task-run");
+    const taskRuns = markerNumbers(trustedAutomationComments(comments), "task-run");
     if (taskRuns.length === 0) continue;
     try {
       const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
@@ -645,7 +696,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
   for (const issue of [...await issuesWithLabel("agent:queued"), ...await issuesWithLabel("agent:running")]) {
     if (Date.now() - Date.parse(issue.updated_at) <= 90 * 60 * 1000 || issuesWithOpenPulls.has(issue.number)) continue;
     const comments = await commentsFor(issue.number);
-    const taskRuns = markerNumbers(comments, "task-run");
+    const taskRuns = markerNumbers(trustedAutomationComments(comments), "task-run");
     if (taskRuns.length > 0) {
       try {
         const run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: taskRuns.at(-1) })).data;
@@ -654,7 +705,7 @@ export async function reconcileAgentPipeline({ github, context, core }) {
         if (error.status !== 404) throw error;
       }
     }
-    const retries = markerNumbers(comments, "stale-retry").length;
+    const retries = markerNumbers(commentsAfterLatestMarker(comments, "recovery-reset"), "stale-retry").length;
     if (retries >= 3) {
       await setState(issue.number, "agent:error");
       await commentOnce(
@@ -713,7 +764,8 @@ export async function queueNextApproved({ github, context, core }) {
   const defaultBranch = context.payload.repository.default_branch;
   const exactCheckValid = await validExactCheck(github, owner, repo, pr);
   const provenanceValid = pipelinePullProvenance(pr, defaultBranch);
-  if (!provenanceValid || !exactCheckValid) {
+  const validation = pipelineValidationProvenance(pr);
+  if (!provenanceValid || !validation || !exactCheckValid) {
     try {
       await github.rest.issues.removeLabel({
         owner, repo, issue_number: pr.number, name: "agent:approved",
@@ -748,10 +800,19 @@ export async function queueNextApproved({ github, context, core }) {
     });
     if (!result.data.merged) throw new Error(`GitHub did not merge PR #${pr.number}: ${result.data.message}`);
     merged = true;
+    const mergeCommit = await github.rest.git.getCommit({ owner, repo, commit_sha: result.data.sha });
+    const promotionInputs = mergeCommit.data.tree.sha === validation.treeSha ? {
+      validation_run: String(validation.runId),
+      validation_attempt: String(validation.runAttempt),
+      validation_artifact: String(validation.artifactId),
+      validation_digest: validation.artifactDigest,
+      validation_tree: validation.treeSha,
+    } : {};
     // GITHUB_TOKEN-authored merges intentionally do not trigger push workflows.
     // Dispatch the release explicitly while the merge slot remains locked.
     await github.rest.actions.createWorkflowDispatch({
       owner, repo, workflow_id: "release.yml", ref: defaultBranch,
+      inputs: promotionInputs,
     });
   } catch (error) {
     if (!merged) {

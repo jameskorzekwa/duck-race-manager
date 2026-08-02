@@ -113,7 +113,8 @@ jobs:
                 owner, repo, issue_number: issueNumber, per_page: 100,
               });
               const lastQuestion = questionComments.findLast(
-                (comment) => String(comment.body ?? "").includes("<!-- agent-pipeline question="),
+                (comment) => comment.user?.id === 41898282
+                  && String(comment.body ?? "").includes("<!-- agent-pipeline question="),
               );
               const answered = lastQuestion !== undefined && questionComments.some(
                 (comment) => comment.user?.id === trustedUserId
@@ -130,6 +131,18 @@ jobs:
             if (!currentLabels.includes("agent:running")) {
               await setState(issue, "agent:queued");
             }
+            const trustedRecovery = currentLabels.includes("agent:error")
+              && context.payload.sender?.id === trustedUserId && (
+              context.eventName === "workflow_dispatch"
+              || (context.eventName === "issue_comment"
+                && (/^\/(?:agent|oc)(?:\s|$)/).test(String(context.payload.comment?.body ?? "")))
+            );
+            if (trustedRecovery) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber,
+                body: `<!-- agent-pipeline recovery-reset=${context.runId} -->\nTrusted recovery command started a fresh bounded retry budget.`,
+              });
+            }
             await github.rest.issues.createComment({
               owner, repo, issue_number: issueNumber,
               body: `<!-- agent-pipeline task-run=${context.runId} -->\n[Agent Task run](${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId})`,
@@ -141,7 +154,7 @@ jobs:
   implement:
     needs: prepare
     if: needs.prepare.result == 'success' && needs.prepare.outputs.skip != 'true'
-    runs-on: [self-hosted, macOS, ARM64, quickducks-model]
+    runs-on: [self-hosted, macOS, ARM64, quickducks-implement]
     timeout-minutes: 170
     permissions:
       contents: read
@@ -299,14 +312,24 @@ jobs:
               }
             });'
           state_root="$HOME/.local/state/quickducks-agent-runner"
-          state_path="$state_root/active.json"
-          mkdir -p "$state_root/workspaces"
+          if ! [[ "$RUNNER_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            printf 'Unsafe runner name %q.\n' "$RUNNER_NAME" >&2
+            exit 1
+          fi
+          runner_root="$state_root/runners/$RUNNER_NAME"
+          state_path="$runner_root/active.json"
+          workspace_root="$runner_root/workspaces"
+          mkdir -p "$workspace_root"
+          seed_metadata="$RUNNER_TEMP/agent-task/seed.json"
+          node "$GITHUB_WORKSPACE/scripts/seed-model-workspace.mjs" \
+            --state "$state_root" --issue "$PIPELINE_ISSUE" --format json > "$seed_metadata"
+          printf 'PIPELINE_SEED_METADATA=%s\n' "$seed_metadata" >> "$GITHUB_ENV"
           if [[ -f "$state_path" ]]; then
             previous_dir="$(STATE_PATH="$state_path" STATE_ROOT="$state_root" node <<'NODE'
           const fs = require("node:fs");
           const path = require("node:path");
           const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
-          const root = path.resolve(process.env.STATE_ROOT, "workspaces") + path.sep;
+          const root = path.resolve(process.env.STATE_ROOT, "runners") + path.sep;
           const directory = path.resolve(String(state.directory ?? ""));
           if (!directory.startsWith(root)) throw new Error("Persistent model state points outside its workspace root.");
           process.stdout.write(directory);
@@ -317,8 +340,7 @@ jobs:
               --dir "$previous_dir" \
               --state "$state_path" \
               --timeout 600
-            node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
-              "$state_path" "$state_root/workspaces" "$previous_dir"
+            printf 'Prior session is idle; its workspace remains available for verification repair.\n'
           fi
 
       - name: Build isolated model workspace
@@ -326,13 +348,37 @@ jobs:
         run: |
           set -euo pipefail
           state_root="$HOME/.local/state/quickducks-agent-runner"
-          model_dir="$state_root/workspaces/task-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          runner_root="$state_root/runners/$RUNNER_NAME"
+          workspace_root="$runner_root/workspaces"
+          state_path="$runner_root/active.json"
+          resume_session="$(SEED_METADATA="$PIPELINE_SEED_METADATA" node -e '
+            const seed = JSON.parse(require("node:fs").readFileSync(process.env.SEED_METADATA, "utf8"));
+            const value = seed.metadata?.sessionId;
+            if (typeof value === "string" && /^ses_[A-Za-z0-9]+$/.test(value)) process.stdout.write(value);
+          ')"
+          marker_offset="$(SEED_METADATA="$PIPELINE_SEED_METADATA" node -e '
+            const seed = JSON.parse(require("node:fs").readFileSync(process.env.SEED_METADATA, "utf8"));
+            const value = Number(seed.metadata?.markerOffset ?? 0);
+            process.stdout.write(Number.isSafeInteger(value) && value >= 0 ? String(value) : "0");
+          ')"
+          resume_dir="$(SEED_METADATA="$PIPELINE_SEED_METADATA" STATE_ROOT="$state_root" node -e '
+            const fs = require("node:fs"), path = require("node:path");
+            const seed = JSON.parse(fs.readFileSync(process.env.SEED_METADATA, "utf8"));
+            if (!seed.use || !seed.metadata?.directory || !seed.metadata?.sessionId) process.exit(0);
+            const root = path.resolve(process.env.STATE_ROOT, "runners") + path.sep;
+            const value = path.resolve(seed.metadata.directory);
+            if (!value.startsWith(root)) throw new Error("Saved model directory escapes runner state.");
+            process.stdout.write(value);
+          ')"
+          model_dir="${resume_dir:-$workspace_root/task-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}}"
           rm -rf "$model_dir"
           mkdir -p "$model_dir"
           git archive "$EXPECTED_BASE" | tar -x -C "$model_dir"
           resumed=false
-          seed="$(node "$GITHUB_WORKSPACE/scripts/seed-model-workspace.mjs" \
-            --state "$state_root" --issue "$PIPELINE_ISSUE")"
+          seed="$(SEED_METADATA="$PIPELINE_SEED_METADATA" node -e '
+            const seed = JSON.parse(require("node:fs").readFileSync(process.env.SEED_METADATA, "utf8"));
+            if (seed.use && typeof seed.patch === "string") process.stdout.write(seed.patch);
+          ')"
           if [[ -n "$seed" ]]; then
             seed_repo="$RUNNER_TEMP/agent-task/seed-repo"
             rm -rf "$seed_repo"
@@ -360,7 +406,7 @@ jobs:
           mkdir -p "$model_dir/.pipeline"
           cp "$RUNNER_TEMP/agent-task/context.json" "$model_dir/.pipeline/context.json"
           chmod -R a-w "$model_dir/.pipeline"
-          MODEL_DIR="$model_dir" STATE_PATH="$state_root/active.json" node <<'NODE'
+          MODEL_DIR="$model_dir" STATE_PATH="$state_path" node <<'NODE'
           const fs = require("node:fs");
           fs.writeFileSync(process.env.STATE_PATH, JSON.stringify({
             directory: process.env.MODEL_DIR,
@@ -369,7 +415,13 @@ jobs:
             runAttempt: process.env.GITHUB_RUN_ATTEMPT,
           }));
           NODE
-          printf 'PIPELINE_MODEL_DIR=%s\n' "$model_dir" >> "$GITHUB_ENV"
+          {
+            printf 'PIPELINE_MODEL_DIR=%s\n' "$model_dir"
+            printf 'PIPELINE_MODEL_STATE=%s\n' "$state_path"
+            printf 'PIPELINE_MODEL_WORKSPACES=%s\n' "$workspace_root"
+            printf 'PIPELINE_RESUME_SESSION=%s\n' "$resume_session"
+            printf 'PIPELINE_MARKER_OFFSET=%s\n' "$marker_offset"
+          } >> "$GITHUB_ENV"
 
       - name: Run local OAuth implementation lead in OpenChamber
         shell: bash
@@ -389,28 +441,41 @@ jobs:
             printf 'AGENT_IMPLEMENT_VARIANT %q is not a variant name.\n' "$PIPELINE_IMPLEMENT_VARIANT" >&2
             exit 1
           fi
-          STATE_PATH="$HOME/.local/state/quickducks-agent-runner/active.json" node <<'NODE'
+          STATE_PATH="$PIPELINE_MODEL_STATE" node <<'NODE'
           const fs = require("node:fs");
           const state = JSON.parse(fs.readFileSync(process.env.STATE_PATH, "utf8"));
           state.phase = "dispatching";
           fs.writeFileSync(process.env.STATE_PATH, JSON.stringify(state));
           NODE
           status=0
-          openchamber session create \
-            --dir "$PIPELINE_MODEL_DIR" \
-            --title "QuickDucks issue #${PIPELINE_ISSUE} implementation" \
-            --prompt "Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot at .pipeline/context.json. Follow the pipeline-orchestrator contract and emit exactly one final task marker." \
-            --model "$PIPELINE_IMPLEMENT_MODEL" \
-            --agent pipeline-orchestrator \
-            --variant "$PIPELINE_IMPLEMENT_VARIANT" \
-            --json \
-            > "$RUNNER_TEMP/agent-task/session-dispatch.json" 2>&1 || true
+          if [[ -n "$PIPELINE_RESUME_SESSION" ]]; then
+            openchamber session send \
+              --session "$PIPELINE_RESUME_SESSION" \
+              --dir "$PIPELINE_MODEL_DIR" \
+              --prompt "Resume issue #${PIPELINE_ISSUE} from the reconstructed trusted snapshot. Read new hosted verification evidence in .pipeline/context.json, repair the complete failure index without repeating repository analysis or specialists, and emit exactly one new final task marker." \
+              --model "$PIPELINE_IMPLEMENT_MODEL" \
+              --agent pipeline-orchestrator \
+              --variant "$PIPELINE_IMPLEMENT_VARIANT" \
+              --json \
+              > "$RUNNER_TEMP/agent-task/session-dispatch.json" 2>&1 || true
+          else
+            openchamber session create \
+              --dir "$PIPELINE_MODEL_DIR" \
+              --title "QuickDucks issue #${PIPELINE_ISSUE} implementation" \
+              --prompt "Process issue #${PIPELINE_ISSUE} from the immutable trusted snapshot at .pipeline/context.json. Follow the pipeline-orchestrator contract and emit exactly one final task marker." \
+              --model "$PIPELINE_IMPLEMENT_MODEL" \
+              --agent pipeline-orchestrator \
+              --variant "$PIPELINE_IMPLEMENT_VARIANT" \
+              --json \
+              > "$RUNNER_TEMP/agent-task/session-dispatch.json" 2>&1 || true
+          fi
           node "$GITHUB_WORKSPACE/scripts/wait-for-openchamber-session.mjs" \
             --dir "$PIPELINE_MODEL_DIR" \
             --result "$RUNNER_TEMP/agent-task/session-result.json" \
-            --state "$HOME/.local/state/quickducks-agent-runner/active.json" \
+            --state "$PIPELINE_MODEL_STATE" \
             --timeout 9600 \
-            --marker-prefix PIPELINE_TASK_ || status=$?
+            --marker-prefix PIPELINE_TASK_ \
+            --marker-offset "$PIPELINE_MARKER_OFFSET" || status=$?
           printf '%s\n' "$status" > "$RUNNER_TEMP/agent-task/task-exit-status.txt"
 
       - name: Build deterministic task artifact
@@ -436,9 +501,12 @@ jobs:
           git -C "$patch_repo" add -A
           node "$GITHUB_WORKSPACE/scripts/validate-agent-patch.mjs" "$patch_repo"
           git -C "$patch_repo" diff --cached --binary --full-index HEAD > "$RUNNER_TEMP/agent-task/task.patch"
-          node <<'NODE'
-          const crypto = require("node:crypto");
-          const fs = require("node:fs");
+          node --input-type=module <<'NODE'
+          import crypto from "node:crypto";
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const { classifyTaskResult } = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
 
           const issue = Number(process.env.PIPELINE_ISSUE);
           const artifactDir = `${process.env.RUNNER_TEMP}/agent-task`;
@@ -456,25 +524,14 @@ jobs:
             .filter((line) => line.startsWith("PIPELINE_TASK_"));
           const marker = markerLines.length === 1 ? markerLines[0] : "";
           const patch = fs.readFileSync(`${artifactDir}/task.patch`);
-          let decision = { type: "failed", numbers: [] };
-          let match;
-          if ((match = marker.match(/^PIPELINE_TASK_READY:(\d+)$/)) && Number(match[1]) === issue && patch.length > 0) {
-            decision = { type: "ready", numbers: [issue] };
-          } else if ((match = marker.match(/^PIPELINE_TASK_GROUPED:(\d+)$/)) && Number(match[1]) !== issue && patch.length === 0) {
-            decision = { type: "grouped", numbers: [Number(match[1])] };
-          } else if ((match = marker.match(/^PIPELINE_TASK_BLOCKED:(\d+(?:,\d+)*)$/)) && patch.length === 0) {
-            const numbers = match[1].split(",").map(Number);
-            if (!numbers.includes(issue) && new Set(numbers).size === numbers.length) {
-              decision = { type: "blocked", numbers };
-            }
-          } else if ((match = marker.match(/^PIPELINE_TASK_DUPLICATE:(\d+)$/)) && Number(match[1]) !== issue && patch.length === 0) {
-            decision = { type: "duplicate", numbers: [Number(match[1])] };
-          } else if ((match = marker.match(/^PIPELINE_TASK_QUESTION:(\d+)$/)) && Number(match[1]) === issue) {
-            // A blocking question may accompany partial work; the patch is
-            // saved as the seed either way so the answer resumes, not restarts.
-            decision = { type: "question", numbers: [issue] };
-          }
-          if (exitStatus !== 0) decision = { type: "failed", numbers: [] };
+          // A blocking question may accompany partial work; the patch is saved
+          // as the seed either way so the answer resumes, not restarts.
+          const decision = classifyTaskResult({
+            issue,
+            marker,
+            patchLength: patch.length,
+            exitStatus,
+          });
           const digest = crypto.createHash("sha256").update(patch).digest("hex");
           fs.writeFileSync(`${artifactDir}/task-result.json`, JSON.stringify({
             issue,
@@ -483,19 +540,34 @@ jobs:
             digest,
             report,
             exitStatus,
+            modelMetrics: sessionResult.metrics ?? null,
+            sessionId: sessionResult.sessionId ?? null,
+            runnerName: process.env.RUNNER_NAME,
+            workspaceName: process.env.PIPELINE_MODEL_DIR.split("/").at(-1),
+            workspaceRelative: path.relative(
+              path.join(process.env.HOME, ".local/state/quickducks-agent-runner/runners"),
+              process.env.PIPELINE_MODEL_DIR,
+            ),
+            markerOffset: Number(process.env.PIPELINE_MARKER_OFFSET) + (markerLines.length === 1 ? 1 : 0),
           }, null, 2));
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `decision=${decision.type}\ndigest=${digest}\n`);
           NODE
           state_root="$HOME/.local/state/quickducks-agent-runner"
           mkdir -p "$state_root/patches"
           find "$state_root/patches" -type f -mtime +7 -delete
+          session_id="$(node -e 'const v=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); if(v.sessionId)process.stdout.write(v.sessionId)' "$RUNNER_TEMP/agent-task/task-result.json")"
+          marker_offset="$(node -e 'const v=JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String(v.markerOffset ?? 0))' "$RUNNER_TEMP/agent-task/task-result.json")"
           node "$GITHUB_WORKSPACE/scripts/seed-model-workspace.mjs" \
             --mode save \
             --state "$state_root" \
             --issue "$PIPELINE_ISSUE" \
             --patch "$RUNNER_TEMP/agent-task/task.patch" \
             --run "$GITHUB_RUN_ID" \
-            --base "$EXPECTED_BASE"
+            --base "$EXPECTED_BASE" \
+            --session "$session_id" \
+            --directory "$PIPELINE_MODEL_DIR" \
+            --runner "$RUNNER_NAME" \
+            --marker-offset "$marker_offset"
 
       - name: Upload immutable task artifact
         if: always()
@@ -509,7 +581,7 @@ jobs:
           retention-days: 7
 
       - name: Clean local model context
-        if: always()
+        if: always() && steps.result.outputs.decision != 'ready' && steps.result.outputs.decision != 'question' && steps.result.outputs.decision != 'failed'
         shell: bash
         run: |
           set -euo pipefail
@@ -518,13 +590,13 @@ jobs:
             node "$GITHUB_WORKSPACE/scripts/wait-for-openchamber-session.mjs" \
               --mode idle \
               --dir "$PIPELINE_MODEL_DIR" \
-              --state "$state_root/active.json" \
+              --state "$PIPELINE_MODEL_STATE" \
               --timeout 600
             node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
-              "$state_root/active.json" "$state_root/workspaces" "$PIPELINE_MODEL_DIR"
+              "$PIPELINE_MODEL_STATE" "$state_root/runners" "$PIPELINE_MODEL_DIR"
           fi
           node "$GITHUB_WORKSPACE/scripts/cleanup-model-workspace.mjs" \
-            "$state_root/active.json" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-task"
+            "$PIPELINE_MODEL_STATE" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-task"
 
   verify:
     needs: [prepare, implement]
@@ -533,6 +605,10 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
+    outputs:
+      artifact-digest: ${{ steps.validation-artifact.outputs.artifact-digest }}
+      artifact-id: ${{ steps.validation-artifact.outputs.artifact-id }}
+      tree: ${{ steps.validation-manifest.outputs.tree }}
     env:
       CI: "true"
       EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
@@ -604,11 +680,32 @@ jobs:
             run_gate "typecheck" npm run typecheck
             run_gate "unit and integration tests" npm test
             run_gate "Playwright installation" npx playwright install --with-deps chromium
-            run_gate "browser integration tests" npm run test:e2e
+            run_gate "browser integration tests" npm run test:e2e:sharded
             run_gate "Wrangler validation" npm run wrangler:validate
             run_gate "local migration validation" npm run db:migrate:local
             exit "$status"
           } 2>&1 | tee "$RUNNER_TEMP/agent-verify/gate.log"
+
+      - name: Create exact-tree validation manifest
+        id: validation-manifest
+        env:
+          VALIDATION_BASE_SHA: ${{ env.EXPECTED_BASE }}
+          VALIDATION_ISSUE: ${{ needs.prepare.outputs.issue }}
+          VALIDATION_PATCH_DIGEST: ${{ env.EXPECTED_DIGEST }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tree="$(node scripts/validation-manifest.mjs create "$RUNNER_TEMP/agent-verify/validation.json")"
+          printf 'tree=%s\n' "$tree" >> "$GITHUB_OUTPUT"
+
+      - name: Upload exact-tree validation manifest
+        id: validation-artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/agent-verify/validation.json
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Summarize verification failure
         if: failure()
@@ -664,6 +761,13 @@ jobs:
         with:
           name: agent-verify-${{ github.run_id }}-${{ github.run_attempt }}
           path: verify-artifact
+
+      - name: Download exact-tree validation manifest
+        if: needs.implement.outputs.decision == 'ready' && needs.verify.result == 'success'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agent-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: validation-artifact
 
       - name: Record non-code decision
         if: needs.implement.result == 'success' && needs.implement.outputs.decision != 'ready'
@@ -778,6 +882,26 @@ jobs:
           git apply --index task-artifact/task.patch
           test -n "$(git diff --cached --name-only)"
           node "$RUNNER_TEMP/validate-agent-patch.mjs" "$GITHUB_WORKSPACE"
+          validated_tree="$(node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          import { assertValidationManifest } from "./scripts/validation-manifest.mjs";
+          import { execFileSync } from "node:child_process";
+
+          const manifest = JSON.parse(readFileSync("validation-artifact/validation.json", "utf8"));
+          const tree = execFileSync("git", ["write-tree"], { encoding: "utf8" }).trim();
+          assertValidationManifest(manifest, {
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: process.env.GITHUB_RUN_ID,
+            runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+            issue: process.env.ISSUE_NUMBER,
+            baseSha: process.env.EXPECTED_BASE,
+            patchDigest: process.env.EXPECTED_DIGEST,
+            treeSha: tree,
+          });
+          process.stdout.write(tree);
+          NODE
+          )"
+          test "$validated_tree" = "${{ needs.verify.outputs.tree }}"
 
       - name: Publish branch and PR
         id: publication
@@ -817,6 +941,7 @@ jobs:
             --head "$branch" \
             --title "$title" \
             --body "<!-- agent-pipeline task-run=${GITHUB_RUN_ID} issue=${ISSUE_NUMBER} base=${EXPECTED_BASE} -->
+          <!-- agent-pipeline validation-run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT} artifact=${{ needs.verify.outputs.artifact-id }} digest=${{ needs.verify.outputs.artifact-digest }} tree=${{ needs.verify.outputs.tree }} -->
 
           Closes #${ISSUE_NUMBER}")"
           published_pr=true
@@ -848,7 +973,7 @@ jobs:
               owner, repo, issue_number: issueNumber, labels: [...labels, "agent:review"],
             });
 
-      - name: Dispatch candidate CI and trusted review
+      - name: Dispatch trusted review
         if: needs.implement.result == 'success' && needs.implement.outputs.decision == 'ready' && needs.verify.result == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -856,8 +981,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          branch="opencode/issue${ISSUE_NUMBER}-run${GITHUB_RUN_ID}"
-          gh workflow run ci.yml --ref "$branch"
           gh workflow run agent-review.yml \
             --ref "${{ github.event.repository.default_branch }}" \
             -f pr="$PR_NUMBER"
@@ -937,6 +1060,64 @@ jobs:
             // The shared policy decides: requeue with the saved seed, or park at
             // agent:error when the budget is spent or no progress was made.
             if (!published && ownsIssue) {
-              const outcome = await pipeline.recoverFailedIssue({ github, context }, issueNumber);
-              core.info(`Failed attempt handled immediately: ${outcome}.`);
-            }
+               const outcome = await pipeline.recoverFailedIssue({ github, context }, issueNumber);
+               core.info(`Failed attempt handled immediately: ${outcome}.`);
+             }
+
+  cleanup-model:
+    name: Clean completed model session
+    needs: [prepare, implement, verify, publish]
+    if: always() && needs.implement.result == 'success' && needs.verify.result == 'success'
+    runs-on: [self-hosted, macOS, ARM64, quickducks-implement]
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out trusted control plane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.prepare.outputs.base }}
+
+      - name: Download task result
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agent-task-${{ github.run_id }}-${{ github.run_attempt }}
+          path: task-artifact
+
+      - name: Remove completed workspace and retry seed
+        env:
+          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_root="$HOME/.local/state/quickducks-agent-runner"
+          resolved="$(STATE_ROOT="$state_root" node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const result = JSON.parse(fs.readFileSync("task-artifact/task-result.json", "utf8"));
+          if (!/^[A-Za-z0-9._-]+$/.test(result.runnerName ?? "")) throw new Error("Task result runner name is invalid.");
+          const root = path.resolve(process.env.STATE_ROOT, "runners") + path.sep;
+          const target = path.resolve(root, String(result.workspaceRelative ?? ""));
+          if (!target.startsWith(root)) throw new Error("Task result workspace escapes runner state.");
+          process.stdout.write(`${target}\n${path.resolve(process.env.STATE_ROOT, "runners", result.runnerName, "active.json")}`);
+          NODE
+          )"
+          model_dir="${resolved%%$'\n'*}"
+          state_path="${resolved#*$'\n'}"
+          if [[ -d "$model_dir" ]]; then
+            node scripts/wait-for-openchamber-session.mjs --mode idle --dir "$model_dir" --state "$state_path" --timeout 600
+          fi
+          node scripts/cleanup-model-workspace.mjs "$state_path" "$state_root/runners" "$model_dir"
+          node scripts/seed-model-workspace.mjs --mode clear --state "$state_root" --issue "$ISSUE_NUMBER"
+
+  metrics:
+    name: Metrics
+    needs: [prepare, implement, verify, publish, cleanup-model]
+    if: always()
+    permissions:
+      actions: read
+    uses: ./.github/workflows/pipeline-metrics.yml
+    with:
+      pipeline: Agent Task

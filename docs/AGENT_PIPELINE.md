@@ -22,13 +22,13 @@ Agent Task: triage -> grouped, blocked, duplicate, or implementation
 OpenChamber + paid local models -> allowlisted specialists -> integrated patch
         |
         v
-Pull request -> CI Validate + trusted candidate validation + read-only Agent Review
+Exact-tree validation artifact -> pull request -> read-only Agent Review
         |
         v
-agent:approved -> one agent:merge-slot -> GitHub auto-merge
+agent:approved -> one agent:merge-slot -> exact-head REST merge
         |
         v
-Release validation -> production approval -> deployment and smoke tests
+Artifact promotion or fallback validation -> production approval -> deploy and smoke
         |
         v
 deterministic Agent Reconcile -> agent:deployed or agent:failed -> next slot
@@ -48,12 +48,12 @@ Pipeline state is represented by labels:
 | `agent:inbox` | Accepted and waiting for triage |
 | `agent:triage` | Classification is active |
 | `agent:ready` | Independently releasable work is ready |
-| `agent:queued` | Accepted for implementation, waiting for the single model runner |
+| `agent:queued` | Accepted for implementation, waiting for either implementation runner |
 | `agent:running` | The model runner has started this implementation or repair |
 | `agent:grouped` | Requirements belong to a canonical active issue |
 | `agent:blocked` | Explicit dependencies or input are outstanding |
 | `agent:question` | Implementation is blocked on a question posted to the issue; any James reply resumes it automatically from the saved partial work |
-| `agent:reviewing` | The single model runner is executing this candidate's independent review |
+| `agent:reviewing` | The dedicated review runner is executing this candidate's independent review |
 | `agent:review` | A PR is under deterministic CI or agent review |
 | `agent:approved` | Independent review passed at the current head |
 | `agent:merge-slot` | The single PR/release allowed in production lane |
@@ -119,7 +119,7 @@ without write authority. Only after verification does a model-free publisher
 apply the same digest-bound patch without executing it and use its short-lived,
 repository-scoped `GITHUB_TOKEN` to create the branch and PR. Because workflow
 token writes do not recursively trigger most workflows, the publisher explicitly
-dispatches CI on the candidate branch and Agent Review from the trusted default
+dispatches Agent Review from the trusted default
 branch. The task's base SHA remains its immutable fork point: publication does
 not reject a fully verified patch merely because `main` advanced while the task
 was queued. Trusted review later proves that fork point is still on `main` and
@@ -137,8 +137,9 @@ publication. Pipeline control-plane changes therefore use the normal manual PR
 path and cannot make an autonomous branch run code on the OAuth-bearing runner.
 
 `agent-review.yml` is loaded from the trusted default branch and clears stale
-approval whenever the PR head changes. One hosted read-only-token job runs the
-exact candidate's release gate. A separate self-hosted job submits a read-only
+approval whenever the PR head changes. One hosted read-only-token job downloads
+the task's immutable validation artifact and proves its tested Git tree equals
+the exact candidate tree. A separate self-hosted job submits a read-only
 OpenChamber review session from a plain trusted-base snapshot. It receives only
 the candidate patch and trusted issue context as read-only data, not a candidate
 filesystem, and cannot execute candidate code or follow candidate symlinks. Its SHA-bound
@@ -150,9 +151,9 @@ implementation from current `main`, at most three times.
 The gate also publishes `Agent Review / Exact SHA` directly on the candidate
 commit. That check is fully autonomous: it passes on deterministic validation of
 the exact candidate SHA plus an approving independent model review, and no
-human PR approval is required to run or satisfy either required check. Candidate
-CI is dispatched explicitly on the branch, so repository policy must not demand
-manual approval to run workflows for pipeline-authored pull requests.
+human PR approval is required to run or satisfy either required check. Ordinary
+manual PRs still use the sharded CI workflow; pipeline candidates reuse the
+stronger digest-bound verification already completed before publication.
 
 Autonomy stops at production. Merges are still serialized through the single
 merge slot, and deployment still requires James's approval in the protected
@@ -176,11 +177,16 @@ The merge decision is deterministic. A serialized job checks all of these:
 2. No PR in any state carries `agent:merge-slot`.
 3. No Release workflow run is queued, in progress, or waiting for approval.
 4. GitHub branch protection still requires `CI / Validate` and candidate-head
-   `Agent Review / Exact SHA`.
+   `Agent Review / Exact SHA`; the trusted review gate publishes `Validate` from
+   the exact-tree artifact for pipeline-authored candidates.
 
-It then adds `agent:merge-slot` and enables merge-commit auto-merge. GitHub waits
-for required checks. The slot remains through production approval, deployment,
+It then adds `agent:merge-slot` and merges the exact reviewed head through the
+REST API after required checks pass. The slot remains through production approval, deployment,
 smoke tests, tag creation, and release publication.
+
+If the resulting merge commit has the exact tested tree, Release downloads and
+verifies the immutable validation artifact and skips duplicate tests. If another
+main change altered the merge tree, Release runs the complete gate again.
 
 The production environment requires James's approval and has no administrator
 bypass. The deploy job refetches `main` after approval and fails if its validated
@@ -193,7 +199,8 @@ does not call a model. It:
 
 - Settles successful or failed releases for the merge-slot PR.
 - Dispatches grouped requirements only after the canonical issue is deployed.
-- Releases issues whose blockers are closed.
+- Releases pipeline issues only after blockers are deployed; ordinary blockers
+  without pipeline state still require closure.
 - Retries stale work with bounded machine-readable attempts.
 - Repairs labels when PR, workflow, and deployment state proves the transition.
 - Advances the oldest approved PR after the production lane is free.
@@ -207,16 +214,15 @@ marks the linked issue `agent:deployed` only when a successful production releas
 contains the merge commit, including when the issue was already closed by the PR.
 
 A candidate whose base has moved is behind, not invalid. Mergeable candidates
-keep their immutable fork-point provenance and existing exact-head gates. Only a
-candidate GitHub reports as `CONFLICTING` is refreshed by merging the default
-branch forward in a deterministic, model-free job, re-running
-`validate-agent-patch`, rewriting the provenance marker, clearing stale approval,
-and re-dispatching both gates. A genuine merge conflict returns the work to the
-model, which resumes from its saved patch. Re-implementation is the fallback,
-never the routine response to an unrelated merge.
+keep their immutable fork-point provenance and exact-head gates. A candidate
+GitHub reports as `CONFLICTING` cannot reuse its tested-tree artifact, so
+reconciliation closes it and returns the saved patch to the existing
+implementation session against current `main`.
 
-An interrupted model turn is restarted from issue, branch, PR, and check state;
-it is never resumed as if a provider call were exactly-once.
+An interrupted provider call is never assumed exactly-once. After a completed
+turn fails hosted verification, however, the next bounded repair reconstructs
+the trusted workspace and sends the redacted failure index into the same idle
+OpenChamber session, preserving context without rerunning specialists.
 
 When hosted verification rejects a patch, the unprivileged gate captures its own
 output, and the model-free publisher posts a bounded, credential-redacted
@@ -226,11 +232,11 @@ reimplementing blind. The excerpt is data, never instructions: pipeline markers
 inside it are neutralized before it is posted, so candidate output cannot forge
 durable state.
 
-The runner records each active model directory outside the Actions workspace.
-Every later model job checks that record and fails closed while any prior
-OpenChamber parent or child session remains busy. Workspaces are unique per run
-and are deleted only after all matching sessions report `idle`, so a timed-out
-turn cannot race a later checkout or contaminate another patch.
+Each runner records active model state outside the Actions workspace. State and
+workspaces are runner-scoped so two implementation sessions and one review can
+run concurrently without sharing mutable records. Workspaces are deleted only
+after all matching sessions report `idle`, so a timed-out turn cannot race
+cleanup or contaminate another patch.
 
 ## Install In Another Repository
 
@@ -254,10 +260,14 @@ opencode.json
 .github/workflows/agent-review.yml
 .github/workflows/agent-review-revoke.yml
 .github/workflows/agent-reconcile.yml
+.github/workflows/pipeline-metrics.yml
 scripts/agent-pipeline.mjs
 scripts/cleanup-model-workspace.mjs
+scripts/run-e2e-shards.mjs
+scripts/seed-model-workspace.mjs
 scripts/summarize-verification-failure.mjs
 scripts/validate-agent-patch.mjs
+scripts/validation-manifest.mjs
 scripts/wait-for-openchamber-session.mjs
 ```
 
@@ -268,11 +278,12 @@ model choices, and release workflow name.
 ### 3. Configure the local model worker
 
 Pin a tested OpenCode/OpenChamber pairing and every local authentication plugin
-version in the model machine's OpenCode package lock. Install a repository-scoped
-self-hosted Actions runner on that machine. Give the runner a unique label and
-target only model jobs with it. A single runner serializes top-level OAuth
-sessions; the implementation lead may parallelize only the allowlisted read-only
-specialists through OpenCode's built-in task tool.
+version in the model machine's OpenCode package lock. Install isolated
+self-hosted runner services on that machine: at least two with the
+`quickducks-implement` role label and one with `quickducks-review`. Each service
+needs its own runner directory and Actions work folder. Runner-scoped state keeps
+top-level OAuth sessions independent; the implementation lead may also use the
+allowlisted read-only specialists through OpenCode's built-in task tool.
 
 Do not expose the sensitive runner to autonomous workflow changes. Preserve the
 plain snapshot, protected-path policy, symlink/gitlink rejection, persistent
@@ -299,8 +310,8 @@ The job must not load provider credentials into the Actions process.
 
 Grant `contents: write`, `pull-requests: write`, and `actions: write` only to a
 deterministic publisher that never executes candidate code or invokes a model.
-Use its short-lived repository-scoped `GITHUB_TOKEN` to publish, then explicitly
-dispatch candidate CI and the trusted default-branch review workflow. Enable the
+Use its short-lived repository-scoped `GITHUB_TOKEN` to publish the validation
+artifact provenance and explicitly dispatch the trusted default-branch review. Enable the
 repository's bundled "Allow GitHub Actions to create and approve pull requests"
 setting, but do not implement automated review approval. Never upload a local
 OpenCode `auth.json`, OAuth refresh token, or long-lived PAT to Actions.
@@ -343,8 +354,8 @@ authoritative. Add this guide to the repository's main documentation index.
 3. Push a setup branch and let ordinary CI pass.
 4. Verify the self-hosted runner is online, OpenChamber is running, and both paid
    provider model families are visible.
-5. Enable workflow-token PR creation and verify native-token publication plus
-   explicit candidate CI and trusted review dispatch.
+5. Enable workflow-token PR creation and verify native-token publication,
+   exact-tree artifact validation, and trusted review dispatch.
 6. Submit one documentation-only canary issue.
 7. Confirm local OpenChamber sessions, branch creation, PR CI, independent review,
    merge slot, environment approval, deployment, smoke tests, and final issue state.
@@ -390,10 +401,17 @@ non-secret environment. Set an explicit `OPENCODE_BINARY` when OpenCode is not
 on the service's default `PATH`. Never persist provider tokens in a service
 definition.
 
-The QuickDucks model runner is named `james-mac-quickducks-model` and carries the
-custom `quickducks-model` label. If the Mac or OpenChamber is unavailable, model
-jobs remain queued or fail closed; hosted validation, merge, and deployment jobs
-never fall back to weaker models.
+QuickDucks currently has two online `quickducks-implement` services
+(`james-mac-quickducks-model` and `james-mac-quickducks-implement-2`) plus
+`james-mac-quickducks-review` with the `quickducks-review` label. If the Mac or
+OpenChamber is unavailable, model jobs remain queued or fail closed; hosted
+validation, merge, and deployment jobs never fall back to weaker models.
+
+Every major workflow writes a 90-day `pipeline-metrics-<run>-<attempt>` artifact
+and a job-summary table. Metrics include run/job/step queue and execution times
+plus aggregate model tokens, cache usage, reasoning tokens, cost, and model
+duration. They deliberately exclude prompts, transcripts, test logs, participant
+data, provider errors, and credentials.
 
 ## Operational Commands
 

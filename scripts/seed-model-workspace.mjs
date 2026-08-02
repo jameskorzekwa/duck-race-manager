@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -59,6 +59,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const paths = seedPaths(args.state, args.issue);
     const patchBytes = existsSync(args.patch) ? readFileSync(args.patch) : Buffer.alloc(0);
     if (patchBytes.length === 0) {
+      rmSync(paths.patch, { force: true });
+      rmSync(paths.metadata, { force: true });
       process.stdout.write("cleared\n");
     } else {
       writeFileSync(paths.patch, patchBytes);
@@ -68,16 +70,36 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
         baseSha: args.base ?? null,
         digest: createHash("sha256").update(patchBytes).digest("hex"),
         savedAtMs: Date.now(),
+        sessionId: args.session ?? null,
+        directory: args.directory ?? null,
+        runnerName: args.runner ?? null,
+        markerOffset: Number(args["marker-offset"] ?? 0),
       }, null, 2));
       process.stdout.write("saved\n");
     }
+  } else if (args.mode === "clear") {
+    if (!args.state || !args.issue) {
+      throw new Error("Usage: seed-model-workspace.mjs --mode clear --state <root> --issue <n>");
+    }
+    const paths = seedPaths(args.state, args.issue);
+    rmSync(paths.patch, { force: true });
+    rmSync(paths.metadata, { force: true });
+    process.stdout.write("cleared\n");
   } else {
     if (!args.state || !args.issue) {
       throw new Error("Usage: seed-model-workspace.mjs --state <root> --issue <n>");
     }
     const { paths, patchBytes, metadata, savedAtMs } = readSeed(args.state, args.issue);
     const decision = selectSeed({ metadata, patchBytes, issue: args.issue, savedAtMs });
-    process.stderr.write(`${decision.reason}\n`);
-    process.stdout.write(decision.use ? `${paths.patch}\n` : "\n");
+    if (args.format === "json") {
+      process.stdout.write(`${JSON.stringify({
+        ...decision,
+        patch: decision.use ? paths.patch : null,
+        metadata: decision.use ? metadata : null,
+      })}\n`);
+    } else {
+      process.stderr.write(`${decision.reason}\n`);
+      process.stdout.write(decision.use ? `${paths.patch}\n` : "\n");
+    }
   }
 }

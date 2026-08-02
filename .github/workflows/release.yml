@@ -2,6 +2,27 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      validation_run:
+        description: Trusted Agent Task run containing the exact-tree validation
+        required: false
+        type: string
+      validation_attempt:
+        description: Trusted Agent Task run attempt
+        required: false
+        type: string
+      validation_artifact:
+        description: Immutable validation artifact ID
+        required: false
+        type: string
+      validation_digest:
+        description: Immutable validation artifact SHA-256 digest
+        required: false
+        type: string
+      validation_tree:
+        description: Exact tested Git tree
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -21,10 +42,12 @@ jobs:
     timeout-minutes: 25
     outputs:
       prerelease: ${{ steps.version.outputs.prerelease }}
+      promoted: ${{ steps.promotion.outputs.promoted }}
       source-sha: ${{ steps.source.outputs.source-sha }}
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
     permissions:
+      actions: read
       contents: read
     env:
       CI: "true"
@@ -131,25 +154,102 @@ jobs:
             exit 1
           fi
 
+      - name: Validate promotion inputs
+        id: promotion-inputs
+        env:
+          VALIDATION_ARTIFACT: ${{ inputs.validation_artifact }}
+          VALIDATION_ATTEMPT: ${{ inputs.validation_attempt }}
+          VALIDATION_DIGEST: ${{ inputs.validation_digest }}
+          VALIDATION_RUN: ${{ inputs.validation_run }}
+          VALIDATION_TREE: ${{ inputs.validation_tree }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          provided=0
+          for value in "$VALIDATION_ARTIFACT" "$VALIDATION_ATTEMPT" "$VALIDATION_DIGEST" "$VALIDATION_RUN" "$VALIDATION_TREE"; do
+            [[ -n "$value" ]] && provided=$((provided + 1))
+          done
+          if (( provided != 0 && provided != 5 )); then
+            printf 'Exact-tree promotion inputs must be all present or all absent.\n' >&2
+            exit 1
+          fi
+          printf 'enabled=%s\n' "$([[ "$provided" == 5 ]] && printf true || printf false)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify immutable validation artifact identity
+        if: steps.promotion-inputs.outputs.enabled == 'true'
+        env:
+          EXPECTED_ARTIFACT: ${{ inputs.validation_artifact }}
+          EXPECTED_ATTEMPT: ${{ inputs.validation_attempt }}
+          EXPECTED_DIGEST: ${{ inputs.validation_digest }}
+          EXPECTED_RUN: ${{ inputs.validation_run }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${EXPECTED_ARTIFACT}")"
+          ARTIFACT="$artifact" node <<'NODE'
+          const artifact = JSON.parse(process.env.ARTIFACT);
+          if (artifact.id !== Number(process.env.EXPECTED_ARTIFACT)
+              || artifact.workflow_run?.id !== Number(process.env.EXPECTED_RUN)
+              || artifact.name !== `agent-validation-${process.env.EXPECTED_RUN}-${process.env.EXPECTED_ATTEMPT}`
+              || artifact.expired || artifact.digest !== `sha256:${process.env.EXPECTED_DIGEST}`) {
+            throw new Error("Release promotion artifact identity is invalid.");
+          }
+          NODE
+
+      - name: Download exact-tree validation manifest
+        if: steps.promotion-inputs.outputs.enabled == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agent-validation-${{ inputs.validation_run }}-${{ inputs.validation_attempt }}
+          path: validation-artifact
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.validation_run }}
+
+      - name: Verify promoted exact tested tree
+        id: promotion
+        env:
+          VALIDATION_RUN_ATTEMPT: ${{ inputs.validation_attempt }}
+          VALIDATION_RUN_ID: ${{ inputs.validation_run }}
+          VALIDATION_TREE: ${{ inputs.validation_tree }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.promotion-inputs.outputs.enabled }}" != "true" ]]; then
+            printf 'promoted=false\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tree="$(node scripts/validation-manifest.mjs verify validation-artifact/validation.json)"
+          test "$tree" = "$VALIDATION_TREE"
+          printf 'promoted=true\n' >> "$GITHUB_OUTPUT"
+
       - name: Audit dependencies
+        if: steps.promotion.outputs.promoted != 'true'
         run: npm audit --audit-level=high
 
       - name: Check TypeScript
+        if: steps.promotion.outputs.promoted != 'true'
         run: npm run typecheck
 
       - name: Run full test suite
+        if: steps.promotion.outputs.promoted != 'true'
         run: npm test
 
       - name: Install Chromium for browser integration tests
+        if: steps.promotion.outputs.promoted != 'true'
         run: npx playwright install --with-deps chromium
 
       - name: Run browser integration suite
-        run: npm run test:e2e
+        if: steps.promotion.outputs.promoted != 'true'
+        run: npm run test:e2e:sharded
 
       - name: Validate all Worker bundles and Wrangler configurations
+        if: steps.promotion.outputs.promoted != 'true'
         run: npm run wrangler:validate
 
       - name: Validate D1 migrations locally
+        if: steps.promotion.outputs.promoted != 'true'
         run: npm run db:migrate:local
 
   deploy:
@@ -690,3 +790,13 @@ jobs:
               draft: false,
               prerelease,
             });
+
+  metrics:
+    name: Metrics
+    needs: [validate, deploy, release]
+    if: always()
+    permissions:
+      actions: read
+    uses: ./.github/workflows/pipeline-metrics.yml
+    with:
+      pipeline: Release

@@ -17,6 +17,7 @@
     "release:validate-tag": "node scripts/release-version.mjs",
     "test": "node --test src/*.test.mjs",
     "test:e2e": "playwright test",
+    "test:e2e:sharded": "node scripts/run-e2e-shards.mjs",
     "test:e2e:install": "playwright install chromium",
     "typecheck": "tsc --noEmit",
     "wrangler:validate": "node scripts/validate-wrangler-configs.mjs"

@@ -101,8 +101,10 @@ npm audit --audit-level=high
 npm run db:migrate:local              # when migrations changed
 ```
 
-Both CI and the release workflow run the browser integration suite. Do not skip,
-disable, narrow, or mock away coverage to make a release pass.
+CI shards the browser integration suite across isolated Workers and databases.
+Agent Task also runs the complete suite before publishing a candidate. Release
+either verifies the exact immutable tested tree or runs the complete gate again.
+Do not skip, disable, narrow, or mock away coverage to make a release pass.
 
 Agents do **not** need to start `dev:local` or `dev:network`, leave a server or
 temporary clone running, or ask James to manually test every change. Use the
@@ -163,7 +165,8 @@ manual hold. After merging, confirm the release pipeline and production health.
 - Preserve exact D1 binding/resource names unless a coordinated infrastructure
   migration explicitly changes them.
 - Normal production releases follow required CI and a reviewed merge to `main`;
-  the release workflow validates again, waits for production-environment
+  the release workflow verifies an immutable exact-tree validation artifact or
+  runs the full gate again, waits for production-environment
   approval, deploys, then creates the automatic patch tag and release.
   Intentional major/minor releases use a
   reviewed protected tag on a default-branch commit. Because that merge ships

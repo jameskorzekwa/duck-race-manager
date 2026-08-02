@@ -4,7 +4,15 @@ import { createInterface } from "node:readline";
 
 import { redactE2eOutput } from "./e2e-redaction.mjs";
 
-const persistPath = ".wrangler/e2e";
+const port = Number(process.env.E2E_PORT ?? 8787);
+if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) throw new Error("E2E_PORT is invalid.");
+const inspectorPort = Number(process.env.E2E_INSPECTOR_PORT ?? 9229);
+if (!Number.isSafeInteger(inspectorPort) || inspectorPort < 1024 || inspectorPort > 65535) {
+  throw new Error("E2E_INSPECTOR_PORT is invalid.");
+}
+const shardId = String(process.env.E2E_SHARD_ID ?? "default");
+if (!/^[A-Za-z0-9_-]+$/.test(shardId)) throw new Error("E2E_SHARD_ID is invalid.");
+const persistPath = `.wrangler/e2e-${shardId}`;
 const wrangler = process.platform === "win32" ? "npx.cmd" : "npx";
 const environment = {
   ...process.env,
@@ -24,7 +32,8 @@ if (migration.status !== 0) process.exit(migration.status ?? 1);
 
 const server = spawn(wrangler, [
   "wrangler", "dev", "--config", "wrangler.local.jsonc",
-  "--persist-to", persistPath, "--ip", "127.0.0.1", "--port", "8787",
+  "--persist-to", persistPath, "--ip", "127.0.0.1", "--port", String(port),
+  "--inspector-port", String(inspectorPort),
 ], { env: environment, stdio: ["ignore", "pipe", "pipe"] });
 
 const forwardRedacted = (stream, output) => {

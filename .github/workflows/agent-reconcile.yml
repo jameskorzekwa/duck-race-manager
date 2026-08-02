@@ -8,7 +8,7 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch:
   workflow_run:
-    workflows: [Agent Task, Agent Review PR, Release]
+    workflows: [Agent Task, Agent Review, Release]
     types: [in_progress, completed]
 
 permissions: {}
@@ -18,41 +18,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # A candidate whose base moved is not invalid, it is behind. Merging main
-  # forward preserves the model's work; only a genuine conflict needs a fresh
-  # implementation. The merge is deterministic and model-free, and the gates
-  # re-run against the new head, so the exact-SHA guarantee is rebuilt rather
-  # than bypassed.
+  # A conflicting candidate cannot retain its exact-tree validation artifact.
+  # Return its saved patch to the same implementation session so the model can
+  # resolve the conflict against current main and produce a fresh attestation.
   refresh-candidates:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_run' || github.actor_id == '38769771'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       actions: write
-      contents: write
       issues: write
       pull-requests: write
     steps:
-      - name: Check out trusted default branch
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.repository.default_branch }}
-
-      - name: Merge main forward into stale candidates
+      - name: Return conflicting candidates for same-session repair
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          main_sha="$(git rev-parse "origin/${DEFAULT_BRANCH}")"
-
-          # Only conflicting candidates are refreshed. Branch protection is not
-          # strict, so being behind main is not a defect and rewriting a healthy
-          # candidate would only invalidate its review and its CI for nothing.
           gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName,author,body,mergeable \
             --jq '.[] | select(.author.login == "app/github-actions") | select(.headRefName | startswith("opencode/")) | select(.mergeable == "CONFLICTING") | @base64' \
             > candidates.txt || true
@@ -61,46 +45,12 @@ jobs:
             [[ -z "$encoded" ]] && continue
             candidate="$(printf '%s' "$encoded" | base64 --decode)"
             number="$(printf '%s' "$candidate" | node -e 'let b="";process.stdin.on("data",c=>b+=c).on("end",()=>console.log(JSON.parse(b).number))')"
-            branch="$(printf '%s' "$candidate" | node -e 'let b="";process.stdin.on("data",c=>b+=c).on("end",()=>console.log(JSON.parse(b).headRefName))')"
-            git fetch --quiet origin "$branch"
-            git checkout --quiet -B "$branch" "origin/$branch"
-            printf 'Resolving conflict on PR #%s (%s) against %s\n' "$number" "$branch" "${main_sha:0:12}"
-            if git merge --no-edit "origin/${DEFAULT_BRANCH}" > merge.log 2>&1; then
-              # The candidate's own diff must still respect pipeline policy.
-              if ! node scripts/validate-agent-patch.mjs "$PWD" "$main_sha" HEAD; then
-                printf 'PR #%s violates patch policy after refresh; leaving it for re-implementation.\n' "$number"
-                git merge --abort || true
-                git checkout --quiet "$main_sha"
-                continue
-              fi
-              git push --quiet origin "$branch"
-              node - "$number" "$main_sha" <<'NODE'
-          const { execFileSync } = require("node:child_process");
-          const [number, mainSha] = process.argv.slice(2);
-          const body = execFileSync("gh", ["pr", "view", number, "--json", "body", "--jq", ".body"], { encoding: "utf8" });
-          const updated = body.replace(/(<!-- agent-pipeline task-run=\d+ issue=\d+ base=)[0-9a-f]{40}( -->)/, `$1${mainSha}$2`);
-          if (updated !== body) {
-            execFileSync("gh", ["pr", "edit", number, "--body", updated]);
-          }
-          NODE
-              gh pr edit "$number" --remove-label agent:approved > /dev/null 2>&1 || true
-              gh workflow run ci.yml --ref "$branch" > /dev/null 2>&1 || true
-              gh workflow run agent-review.yml --ref "$DEFAULT_BRANCH" -f pr="$number" > /dev/null 2>&1 || true
-              printf 'PR #%s refreshed and re-gated.\n' "$number"
-            else
-              git merge --abort || true
-              printf 'PR #%s conflicts with main; handing back for re-implementation.\n' "$number"
-              cat merge.log
-              issue="$(printf '%s' "$candidate" | node -e 'let b="";process.stdin.on("data",c=>b+=c).on("end",()=>{const m=JSON.parse(b).body.match(/<!-- agent-pipeline task-run=\d+ issue=(\d+) /);console.log(m?m[1]:"")})')"
-              if [[ -n "$issue" ]]; then
-                # The model resolves semantic conflicts, resuming from its saved
-                # patch; the stale candidate is closed so it cannot be merged.
-                gh pr close "$number" --delete-branch \
-                  --comment "Superseded: this candidate conflicts with current main. Retrying from the saved patch." > /dev/null 2>&1 || true
-                gh workflow run agent-task.yml --ref "$DEFAULT_BRANCH" -f issue="$issue" > /dev/null 2>&1 || true
-              fi
+            issue="$(printf '%s' "$candidate" | node -e 'let b="";process.stdin.on("data",c=>b+=c).on("end",()=>{const m=JSON.parse(b).body.match(/<!-- agent-pipeline task-run=\d+ issue=(\d+) /);console.log(m?m[1]:"")})')"
+            if [[ -n "$issue" ]]; then
+              gh pr close "$number" --delete-branch \
+                --comment "Superseded: this candidate conflicts with current main. Returning its saved patch to the existing implementation session." > /dev/null 2>&1 || true
+              gh workflow run agent-task.yml --ref "$DEFAULT_BRANCH" -f issue="$issue" > /dev/null 2>&1 || true
             fi
-            git checkout --quiet "$main_sha"
           done < candidates.txt
 
   reconcile:
@@ -113,6 +63,7 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
+      statuses: read
     steps:
       - name: Check out trusted default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -155,3 +106,13 @@ jobs:
           script: |
             const module = await import(`${process.env.GITHUB_WORKSPACE}/scripts/agent-pipeline.mjs`);
             await module.queueNextApproved({ github, context, core });
+
+  metrics:
+    name: Metrics
+    needs: [refresh-candidates, reconcile, queue-next]
+    if: always()
+    permissions:
+      actions: read
+    uses: ./.github/workflows/pipeline-metrics.yml
+    with:
+      pipeline: Agent Reconcile

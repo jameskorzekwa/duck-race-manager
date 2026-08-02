@@ -118,13 +118,14 @@ recovered from GitHub state rather than treated as durable jobs.
 Only issues created by James with `agent:inbox`, explicit James `/agent` or
 `/oc` issue comments, and trusted workflow dispatches run code agents. Public
 issue or PR content never receives an automatic privileged execution path.
-Model jobs run on the repository-scoped `quickducks-model` runner and submit
+Implementation jobs run on two repository-scoped `quickducks-implement` runners;
+independent review uses a dedicated `quickducks-review` runner. They submit
 sessions to James's local OpenChamber runtime, which already owns the paid
 OpenAI and Anthropic OAuth credentials. Those credentials are never copied into
 GitHub secrets or the Actions environment. A model-free publisher uses its
-short-lived repository-scoped `GITHUB_TOKEN`, then explicitly dispatches
-candidate CI and trusted-default-branch review because workflow-token writes do
-not recursively trigger most workflows. The verified task base remains immutable
+short-lived repository-scoped `GITHUB_TOKEN`, then explicitly dispatches the
+trusted-default-branch review because workflow-token writes do not recursively
+trigger most workflows. The verified task base remains immutable
 fork-point provenance, so publication continues when unrelated commits reach
 `main`; trusted review validates that ancestry and the exact candidate's
 mergeability. Agent jobs do not receive production credentials.
@@ -135,9 +136,10 @@ environment files, OpenCode tool-output storage, or external paths. Patch
 extraction uses a separate trusted Git repository after a pre-copy `lstat`
 quarantine rejects case-folded Git metadata, symlinks, hardlinks, and non-regular
 files. A case-insensitive policy rejects gitlinks and pipeline control-plane paths
-before any autonomous branch is published. A persistent runner-side state record
-prevents a timed-out OpenChamber session from overlapping later work, and that
-record is removed only after transactional workspace deletion succeeds.
+before any autonomous branch is published. Runner-scoped state records isolate
+concurrent sessions. Failed hosted verification reconstructs the saved workspace
+and sends evidence into the same OpenChamber session; completed workspaces are
+deleted transactionally only after all matching sessions are idle.
 
 Agent Review uses `pull_request_target` only as a trusted control plane. Candidate
 tests and local OpenChamber model review run in separate jobs with read-only
