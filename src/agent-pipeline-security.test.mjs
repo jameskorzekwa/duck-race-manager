@@ -397,10 +397,18 @@ test("a blocked implementation can ask James and resume on his reply", async () 
   assert.match(prepare, /agent-pipeline question=/);
   assert.match(prepare, /Date\.parse\(comment\.created_at\) > Date\.parse\(lastQuestion\.created_at\)/);
   assert.match(prepare, /if \(!answered\) \{/);
+  assert.match(prepare, /core\.setOutput\("question-resume", "true"\)/);
+  assert.match(implement, /PIPELINE_QUESTION_RESUME/);
+  assert.match(implement, /James replied after your latest question/);
+  assert.match(implement, /If James requested more investigation/);
+  assert.match(implement, /use only any useful allowlisted specialist not already launched/);
+  assert.match(implement, /--prompt "\$turn_prompt"/);
 
   const orchestrator = await read(".opencode/agents/pipeline-orchestrator.md");
   assert.match(orchestrator, /PIPELINE_TASK_QUESTION:N/);
   assert.match(orchestrator, /finish every part of the implementation the answer does not affect/);
+  assert.match(orchestrator, /newest trusted comments as the next conversational turn/);
+  assert.match(orchestrator, /ask a refined question again/);
 });
 
 test("queued work is labeled queued until the model runner actually starts", async () => {

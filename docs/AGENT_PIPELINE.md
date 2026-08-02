@@ -56,7 +56,7 @@ Pipeline state is represented by labels:
 | `agent:running` | The model runner has started this implementation or repair |
 | `agent:grouped` | Requirements belong to a canonical active issue |
 | `agent:blocked` | Explicit dependencies or input are outstanding |
-| `agent:question` | Implementation is blocked on a question posted to the issue; any James reply resumes it automatically from the saved partial work |
+| `agent:question` | Implementation is blocked on a question posted to the issue; any James reply resumes the same session and saved partial work for another conversational turn |
 | `agent:reviewing` | The dedicated review runner is executing this candidate's independent review |
 | `agent:review` | A PR is under deterministic CI or agent review |
 | `agent:approved` | Independent review passed at the current head |
@@ -119,6 +119,12 @@ releases cannot reliably scope their target paths; the path-checked read tool
 supports both repository directory listing and file reads.
 Project configuration also disables LSP and formatter subprocesses.
 Candidate code executes only in the hosted verification job.
+
+Question turns are repeatable rather than one-shot. A trusted James comment after
+the latest question receives a dedicated conversational resume prompt. He may
+answer, ask a follow-up, or request more bounded investigation; the same primary
+session continues from its partial patch and may ask a materially refined
+question again. Only specialists not already used by that task may be launched.
 
 The implementation lead and test/risk roles use James's local ChatGPT/Codex
 OAuth with `openai/gpt-5.6-sol`. Scouting and independent semantic review use
