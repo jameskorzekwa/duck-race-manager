@@ -344,7 +344,7 @@ jobs:
           mkdir -p "$model_dir/.pipeline" "$RUNNER_TEMP/agent-review"
           git -C candidate diff --no-ext-diff --binary "${{ needs.prepare.outputs.base }}..${EXPECTED_HEAD}" \
             > "$model_dir/.pipeline/candidate.patch"
-          gh issue view "$ISSUE_NUMBER" --json number,title,body,state,url \
+          gh issue view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json number,title,body,state,url \
             > "$model_dir/.pipeline/review-context.json"
           chmod -R a-w "$model_dir"
           {
@@ -437,6 +437,7 @@ jobs:
           printf '%s\n' "$status" > "$RUNNER_TEMP/agent-review/review-exit-status.txt"
 
       - name: Extract exact-head decision
+        id: result
         run: |
           node <<'NODE'
           const fs = require("node:fs");
@@ -468,7 +469,7 @@ jobs:
           NODE
 
       - name: Upload review decision
-        if: always()
+        if: steps.result.conclusion == 'success'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: agent-review-${{ needs.prepare.outputs.pr }}-${{ needs.prepare.outputs.head }}-${{ github.run_attempt }}
@@ -481,7 +482,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "${PIPELINE_MODEL_DIR:-}" ]] && command -v openchamber > /dev/null; then
+          if [[ -n "${PIPELINE_MODEL_DIR:-}" && -n "${PIPELINE_MODEL_STATE:-}" && -n "${PIPELINE_MODEL_WORKSPACES:-}" ]] && command -v openchamber > /dev/null; then
             node "$GITHUB_WORKSPACE/trusted/scripts/wait-for-openchamber-session.mjs" \
               --mode idle \
               --dir "$PIPELINE_MODEL_DIR" \
@@ -490,8 +491,9 @@ jobs:
             node "$GITHUB_WORKSPACE/trusted/scripts/cleanup-model-workspace.mjs" \
               "$PIPELINE_MODEL_STATE" "$PIPELINE_MODEL_WORKSPACES" "$PIPELINE_MODEL_DIR"
           fi
+          temp_state="${PIPELINE_MODEL_STATE:-$RUNNER_TEMP/agent-review/cleanup-state.json}"
           node "$GITHUB_WORKSPACE/trusted/scripts/cleanup-model-workspace.mjs" \
-            "$PIPELINE_MODEL_STATE" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-review"
+            "$temp_state" "$RUNNER_TEMP" "$RUNNER_TEMP/agent-review"
 
   gate:
     name: Gate

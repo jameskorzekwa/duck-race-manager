@@ -107,6 +107,9 @@ test("review publishes a candidate-SHA check without privileged candidate execut
   assert.doesNotMatch(review, /quickducks-local-oauth-model/);
   assert.doesNotMatch(review, /REVIEW_CANDIDATE_PATH|--dir "\$GITHUB_WORKSPACE\/trusted"/);
   assert.match(review, /\.pipeline\/candidate\.patch/);
+  assert.match(review, /gh issue view "\$ISSUE_NUMBER" --repo "\$GITHUB_REPOSITORY"/);
+  assert.match(review, /if: steps\.result\.conclusion == 'success'/);
+  assert.match(review, /temp_state="\$\{PIPELINE_MODEL_STATE:-\$RUNNER_TEMP\/agent-review\/cleanup-state\.json\}"/);
   assert.match(review, /git -C trusted archive/);
   assert.match(review, /--mode idle \\\n\s+--dir "\$PIPELINE_MODEL_DIR"/);
   assert.match(review, /--mode idle \\\n\s+--dir "\$previous_dir"/);
