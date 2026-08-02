@@ -50,6 +50,10 @@ import {
   scheduleRaceUpdate,
 } from "./live-updates.ts";
 import { getCurrentPublicEvent, getPublicRaceBoard, publicDisplayName } from "./race-board.ts";
+import {
+  publishParticipantNotificationsForCommand,
+  registrationNotificationStatements,
+} from "./participant-notifications.ts";
 import type { Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
 
 const apiHeaders = {
@@ -436,6 +440,9 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         `INSERT INTO race_entries (id, event_id, registration_id)
          VALUES (?, ?, ?)`,
       ).bind(raceEntryId, event.id, registrationId),
+      ...registrationNotificationStatements(
+        env, event.id, registrationId, payload.commandId, now,
+      ),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
@@ -475,6 +482,8 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
     }
     return json({ error: "Registration could not be saved. Please retry with the same command identifier." }, 409);
   }
+
+  await publishParticipantNotificationsForCommand(env, payload.commandId);
 
   return registrationResponse(
     registrationId,
@@ -1299,6 +1308,10 @@ const updateMyContact = async (
     (target.row.sms_notifications_enabled === 1) !== value.smsNotificationsEnabled
       ? "sms_notifications_enabled" : null,
   ].filter((field): field is string => field !== null);
+  const clearEmailSuppression = value.emailNotificationsEnabled
+    && (target.row.email_notifications_enabled !== 1 || target.row.email !== value.email);
+  const clearSmsSuppression = value.smsNotificationsEnabled
+    && (target.row.sms_notifications_enabled !== 1 || target.row.phone !== value.phone);
   const now = new Date().toISOString();
   try {
     await env.DB.batch([
@@ -1362,6 +1375,43 @@ const updateMyContact = async (
         now,
         registrationId,
         value.emailNotificationsEnabled ? 1 : 0,
+        commandId,
+        registrationId,
+      ),
+      env.DB.prepare(
+        `UPDATE participant_notifications
+            SET status = 'CANCELLED', terminal_at = ?, status_reason = 'CHANNEL_NOT_OPTED_IN',
+                retry_after = NULL, last_error_code = NULL, updated_at = ?
+          WHERE registration_id = ?
+            AND ((channel = 'EMAIL' AND ? = 0) OR (channel = 'SMS' AND ? = 0))
+            AND status IN ('PENDING', 'QUEUED', 'RETRY_PENDING')
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'UPDATE_PARTICIPANT_CONTACT'
+                 AND rc.result_id = ?
+            )`,
+      ).bind(
+        now,
+        now,
+        registrationId,
+        value.emailNotificationsEnabled ? 1 : 0,
+        value.smsNotificationsEnabled ? 1 : 0,
+        commandId,
+        registrationId,
+      ),
+      env.DB.prepare(
+        `DELETE FROM participant_notification_suppressions
+          WHERE registration_id = ?
+            AND ((channel = 'EMAIL' AND ? = 1) OR (channel = 'SMS' AND ? = 1))
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'UPDATE_PARTICIPANT_CONTACT'
+                 AND rc.result_id = ?
+            )`,
+      ).bind(
+        registrationId,
+        clearEmailSuppression ? 1 : 0,
+        clearSmsSuppression ? 1 : 0,
         commandId,
         registrationId,
       ),

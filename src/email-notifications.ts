@@ -1,9 +1,11 @@
 import type { Env } from "./types.ts";
+import { emailSuppressedForRegistration, unsubscribeUrlFor } from "./notification-unsubscribe.ts";
 
 export const EMAIL_NOTIFICATION_TYPES = ["HEAT_ASSIGNED", "HEAT_UPCOMING"] as const;
 
 const sendableStatuses = new Set<string>(["PENDING", "QUEUED", "RETRY_PENDING"]);
 const notificationIdPattern = /^[A-Za-z0-9_-]{1,128}$/;
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const textEncoder = new TextEncoder();
 
 export interface OutboundEmail {
@@ -12,6 +14,7 @@ export interface OutboundEmail {
   subject: string;
   text: string;
   html: string;
+  headers?: readonly { name: string; value: string }[];
 }
 
 export interface EmailSendResult {
@@ -23,13 +26,17 @@ export type EmailSender = (email: OutboundEmail, env: Env) => Promise<EmailSendR
 export class EmailSendError extends Error {
   readonly safeCode: string;
   readonly retryable: boolean;
+  readonly ambiguous: boolean;
 
-  constructor(safeCode: string, retryable: boolean) {
+  constructor(safeCode: string, retryable: boolean, ambiguous = false) {
     super(safeCode);
     this.safeCode = safeCode;
     this.retryable = retryable;
+    this.ambiguous = ambiguous;
   }
 }
+
+export type EmailSuppressionChecker = (email: string, env: Env) => Promise<boolean>;
 
 interface NotificationRow {
   id: string;
@@ -66,6 +73,7 @@ interface NotificationClaimRow {
 
 interface AttemptNumberRow {
   last_attempt: number;
+  temporary_failures: number;
 }
 
 export type EmailProcessingResult = "SENT" | "CANCELLED" | "FAILED" | "NOOP" | "RETRY";
@@ -125,6 +133,10 @@ export const sendEmailWithSes: EmailSender = async (email, env) => {
     Content: {
       Simple: {
         Subject: { Data: email.subject, Charset: "UTF-8" },
+        ...(email.headers === undefined ? {} : { Headers: email.headers.map((header) => ({
+          Name: header.name,
+          Value: header.value,
+        })) }),
         Body: {
           Text: { Data: email.text, Charset: "UTF-8" },
           Html: { Data: email.html, Charset: "UTF-8" },
@@ -160,14 +172,20 @@ export const sendEmailWithSes: EmailSender = async (email, env) => {
       body,
     });
   } catch {
-    throw new EmailSendError("SES_NETWORK_ERROR", true);
+    // Once bytes were handed to fetch, a network failure cannot prove SES did
+    // not accept them. SES SendEmail has no idempotency key, so this outcome is
+    // terminal rather than risking a duplicate participant message.
+    throw new EmailSendError("DELIVERY_OUTCOME_UNKNOWN", false, true);
   }
 
   if (!response.ok) {
     // Provider response bodies can repeat recipient or message material. They
     // are deliberately neither parsed nor persisted.
-    const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
-    throw new EmailSendError(retryable ? "SES_TEMPORARY_FAILURE" : "SES_REJECTED", retryable);
+    if (response.status === 429) throw new EmailSendError("SES_THROTTLED", true);
+    if (response.status === 408 || response.status >= 500) {
+      throw new EmailSendError("DELIVERY_OUTCOME_UNKNOWN", false, true);
+    }
+    throw new EmailSendError("SES_REJECTED", false);
   }
 
   let providerMessageId: string | null = null;
@@ -181,6 +199,52 @@ export const sendEmailWithSes: EmailSender = async (email, env) => {
     // missing or malformed; no provider body is retained.
   }
   return { providerMessageId };
+};
+
+// SES account-level bounce/complaint suppression is separate from the
+// participant's own unsubscribe state. Query it after the delivery claim and
+// immediately before SendEmail; no response body is retained.
+export const checkEmailSuppressedWithSes: EmailSuppressionChecker = async (email, env) => {
+  const region = env.AWS_REGION;
+  if (
+    region !== "us-east-1"
+    || typeof env.AWS_ACCESS_KEY_ID !== "string" || env.AWS_ACCESS_KEY_ID.length < 16
+    || typeof env.AWS_SECRET_ACCESS_KEY !== "string" || env.AWS_SECRET_ACCESS_KEY.length < 32
+  ) throw new EmailSendError("SES_CONFIGURATION_INVALID", false);
+  const host = `email.${region}.amazonaws.com`;
+  const encodedEmail = encodeURIComponent(email).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  const path = `/v2/email/suppression/addresses/${encodedEmail}`;
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const date = amzDate.slice(0, 8);
+  const payloadHash = hex(await sha256(""));
+  const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+  const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`;
+  const canonicalRequest = `GET\n${path}\n\n${canonicalHeaders}${signedHeaders}\n${payloadHash}`;
+  const scope = `${date}/${region}/ses/aws4_request`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${hex(await sha256(canonicalRequest))}`;
+  const dateKey = await hmac(textEncoder.encode(`AWS4${env.AWS_SECRET_ACCESS_KEY}`), date);
+  const regionKey = await hmac(dateKey, region);
+  const serviceKey = await hmac(regionKey, "ses");
+  const signature = hex(await hmac(await hmac(serviceKey, "aws4_request"), stringToSign));
+  let response: Response;
+  try {
+    response = await fetch(`https://${host}${path}`, { headers: {
+      authorization: `AWS4-HMAC-SHA256 Credential=${env.AWS_ACCESS_KEY_ID}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+      "x-amz-content-sha256": payloadHash,
+      "x-amz-date": amzDate,
+    } });
+  } catch {
+    throw new EmailSendError("SES_SUPPRESSION_CHECK_FAILED", true);
+  }
+  if (response.status === 404) return false;
+  if (response.ok) return true;
+  const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+  throw new EmailSendError(
+    retryable ? "SES_SUPPRESSION_CHECK_FAILED" : "SES_SUPPRESSION_CHECK_REJECTED",
+    retryable,
+  );
 };
 
 const notificationRow = (env: Env, notificationId: string): Promise<NotificationRow | null> =>
@@ -306,7 +370,9 @@ const failAmbiguousDelivery = async (
 const validationFailure = (row: NotificationRow): string | null => {
   if (!(EMAIL_NOTIFICATION_TYPES as readonly string[]).includes(row.notification_type)) return "UNSUPPORTED_TEMPLATE";
   if (row.template_version !== 1) return "UNSUPPORTED_TEMPLATE";
-  if (row.email_notifications_enabled !== 1 || row.email === null) return "EMAIL_NOT_OPTED_IN";
+  if (row.email_notifications_enabled !== 1 || row.email === null || !emailPattern.test(row.email)) {
+    return "EMAIL_NOT_OPTED_IN";
+  }
   if (row.registration_status !== "ACTIVE") return "REGISTRATION_NOT_ACTIVE";
   if (
     row.duck_assignment_id === null
@@ -328,13 +394,14 @@ const validationFailure = (row: NotificationRow): string | null => {
   return null;
 };
 
-const renderEmail = (row: NotificationRow, env: Env): OutboundEmail => {
+const renderEmail = async (row: NotificationRow, env: Env): Promise<OutboundEmail> => {
   const eventName = singleLine(row.event_name);
   const participantName = singleLine(`${row.first_name} ${row.last_name}`);
   const round = row.heat_round === "FINAL" ? "Final" : "Round One";
   const heat = `${round}, Heat ${row.heat_number}`;
   const duck = `Duck #${row.visible_number}`;
   const raceUrl = new URL("/race", env.APP_ORIGIN).toString();
+  const unsubscribeUrl = await unsubscribeUrlFor(row.id, env);
   const assigned = row.notification_type === "HEAT_ASSIGNED";
   const subject = singleLine(assigned
     ? `${duck} is assigned to ${heat}`
@@ -352,18 +419,23 @@ const renderEmail = (row: NotificationRow, env: Env): OutboundEmail => {
     "",
     "Race progress can change, so this reminder does not promise a start time.",
     "You can turn off email updates from My Ducks on the device used to register.",
+    `Or unsubscribe from email updates directly: ${unsubscribeUrl}`,
   ].join("\n");
   const html = `<!doctype html><html lang="en"><body><p>Hi ${escapeHtml(participantName)},</p>`
     + `<p><strong>${escapeHtml(action)}</strong></p>`
     + `<p>Event: ${escapeHtml(eventName)}<br><a href="${escapeHtml(raceUrl)}">View race status</a></p>`
     + "<p>Race progress can change, so this reminder does not promise a start time.</p>"
-    + "<p>You can turn off email updates from My Ducks on the device used to register.</p></body></html>";
+    + `<p>You can turn off email updates from My Ducks on the device used to register, or <a href="${escapeHtml(unsubscribeUrl)}">unsubscribe from email updates</a>.</p></body></html>`;
   return {
     from: env.EMAIL_FROM_ADDRESS,
     to: row.email!,
     subject,
     text,
     html,
+    headers: [
+      { name: "List-Unsubscribe", value: `<${unsubscribeUrl}>` },
+      { name: "List-Unsubscribe-Post", value: "List-Unsubscribe=One-Click" },
+    ],
   };
 };
 
@@ -371,7 +443,8 @@ export const processEmailNotification = async (
   env: Env,
   notificationId: string,
   sender: EmailSender = sendEmailWithSes,
-  queueDeliveryAttempt = 1,
+  _queueDeliveryAttempt = 1,
+  providerSuppressionChecker?: EmailSuppressionChecker,
 ): Promise<EmailProcessingResult> => {
   if (!notificationIdPattern.test(notificationId)) return "NOOP";
   const claimRow = await notificationClaimRow(env, notificationId);
@@ -395,7 +468,9 @@ export const processEmailNotification = async (
 
   const now = new Date().toISOString();
   const lastAttempt = await env.DB.prepare(
-    `SELECT COALESCE(MAX(attempt_number), 0) AS last_attempt
+    `SELECT COALESCE(MAX(attempt_number), 0) AS last_attempt,
+            COALESCE(SUM(CASE WHEN status = 'TEMPORARY_FAILURE' THEN 1 ELSE 0 END), 0)
+              AS temporary_failures
        FROM email_attempts WHERE notification_id = ? AND stage = 'DELIVERY'`,
   ).bind(notificationId).first<AttemptNumberRow>();
   const attemptNumber = Number(lastAttempt?.last_attempt ?? 0) + 1;
@@ -443,17 +518,44 @@ export const processEmailNotification = async (
     return "CANCELLED";
   }
 
+  if (await emailSuppressedForRegistration(env, row.event_id, row.registration_id)) {
+    await cancelNotification(env, notificationId, attemptId, "EMAIL_UNSUBSCRIBED");
+    return "CANCELLED";
+  }
+
   let result: EmailSendResult;
   try {
-    result = await sender(renderEmail(row, env), env);
+    const suppressionChecker = providerSuppressionChecker
+      ?? (sender === sendEmailWithSes ? checkEmailSuppressedWithSes : async () => false);
+    if (await suppressionChecker(row.email!, env)) {
+      await env.DB.prepare(
+        `INSERT INTO participant_notification_suppressions
+          (event_id, registration_id, channel, source)
+         VALUES (?, ?, 'EMAIL', 'PROVIDER_SUPPRESSION')
+         ON CONFLICT(event_id, registration_id, channel) DO NOTHING`,
+      ).bind(row.event_id, row.registration_id).run();
+      await cancelNotification(env, notificationId, attemptId, "EMAIL_PROVIDER_SUPPRESSED");
+      return "CANCELLED";
+    }
+    result = await sender(await renderEmail(row, env), env);
   } catch (error) {
     const failure = error instanceof EmailSendError
       ? error
       : new EmailSendError("EMAIL_SENDER_FAILURE", true);
     const completedAt = new Date().toISOString();
-    const exhausted = failure.retryable && queueDeliveryAttempt >= 5;
+    // Queue redelivery and successful reconciliation republishes are transport
+    // facts, not provider attempts. Only actual claimed delivery calls consume
+    // the bounded retry budget.
+    // Attempt numbers also include claims cancelled by a consent, assignment,
+    // or lifecycle recheck before the provider adapter ran. Those claims remain
+    // useful history, but only prior transient adapter failures consume the
+    // bounded provider retry budget.
+    const providerFailureNumber = Number(lastAttempt?.temporary_failures ?? 0) + 1;
+    const exhausted = failure.retryable && providerFailureNumber >= 5;
     const retryable = failure.retryable && !exhausted;
-    const code = exhausted ? "DELIVERY_RETRIES_EXHAUSTED" : failure.safeCode;
+    const code = failure.ambiguous
+      ? "DELIVERY_OUTCOME_UNKNOWN"
+      : exhausted ? "DELIVERY_RETRIES_EXHAUSTED" : failure.safeCode;
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE email_attempts
@@ -507,12 +609,16 @@ export const processEmailNotification = async (
 
 const publishEmailNotificationUnsafe = async (env: Env, notificationId: string): Promise<void> => {
   if (!notificationIdPattern.test(notificationId)) return;
+  const staleQueuedBefore = new Date(Date.now() - 5 * 60_000).toISOString();
   const notification = await env.DB.prepare(
     `SELECT id, event_id, status
        FROM email_notifications
-      WHERE id = ? AND status IN ('PENDING', 'RETRY_PENDING')
+      WHERE id = ? AND (
+        status IN ('PENDING', 'RETRY_PENDING')
+        OR (status = 'QUEUED' AND queued_at <= ?)
+      )
       LIMIT 1`,
-  ).bind(notificationId).first<{ id: string; event_id: string; status: string }>();
+  ).bind(notificationId, staleQueuedBefore).first<{ id: string; event_id: string; status: string }>();
   if (notification === null) return;
 
   const startedAt = new Date().toISOString();
@@ -532,11 +638,11 @@ const publishEmailNotificationUnsafe = async (env: Env, notificationId: string):
           (id, event_id, notification_id, attempt_number, stage, status, started_at, completed_at)
          VALUES (?, ?, ?, ?, 'QUEUE', 'QUEUED', ?, ?)`,
       ).bind(attemptId, notification.event_id, notificationId, attemptNumber, startedAt, completedAt),
-      env.DB.prepare(
-        `UPDATE email_notifications
-            SET status = 'QUEUED', queued_at = COALESCE(queued_at, ?),
+       env.DB.prepare(
+         `UPDATE email_notifications
+            SET status = 'QUEUED', queued_at = ?,
                 retry_after = NULL, last_error_code = NULL, updated_at = ?
-          WHERE id = ? AND status IN ('PENDING', 'RETRY_PENDING')`,
+          WHERE id = ? AND status IN ('PENDING', 'QUEUED', 'RETRY_PENDING')`,
       ).bind(completedAt, completedAt, notificationId),
     ]);
   } catch {
@@ -553,7 +659,7 @@ const publishEmailNotificationUnsafe = async (env: Env, notificationId: string):
           `UPDATE email_notifications
               SET status = 'RETRY_PENDING', last_error_code = 'QUEUE_PUBLISH_FAILED',
                   retry_after = ?, updated_at = ?
-            WHERE id = ? AND status IN ('PENDING', 'RETRY_PENDING')`,
+            WHERE id = ? AND status IN ('PENDING', 'QUEUED', 'RETRY_PENDING')`,
         ).bind(isoAfter(60_000), completedAt, notificationId),
       ]);
     } catch {
@@ -576,15 +682,17 @@ export const publishEmailNotification = async (env: Env, notificationId: string)
 
 export const dispatchPendingEmailNotifications = async (env: Env): Promise<void> => {
   const now = new Date().toISOString();
+  const staleQueuedBefore = new Date(Date.now() - 5 * 60_000).toISOString();
   const pending = await env.DB.prepare(
     `SELECT id
        FROM email_notifications
       WHERE (status = 'PENDING' AND (scheduled_at IS NULL OR scheduled_at <= ?))
          OR (status = 'RETRY_PENDING' AND (retry_after IS NULL OR retry_after <= ?))
+         OR (status = 'QUEUED' AND queued_at <= ?)
       ORDER BY created_at, id
       LIMIT 100`,
-  ).bind(now, now).all<{ id: string }>();
-  await Promise.all(pending.results.map((notification) => publishEmailNotification(env, notification.id)));
+  ).bind(now, now, staleQueuedBefore).all<{ id: string }>();
+  for (const notification of pending.results) await publishEmailNotification(env, notification.id);
 };
 
 export const handleEmailQueue = async (

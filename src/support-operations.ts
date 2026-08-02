@@ -1,5 +1,6 @@
 import type { StaffActor } from "./auth.ts";
 import { isCommandId } from "./registration.ts";
+import { publishParticipantNotification } from "./participant-notifications.ts";
 import type { Env } from "./types.ts";
 
 const headers = {
@@ -127,12 +128,15 @@ const operationalSummary = async (env: Env, eventId: string): Promise<Response> 
     ).bind(eventId).first<Record<string, unknown>>(),
     env.DB.prepare(
       `SELECT COUNT(*) AS total_count,
-              SUM(CASE WHEN status NOT IN ('SENT', 'DELIVERED', 'FAILED', 'BOUNCED', 'COMPLAINED', 'SUPPRESSED', 'CANCELLED') THEN 1 ELSE 0 END) AS nonterminal_count,
-              SUM(CASE WHEN status IN ('FAILED', 'BOUNCED', 'COMPLAINED') THEN 1 ELSE 0 END) AS failed_count,
-              SUM(CASE WHEN status = 'RETRY_PENDING' THEN 1 ELSE 0 END) AS retry_pending_count
-         FROM email_notifications
-        WHERE event_id = ?`,
-    ).bind(eventId).first<Record<string, unknown>>(),
+               SUM(CASE WHEN status NOT IN ('SENT', 'DELIVERED', 'FAILED', 'BOUNCED', 'COMPLAINED', 'SUPPRESSED', 'CANCELLED') THEN 1 ELSE 0 END) AS nonterminal_count,
+               SUM(CASE WHEN status IN ('FAILED', 'BOUNCED', 'COMPLAINED') THEN 1 ELSE 0 END) AS failed_count,
+               SUM(CASE WHEN status = 'RETRY_PENDING' THEN 1 ELSE 0 END) AS retry_pending_count
+          FROM (
+            SELECT status FROM email_notifications WHERE event_id = ?
+            UNION ALL
+            SELECT status FROM participant_notifications WHERE event_id = ?
+          )`,
+    ).bind(eventId, eventId).first<Record<string, unknown>>(),
   ]);
 
   const registrationBlockers = numberValue(registrations?.unpaired_count);
@@ -195,6 +199,7 @@ interface NotificationListRow {
   attempt_count: number;
   last_attempt_status: string | null;
   last_attempt_error_code: string | null;
+  channel: string;
 }
 
 const listNotifications = async (url: URL, env: Env, eventId: string): Promise<Response> => {
@@ -219,22 +224,35 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
   if (before !== null) args.push(before);
   args.push(limit);
   const rows = await env.DB.prepare(
-    `SELECT n.id, n.registration_id, n.notification_type, n.status,
-            n.template_version, n.scheduled_at, n.queued_at, n.sent_at,
-            n.terminal_at, n.status_reason, n.last_error_code, n.created_at,
-            r.first_name, r.last_name, h.heat_number, h.round,
-            (SELECT COUNT(*) FROM email_attempts count_attempt
-              WHERE count_attempt.notification_id = n.id) AS attempt_count,
-            last_attempt.status AS last_attempt_status,
-            last_attempt.error_code AS last_attempt_error_code
-       FROM email_notifications n
+    `WITH notifications AS (
+       SELECT id, event_id, registration_id, notification_type, status,
+              template_version, scheduled_at, queued_at, sent_at, terminal_at,
+              status_reason, last_error_code, created_at, heat_id, 'EMAIL' AS channel
+         FROM email_notifications
+       UNION ALL
+       SELECT id, event_id, registration_id, notification_type, status,
+              template_version, scheduled_at, queued_at, sent_at, terminal_at,
+              status_reason, last_error_code, created_at, heat_id, channel
+         FROM participant_notifications
+     ), attempts AS (
+       SELECT id, notification_id, attempt_number, status, error_code, created_at FROM email_attempts
+       UNION ALL
+       SELECT id, notification_id, attempt_number, status, error_code, created_at FROM participant_notification_attempts
+     )
+     SELECT n.id, n.registration_id, n.notification_type, n.status,
+             n.template_version, n.scheduled_at, n.queued_at, n.sent_at,
+             n.terminal_at, n.status_reason, n.last_error_code, n.created_at,
+             n.channel, r.first_name, r.last_name, h.heat_number, h.round,
+             (SELECT COUNT(*) FROM attempts count_attempt
+               WHERE count_attempt.notification_id = n.id) AS attempt_count,
+             last_attempt.status AS last_attempt_status,
+             last_attempt.error_code AS last_attempt_error_code
+       FROM notifications n
        JOIN registrations r ON r.id = n.registration_id AND r.event_id = n.event_id
        LEFT JOIN heats h ON h.id = n.heat_id AND h.event_id = n.event_id
-       LEFT JOIN email_attempts last_attempt ON last_attempt.id = (
-         SELECT ea.id FROM email_attempts ea
-          WHERE ea.notification_id = n.id
-          ORDER BY ea.attempt_number DESC, ea.created_at DESC
-          LIMIT 1
+       LEFT JOIN attempts last_attempt ON last_attempt.id = (
+         SELECT ea.id FROM attempts ea WHERE ea.notification_id = n.id
+          ORDER BY ea.attempt_number DESC, ea.created_at DESC LIMIT 1
        )
       WHERE n.event_id = ? ${statusClause} ${beforeClause}
       ORDER BY n.created_at DESC, n.id DESC
@@ -247,6 +265,7 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
       registrationId: row.registration_id,
       participantName: `${row.first_name} ${row.last_name}`,
       type: row.notification_type,
+      channel: row.channel,
       status: row.status,
       terminal: terminalNotificationStatuses.has(row.status),
       templateVersion: row.template_version,
@@ -283,12 +302,21 @@ const listNotificationAttempts = async (
   notificationId: string,
 ): Promise<Response> => {
   const notification = await env.DB.prepare(
-    "SELECT id, status FROM email_notifications WHERE id = ? AND event_id = ? LIMIT 1",
-  ).bind(notificationId, eventId).first<{ id: string; status: string }>();
+    `SELECT id, status FROM email_notifications WHERE id = ? AND event_id = ?
+     UNION ALL
+     SELECT id, status FROM participant_notifications WHERE id = ? AND event_id = ?
+     LIMIT 1`,
+  ).bind(notificationId, eventId, notificationId, eventId).first<{ id: string; status: string }>();
   if (notification === null) return json({ error: "Notification not found." }, 404);
   const attempts = await env.DB.prepare(
     `SELECT id, attempt_number, stage, status, started_at, completed_at, error_code
-       FROM email_attempts
+       FROM (
+         SELECT id, event_id, notification_id, attempt_number, stage, status,
+                started_at, completed_at, error_code, created_at FROM email_attempts
+         UNION ALL
+         SELECT id, event_id, notification_id, attempt_number, stage, status,
+                started_at, completed_at, error_code, created_at FROM participant_notification_attempts
+       )
       WHERE notification_id = ? AND event_id = ?
       ORDER BY attempt_number DESC, created_at DESC
       LIMIT 100`,
@@ -382,6 +410,17 @@ const retryNotification = async (
     ) {
       return json({ error: "This command identifier was already used for another operation." }, 409);
     }
+    const participantNotification = await env.DB.prepare(
+      `SELECT id, status FROM participant_notifications
+        WHERE id = ? AND event_id = ? LIMIT 1`,
+    ).bind(notificationId, eventId).first<{ id: string; status: string }>();
+    if (participantNotification !== null) {
+      await publishParticipantNotification(env, notificationId);
+      const current = await env.DB.prepare(
+        "SELECT status FROM participant_notifications WHERE id = ? AND event_id = ?",
+      ).bind(notificationId, eventId).first<{ status: string }>();
+      return json({ notificationId, status: current?.status ?? participantNotification.status, replayed: true });
+    }
     const attempt = await env.DB.prepare(
       `SELECT id, notification_id, status, attempt_number
          FROM email_attempts
@@ -394,6 +433,52 @@ const retryNotification = async (
   }
 
   const now = new Date().toISOString();
+  const participantNotification = await env.DB.prepare(
+    `SELECT id FROM participant_notifications
+      WHERE id = ? AND event_id = ? AND status IN ('FAILED', 'RETRY_PENDING')
+        AND COALESCE(last_error_code, '') != 'DELIVERY_OUTCOME_UNKNOWN'
+      LIMIT 1`,
+  ).bind(notificationId, eventId).first<{ id: string }>();
+  if (participantNotification !== null) {
+    try {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT INTO race_commands
+            (id, event_id, command_type, result_id, requested_at, completed_at)
+           SELECT ?, n.event_id, 'RETRY_NOTIFICATION', n.id, ?, ?
+             FROM participant_notifications n
+            WHERE n.id = ? AND n.event_id = ? AND n.status IN ('FAILED', 'RETRY_PENDING')
+              AND COALESCE(n.last_error_code, '') != 'DELIVERY_OUTCOME_UNKNOWN'`,
+        ).bind(commandId, now, now, notificationId, eventId),
+        env.DB.prepare(
+          `UPDATE participant_notifications
+              SET status = 'PENDING', terminal_at = NULL, status_reason = NULL,
+                  last_error_code = NULL, retry_after = NULL, updated_at = ?
+            WHERE id = ? AND event_id = ?
+              AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'RETRY_NOTIFICATION')`,
+        ).bind(now, notificationId, eventId, commandId),
+        env.DB.prepare(
+          `INSERT INTO audit_events
+            (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
+           SELECT ?, ?, ?, 'NOTIFICATION_RETRY_REQUESTED', 'PARTICIPANT_NOTIFICATION', ?, 'STAFF', ?, ?
+             FROM race_commands
+            WHERE id = ? AND event_id = ? AND command_type = 'RETRY_NOTIFICATION'`,
+        ).bind(
+          crypto.randomUUID(), eventId, commandId, notificationId, now,
+          JSON.stringify({ staff_profile_id: actor.id }), commandId, eventId,
+        ),
+      ]);
+    } catch {
+      if (await findCommand(env, commandId) === null) {
+        return json({ error: "The notification retry conflicted with another update." }, 409);
+      }
+    }
+    await publishParticipantNotification(env, notificationId);
+    const current = await env.DB.prepare(
+      "SELECT status FROM participant_notifications WHERE id = ? AND event_id = ?",
+    ).bind(notificationId, eventId).first<{ status: string }>();
+    return json({ notificationId, status: current?.status ?? "PENDING", replayed: false }, 202);
+  }
   const attemptId = crypto.randomUUID();
   try {
     await env.DB.batch([
@@ -488,10 +573,13 @@ const terminalNotificationAction = async (
     }
     const notification = await env.DB.prepare(
       `SELECT id, status, status_reason
-         FROM email_notifications
-        WHERE id = ? AND event_id = ?
+         FROM email_notifications WHERE id = ? AND event_id = ?
+        UNION ALL
+       SELECT id, status, status_reason
+         FROM participant_notifications WHERE id = ? AND event_id = ?
         LIMIT 1`,
-    ).bind(notificationId, eventId).first<{ id: string; status: string; status_reason: string | null }>();
+    ).bind(notificationId, eventId, notificationId, eventId)
+      .first<{ id: string; status: string; status_reason: string | null }>();
     if (notification === null || notification.status !== targetStatus || notification.status_reason !== reason) {
       return json({ error: "The replayed command does not match this request." }, 409);
     }
@@ -502,6 +590,74 @@ const terminalNotificationAction = async (
     ? "('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING', 'FAILED')"
     : "('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')";
   const now = new Date().toISOString();
+  const participantNotification = await env.DB.prepare(
+    `SELECT id, registration_id, channel FROM participant_notifications
+      WHERE id = ? AND event_id = ? AND status IN ${eligibleStatuses} LIMIT 1`,
+  ).bind(notificationId, eventId).first<{
+    id: string;
+    registration_id: string;
+    channel: string;
+  }>();
+  if (participantNotification !== null) {
+    const statements: D1PreparedStatement[] = [
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at)
+         SELECT ?, n.event_id, ?, n.id, ?, ?
+           FROM participant_notifications n
+          WHERE n.id = ? AND n.event_id = ? AND n.status IN ${eligibleStatuses}`,
+      ).bind(commandId, commandType, now, now, notificationId, eventId),
+      env.DB.prepare(
+        `UPDATE participant_notifications
+            SET status = ?, terminal_at = ?, status_reason = ?, retry_after = NULL, updated_at = ?
+          WHERE id = ? AND event_id = ?
+            AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = ?)`,
+      ).bind(targetStatus, now, reason, now, notificationId, eventId, commandId, commandType),
+    ];
+    if (action === "SUPPRESS") {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO participant_notification_suppressions
+            (event_id, registration_id, channel, source, created_at)
+           SELECT n.event_id, n.registration_id, n.channel, 'SUPPORT', ?
+             FROM participant_notifications n
+            WHERE n.id = ? AND n.event_id = ?
+              AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'SUPPRESS_NOTIFICATION')
+           ON CONFLICT(event_id, registration_id, channel) DO UPDATE SET source = 'SUPPORT', created_at = excluded.created_at`,
+        ).bind(now, notificationId, eventId, commandId),
+        env.DB.prepare(
+          `UPDATE participant_notifications
+              SET status = 'SUPPRESSED', terminal_at = ?, status_reason = ?,
+                  retry_after = NULL, last_error_code = NULL, updated_at = ?
+            WHERE event_id = ? AND registration_id = ? AND channel = ?
+              AND status IN ('PENDING', 'QUEUED', 'RETRY_PENDING')`,
+        ).bind(
+          now, reason, now, eventId,
+          participantNotification.registration_id, participantNotification.channel,
+        ),
+      );
+    }
+    statements.push(env.DB.prepare(
+      `INSERT INTO audit_events
+        (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
+       SELECT ?, ?, ?, ?, 'PARTICIPANT_NOTIFICATION', ?, 'STAFF', ?, ?
+         FROM race_commands
+        WHERE id = ? AND event_id = ? AND command_type = ?`,
+    ).bind(
+      crypto.randomUUID(), eventId, commandId,
+      action === "SUPPRESS" ? "NOTIFICATION_SUPPRESSED" : "NOTIFICATION_CANCELLED",
+      notificationId, now, JSON.stringify({ staff_profile_id: actor.id, reason_recorded: true }),
+      commandId, eventId, commandType,
+    ));
+    try {
+      await env.DB.batch(statements);
+    } catch {
+      return json({ error: "The notification update conflicted with another operation." }, 409);
+    }
+    return await findCommand(env, commandId) === null
+      ? json({ error: `This notification cannot be ${action === "SUPPRESS" ? "suppressed" : "cancelled"} in its current state.` }, 409)
+      : json({ notificationId, status: targetStatus, replayed: false }, 201);
+  }
   try {
     await env.DB.batch([
       env.DB.prepare(
@@ -588,13 +744,23 @@ const auditTimeline = async (url: URL, env: Env, eventId: string): Promise<Respo
                 'SYSTEM' AS actor_type, NULL AS actor_display_name,
                 COALESCE(ea.completed_at, ea.started_at) AS occurred_at,
                 ea.error_code AS safe_code
-           FROM email_attempts ea
-          WHERE ea.event_id = ?
-       ) timeline
+            FROM email_attempts ea
+           WHERE ea.event_id = ?
+         UNION ALL
+         SELECT pa.id, 'NOTIFICATION_ATTEMPT' AS source,
+                'NOTIFICATION_' || pa.stage || '_' || pa.status AS action,
+                'PARTICIPANT_NOTIFICATION' AS subject_type,
+                pa.notification_id AS subject_id,
+                'SYSTEM' AS actor_type, NULL AS actor_display_name,
+                COALESCE(pa.completed_at, pa.started_at) AS occurred_at,
+                pa.error_code AS safe_code
+           FROM participant_notification_attempts pa
+          WHERE pa.event_id = ?
+        ) timeline
       WHERE (? IS NULL OR timeline.occurred_at < ?)
       ORDER BY timeline.occurred_at DESC, timeline.id DESC
       LIMIT ?`,
-  ).bind(eventId, eventId, before, before, limit).all<AuditTimelineRow>();
+  ).bind(eventId, eventId, eventId, before, before, limit).all<AuditTimelineRow>();
 
   return json({
     events: rows.results.map((row) => ({

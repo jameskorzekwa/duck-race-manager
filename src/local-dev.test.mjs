@@ -67,11 +67,13 @@ const localEnv = (database) => ({
   APP_ORIGIN: localOrigin,
   AWS_REGION: "us-east-1",
   EMAIL_FROM_ADDRESS: "race@quickducks.local",
+  UNSUBSCRIBE_SECRET: "local-test-unsubscribe-secret-00000001",
   COGNITO_USER_POOL_ID: "us-east-1_local0000",
   COGNITO_USER_POOL_CLIENT_ID: "localdevclientid",
   COGNITO_DOMAIN: localOrigin,
   DB: createD1(database),
   EMAIL_QUEUE: { async send() {} },
+  PARTICIPANT_NOTIFICATION_QUEUE: { async send() {} },
   PARTICIPANT_CONTACT_READ_RATE_LIMITER: { async limit() { return { success: true }; } },
   PUBLIC_SEARCH_RATE_LIMITER: { async limit() { return { success: true }; } },
 });

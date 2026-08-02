@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0019_round_one_walk_up_admission.sql`, browser
+the Worker, D1 migrations through `0022_participant_notification_delivery.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -671,9 +671,42 @@ corresponding valid address. Invalid non-empty contact is rejected even with its
 opt-in off. The same validation and controls apply during public registration,
 staff walk-up registration, and staff participant edits. Audit history records
 only the changed field names, never old or new contact values or ownership
-proof. Email consent participates in the implemented operational-email workflow.
-SMS consent is captured independently, but SMS delivery is not implemented and
-the choice does not enqueue an SMS.
+proof. Email and SMS consent participate independently in the implemented
+participant-notification workflow. Explicitly opting back into a channel, or
+replacing its contact value while it remains opted in, clears that
+registration's prior suppression for that channel; changing one channel never
+changes the other.
+
+### Participant Email and SMS Delivery
+
+**Implemented:** a successful public or staff registration creates a durable
+confirmation for each currently opted-in channel. Pairing creates the Round One
+assignment notification; publishing a Round One winner creates official-result
+notifications for that heat and a Final assignment for the qualifier; publishing
+the Final creates official placement/non-placement notifications. Starting a
+round makes its first heat next and creates one reminder for that occurrence.
+Publishing or automatically settling a heat makes the next runnable heat in that
+round next. Resetting a heat cancels its old pending occurrence and creates one
+new occurrence when no earlier heat remains open; otherwise authoritative later
+progression creates it when that heat actually becomes next. Calling a heat does
+not create a duplicate reminder, and no wall-clock start estimate is used.
+
+Every outbox row commits in the same D1 batch as the domain fact and is unique by
+participant, channel, notification type, and lifecycle occurrence. Queue and
+provider work happens only after commit. Reconciliation recovers pending,
+publication-failed, and stale queued work; repeated successful publication never
+exhausts a notification. Delivery claims and terminal ambiguous outcomes prefer
+a missed message to a duplicate when provider acceptance cannot be proved.
+Queue payloads are opaque IDs only.
+
+The consumer reloads current contact, channel consent, participant/duck/heat or
+result state, local suppression, and provider suppression after claiming and
+immediately before delivery. Email uses SES and includes both a direct signed
+unsubscribe link and My Ducks guidance. Link-scanner GETs are read-only; the
+idempotent POST turns off only email and suppresses pending email. SMS uses AWS
+SNS transactional direct-to-phone delivery, includes STOP guidance, and checks
+SNS's opted-out-number state immediately before publishing. Email unsubscribe,
+SES suppression, and SMS STOP never disable or cancel the other channel.
 
 The privacy notice warns that anyone with access to the originating browser
 profile may view or edit its owned contact details. Cancel discards an edit,
@@ -742,8 +775,8 @@ preflight read. Every child delete in the batch is conditional on that command
 row existing, so a refused attempt writes nothing.
 
 A successful delete removes the registration, its race entry, its collection
-links in every browser including followers, and any email notification and
-attempt rows, in one atomic batch. The `race_commands` and redacted
+links in every browser including followers, and all email/SMS notification,
+attempt, and channel-suppression rows, in one atomic batch. The `race_commands` and redacted
 `REGISTRATION_DELETED` audit rows deliberately outlive the subject; the audit
 records the registration identifier and `deleted_via`, never a name, contact
 value, lookup code, or token. The mutation publishes the `participants` refresh
@@ -3248,45 +3281,31 @@ not return `details_json`, contact data, tokens, or provider details.
 
 ### Notification Support
 
-Operational race reminders are sent to a participant only when their current
-registration has both an email address and email updates enabled. Pairing creates
-one `HEAT_ASSIGNED` notification in the same D1 batch as the duck assignment and
-heat place. Moving a Round One or Final heat from `READY` to `CALLING` creates one
-`HEAT_UPCOMING` notification for each eligible opted-in racer on that heat. A
-matching command retry cannot create another logical message.
+The administrator support view combines migration-compatible email rows with the
+channel-neutral participant outbox. It shows channel, trigger, lifecycle state,
+attempt counts, and fixed safe failure codes without contact values, rendered
+content, provider response bodies, unsubscribe credentials, or private race
+links. Administrators can inspect attempts, retry non-ambiguous failures, and
+cancel or channel-suppress eligible work. Suppressing one channel also creates
+the durable registration/channel suppression checked by the consumer.
 
-The mutation publishes only the opaque notification ID to `EMAIL_QUEUE`; no
-name, address, duck number, lookup code, or token enters the queue message. A
-once-per-minute dispatcher recovers a notification committed before queue
-publication. Each durable row records the duck assignment that originated it.
-The consumer reloads the current consent, address, active registration, heat
-place, duck assignment, and heat state from D1 before it renders versioned text
-and HTML and asks SES to send. The originating assignment must still be the
-current one; a legacy row without that proof is cancelled rather than guessed.
-Opt-out, withdrawal, deletion, a changed assignment, or a heat that is no longer
-upcoming cancels stale work without sending. Email failure never rolls back
-pairing or a heat transition, and the onsite announcer remains authoritative.
+Only opaque IDs enter `EMAIL_QUEUE` or `PARTICIPANT_NOTIFICATION_QUEUE`. The
+once-per-minute dispatcher recovers `PENDING`, publication-failed, and stale
+`QUEUED` rows. Successful republication is not a provider attempt and never
+exhausts work; duplicate queue messages are harmless because one unique D1 claim
+owns delivery. Provider retries are counted separately, use bounded backoff, and
+stop after five actual attempts. A stale claim or ambiguous network/provider
+outcome becomes terminal `DELIVERY_OUTCOME_UNKNOWN`: neither automation nor a
+manual retry can risk a duplicate message after possible provider acceptance.
 
-Each email names the event, participant, current duck number, and Round One or
-Final heat. Assignment mail asks the participant to stay near the pond; upcoming
-mail says the heat is being called and asks them to bring their duck to the pond.
-Both link only to public race status, explain that race progress can change, and
-do not promise a start time. Private status credentials and contact-preference
-credentials are never placed in email storage or reconstructed by the consumer.
-
-SES acceptance records `SENT`. That is the terminal success the current system
-can prove; it is not relabeled `DELIVERED`. SES delivery, bounce, and complaint
-event callbacks remain deferred. Temporary send failures receive bounded queue
-retries, exhausted or permanent failures become `FAILED`, and unexpected queue
-failures reach the configured DLQ. Each active delivery is owned by a unique D1
-claim token rather than a timestamp. If a claim becomes stale, QuickDucks cannot
-distinguish a pre-send Worker stop from SES acceptance followed by a failed D1
-write, so it records `DELIVERY_OUTCOME_UNKNOWN` and never sends or manually
-retries that notification again. This at-most-once recovery policy prefers one
-missed reminder to a duplicate. The administrator UI lists notification rows
-and attempts, retries other `FAILED` or `RETRY_PENDING` records, and can suppress
-or cancel eligible work. All persisted errors are fixed safe codes rather than
-raw provider responses.
+After claiming, the consumer reloads current consent, a valid current contact,
+registration status, assignment/heat/result state, local suppression, and SES or
+SNS suppression. Changed or withdrawn state cancels without provider access.
+Email goes through SES with direct unsubscribe/list headers. SMS goes through SNS
+as transactional direct-to-phone traffic only after checking the provider's
+STOP/opted-out-number state. Provider latency, provider failure, queue failure,
+and support inspection never roll back or block the race mutation that created
+the durable row.
 
 ## Delete Event (Any State)
 
@@ -3310,8 +3329,8 @@ revision returns `409` without deleting anything; a wrong typed name returns
 
 One atomic D1 batch deletes the complete dataset: registrations, race entries,
 duck assignments, event duck reservations, duck inventory events, ducks and
-tags, heats, heat entries, current and superseded heat results, email
-notifications and attempts, browser collection links and collections, race
+tags, heats, heat entries, current and superseded heat results, participant and
+legacy email notifications, attempts and suppressions, browser collection links and collections, race
 commands, audit events, and the event row itself. Staff profiles, staff
 access/lifecycle history, and organization event defaults remain. The next event
 starts with no race duck/tag rows, so each physically selected duck must be
@@ -3373,13 +3392,14 @@ External Cognito changes cannot share a D1 transaction. Staff grant and
 lifecycle handlers use compensation as described in the staff-access section
 and return explicit reconciliation errors if compensation also fails.
 
-Queue publication is also split across D1 and Cloudflare Queue. Pairing or a heat
-call commits the durable notification with its race command before making a
-best-effort queue send. A failed send records a temporary queue attempt and
-returns the notification to `RETRY_PENDING`; if even that recovery write fails,
-the row remains `PENDING`. The once-per-minute dispatcher rediscovers both states.
-The configured consumer then claims the row and revalidates authoritative race
-and consent state before any SES request.
+Queue publication is also split across D1 and Cloudflare Queue. Registration,
+pairing, round progression, and official result commands commit their durable
+notifications before making a best-effort queue send. A failed send records a
+temporary queue attempt and returns the notification to `RETRY_PENDING`; if even
+that recovery write fails, the row remains discoverable. The once-per-minute
+dispatcher also republishes stale `QUEUED` work. The configured consumer then
+claims the row and revalidates authoritative race, contact, consent, and
+suppression state before any SES or SNS request.
 
 ### Connectivity Failure
 

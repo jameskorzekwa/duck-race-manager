@@ -25,6 +25,7 @@ const migrationNames = [
   "0019_round_one_walk_up_admission.sql",
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
+  "0022_participant_notification_delivery.sql",
 ];
 
 const lifecycleStatuses = [
@@ -1266,6 +1267,65 @@ test("0021 adds unique nullable delivery claims without breaking older notificat
   assert.throws(() => database.prepare(
     "UPDATE email_notifications SET delivery_claim_token = ? WHERE id = ?",
   ).run("", "claim-notification-2"), /CHECK constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0022 keeps legacy email writes compatible and enforces channel-scoped outbox uniqueness", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0022_participant_notification_delivery.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('notify-event', 'notify-race', 'Notify Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, email, phone, status, lookup_code,
+       private_token_hash, email_notifications_enabled, sms_notifications_enabled,
+       submitted_at, status_changed_at)
+    VALUES ('notify-registration', 'notify-event', 'Daisy', 'Duck', 'daisy@example.test',
+            '(817) 555-0100', 'ACTIVE', 'DAISY123', 'notify-hash', 1, 1,
+            '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('notify-command', 'notify-event', 'CREATE_REGISTRATION', 'notify-registration',
+            '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+  `);
+
+  applyMigrations(database, ["0022_participant_notification_delivery.sql"]);
+  // A Worker from before 0022 can still write and later drain its email table.
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status, created_by_command_id)
+    VALUES ('legacy-email', 'notify-event', 'notify-registration',
+            'HEAT_ASSIGNED', 'PENDING', 'notify-command');
+    INSERT INTO participant_notifications
+      (id, event_id, registration_id, channel, notification_type, lifecycle_key,
+       created_by_command_id)
+    VALUES
+      ('new-email', 'notify-event', 'notify-registration', 'EMAIL',
+       'REGISTRATION_CONFIRMED', 'registration:notify-registration', 'notify-command'),
+      ('new-sms', 'notify-event', 'notify-registration', 'SMS',
+       'REGISTRATION_CONFIRMED', 'registration:notify-registration', 'notify-command');
+  `);
+  assert.equal(count(database, "email_notifications"), 1);
+  assert.equal(count(database, "participant_notifications"), 2);
+  assert.throws(() => database.exec(`
+    INSERT INTO participant_notifications
+      (id, event_id, registration_id, channel, notification_type, lifecycle_key,
+       created_by_command_id)
+    VALUES ('duplicate-email', 'notify-event', 'notify-registration', 'EMAIL',
+            'REGISTRATION_CONFIRMED', 'registration:notify-registration', 'notify-command');
+  `), /UNIQUE constraint failed/);
+  database.exec(`
+    INSERT INTO participant_notification_suppressions
+      (event_id, registration_id, channel, source)
+    VALUES ('notify-event', 'notify-registration', 'EMAIL', 'EMAIL_UNSUBSCRIBE');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO participant_notification_suppressions
+      (event_id, registration_id, channel, source)
+    VALUES ('notify-event', 'notify-registration', 'EMAIL', 'SUPPORT');
+  `), /UNIQUE constraint failed/);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

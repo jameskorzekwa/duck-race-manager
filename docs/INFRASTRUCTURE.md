@@ -13,8 +13,11 @@
 | Public search limit | Workers binding `PUBLIC_SEARCH_RATE_LIMITER` | `wrangler.jsonc` |
 | Email queue | Cloudflare Queue `quickducks-email` | Wrangler producer/consumer and `EMAIL_QUEUE` binding |
 | Email dead-letter queue | Cloudflare Queue `quickducks-email-dlq` | Wrangler consumer retry exhaustion |
+| Participant notification queue | Cloudflare Queue `quickducks-participant-notifications` | Wrangler producer/consumer and `PARTICIPANT_NOTIFICATION_QUEUE` binding |
+| Participant notification dead-letter queue | Cloudflare Queue `quickducks-participant-notifications-dlq` | Wrangler consumer retry exhaustion |
 | Staff identity | Cognito user pool `quickducks-staff` in `us-east-1` | CloudFormation |
 | Transactional email identity | Amazon SES identity `quickducks.com` in `us-east-1` | CloudFormation plus DNS |
+| Transactional SMS | Amazon SNS direct-to-phone publishing in `us-east-1` | CloudFormation IAM plus AWS SMS registration and spend controls |
 | Worker AWS identity | IAM user `quickducks-worker-ses` | Application CloudFormation stack; bootstrap-owned permissions boundary; key stored as Worker secrets |
 | Registration challenge | Cloudflare Turnstile widget for `quickducks.com` | Cloudflare dashboard plus Worker variable/secret |
 
@@ -37,8 +40,9 @@ are production resources. Do not create substitutes during a release.
   `quickducks-worker-ses-boundary`. The application stack can attach only that
   boundary to the exact Worker user; it cannot create or alter boundary policy
   versions or remove the boundary. The boundary fixes effective SES access to
-  `SendEmail` and `SendRawEmail` on only the `quickducks.com` identity and
-  staff-administration access to only the production Cognito pool.
+  send from only the `quickducks.com` identity plus account-suppression reads,
+  SNS access to direct publishing and phone opt-out checks only in `us-east-1`,
+  and staff-administration access to only the production Cognito pool.
 - The Worker's runtime AWS key pair and both Turnstile keys exist only as
   encrypted Cloudflare Worker secrets. They are not GitHub Actions secrets and
   the release does not replace them.
@@ -410,8 +414,10 @@ The template creates or updates:
 - A Cognito managed-login domain and default branding.
 - The `quickducks.com` SES identity with Easy DKIM and custom MAIL FROM.
 - The `quickducks-worker-ses` IAM user and an inline policy limited to sending
-  from the QuickDucks SES identity and managing staff identities in this user
-  pool, capped by the independently bootstrap-managed permissions boundary.
+  from the QuickDucks SES identity, checking email suppression, publishing
+  transactional SMS, checking phone opt-outs, and managing staff identities in
+  this user pool, capped by the independently bootstrap-managed permissions
+  boundary.
 
 The stack deliberately does not create an IAM access key. The user pool and
 managed-login branding have retain policies, and the pool has deletion
@@ -512,6 +518,8 @@ once if they do not already exist:
 npx wrangler d1 create quickducks-prod
 npx wrangler queues create quickducks-email
 npx wrangler queues create quickducks-email-dlq
+npx wrangler queues create quickducks-participant-notifications
+npx wrangler queues create quickducks-participant-notifications-dlq
 ```
 
 Put the returned D1 database ID in `wrangler.jsonc` and commit it. The committed
@@ -581,15 +589,54 @@ notifications pin their originating assignment, while null legacy work and any
 replacement mismatch are cancelled instead of being rendered with a different
 duck. Automatic invocation logs remain disabled, and raw SES responses,
 recipient addresses, rendered bodies, and credentials must not be logged or
-persisted as errors. SES acceptance is recorded honestly as `SENT`;
-delivery/bounce/complaint callbacks are not currently implemented.
+persisted as errors. SES acceptance is recorded honestly as `SENT`; the consumer
+also checks SES account suppression immediately before sending.
 
-After deployment, use a synthetic controlled registration to opt into email,
-pair it, and call its heat. Confirm the support view reaches `SENT` for the
-assignment and upcoming notification and that the controlled mailbox receives
-the expected text. Do not use participant data for this canary. Inspect the main
-queue and DLQ metrics for retries. If sending misbehaves, pause the queue
-consumer first (or remove its consumer binding in a reviewed Worker rollback),
+Migration `0022_participant_notification_delivery.sql` adds a channel-neutral
+outbox, attempt history, and registration-scoped channel suppression without
+changing the legacy email tables. This is migration-first and rollback safe: an
+older Worker can continue writing/draining `quickducks-email`, while new email
+and SMS lifecycle work uses the distinct
+`quickducks-participant-notifications` queue. Never put a new SMS outbox ID on
+the legacy email queue. The one-minute reconciler republishes stale accepted
+queue work without treating successful publications as provider attempts, so a
+long consumer outage remains recoverable and duplicate-safe.
+
+Participant email contains a signed, mailbox-independent unsubscribe capability.
+The stable HMAC key is the encrypted Worker secret `UNSUBSCRIBE_SECRET`; it must
+be at least 32 random bytes represented without whitespace. Rotation invalidates
+links already delivered, so rotate only as a deliberate containment action.
+
+**Production-affecting secret setup:** verify the target account and Worker name
+before running this interactive command; paste the generated value at the prompt
+and never place it in shell history or a file.
+
+```sh
+npx wrangler secret put UNSUBSCRIBE_SECRET
+```
+
+AWS provides the SMS path through SNS direct-to-phone transactional publishing.
+It is usage-priced, not a free production A2P service; AWS sandbox exit,
+origination identity/registration, spend limits, and country rules must be
+approved in `us-east-1` before enabling participant traffic. Carrier-email
+gateways and consumer "free SMS" services are not supported alternatives: they
+cannot provide the consent, STOP, suppression, deliverability, and operational
+failure contract used here. The retained `quickducks-worker-ses` IAM user name is
+legacy naming only. Its boundary allows SES send/suppression reads and exactly
+`sns:Publish` plus `sns:CheckIfPhoneNumberIsOptedOut` in `us-east-1`; SNS phone
+publishing does not support a narrower resource ARN.
+
+Deploy the reviewed bootstrap-stack update before the application-stack release
+that adds SNS to the Worker inline policy. The independently managed boundary
+must allow those two SNS actions first; do not bypass an ordering failure by
+removing or broadening the boundary.
+
+After deployment, use synthetic controlled email and phone destinations to opt
+into each channel and exercise registration, assignment, round start, one
+official Round One result, and unsubscribe/STOP. Confirm the redacted support
+view reaches `SENT` or `SUPPRESSED` as expected. Do not use participant data for
+this canary. Inspect both main queues and DLQs for retries. If sending misbehaves,
+pause the affected queue consumer first (or remove its consumer binding in a reviewed Worker rollback),
 then revoke the Worker SES key if containment requires it. Retain D1 notification
 and attempt history plus queue/DLQ messages for diagnosis; already accepted
 email cannot be recalled, and replaying a DLQ must pass the same current-state
@@ -699,6 +746,7 @@ The Worker needs this exact encrypted-secret set:
 | `AWS_SECRET_ACCESS_KEY` | Matching secret access key, available only at creation |
 | `TURNSTILE_SECRET_KEY` | Turnstile widget secret |
 | `TURNSTILE_SITE_KEY` | Turnstile widget site key; intentionally encrypted in current production |
+| `UNSUBSCRIBE_SECRET` | Random HMAC key for participant email unsubscribe links |
 
 Create the IAM key only when the Worker integration is ready. On a trusted
 workstation with `jq`, transfer the pair directly from AWS to Wrangler without
@@ -721,7 +769,7 @@ printing it or writing it to disk:
 If the bulk operation fails, immediately list and delete the newly created IAM
 key before retrying; AWS will never show its secret value again. Never place
 these runtime keys in `wrangler.jsonc`, `.dev.vars`, GitHub, logs, issues, or
-release notes. Confirm all four secrets with `npx wrangler secret list`, which
+release notes. Confirm all five secrets with `npx wrangler secret list`, which
 shows names but not values. Every release performs this name-only check before
 CloudFormation, D1, or Worker mutation.
 
@@ -759,7 +807,7 @@ historical bootstrap gates, not approval steps to repeat for every merge:
   committed `RaceUpdates` class migration.
 - All existing migrations pass locally and production contains no manually
   modified schema that is absent from `db/migrations`.
-- The Worker's four encrypted runtime secret names exist.
+- The Worker's five encrypted runtime secret names exist.
 - Both custom hostnames are active and Turnstile allows the production host.
 - The reviewed change enabling `RaceUpdates` migration `v1` records that there
   is no rollback path to a pre-migration Worker and has a forward-fix recovery
@@ -817,7 +865,7 @@ no manual tag, but deployment requires production-environment approval:
 6. After James approves the `production` environment, the deployment refetches
    the default branch and fails if the validated SHA is no longer its current
    tip. It then verifies the exact account, region, stack and bootstrap role ARN
-   shapes, all four Worker secret names, D1 legacy-role safety, the existing
+   shapes, all five Worker secret names, D1 legacy-role safety, the existing
    named CloudFormation stack, current Cognito outputs and `AppOrigin`, monotonic
    stack version, and source ancestry. It validates both templates, deploys
    CloudFormation with the dedicated execution role, verifies the result,

@@ -6,6 +6,7 @@ export const requiredWorkerSecrets = [
   "AWS_SECRET_ACCESS_KEY",
   "TURNSTILE_SECRET_KEY",
   "TURNSTILE_SITE_KEY",
+  "UNSUBSCRIBE_SECRET",
 ];
 
 export const checkWorkerSecrets = (payload) => {

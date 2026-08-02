@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  checkEmailSuppressedWithSes,
   EmailSendError,
   handleEmailQueue,
   sendEmailWithSes,
@@ -57,13 +58,22 @@ const expectSendError = async (promise, safeCode, retryable) => {
 
 test("production wires the opaque-ID queue consumer, bounded retries, DLQ, and outbox cron", () => {
   const production = config("wrangler.jsonc");
-  assert.deepEqual(production.queues.consumers, [{
-    queue: "quickducks-email",
-    max_batch_size: 10,
-    max_batch_timeout: 5,
-    max_retries: 5,
-    dead_letter_queue: "quickducks-email-dlq",
-  }]);
+  assert.deepEqual(production.queues.consumers, [
+    {
+      queue: "quickducks-email",
+      max_batch_size: 10,
+      max_batch_timeout: 5,
+      max_retries: 5,
+      dead_letter_queue: "quickducks-email-dlq",
+    },
+    {
+      queue: "quickducks-participant-notifications",
+      max_batch_size: 10,
+      max_batch_timeout: 5,
+      max_retries: 5,
+      dead_letter_queue: "quickducks-participant-notifications-dlq",
+    },
+  ]);
   assert.deepEqual(production.triggers.crons, ["*/1 * * * *"]);
   assert.equal(production.vars.EMAIL_FROM_ADDRESS, "race@quickducks.com");
   assert.equal(typeof worker.queue, "function");
@@ -155,12 +165,12 @@ test("SES failures are safely classified without reading provider response bodie
   context.after(() => { globalThis.fetch = originalFetch; });
 
   globalThis.fetch = async () => { throw new Error("private network detail"); };
-  await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), "SES_NETWORK_ERROR", true);
+  await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), "DELIVERY_OUTCOME_UNKNOWN", false);
 
   for (const [status, safeCode, retryable] of [
-    [408, "SES_TEMPORARY_FAILURE", true],
-    [429, "SES_TEMPORARY_FAILURE", true],
-    [503, "SES_TEMPORARY_FAILURE", true],
+    [408, "DELIVERY_OUTCOME_UNKNOWN", false],
+    [429, "SES_THROTTLED", true],
+    [503, "DELIVERY_OUTCOME_UNKNOWN", false],
     [400, "SES_REJECTED", false],
   ]) {
     let bodyRead = false;
@@ -173,6 +183,19 @@ test("SES failures are safely classified without reading provider response bodie
     await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), safeCode, retryable);
     assert.equal(bodyRead, false, `provider body is ignored for HTTP ${status}`);
   }
+});
+
+test("SES suppression lookup retries request timeouts before any email is sent", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(null, { status: 408 });
+
+  await expectSendError(
+    checkEmailSuppressedWithSes("racer@example.test", sesEnv),
+    "SES_SUPPRESSION_CHECK_FAILED",
+    true,
+  );
 });
 
 test("SES acceptance does not depend on a usable provider message ID", async (context) => {
@@ -188,6 +211,29 @@ test("SES acceptance does not depend on a usable provider message ID", async (co
     globalThis.fetch = async () => new Response(body, { status: 202 });
     assert.deepEqual(await sendEmailWithSes(outboundEmail, sesEnv), { providerMessageId: null });
   }
+});
+
+test("SES structured mail carries standards-compatible unsubscribe headers", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let body;
+  globalThis.fetch = async (_url, options) => {
+    body = JSON.parse(options.body);
+    return Response.json({ MessageId: "unsubscribe-message" });
+  };
+  const unsubscribeUrl = "https://quickducks.com/notifications/unsubscribe/id/token";
+  await sendEmailWithSes({
+    ...outboundEmail,
+    headers: [
+      { name: "List-Unsubscribe", value: `<${unsubscribeUrl}>` },
+      { name: "List-Unsubscribe-Post", value: "List-Unsubscribe=One-Click" },
+    ],
+  }, sesEnv);
+  assert.deepEqual(body.Content.Simple.Headers, [
+    { Name: "List-Unsubscribe", Value: `<${unsubscribeUrl}>` },
+    { Name: "List-Unsubscribe-Post", Value: "List-Unsubscribe=One-Click" },
+  ]);
 });
 
 test("invalid or missing SES configuration fails closed before fetch", async (context) => {

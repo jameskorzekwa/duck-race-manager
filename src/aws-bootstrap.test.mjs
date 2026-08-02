@@ -78,6 +78,9 @@ test("CloudFormation execution role is limited to application resource types and
   const boundary = section(bootstrap, "  WorkerPermissionsBoundary:", "  GitHubActionsOidcProvider:");
   assert.match(boundary, /ManagedPolicyName: quickducks-worker-ses-boundary/);
   assert.match(boundary, /- ses:SendEmail\n\s+- ses:SendRawEmail/);
+  assert.match(boundary, /Action: ses:GetSuppressedDestination/);
+  assert.match(boundary, /- sns:CheckIfPhoneNumberIsOptedOut\n\s+- sns:Publish/);
+  assert.match(boundary, /aws:RequestedRegion: us-east-1/);
   assert.match(boundary, /identity\/quickducks\.com/);
   assert.match(boundary, /userpool\/\$\{StaffUserPoolId\}/);
   assert.doesNotMatch(boundary, /userpool\/\*/);
@@ -98,6 +101,7 @@ test("CloudFormation execution role is limited to application resource types and
     "iam:PutRolePolicy",
     "iam:UpdateAccessKey",
     "ses:*",
+    "sns:*",
   ]) {
     assert.equal(executionRole.includes(forbidden), false, `Execution role must not contain ${forbidden}`);
   }

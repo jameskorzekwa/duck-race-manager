@@ -236,6 +236,19 @@ const seedFullEventDataset = (database, status) => {
     VALUES ('notification', 'event_test', 'registration', 'heat', 'HEAT_ASSIGNED', 'PENDING');
     INSERT INTO email_attempts (id, event_id, notification_id, attempt_number, stage, status, started_at)
     VALUES ('attempt', 'event_test', 'notification', 1, 'QUEUE', 'PENDING', '2026-07-26T02:00:00Z');
+    INSERT INTO participant_notifications
+      (id, event_id, registration_id, channel, notification_type, lifecycle_key,
+       heat_id, duck_assignment_id, created_by_command_id)
+    VALUES ('participant-notification', 'event_test', 'registration', 'EMAIL',
+            'ROUND_ONE_ASSIGNED', 'assignment:heat', 'heat', 'assignment',
+            '11111111-1111-4111-8111-111111111111');
+    INSERT INTO participant_notification_attempts
+      (id, event_id, notification_id, attempt_number, stage, status, started_at)
+    VALUES ('participant-attempt', 'event_test', 'participant-notification', 1,
+            'QUEUE', 'QUEUED', '2026-07-26T02:00:00Z');
+    INSERT INTO participant_notification_suppressions
+      (event_id, registration_id, channel, source)
+    VALUES ('event_test', 'registration', 'SMS', 'SUPPORT');
     INSERT INTO browser_registration_collections (id, token_hash, created_at, last_seen_at, expires_at)
     VALUES ('collection', 'collection-hash', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', '2027-07-26T00:00:00Z');
     INSERT INTO browser_collection_registrations (collection_id, registration_id, added_at)
@@ -264,6 +277,9 @@ const eventLinkedTables = [
   "final_podium_selections",
   "email_notifications",
   "email_attempts",
+  "participant_notifications",
+  "participant_notification_attempts",
+  "participant_notification_suppressions",
   "browser_registration_collections",
   "browser_collection_registrations",
   "race_commands",

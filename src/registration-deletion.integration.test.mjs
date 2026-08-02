@@ -599,7 +599,16 @@ test("the guarded public delete binds every external value and re-checks ownersh
   const deletes = DB.statements.filter((statement) => statement.sql.startsWith("DELETE FROM "));
   assert.deepEqual(
     deletes.map((statement) => statement.sql.match(/^DELETE FROM (\w+)/)[1]),
-    ["email_attempts", "email_notifications", "browser_collection_registrations", "race_entries", "registrations"],
+    [
+      "participant_notification_attempts",
+      "participant_notifications",
+      "participant_notification_suppressions",
+      "email_attempts",
+      "email_notifications",
+      "browser_collection_registrations",
+      "race_entries",
+      "registrations",
+    ],
   );
   for (const statement of deletes) {
     assert.match(statement.sql, /rc\.command_type = 'DELETE_REGISTRATION'/);

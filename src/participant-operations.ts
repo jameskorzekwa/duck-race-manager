@@ -21,6 +21,10 @@ import {
   type RegistrationInput,
 } from "./registration.ts";
 import { reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
+import {
+  publishParticipantNotificationsForCommand,
+  registrationNotificationStatements,
+} from "./participant-notifications.ts";
 import type { Env } from "./types.ts";
 import {
   unstartedRoundOneHeatExistsSql,
@@ -607,6 +611,7 @@ const createWalkUp = async (
           WHERE r.id = ? AND r.event_id = ?
             AND rc.command_type = 'CREATE_STAFF_REGISTRATION'`,
       ).bind(raceEntryId, commandId, registrationId, eventId),
+      ...registrationNotificationStatements(env, eventId, registrationId, commandId, now),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -640,6 +645,8 @@ const createWalkUp = async (
     }
     return json({ error: "Walk-up registration conflicted with another update. Retry with the same command." }, 409);
   }
+
+  await publishParticipantNotificationsForCommand(env, commandId);
 
   const created = await getRegistration(env, registrationId);
   if (created === null) {
@@ -774,6 +781,10 @@ const editRegistration = async (
   }
   if (value.staffNotes !== current.staff_notes) changedFields.push("staff_notes");
 
+  const clearEmailSuppression = value.input.emailNotificationsEnabled
+    && (current.email_notifications_enabled !== 1 || current.email !== value.input.email);
+  const clearSmsSuppression = value.input.smsNotificationsEnabled
+    && (current.sms_notifications_enabled !== 1 || current.phone !== value.input.phone);
   const now = new Date().toISOString();
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
@@ -825,6 +836,43 @@ const editRegistration = async (
     now,
     registrationId,
     value.input.emailNotificationsEnabled ? 1 : 0,
+    commandId,
+    registrationId,
+  ));
+  statements.push(env.DB.prepare(
+    `UPDATE participant_notifications
+        SET status = 'CANCELLED', terminal_at = ?, status_reason = 'CHANNEL_NOT_OPTED_IN',
+            retry_after = NULL, last_error_code = NULL, updated_at = ?
+      WHERE registration_id = ?
+        AND ((channel = 'EMAIL' AND ? = 0) OR (channel = 'SMS' AND ? = 0))
+        AND status IN ('PENDING', 'QUEUED', 'RETRY_PENDING')
+        AND EXISTS (
+          SELECT 1 FROM race_commands rc
+           WHERE rc.id = ? AND rc.command_type = 'UPDATE_REGISTRATION'
+             AND rc.result_id = ?
+        )`,
+  ).bind(
+    now,
+    now,
+    registrationId,
+    value.input.emailNotificationsEnabled ? 1 : 0,
+    value.input.smsNotificationsEnabled ? 1 : 0,
+    commandId,
+    registrationId,
+  ));
+  statements.push(env.DB.prepare(
+    `DELETE FROM participant_notification_suppressions
+      WHERE registration_id = ?
+        AND ((channel = 'EMAIL' AND ? = 1) OR (channel = 'SMS' AND ? = 1))
+        AND EXISTS (
+          SELECT 1 FROM race_commands rc
+           WHERE rc.id = ? AND rc.command_type = 'UPDATE_REGISTRATION'
+             AND rc.result_id = ?
+        )`,
+  ).bind(
+    registrationId,
+    clearEmailSuppression ? 1 : 0,
+    clearSmsSuppression ? 1 : 0,
     commandId,
     registrationId,
   ));

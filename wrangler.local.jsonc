@@ -45,7 +45,8 @@
     "EMAIL_FROM_ADDRESS": "race@quickducks.local",
     "COGNITO_USER_POOL_ID": "us-east-1_local0000",
     "COGNITO_USER_POOL_CLIENT_ID": "localdevclientid",
-    "COGNITO_DOMAIN": "http://localhost:8787"
+    "COGNITO_DOMAIN": "http://localhost:8787",
+    "UNSUBSCRIBE_SECRET": "local-development-unsubscribe-secret-only"
   },
   "d1_databases": [
     {
@@ -74,6 +75,10 @@
       {
         "binding": "EMAIL_QUEUE",
         "queue": "quickducks-email-local"
+      },
+      {
+        "binding": "PARTICIPANT_NOTIFICATION_QUEUE",
+        "queue": "quickducks-participant-notifications-local"
       }
     ],
     "consumers": [
@@ -83,6 +88,13 @@
         "max_batch_timeout": 1,
         "max_retries": 5,
         "dead_letter_queue": "quickducks-email-local-dlq"
+      },
+      {
+        "queue": "quickducks-participant-notifications-local",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "quickducks-participant-notifications-local-dlq"
       }
     ]
   },

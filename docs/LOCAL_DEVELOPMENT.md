@@ -39,9 +39,9 @@ devices](#testing-on-other-devices).
 
 ## What makes this work
 
-Three things in production need the network: Cognito, which authenticates staff;
-Turnstile, which protects public registration; and SES, which sends race
-reminders. Local development replaces exactly those external boundaries while
+Four things in production need the network: Cognito, which authenticates staff;
+Turnstile, which protects public registration; SES, which sends participant
+email; and SNS, which sends participant SMS. Local development replaces exactly those external boundaries while
 retaining their application-side authorization, queue, and persistence paths.
 
 `wrangler.local.jsonc` differs from `wrangler.jsonc` in four ways:
@@ -69,13 +69,13 @@ It supplies the two seams `createWorker` already accepts:
 It also serves a stand-in for the Cognito hosted UI at `/oauth2/authorize`, which
 lists the staff accounts in the local database and lets you pick one.
 
-The local email queue has its own `quickducks-email-local` and
-`quickducks-email-local-dlq` identities. Its consumer runs the production D1
-claim, consent checks, rendering, attempt recording, and retry logic, then stores
-the synthetic message in memory instead of contacting SES. Browser tests inspect
-that mailbox at `GET /__local/emails` and clear it with
-`DELETE /__local/emails`; both routes exist only in `src/local-dev.ts` and are
-refused outside a configured local origin.
+The local legacy-email and participant-notification queues have identities that
+are distinct from production. Their consumers run the production D1 claims,
+consent and suppression checks, rendering, attempt recording, and retry logic,
+then store synthetic messages in memory instead of contacting SES or SNS.
+Browser tests inspect and clear email at `GET`/`DELETE /__local/emails` and SMS
+at `GET`/`DELETE /__local/sms`; these routes exist only in `src/local-dev.ts` and
+are refused outside a configured local origin.
 
 Everything else is the real thing. Sign-in still runs the production PKCE flow,
 sets the same `__Host-` cookies, refreshes the same way, and — crucially — still
@@ -261,8 +261,8 @@ or when a local database drifted while a migration was being written.
 
 ## What is still not local
 
-- **Outbound email.** The queue producer runs, but there is no consumer and no
-  SES path in any environment, so nothing sends.
+- **Real outbound delivery.** Local consumers capture synthetic email and SMS
+  through the production application paths, but never contact SES or SNS.
 - **Real NFC writing**, unless you serve the site to an Android phone with
   `npm run dev:network` and a `mkcert` certificate the phone trusts. That is only
   the scanning station on `/staff/inventory`; the rest of that page works on any

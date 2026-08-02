@@ -31,6 +31,12 @@ import {
   sendEmailWithSes,
   type EmailSender,
 } from "./email-notifications.ts";
+import { handleEmailUnsubscribe } from "./notification-unsubscribe.ts";
+import {
+  dispatchPendingParticipantNotifications,
+  handleParticipantNotificationQueue,
+  type ParticipantNotificationDependencies,
+} from "./participant-notifications.ts";
 import {
   phaseAllowsRaceStatus,
   phaseShowsMyDucks,
@@ -193,6 +199,7 @@ export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
   emailSender: EmailSender = sendEmailWithSes,
+  participantNotificationDependencies: Partial<ParticipantNotificationDependencies> = {},
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -334,6 +341,13 @@ export const createWorker = (
         database: database?.ok === 1 ? "connected" : "unavailable",
         region: env.AWS_REGION,
       });
+    }
+
+    const unsubscribeMatch = url.pathname.match(
+      /^\/notifications\/unsubscribe\/([A-Za-z0-9_-]{1,128})\/([0-9a-f]{64})$/,
+    );
+    if (unsubscribeMatch !== null) {
+      return handleEmailUnsubscribe(request, env, unsubscribeMatch[1], unsubscribeMatch[2]);
     }
 
     if (url.pathname.startsWith("/api/v1/")) {
@@ -638,10 +652,21 @@ export const createWorker = (
     return html(renderNotFound(), 404, true);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, emailSender);
+    if (batch.queue.includes("participant-notifications")) {
+      await handleParticipantNotificationQueue(batch, env, {
+        emailSender,
+        ...(emailSender === sendEmailWithSes ? {} : { emailSuppressionChecker: async () => false }),
+        ...participantNotificationDependencies,
+      });
+    } else {
+      await handleEmailQueue(batch, env, emailSender);
+    }
   },
   async scheduled(_controller, env, ctx): Promise<void> {
-    ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    ctx.waitUntil(Promise.all([
+      dispatchPendingEmailNotifications(env),
+      dispatchPendingParticipantNotifications(env),
+    ]).then(() => undefined));
   },
 });
 

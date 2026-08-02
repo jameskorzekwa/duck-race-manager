@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: QuickDucks Cognito staff authentication and SES sending identity
+Description: QuickDucks Cognito staff authentication and participant email/SMS delivery
 
 Parameters:
   AppOrigin:
@@ -123,6 +123,23 @@ Resources:
                   - ses:SendEmail
                   - ses:SendRawEmail
                 Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/quickducks.com
+              - Effect: Allow
+                Action: ses:GetSuppressedDestination
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
+              # SNS direct-to-phone operations do not support resource-level
+              # permissions. Region and action are therefore the narrow runtime
+              # boundary; messages are forced to Transactional in Worker code.
+              - Effect: Allow
+                Action:
+                  - sns:CheckIfPhoneNumberIsOptedOut
+                  - sns:Publish
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref AWS::Region
               - Effect: Allow
                 Action:
                   - cognito-idp:AdminCreateUser

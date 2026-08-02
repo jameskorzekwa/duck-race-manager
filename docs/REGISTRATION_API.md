@@ -62,7 +62,9 @@ Successful response:
 ```
 
 Registration creation writes the command, registration, stable race entry,
-and audit event in one D1 batch. No duck or heat is assigned at submission.
+channel-specific durable confirmation outbox rows, and audit event in one D1
+batch. Queue/provider failure cannot roll back the registration. No duck or heat
+is assigned at submission.
 Registration does not ask whether a participant plans to keep or return a duck.
 The legacy `race_entries.duck_keep_preference` column remains for database
 compatibility, receives its existing default for new rows, and is not read,

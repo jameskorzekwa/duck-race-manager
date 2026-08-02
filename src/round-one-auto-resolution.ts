@@ -5,6 +5,11 @@ import {
   pendingUnplacedWalkUpExistsSql,
 } from "./heat-operations.ts";
 import type { Env } from "./types.ts";
+import {
+  nextHeatUpcomingStatements,
+  publishParticipantNotificationsForCommand,
+  resultNotificationStatements,
+} from "./participant-notifications.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
 
 // A Round One heat stops being a race when the racers in it leave. Withdrawal
@@ -199,6 +204,7 @@ const skipStatements = (
     commandId, now, candidate.id, eventId, candidate.revision,
     commandId, eventId, COMMAND_TYPES.SKIPPED, candidate.id,
   ),
+  ...nextHeatUpcomingStatements(env, eventId, candidate.id, commandId, now),
   env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id,
@@ -368,6 +374,7 @@ const uncontestedStatements = (
       }),
     ),
   );
+  statements.push(...resultNotificationStatements(env, eventId, candidate.id, commandId, now, true));
   return statements;
 };
 
@@ -434,6 +441,7 @@ export const reconcileRoundOneHeats = async (
       "SELECT id FROM race_commands WHERE id = ? AND event_id = ? LIMIT 1",
     ).bind(commandId, eventId).first<{ id: string }>().catch(() => null);
     if (committed === null) continue;
+    await publishParticipantNotificationsForCommand(env, commandId);
     resolutions.push({
       heatId: candidate.id,
       heatNumber: candidate.heat_number,

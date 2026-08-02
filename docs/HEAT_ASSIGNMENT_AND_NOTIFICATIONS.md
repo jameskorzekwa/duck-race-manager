@@ -13,6 +13,9 @@
 > closing registration folds a shorter final heat into the heat before it.
 > Rosters lock automatically when a round starts, so there is no manual
 > lock-roster action. See `docs/WORKFLOWS.md` for implemented behavior.
+> The email-only, call-time notification design below is also superseded:
+> implemented notifications are independently consented email/SMS lifecycle
+> messages whose upcoming trigger follows authoritative round progression.
 
 ## Purpose
 

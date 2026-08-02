@@ -3,6 +3,10 @@ import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
 import { autoResolvableRoundOneHeatSql, reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
+import {
+  firstHeatUpcomingStatements,
+  publishParticipantNotificationsForCommand,
+} from "./participant-notifications.ts";
 import type { Env } from "./types.ts";
 import { unstartedRoundOneHeatExistsSql, walkUpAdmissionFor } from "./walk-up-admission.ts";
 
@@ -1822,6 +1826,7 @@ const lifecycleSideEffects = async (
     return {
       statements: [
         lockRoundStatement(round, definition.commandType, eventId, commandId, actor.id, now, env),
+        ...firstHeatUpcomingStatements(env, eventId, round, commandId, now),
       ],
       audits: [{ action: "HEAT_ROSTERS_LOCKED", round }],
       bagMoves: [],
@@ -1977,6 +1982,7 @@ const runLifecycleCommand = async (
     revision: event.revision + 1,
     updated_at: now,
   };
+  await publishParticipantNotificationsForCommand(env, commandId);
   // The moves are reported with the transition that made them, and only when
   // that transition genuinely committed. Every rebalance statement shares the
   // command-committed guard of `updateSql`, and the two `meta.changes` checks
@@ -2066,6 +2072,9 @@ const forceDeleteEvent = async (
           WHERE e.id = ? AND e.revision = ?
             AND NOT EXISTS (SELECT 1 FROM events WHERE id != ?)`,
       ).bind(commandId, now, now, fingerprint, eventId, revision, eventId),
+      scoped("participant_notification_attempts"),
+      scoped("participant_notifications"),
+      scoped("participant_notification_suppressions"),
       scoped("email_attempts"),
       scoped("email_notifications"),
       // Provisional podium places reference the heat, its roster entry, the

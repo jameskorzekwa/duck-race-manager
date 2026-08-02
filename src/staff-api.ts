@@ -16,6 +16,10 @@ import {
 } from "./staff-access.ts";
 import type { Env } from "./types.ts";
 import { publishEmailNotification } from "./email-notifications.ts";
+import {
+  publishParticipantNotificationsForCommand,
+  roundOneSmsAssignmentStatement,
+} from "./participant-notifications.ts";
 import { heatHasNeverStartedSql, unstartedRoundOneHeatExistsSql } from "./walk-up-admission.ts";
 
 const headers = {
@@ -1322,7 +1326,7 @@ const pairDuck = async (
   // Re-pairing into an existing slot is harmless because the schema permits one
   // HEAT_ASSIGNED message for this participant and heat.
   const notificationId = assignedHeatId === null ? null : crypto.randomUUID();
-  if (notificationId !== null) {
+  if (notificationId !== null && assignedHeatId !== null) {
     statements.push(env.DB.prepare(
       `INSERT INTO email_notifications
         (id, event_id, registration_id, heat_id, duck_assignment_id,
@@ -1344,6 +1348,15 @@ const pairDuck = async (
       now,
       context.registration_id,
       assignedHeatId,
+    ));
+    statements.push(roundOneSmsAssignmentStatement(
+      env,
+      eventId,
+      context.registration_id,
+      assignedHeatId,
+      assignmentId,
+      commandId,
+      now,
     ));
   }
 
@@ -1373,6 +1386,7 @@ const pairDuck = async (
   }
 
   if (notificationId !== null) await publishEmailNotification(env, notificationId);
+  await publishParticipantNotificationsForCommand(env, commandId);
 
   return pairingResponse(
     assignmentId,

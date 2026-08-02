@@ -233,9 +233,11 @@ const deleteCommandGuard = `EXISTS (
 //   registrations       <- race_entries (RESTRICT)
 //                       <- browser_collection_registrations (CASCADE)
 //                       <- email_notifications (CASCADE)
+//                       <- participant_notifications/suppressions (CASCADE)
 //   race_entries        <- duck_assignments (RESTRICT, refused above)
 //                       <- heat_entries (RESTRICT, refused above)
 //   email_notifications <- email_attempts (CASCADE)
+//   participant_notifications <- participant_notification_attempts (CASCADE)
 //
 // Collection links are removed for every browser, not only the deleting one,
 // because the registration itself is gone and a follower must not keep a
@@ -247,6 +249,21 @@ export const registrationDeletionStatements = (
   commandId: string,
   registrationId: string,
 ): D1PreparedStatement[] => [
+  env.DB.prepare(
+    `DELETE FROM participant_notification_attempts
+       WHERE notification_id IN (
+         SELECT id FROM participant_notifications WHERE registration_id = ?
+       )
+         AND ${deleteCommandGuard}`,
+  ).bind(registrationId, commandId, registrationId),
+  env.DB.prepare(
+    `DELETE FROM participant_notifications
+       WHERE registration_id = ? AND ${deleteCommandGuard}`,
+  ).bind(registrationId, commandId, registrationId),
+  env.DB.prepare(
+    `DELETE FROM participant_notification_suppressions
+       WHERE registration_id = ? AND ${deleteCommandGuard}`,
+  ).bind(registrationId, commandId, registrationId),
   env.DB.prepare(
     `DELETE FROM email_attempts
        WHERE notification_id IN (

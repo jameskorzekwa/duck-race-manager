@@ -38,6 +38,22 @@ Resources:
               - ses:SendEmail
               - ses:SendRawEmail
             Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+          - Sid: ReadSesSuppressionInProductionRegion
+            Effect: Allow
+            Action: ses:GetSuppressedDestination
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: us-east-1
+          - Sid: SendTransactionalSmsAndCheckOptOuts
+            Effect: Allow
+            Action:
+              - sns:CheckIfPhoneNumberIsOptedOut
+              - sns:Publish
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: us-east-1
           - Sid: AdministerOnlyQuickDucksStaffPools
             Effect: Allow
             Action:
