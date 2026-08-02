@@ -88,6 +88,7 @@ test("polling adopts a session the dispatch call never confirmed", async () => {
 
   assert.equal(result.sessionId, "ses_parent");
   assert.equal(result.lastAssistantMessage.text, "Done\nPIPELINE_TASK_READY:69");
+  assert.equal(result.markerCount, 1);
   assert.deepEqual(resolved, ["ses_parent"]);
 });
 
@@ -225,7 +226,13 @@ test("polling rejects stable idle without a terminal marker", async () => {
     ...clock,
     pollIntervalMs: 10,
     idleGraceMs: 20,
-  }), /became idle without exactly one new PIPELINE_TASK_ marker/);
+  }), (error) => {
+    assert.match(error.message, /became idle without exactly one new PIPELINE_TASK_ marker/);
+    assert.equal(error.sessionResult.sessionId, "ses_parent");
+    assert.equal(error.sessionResult.markerCount, 0);
+    assert.equal(error.sessionResult.lastAssistantMessage.text, "No terminal marker");
+    return true;
+  });
 });
 
 test("polling remains bounded while sessions stay busy", async () => {

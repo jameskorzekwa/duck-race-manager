@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyTaskResult, closingIssueNumbers, firstDeployedRelease, latestTaskRun, markerNumbers, pipelineValidationProvenance, questionAnswered, recoverFailedIssue, trustedManualPullProvenance, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
+import { agentErrorIdentity, classifyTaskResult, closingIssueNumbers, doctorFeatureIncidentMarker, escalateAgentError, firstDeployedRelease, latestTaskRun, markerNumbers, pipelineValidationProvenance, questionAnswered, recoverFailedIssue, trustedManualPullProvenance, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
 
 function fakeRecoveryGithub(comments) {
   comments = comments.map((comment) => ({ user: { id: 41898282 }, ...comment }));
@@ -55,7 +55,7 @@ test("a blocked task names itself first and persists only its prerequisites", ()
   }), { type: "failed", numbers: [] });
 });
 
-test("a spent retry budget parks the issue at agent:error", async () => {
+test("a spent retry budget enters the transient agent:error handoff", async () => {
   const { github, context, actions } = fakeRecoveryGithub(
     Array.from({ length: 5 }, (_, index) => ({ body: `<!-- agent-pipeline task-retry=${index + 1} -->` })),
   );
@@ -112,7 +112,7 @@ test("verification signatures cover the complete sorted failure index", () => {
   assert.equal(verificationFailureSignature("plain failure detail"), null);
 });
 
-test("two identical attempts park the issue at agent:error", async () => {
+test("two identical attempts enter the transient agent:error handoff", async () => {
   const digest = `<!-- agent-pipeline attempt-digest=${"c".repeat(64)} -->`;
   const { github, context, actions } = fakeRecoveryGithub([
     { body: `<!-- agent-pipeline run-failed=1 --> ${digest}` },
@@ -123,6 +123,66 @@ test("two identical attempts park the issue at agent:error", async () => {
   assert.ok(actions.comments.some((body) => body.includes("no-progress")));
   assert.deepEqual(actions.labels, ["enhancement", "agent:error"]);
   assert.equal(actions.dispatched, 0);
+});
+
+test("agent error identity binds one exhausted recovery generation", () => {
+  const comments = [
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline task-run=100 -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline no-progress=aaaaaaaaaaaa -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline recovery-reset=12 -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline task-run=200 -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline repeated-infrastructure=pre-artifact -->" },
+  ];
+  const identity = agentErrorIdentity(70, comments);
+  assert.equal(identity.sourceRun, 200);
+  assert.equal(identity.reason, "repeated-infrastructure=pre-artifact");
+  assert.match(identity.signature, /^[0-9a-f]{64}$/);
+  assert.equal(
+    doctorFeatureIncidentMarker(identity),
+    `<!-- pipeline-doctor feature=70 source=200 signature=${identity.signature} -->`,
+  );
+  assert.notEqual(agentErrorIdentity(71, comments).signature, identity.signature);
+});
+
+test("reconciliation transfers agent:error to a durable doctor-owned blocker", async () => {
+  const featureComments = [
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline task-run=200 -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline task-exhausted -->" },
+  ];
+  const actions = { comments: [], dispatches: [], incidents: [], labels: [] };
+  const issues = {
+    get: async ({ issue_number }) => ({ data: {
+      number: issue_number, state: "open", labels: [{ name: "enhancement" }, { name: "agent:error" }],
+    } }),
+    listComments: async ({ issue_number }) => ({ data: issue_number === 70 ? featureComments : [] }),
+    listForRepo: async () => ({ data: [] }),
+    createLabel: async () => ({}),
+    create: async (input) => {
+      actions.incidents.push(input);
+      return { data: { number: 900, state: "open", labels: input.labels, body: input.body } };
+    },
+    createComment: async (input) => { actions.comments.push(input); },
+    setLabels: async ({ labels }) => { actions.labels = labels; },
+  };
+  const github = {
+    paginate: async (fn, input) => (await fn(input)).data,
+    rest: {
+      issues,
+      actions: { createWorkflowDispatch: async (input) => { actions.dispatches.push(input); } },
+    },
+  };
+  const context = { repo: { owner: "o", repo: "r" }, payload: { repository: { default_branch: "main" } } };
+
+  assert.equal(await escalateAgentError({ github, context }, 70), "escalated");
+  assert.deepEqual(actions.labels, ["enhancement", "agent:blocked"]);
+  assert.equal(actions.incidents.length, 1);
+  assert.deepEqual(actions.incidents[0].labels, ["pipeline:incident"]);
+  assert.match(actions.incidents[0].body, /pipeline-doctor feature=70 source=200 signature=/);
+  assert.ok(actions.comments.some(({ issue_number, body }) => issue_number === 70
+    && body.includes("recovery-reset=900") && body.includes("blocked-by=900")));
+  assert.deepEqual(actions.dispatches, [{
+    owner: "o", repo: "r", workflow_id: "pipeline-doctor.yml", ref: "main", inputs: { incident: "900" },
+  }]);
 });
 
 test("a question resumes only on a James reply newer than the question", () => {

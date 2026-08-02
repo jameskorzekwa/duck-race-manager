@@ -83,6 +83,37 @@ export async function writeIssueStateIfCurrent({ github, context }, issueNumber,
 }
 
 export const TASK_RETRY_LIMIT = 5;
+export const ERROR_ESCALATION_LIMIT = 2;
+
+const ERROR_REASON = /<!-- agent-pipeline (task-exhausted|no-progress=[0-9a-f]+|repeated-verification=[0-9a-f]+|repeated-infrastructure=[a-z-]+|gate-recovery-exhausted=[^ ]+|orphan-exhausted|stale-exhausted|review-exhausted=[^ ]+) -->/;
+
+export function agentErrorIdentity(issueNumber, comments) {
+  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
+    throw new Error("Agent error identity requires a positive issue number.");
+  }
+  const recoveryComments = commentsAfterLatestMarker(comments, "recovery-reset");
+  const sourceRun = latestTaskRun(recoveryComments) ?? latestTaskRun(comments) ?? 0;
+  const reason = recoveryComments
+    .map((comment) => String(comment.body ?? "").match(ERROR_REASON)?.[1])
+    .filter(Boolean)
+    .at(-1) ?? "unclassified";
+  const signature = createHash("sha256").update(JSON.stringify({
+    version: 1,
+    issue: issueNumber,
+    sourceRun,
+    reason,
+  })).digest("hex");
+  return { issue: issueNumber, reason, signature, sourceRun };
+}
+
+export function doctorFeatureIncidentMarker(identity) {
+  if (!Number.isSafeInteger(identity?.issue) || identity.issue < 1
+      || !Number.isSafeInteger(identity?.sourceRun) || identity.sourceRun < 0
+      || !/^[0-9a-f]{64}$/.test(String(identity?.signature ?? ""))) {
+    throw new Error("Pipeline Doctor feature incident identity is invalid.");
+  }
+  return `<!-- pipeline-doctor feature=${identity.issue} source=${identity.sourceRun} signature=${identity.signature} -->`;
+}
 
 export function classifyTaskResult({ issue, marker, patchLength, exitStatus }) {
   const failed = { type: "failed", numbers: [] };
@@ -253,7 +284,8 @@ export async function validExactCheck(github, owner, repo, pr) {
 // Applies the bounded retry policy to one agent:failed issue, immediately.
 // Called by the publish job the moment a failure is recorded, and by
 // reconciliation as the sweeper for anything that slipped through. Retries
-// resume from the saved patch; stopping parks the issue at agent:error.
+// resume from the saved patch; stopping briefly marks agent:error so the same
+// reconciliation pass can transfer ownership to a Pipeline Doctor incident.
 export async function recoverFailedIssue({ github, context }, issueNumber) {
   const { owner, repo } = context.repo;
   const defaultBranch = context.payload.repository.default_branch;
@@ -319,6 +351,104 @@ export async function recoverFailedIssue({ github, context }, issueNumber) {
     inputs: { issue: String(issueNumber) },
   });
   return "retried";
+}
+
+export async function escalateAgentError({ github, context }, issueNumber) {
+  const { owner, repo } = context.repo;
+  const defaultBranch = context.payload.repository.default_branch;
+  const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+  if (issue.state !== "open" || !labelNames(issue).has("agent:error")) return "skipped";
+  const comments = await github.paginate(github.rest.issues.listComments, {
+    owner, repo, issue_number: issueNumber, per_page: 100,
+  });
+  const identity = agentErrorIdentity(issueNumber, comments);
+  const marker = doctorFeatureIncidentMarker(identity);
+  const incidents = (await github.paginate(github.rest.issues.listForRepo, {
+    owner, repo, state: "all", labels: "pipeline:incident", per_page: 100,
+  })).filter((candidate) => !candidate.pull_request);
+  const featureMarker = `<!-- pipeline-doctor feature=${issueNumber} `;
+  const prior = incidents.filter((candidate) => String(candidate.body ?? "").includes(featureMarker));
+  let incident = incidents.find((candidate) => String(candidate.body ?? "").includes(marker));
+
+  if (incident?.state === "closed") {
+    await github.rest.issues.createComment({
+      owner, repo, issue_number: issueNumber,
+      body: `<!-- agent-pipeline recovery-reset=${incident.number} -->\nA completed Pipeline Doctor incident already owns this failure generation; resuming from current main.`,
+    });
+    const labels = [...labelNames(issue)].filter((label) => !STATE_LABELS.includes(label));
+    await github.rest.issues.setLabels({
+      owner, repo, issue_number: issueNumber, labels: [...labels, "agent:inbox"],
+    });
+    try {
+      await github.rest.actions.createWorkflowDispatch({
+        owner, repo, workflow_id: "agent-task.yml", ref: defaultBranch,
+        inputs: { issue: String(issueNumber) },
+      });
+    } catch (error) {
+      await github.rest.issues.setLabels({
+        owner, repo, issue_number: issueNumber, labels: [...labels, "agent:blocked"],
+      });
+      throw error;
+    }
+    return "resumed";
+  }
+
+  const exhausted = !incident && prior.length >= ERROR_ESCALATION_LIMIT;
+  if (!incident) {
+    for (const [name, color, description] of [
+      ["pipeline:incident", "b60205", "Trusted Pipeline Doctor incident"],
+      ["pipeline:external", "d93f0b", "External pipeline intervention required"],
+    ]) {
+      try {
+        await github.rest.issues.createLabel({ owner, repo, name, color, description });
+      } catch (error) {
+        if (error.status !== 422) throw error;
+      }
+    }
+    const runLine = identity.sourceRun > 0
+      ? `Latest owning Agent Task: https://github.com/${owner}/${repo}/actions/runs/${identity.sourceRun}`
+      : "No owning Agent Task run was recorded for this failure generation.";
+    incident = (await github.rest.issues.create({
+      owner,
+      repo,
+      title: `Feature recovery incident: #${issueNumber}`,
+      labels: exhausted ? ["pipeline:incident", "pipeline:external"] : ["pipeline:incident"],
+      body: `${marker}\n\nFeature #${issueNumber} exhausted bounded automatic recovery.\n\n${runLine}\n\nReason: \`${identity.reason}\`.`,
+    })).data;
+    if (exhausted) {
+      await github.rest.issues.createComment({
+        owner, repo, issue_number: incident.number,
+        body: `<!-- pipeline-doctor terminal=escalation-limit -->\nFeature #${issueNumber} exhausted ${ERROR_ESCALATION_LIMIT} complete Pipeline Doctor recovery generations. It remains blocked on this explicit intervention incident instead of being abandoned at agent:error.`,
+      });
+    }
+  }
+
+  const ownershipMarker = `<!-- agent-pipeline blocked-by=${incident.number} -->`;
+  if (!trustedAutomationComments(comments).some((comment) => String(comment.body ?? "").includes(ownershipMarker))) {
+    await github.rest.issues.createComment({
+      owner, repo, issue_number: issueNumber,
+      body: `<!-- agent-pipeline recovery-reset=${incident.number} -->\n${ownershipMarker}\nAutomatic recovery is now owned by Pipeline Doctor incident #${incident.number}.`,
+    });
+  }
+  const labels = [...labelNames(issue)].filter((label) => !STATE_LABELS.includes(label));
+  await github.rest.issues.setLabels({
+    owner, repo, issue_number: issueNumber, labels: [...labels, "agent:blocked"],
+  });
+  if (exhausted) return "external";
+
+  const incidentComments = await github.paginate(github.rest.issues.listComments, {
+    owner, repo, issue_number: incident.number, per_page: 100,
+  });
+  const trusted = trustedAutomationComments(incidentComments);
+  const terminal = trusted.some((comment) => /<!-- pipeline-doctor (?:terminal|repair-pr)=/.test(comment.body ?? ""));
+  const attempts = trusted.filter((comment) => String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
+  if (!terminal && attempts < 2) {
+    await github.rest.actions.createWorkflowDispatch({
+      owner, repo, workflow_id: "pipeline-doctor.yml", ref: defaultBranch,
+      inputs: { incident: String(incident.number) },
+    });
+  }
+  return "escalated";
 }
 
 export async function reconcileAgentPipeline({ github, context, core }) {
@@ -750,6 +880,14 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     const latestTerminal = comments.findLast((comment) => /<!-- agent-pipeline (?:run-failed|review-exhausted)=/.test(comment.body ?? ""));
     if (!latestFailure || latestFailure.id !== latestTerminal?.id) continue;
     await recoverFailedIssue({ github, context }, issue.number);
+  }
+
+  // agent:error is a transient handoff, never a terminal parking state. Every
+  // source that can exhaust retries is swept above or runs in a workflow that
+  // triggers this reconciler, and the cron remains the delivery backstop.
+  for (const issue of await issuesWithLabel("agent:error")) {
+    if (issuesWithOpenPulls.has(issue.number)) continue;
+    await escalateAgentError({ github, context }, issue.number);
   }
 }
 
