@@ -45,6 +45,10 @@ import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 import { handleSupportOperations } from "./support-operations.ts";
 import {
+  publishPendingParticipantNotifications,
+  registrationNotificationStatement,
+} from "./participant-notifications.ts";
+import {
   handleLiveConnection,
   mutationRefreshDomains,
   scheduleRaceUpdate,
@@ -448,6 +452,13 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         now,
         JSON.stringify({ created_via: "PUBLIC" }),
       ),
+      registrationNotificationStatement(
+        env,
+        event.id,
+        registrationId,
+        payload.commandId,
+        now,
+      ),
       ...await collectionStatements(env, collection, registrationId, now, tokenHash),
     ];
     await env.DB.batch(statements);
@@ -475,6 +486,8 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
     }
     return json({ error: "Registration could not be saved. Please retry with the same command identifier." }, 409);
   }
+
+  await publishPendingParticipantNotifications(env);
 
   return registrationResponse(
     registrationId,

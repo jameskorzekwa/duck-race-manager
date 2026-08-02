@@ -39,9 +39,9 @@ devices](#testing-on-other-devices).
 
 ## What makes this work
 
-Three things in production need the network: Cognito, which authenticates staff;
-Turnstile, which protects public registration; and SES, which sends race
-reminders. Local development replaces exactly those external boundaries while
+Four things in production need the network: Cognito, which authenticates staff;
+Turnstile, which protects public registration; SES, which sends email; and AWS
+End User Messaging, which sends SMS. Local development replaces those boundaries while
 retaining their application-side authorization, queue, and persistence paths.
 
 `wrangler.local.jsonc` differs from `wrangler.jsonc` in four ways:
@@ -60,22 +60,25 @@ public search, follow, unfollow, duck naming, and self-service delete would thro
 
 `src/local-dev.ts` is never bundled into the deployed Worker — `wrangler.jsonc`
 points `main` at `src/index.ts`, and a test asserts no deployed module imports it.
-It supplies the two seams `createWorker` already accepts:
+It supplies the seams `createWorker` accepts:
 
 - a **token verifier** that reads a local bearer token instead of validating a
   Cognito JWT against a remote JWKS, and
 - a **token fetch** that answers `/oauth2/token` and `/oauth2/revoke` in process.
+- synthetic **email and SMS senders** plus a local provider-suppression check,
+  so no notification request leaves the machine.
 
 It also serves a stand-in for the Cognito hosted UI at `/oauth2/authorize`, which
 lists the staff accounts in the local database and lets you pick one.
 
-The local email queue has its own `quickducks-email-local` and
-`quickducks-email-local-dlq` identities. Its consumer runs the production D1
-claim, consent checks, rendering, attempt recording, and retry logic, then stores
-the synthetic message in memory instead of contacting SES. Browser tests inspect
-that mailbox at `GET /__local/emails` and clear it with
-`DELETE /__local/emails`; both routes exist only in `src/local-dev.ts` and are
-refused outside a configured local origin.
+The local email and SMS queues have distinct `quickducks-*-local` and DLQ
+identities. Their consumers run the production D1 claim, consent, contact,
+suppression, lifecycle, rendering, attempt, and retry logic, then retain the
+synthetic messages in memory instead of contacting AWS. Browser tests inspect
+both channels at `GET /__local/notifications` and clear them with
+`DELETE /__local/notifications`; the older email-only inspection route remains
+available. These routes exist only in `src/local-dev.ts` and are refused outside
+a configured local origin.
 
 Everything else is the real thing. Sign-in still runs the production PKCE flow,
 sets the same `__Host-` cookies, refreshes the same way, and — crucially — still
@@ -261,8 +264,8 @@ or when a local database drifted while a migration was being written.
 
 ## What is still not local
 
-- **Outbound email.** The queue producer runs, but there is no consumer and no
-  SES path in any environment, so nothing sends.
+- **Real outbound email and SMS.** Local consumers capture synthetic messages;
+  they never contact SES or AWS End User Messaging.
 - **Real NFC writing**, unless you serve the site to an Android phone with
   `npm run dev:network` and a `mkcert` certificate the phone trusts. That is only
   the scanning station on `/staff/inventory`; the rest of that page works on any

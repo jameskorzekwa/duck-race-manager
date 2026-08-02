@@ -50,7 +50,7 @@ const makeDb = (first = () => null, all = () => ({ results: [] })) => {
   };
 };
 
-const makeEnv = (db, queue = { async send() {} }) => ({ DB: db, EMAIL_QUEUE: queue });
+const makeEnv = (db, queue = { async send() {} }) => ({ DB: db, EMAIL_QUEUE: queue, SMS_QUEUE: queue });
 
 const post = (path, body) => new Request(`https://quickducks.com${path}`, {
   method: "POST",
@@ -162,6 +162,9 @@ test("notification retry creates a durable attempt and queues only its notificat
     if (sql.includes("FROM email_attempts") && sql.includes("source_command_id")) {
       return { id: "attempt_test", notification_id: "notification_test", status: "PENDING", attempt_number: 2 };
     }
+    if (sql.includes("SELECT channel, status, retry_after FROM email_notifications")) {
+      return { channel: "EMAIL", status: "PENDING", retry_after: null };
+    }
     return null;
   });
   const response = await handleSupportOperations(
@@ -175,6 +178,43 @@ test("notification retry creates a durable attempt and queues only its notificat
   assert.equal(db.batches.length, 2);
   assert.match(db.batches[0][2].sql, /INSERT INTO email_attempts/);
   assert.doesNotMatch(JSON.stringify(db.batches), /private_token|provider_message_id|error_detail/);
+});
+
+test("notification support lists the channel without exposing destinations or HMACs", async () => {
+  const db = makeDb(() => null, () => ({
+    results: [{
+      id: "notification_test",
+      registration_id: "registration_test",
+      notification_type: "ROUND_ONE_RESULT",
+      channel: "SMS",
+      status: "WAITING_FOR_SYNC",
+      template_version: 1,
+      scheduled_at: null,
+      queued_at: null,
+      sent_at: null,
+      terminal_at: null,
+      status_reason: null,
+      last_error_code: null,
+      created_at: "2026-08-01T00:00:00Z",
+      first_name: "Daisy",
+      last_name: "Duck",
+      heat_number: 2,
+      round: "ROUND_ONE",
+      attempt_count: 0,
+      last_attempt_status: null,
+      last_attempt_error_code: null,
+    }],
+  }));
+  const response = await handleSupportOperations(
+    new Request("https://quickducks.com/api/v1/staff/support/events/event_test/notifications"),
+    makeEnv(db),
+    admin,
+  );
+  const body = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(body.notifications[0].channel, "SMS");
+  assert.doesNotMatch(JSON.stringify(body), /destination|phone|email|hmac/i);
+  assert.doesNotMatch(db.statements[0].sql, /destination_hmac|r\.email|r\.phone/);
 });
 
 test("notification cancellation records the reason outside redacted audit details", async () => {

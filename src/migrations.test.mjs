@@ -25,6 +25,7 @@ const migrationNames = [
   "0019_round_one_walk_up_admission.sql",
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
+  "0022_participant_notifications.sql",
 ];
 
 const lifecycleStatuses = [
@@ -1266,6 +1267,90 @@ test("0021 adds unique nullable delivery claims without breaking older notificat
   assert.throws(() => database.prepare(
     "UPDATE email_notifications SET delivery_claim_token = ? WHERE id = ?",
   ).run("", "claim-notification-2"), /CHECK constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0022 adds channel lifecycle uniqueness and durable keyed suppression compatibly", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0022_participant_notifications.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('notify-event', 'notify-race', 'Notify Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, email, phone, status, lookup_code,
+       private_token_hash, email_notifications_enabled, sms_notifications_enabled,
+       submitted_at, status_changed_at)
+    VALUES ('notify-registration', 'notify-event', 'Daisy', 'Duck',
+            'daisy@example.test', '(202) 555-0100', 'SUBMITTED', 'NOTIFY12',
+            'notify-hash', 1, 1, '2026-08-01T00:00:00Z', '2026-08-01T00:00:00Z');
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-notification', 'notify-event', 'notify-registration',
+            'HEAT_ASSIGNED', 'PENDING');
+  `);
+
+  applyMigrations(database, ["0022_participant_notifications.sql"]);
+  assert.deepEqual({ ...database.prepare(
+    "SELECT channel, lifecycle_key FROM email_notifications WHERE id = 'legacy-notification'",
+  ).get() }, { channel: "EMAIL", lifecycle_key: null });
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-after-migration', 'notify-event', 'notify-registration',
+            'HEAT_UPCOMING', 'PENDING');
+  `);
+  assert.equal(database.prepare(
+    "SELECT channel FROM email_notifications WHERE id = 'legacy-after-migration'",
+  ).get().channel, "EMAIL");
+
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, channel, lifecycle_key, status)
+    VALUES
+      ('email-lifecycle', 'notify-event', 'notify-registration',
+       'REGISTRATION_CONFIRMATION', 'EMAIL', 'registration:notify-registration', 'PENDING'),
+      ('sms-lifecycle', 'notify-event', 'notify-registration',
+       'REGISTRATION_CONFIRMATION', 'SMS', 'registration:notify-registration', 'WAITING_FOR_SYNC');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, channel, lifecycle_key, status)
+    VALUES ('duplicate-email', 'notify-event', 'notify-registration',
+            'REGISTRATION_CONFIRMATION', 'EMAIL', 'registration:notify-registration', 'PENDING');
+  `), /UNIQUE constraint failed/);
+  assert.throws(
+    () => database.prepare("UPDATE email_notifications SET status = 'PENDING' WHERE id = 'sms-lifecycle'").run(),
+    /channel-aware Worker/,
+  );
+
+  const keyedDigest = "a".repeat(64);
+  database.prepare(`
+    INSERT INTO participant_notification_suppressions
+      (id, channel, key_version, destination_hmac, reason_code)
+    VALUES ('suppression', 'EMAIL', 1, ?, 'EMAIL_UNSUBSCRIBE')
+  `).run(keyedDigest);
+  const serialized = JSON.stringify(database.prepare(
+    "SELECT * FROM participant_notification_suppressions",
+  ).all());
+  assert.doesNotMatch(serialized, /daisy@example|202.*555.*0100/i);
+  assert.match(serialized, new RegExp(keyedDigest));
+
+  database.prepare("UPDATE email_notifications SET status = 'SENDING' WHERE id = 'email-lifecycle'").run();
+  assert.throws(
+    () => database.prepare("DELETE FROM email_notifications WHERE id = 'email-lifecycle'").run(),
+    /delivery is in progress/,
+  );
+  database.prepare("UPDATE email_notifications SET status = 'PENDING' WHERE id = 'email-lifecycle'").run();
+  database.exec(`
+    DELETE FROM registrations WHERE id = 'notify-registration';
+    DELETE FROM events WHERE id = 'notify-event';
+  `);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM email_notifications").get().count, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM participant_notification_suppressions",
+  ).get().count, 1, "destination suppression survives race deletion");
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

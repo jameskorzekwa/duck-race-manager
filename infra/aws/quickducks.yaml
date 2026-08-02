@@ -121,8 +121,19 @@ Resources:
               - Effect: Allow
                 Action:
                   - ses:SendEmail
-                  - ses:SendRawEmail
                 Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/quickducks.com
+              - Effect: Allow
+                Action: ses:GetSuppressedDestination
+                Resource: "*"
+              - Effect: Allow
+                Action: sms-voice:SendTextMessage
+                Resource:
+                  - !Sub arn:${AWS::Partition}:sms-voice:${AWS::Region}:${AWS::AccountId}:phone-number/*
+                  - !Sub arn:${AWS::Partition}:sms-voice:${AWS::Region}:${AWS::AccountId}:pool/*
+                  - !Sub arn:${AWS::Partition}:sms-voice:${AWS::Region}:${AWS::AccountId}:sender-id/*
+              - Effect: Allow
+                Action: sms-voice:DescribeOptedOutNumbers
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - cognito-idp:AdminCreateUser

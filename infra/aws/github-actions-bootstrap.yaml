@@ -36,8 +36,22 @@ Resources:
             Effect: Allow
             Action:
               - ses:SendEmail
-              - ses:SendRawEmail
             Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+          - Sid: ReadSesAccountSuppression
+            Effect: Allow
+            Action: ses:GetSuppressedDestination
+            Resource: "*"
+          - Sid: SendOnlyFromAccountSmsIdentities
+            Effect: Allow
+            Action: sms-voice:SendTextMessage
+            Resource:
+              - !Sub arn:${AWS::Partition}:sms-voice:us-east-1:${AWS::AccountId}:phone-number/*
+              - !Sub arn:${AWS::Partition}:sms-voice:us-east-1:${AWS::AccountId}:pool/*
+              - !Sub arn:${AWS::Partition}:sms-voice:us-east-1:${AWS::AccountId}:sender-id/*
+          - Sid: ReadSmsOptOutList
+            Effect: Allow
+            Action: sms-voice:DescribeOptedOutNumbers
+            Resource: "*"
           - Sid: AdministerOnlyQuickDucksStaffPools
             Effect: Allow
             Action:

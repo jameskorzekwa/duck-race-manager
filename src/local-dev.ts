@@ -3,9 +3,8 @@
 // deployed Worker. It exists so the whole site — including authenticated staff
 // surfaces — can run with no network access to Cognito or any other service.
 //
-// The real Worker is untouched: this module only supplies the two seams
-// `createWorker` already accepts (a staff token verifier and the fetch used for
-// Cognito token calls) and answers the handful of hosted-UI URLs the OAuth code
+// The deployed Worker is untouched: this module supplies its staff-token,
+// Cognito-fetch, email, SMS, and provider-suppression seams and answers the hosted-UI URLs the OAuth code
 // path navigates to. Sign-in therefore exercises the production PKCE flow,
 // cookie handling, D1 profile lookup, and role loading rather than bypassing it.
 //
@@ -14,11 +13,15 @@
 // origin, so a copy of this module deployed by accident serves nothing.
 import { authenticateStaff } from "./auth.ts";
 import {
-  dispatchPendingEmailNotifications,
-  handleEmailQueue,
   type EmailSender,
   type OutboundEmail,
 } from "./email-notifications.ts";
+import {
+  handleParticipantNotificationQueue,
+  publishPendingParticipantNotifications,
+  type OutboundSms,
+  type SmsSender,
+} from "./participant-notifications.ts";
 import { createWorker } from "./index.ts";
 import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
 import { escapeHtml } from "./site.ts";
@@ -29,6 +32,7 @@ export { RaceUpdates } from "./live-updates.ts";
 const accessTokenPrefix = "localdev-";
 const refreshTokenPrefix = "localdevr-";
 const localEmails: (OutboundEmail & { sentAt: string })[] = [];
+const localSmsMessages: (OutboundSms & { sentAt: string })[] = [];
 
 // Local development remains fully offline. The queue consumer exercises the
 // production claim, rendering, status, and attempt code, while this final seam
@@ -37,6 +41,13 @@ const localEmailSender: EmailSender = async (email) => {
   localEmails.push({ ...email, sentAt: new Date().toISOString() });
   return { providerMessageId: `local-${crypto.randomUUID()}` };
 };
+
+const localSmsSender: SmsSender = async (message) => {
+  localSmsMessages.push({ ...message, sentAt: new Date().toISOString() });
+  return { providerMessageId: `local-sms-${crypto.randomUUID()}` };
+};
+
+const locallyNotSuppressed = async (): Promise<boolean> => false;
 
 const noStoreHtml = {
   "cache-control": "no-store",
@@ -315,7 +326,13 @@ const refusal = (env: Env, requestUrl: URL): Response =>
     { status: 500, headers: noStoreHtml },
   );
 
-const worker = createWorker(localAuthenticate, localTokenFetch);
+const worker = createWorker(
+  localAuthenticate,
+  localTokenFetch,
+  localEmailSender,
+  localSmsSender,
+  locallyNotSuppressed,
+);
 
 const localWorker: ExportedHandler<Env> = {
   async fetch(request, env, ctx) {
@@ -399,6 +416,16 @@ const localWorker: ExportedHandler<Env> = {
       localEmails.length = 0;
       return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
     }
+    if (url.pathname === "/__local/notifications" && request.method === "GET") {
+      return Response.json({ emails: localEmails, sms: localSmsMessages }, {
+        headers: { "cache-control": "no-store", "x-robots-tag": "noindex, nofollow" },
+      });
+    }
+    if (url.pathname === "/__local/notifications" && request.method === "DELETE") {
+      localEmails.length = 0;
+      localSmsMessages.length = 0;
+      return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+    }
 
     if (url.pathname.startsWith("/__local/")) {
       return Response.json({ error: "Unknown local development endpoint." }, { status: 404 });
@@ -407,10 +434,16 @@ const localWorker: ExportedHandler<Env> = {
     return worker.fetch!(request, env, ctx);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, localEmailSender);
+    await handleParticipantNotificationQueue(
+      batch,
+      env,
+      localEmailSender,
+      localSmsSender,
+      locallyNotSuppressed,
+    );
   },
   async scheduled(_controller, env, ctx): Promise<void> {
-    ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    ctx.waitUntil(publishPendingParticipantNotifications(env));
   },
 };
 

@@ -3,6 +3,11 @@ import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
 import { autoResolvableRoundOneHeatSql, reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
+import {
+  assignmentByHeatEntryNotificationStatement,
+  nextHeatReminderNotificationStatement,
+  publishPendingParticipantNotifications,
+} from "./participant-notifications.ts";
 import type { Env } from "./types.ts";
 import { unstartedRoundOneHeatExistsSql, walkUpAdmissionFor } from "./walk-up-admission.ts";
 
@@ -1565,6 +1570,13 @@ const mergeStatements = (
       commandId,
       eventId,
     ));
+    statements.push(assignmentByHeatEntryNotificationStatement(
+      env,
+      eventId,
+      entry.id,
+      commandId,
+      now,
+    ));
   }
   // The emptied tail heat is removed last. `heat_entries` references `heats`
   // ON DELETE RESTRICT, so if any move above did not apply the leftover row
@@ -1726,6 +1738,13 @@ const splitStatements = (
       commandId,
       eventId,
     ));
+    statements.push(assignmentByHeatEntryNotificationStatement(
+      env,
+      eventId,
+      entry.id,
+      commandId,
+      now,
+    ));
   }
   return statements;
 };
@@ -1822,6 +1841,7 @@ const lifecycleSideEffects = async (
     return {
       statements: [
         lockRoundStatement(round, definition.commandType, eventId, commandId, actor.id, now, env),
+        nextHeatReminderNotificationStatement(env, eventId, round, commandId, now),
       ],
       audits: [{ action: "HEAT_ROSTERS_LOCKED", round }],
       bagMoves: [],
@@ -1977,6 +1997,7 @@ const runLifecycleCommand = async (
     revision: event.revision + 1,
     updated_at: now,
   };
+  await publishPendingParticipantNotifications(env);
   // The moves are reported with the transition that made them, and only when
   // that transition genuinely committed. Every rebalance statement shares the
   // command-committed guard of `updateSql`, and the two `meta.changes` checks

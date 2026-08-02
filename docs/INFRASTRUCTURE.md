@@ -409,9 +409,10 @@ The template creates or updates:
   the committed callback/logout origins.
 - A Cognito managed-login domain and default branding.
 - The `quickducks.com` SES identity with Easy DKIM and custom MAIL FROM.
-- The `quickducks-worker-ses` IAM user and an inline policy limited to sending
-  from the QuickDucks SES identity and managing staff identities in this user
-  pool, capped by the independently bootstrap-managed permissions boundary.
+- The legacy-named `quickducks-worker-ses` IAM user and an inline policy limited
+  to the QuickDucks SES identity, SES suppression reads, account-scoped AWS SMS
+  origination identities and opt-out reads, and staff identity management in
+  this user pool, capped by the independently bootstrap-managed boundary.
 
 The stack deliberately does not create an IAM access key. The user pool and
 managed-login branding have retain policies, and the pool has deletion
@@ -453,7 +454,7 @@ missing recorded object, shallow/incomplete history, older source commit,
 divergent history, or Git ancestry error fails closed. Only the first release,
 where both stack tags are absent, has no prior ancestry to prove.
 
-### Cognito and SES Gates
+### Cognito, SES, and SMS Gates
 
 Public Cognito sign-up remains disabled. The application verifies the access
 token and requires a matching active `staff_profiles` row; a Cognito identity
@@ -469,6 +470,18 @@ records shown by SES, and publish the organization's DMARC policy at
 verified. New SES accounts are region-specific sandboxes; request production
 access in `us-east-1` and complete a controlled send, bounce, and complaint
 test before enabling race notifications.
+
+AWS does provide SMS through **AWS End User Messaging SMS** (the
+`sms-voice` API). Production requires a registered origination identity in
+`us-east-1`, production access, the appropriate US carrier registration, and an
+explicit monthly spend limit before `SMS_ORIGINATION_IDENTITY` is installed as
+a Worker secret. SMS is usage-priced and carrier fees apply; AWS does not offer
+a dependable free production SMS tier. Free-to-start alternatives generally
+provide only trials or require the participant to use another application, so
+they are not substituted for consented SMS here. Check current AWS pricing and
+US registration lead times immediately before enabling a race, configure a
+spend alarm, and keep SMS consent disabled operationally until the identity is
+approved. Never put an unregistered placeholder identity in production config.
 
 ## Cloudflare Bootstrap
 
@@ -512,6 +525,8 @@ once if they do not already exist:
 npx wrangler d1 create quickducks-prod
 npx wrangler queues create quickducks-email
 npx wrangler queues create quickducks-email-dlq
+npx wrangler queues create quickducks-sms
+npx wrangler queues create quickducks-sms-dlq
 ```
 
 Put the returned D1 database ID in `wrangler.jsonc` and commit it. The committed
@@ -556,23 +571,34 @@ to add a new racer after Round One starts. Rollback is Worker-only: retain the
 migration and any admitted roster entries; the previous Worker reads and races
 them normally but offers no further Round One walk-ups.
 
-The Worker sends only opaque notification IDs to `quickducks-email` through the
-`EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
-with five bounded queue attempts and `quickducks-email-dlq` attached. A one-minute
-cron republishes durable `PENDING` work and queue-publication failures, closing
-the D1-commit/queue-publication gap without putting email delivery inside a race
-control request. Queue duplicates are expected and safe: a D1 claim and the
-logical-message unique index prevent an ordinary duplicate delivery from
-sending twice. Migration `0021_email_delivery_claim.sql` adds the nullable,
-unique token used to own an active delivery claim; it remains compatible with
-the previous Worker. A stale claim is terminally recorded as
-`DELIVERY_OUTCOME_UNKNOWN` and is not automatically or manually retried, because
-it may represent SES acceptance followed by a failed D1 finalization. This
-at-most-once recovery policy can miss a reminder after a pre-send Worker stop,
-but cannot duplicate a message whose post-send persistence was ambiguous.
+The Worker sends only opaque notification IDs to `quickducks-email` and
+`quickducks-sms` through separate `EMAIL_QUEUE` and `SMS_QUEUE` bindings. Separate
+queues preserve rollback safety: the previously deployed email-only Worker can
+never consume and acknowledge an SMS item. SMS rows use `WAITING_FOR_SYNC`, a
+state the previous cron does not select, and migration triggers reject an old
+support handler's attempt to move them into email-only pending states. Both consume batches of at most ten,
+have five bounded transport attempts, and use their own DLQ. A one-minute cron
+republishes due work and stale accepted queue leases. Successful republication
+does not exhaust a notification; only failed provider attempts count toward the
+five-attempt delivery bound, with exponential backoff capped at fifteen minutes.
+Queue duplicates are expected and safe because D1 owns the unique lifecycle row
+and delivery claim.
 
-The consumer signs a structured SES v2 `SendEmail` request with the Worker's
-encrypted AWS key. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
+Migration `0022_participant_notifications.sql` generalizes the existing tables
+with a default `EMAIL` channel so the previous Worker remains write-compatible,
+adds channel/lifecycle uniqueness, heat-run and result-revision proofs, and a
+destination suppression table. Suppression identifiers are versioned
+HMAC-SHA-256 values made with the dedicated
+`PARTICIPANT_DESTINATION_HMAC_KEY` Worker secret; an unkeyed contact digest is
+enumerable and prohibited. During key rotation, deploy code that checks both
+versions before changing the active key, backfill only by re-HMACing current
+authoritative contacts in a controlled credential-free job, then retire the old
+version after the retention window. Never copy the key into D1, logs, queue
+messages, workflow output, or committed configuration.
+
+The consumer signs structured SES v2 `SendEmail`, SES suppression lookup, AWS
+End User Messaging `SendTextMessage`, and SMS opt-out lookup requests with the
+Worker's encrypted AWS key. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
 `race@quickducks.com`; it remains under the verified `quickducks.com` identity.
 Current consent, address, assignment, and heat state are loaded only after the
 opaque ID is received. Migration `0020_email_notification_assignment.sql` adds
@@ -582,18 +608,18 @@ replacement mismatch are cancelled instead of being rendered with a different
 duck. Automatic invocation logs remain disabled, and raw SES responses,
 recipient addresses, rendered bodies, and credentials must not be logged or
 persisted as errors. SES acceptance is recorded honestly as `SENT`;
-delivery/bounce/complaint callbacks are not currently implemented.
+provider response bodies are discarded. SES account bounce/complaint suppression
+is checked in addition to the application's durable unsubscribe. AWS-managed SMS
+STOP state is checked immediately before every text.
 
-After deployment, use a synthetic controlled registration to opt into email,
-pair it, and call its heat. Confirm the support view reaches `SENT` for the
-assignment and upcoming notification and that the controlled mailbox receives
-the expected text. Do not use participant data for this canary. Inspect the main
-queue and DLQ metrics for retries. If sending misbehaves, pause the queue
-consumer first (or remove its consumer binding in a reviewed Worker rollback),
-then revoke the Worker SES key if containment requires it. Retain D1 notification
-and attempt history plus queue/DLQ messages for diagnosis; already accepted
-email cannot be recalled, and replaying a DLQ must pass the same current-state
-checks as ordinary delivery.
+After deployment, use synthetic controlled email and phone destinations to opt
+into each channel and drive the complete lifecycle. Confirm redacted support
+state reaches `SENT`, then exercise email unsubscribe and SMS STOP before another
+event. Do not use participant data for this canary. Inspect both queues and DLQs.
+If sending misbehaves, pause the affected consumer first, then revoke the Worker
+AWS key if containment requires it. Retain redacted D1 history and queue/DLQ IDs
+for diagnosis; accepted messages cannot be recalled, and every redrive must pass
+the same current-state and suppression checks.
 
 ### Durable Object Live Refresh
 

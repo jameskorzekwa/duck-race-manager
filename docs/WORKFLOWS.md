@@ -671,9 +671,24 @@ corresponding valid address. Invalid non-empty contact is rejected even with its
 opt-in off. The same validation and controls apply during public registration,
 staff walk-up registration, and staff participant edits. Audit history records
 only the changed field names, never old or new contact values or ownership
-proof. Email consent participates in the implemented operational-email workflow.
-SMS consent is captured independently, but SMS delivery is not implemented and
-the choice does not enqueue an SMS.
+proof. Email and SMS consent independently participate in the implemented
+participant-notification workflow. An opted-in channel receives registration
+confirmation, Round One and Final assignments, an authoritative next-heat
+reminder, and each applicable official result. The first reminder is committed
+when the round starts; later reminders are committed only when the preceding
+heat is officially resolved, never from a wall-clock estimate. A reset creates a
+new reminder occurrence and invalidates delayed work from the previous run.
+
+Each channel has a durable outbox row in the same D1 batch as the registration,
+assignment, lifecycle transition, or result. Queue and provider work happens
+after that commit, so an outage cannot roll back race state. Current consent,
+contact validity, assignment, heat/result revision, local unsubscribe, and AWS
+suppression or SMS STOP state are checked again immediately before delivery.
+Email includes a participant unsubscribe capability; using it leaves SMS
+unchanged. AWS End User Messaging SMS manages STOP, and the consumer checks that
+provider opt-out list before every SMS. Queue payloads carry only opaque outbox
+IDs. Notification history contains no email address, phone number, message body,
+private link, lookup code, or provider response body.
 
 The privacy notice warns that anyone with access to the originating browser
 profile may view or edit its owned contact details. Cancel discards an edit,

@@ -28,9 +28,8 @@ const notificationStatuses = new Set([
 ]);
 
 const terminalNotificationStatuses = new Set([
-  // SES SendEmail acceptance is the terminal state this application can prove.
-  // Delivery/bounce callbacks are not implemented, so it is never relabeled as
-  // DELIVERED merely to make the support count look complete.
+  // Provider acceptance is the terminal state this application can prove.
+  // It is never relabeled as DELIVERED merely to make support counts look complete.
   "SENT",
   "DELIVERED",
   "FAILED",
@@ -179,6 +178,7 @@ interface NotificationListRow {
   id: string;
   registration_id: string;
   notification_type: string;
+  channel: string;
   status: string;
   template_version: number;
   scheduled_at: string | null;
@@ -219,7 +219,7 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
   if (before !== null) args.push(before);
   args.push(limit);
   const rows = await env.DB.prepare(
-    `SELECT n.id, n.registration_id, n.notification_type, n.status,
+    `SELECT n.id, n.registration_id, n.notification_type, n.channel, n.status,
             n.template_version, n.scheduled_at, n.queued_at, n.sent_at,
             n.terminal_at, n.status_reason, n.last_error_code, n.created_at,
             r.first_name, r.last_name, h.heat_number, h.round,
@@ -247,6 +247,7 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
       registrationId: row.registration_id,
       participantName: `${row.first_name} ${row.last_name}`,
       type: row.notification_type,
+      channel: row.channel,
       status: row.status,
       terminal: terminalNotificationStatuses.has(row.status),
       templateVersion: row.template_version,
@@ -326,9 +327,21 @@ const publishRetry = async (
   }
 
   const now = new Date().toISOString();
+  const notification = await env.DB.prepare(
+    `SELECT channel, status, retry_after FROM email_notifications
+      WHERE id = ? AND event_id = ? LIMIT 1`,
+  ).bind(notificationId, eventId).first<{
+    channel: "EMAIL" | "SMS";
+    status: string;
+    retry_after: string | null;
+  }>();
+  if (notification === null) return json({ error: "Notification not found." }, 404);
+  if (notification.retry_after !== null && notification.retry_after > now) {
+    return json({ notificationId, status: "RETRY_PENDING", replayed, retryAfter: notification.retry_after }, 202);
+  }
   try {
     // The consumer receives no participant data or private token, only this durable record ID.
-    await env.EMAIL_QUEUE.send(notificationId);
+    await (notification.channel === "SMS" ? env.SMS_QUEUE : env.EMAIL_QUEUE).send(notificationId);
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE email_attempts
@@ -339,11 +352,12 @@ const publishRetry = async (
         `UPDATE email_notifications
             SET status = 'QUEUED', queued_at = ?, retry_after = NULL,
                 last_error_code = NULL, updated_at = ?
-          WHERE id = ? AND event_id = ? AND status IN ('PENDING', 'RETRY_PENDING')`,
+          WHERE id = ? AND event_id = ? AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'RETRY_PENDING')`,
       ).bind(now, now, notificationId, eventId),
     ]);
     return json({ notificationId, status: "QUEUED", replayed }, replayed ? 200 : 202);
   } catch {
+    const retryAfter = new Date(Date.now() + 60_000).toISOString();
     await env.DB.batch([
       env.DB.prepare(
         `UPDATE email_attempts
@@ -352,9 +366,11 @@ const publishRetry = async (
       ).bind(now, attempt.id, eventId),
       env.DB.prepare(
         `UPDATE email_notifications
-            SET status = 'RETRY_PENDING', last_error_code = 'QUEUE_PUBLISH_FAILED', updated_at = ?
-          WHERE id = ? AND event_id = ? AND status = 'PENDING'`,
-      ).bind(now, notificationId, eventId),
+            SET status = CASE WHEN channel = 'SMS' THEN 'WAITING_FOR_SYNC' ELSE 'RETRY_PENDING' END,
+                last_error_code = 'QUEUE_PUBLISH_FAILED',
+                retry_after = ?, updated_at = ?
+          WHERE id = ? AND event_id = ? AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'RETRY_PENDING')`,
+      ).bind(retryAfter, now, notificationId, eventId),
     ]);
     return json({ error: "The retry is saved but could not be queued. Retry the same command." }, 503);
   }
@@ -408,7 +424,8 @@ const retryNotification = async (
       ).bind(commandId, now, now, notificationId, eventId),
       env.DB.prepare(
         `UPDATE email_notifications
-            SET status = 'PENDING', terminal_at = NULL, status_reason = NULL,
+            SET status = CASE WHEN channel = 'SMS' THEN 'WAITING_FOR_SYNC' ELSE 'PENDING' END,
+                terminal_at = NULL, status_reason = NULL,
                 last_error_code = NULL, retry_after = NULL, updated_at = ?
           WHERE id = ? AND event_id = ?
             AND status IN ('FAILED', 'RETRY_PENDING')
@@ -429,7 +446,7 @@ const retryNotification = async (
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
-         SELECT ?, ?, ?, 'NOTIFICATION_RETRY_REQUESTED', 'EMAIL_NOTIFICATION', ?, 'STAFF', ?, ?
+          SELECT ?, ?, ?, 'NOTIFICATION_RETRY_REQUESTED', 'PARTICIPANT_NOTIFICATION', ?, 'STAFF', ?, ?
            FROM race_commands
           WHERE id = ? AND event_id = ? AND command_type = 'RETRY_NOTIFICATION'`,
       ).bind(
@@ -520,7 +537,7 @@ const terminalNotificationAction = async (
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id, actor_type, occurred_at, details_json)
-         SELECT ?, ?, ?, ?, 'EMAIL_NOTIFICATION', ?, 'STAFF', ?, ?
+          SELECT ?, ?, ?, ?, 'PARTICIPANT_NOTIFICATION', ?, 'STAFF', ?, ?
            FROM race_commands
           WHERE id = ? AND event_id = ? AND command_type = ?`,
       ).bind(
@@ -574,7 +591,7 @@ const auditTimeline = async (url: URL, env: Env, eventId: string): Promise<Respo
             timeline.subject_id, timeline.actor_type, timeline.actor_display_name,
             timeline.occurred_at, timeline.safe_code
        FROM (
-         SELECT a.id, 'DOMAIN' AS source, a.action, a.subject_type, a.subject_id,
+          SELECT a.id, 'DOMAIN' AS source, a.action, a.subject_type, a.subject_id,
                 a.actor_type, sp.display_name AS actor_display_name,
                 a.occurred_at, NULL AS safe_code
            FROM audit_events a
@@ -584,7 +601,7 @@ const auditTimeline = async (url: URL, env: Env, eventId: string): Promise<Respo
          UNION ALL
          SELECT ea.id, 'NOTIFICATION_ATTEMPT' AS source,
                 'NOTIFICATION_' || ea.stage || '_' || ea.status AS action,
-                'EMAIL_NOTIFICATION' AS subject_type, ea.notification_id AS subject_id,
+                 'PARTICIPANT_NOTIFICATION' AS subject_type, ea.notification_id AS subject_id,
                 'SYSTEM' AS actor_type, NULL AS actor_display_name,
                 COALESCE(ea.completed_at, ea.started_at) AS occurred_at,
                 ea.error_code AS safe_code

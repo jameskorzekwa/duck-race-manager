@@ -6,6 +6,12 @@ import {
 } from "./heat-operations.ts";
 import type { Env } from "./types.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
+import {
+  assignmentNotificationStatement,
+  heatResultNotificationStatement,
+  nextHeatReminderNotificationStatement,
+  publishPendingParticipantNotifications,
+} from "./participant-notifications.ts";
 
 // A Round One heat stops being a race when the racers in it leave. Withdrawal
 // and disqualification never touch a roster — the duck is sealed in a numbered
@@ -113,6 +119,7 @@ interface CandidateRow {
   revision: number;
   eligible_count: number;
   race_entry_id: string | null;
+  registration_id: string | null;
   duck_assignment_id: string | null;
   final_heat_id: string | null;
   final_heat_capacity: number;
@@ -135,6 +142,7 @@ const soleEligibleRacerColumn = (column: string): string => `(
 const candidateSql = `SELECT h.id, h.heat_number, h.revision,
        ${eligibleEntryCountSql("h.event_id", "h.id")} AS eligible_count,
        ${soleEligibleRacerColumn("sole.race_entry_id")} AS race_entry_id,
+       ${soleEligibleRacerColumn("sole_racer.id")} AS registration_id,
        ${soleEligibleRacerColumn("sole_assignment.id")} AS duck_assignment_id,
        (SELECT existing_final.id FROM heats existing_final
          WHERE existing_final.event_id = h.event_id AND existing_final.round = 'FINAL'
@@ -199,6 +207,7 @@ const skipStatements = (
     commandId, now, candidate.id, eventId, candidate.revision,
     commandId, eventId, COMMAND_TYPES.SKIPPED, candidate.id,
   ),
+  nextHeatReminderNotificationStatement(env, eventId, "ROUND_ONE", commandId, now),
   env.DB.prepare(
     `INSERT INTO audit_events
       (id, event_id, command_id, action, subject_type, subject_id,
@@ -353,6 +362,17 @@ const uncontestedStatements = (
       now, commandId, now, candidate.id, eventId, candidate.revision,
       commandId, eventId, COMMAND_TYPES.UNCONTESTED_WINNER, candidate.id,
     ),
+    heatResultNotificationStatement(env, eventId, candidate.id, commandId, now, "ROUND_ONE"),
+    ...(candidate.registration_id === null ? [] : [assignmentNotificationStatement(
+      env,
+      eventId,
+      finalHeatId,
+      candidate.registration_id,
+      commandId,
+      now,
+      "FINAL",
+    )]),
+    nextHeatReminderNotificationStatement(env, eventId, "ROUND_ONE", commandId, now),
     env.DB.prepare(
       `INSERT INTO audit_events
         (id, event_id, command_id, action, subject_type, subject_id,
@@ -441,5 +461,6 @@ export const reconcileRoundOneHeats = async (
       raceEntryId: uncontested ? candidate.race_entry_id : null,
     });
   }
+  await publishPendingParticipantNotifications(env);
   return resolutions;
 };

@@ -56,7 +56,7 @@ delivery phases, and acceptance criteria.
 - Push privacy-safe finite-domain invalidations through one hibernatable Durable
   Object while keeping D1-backed APIs authoritative on every device.
 - Fill fixed-size heats (at least three ducks) as participants are paired.
-- Send upcoming-heat email notifications to participants who provide email.
+- Send consented participant lifecycle notifications independently by email and SMS.
 - Provide a read-only duck inspection workflow for misplaced ducks.
 - Preserve a participant's heat and race status when replacing a lost duck.
 - Optimize staff workflows for speed and people with limited technical skill.
@@ -70,7 +70,7 @@ delivery phases, and acceptance criteria.
 - Duck inventory and NFC provisioning
 - Participant-to-duck assignment
 - Two configurable round-one heat assignment and bagging workflows
-- Participant heat assignment and upcoming-heat email notifications
+- Participant registration, assignment, next-heat, and result email/SMS notifications
 - Pre-heat announcer roster
 - Read-only duck status inspection and recovery tools
 - Guided lost-duck replacement, tag replacement, and duck swapping

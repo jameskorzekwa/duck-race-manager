@@ -21,6 +21,10 @@ import {
   type RegistrationInput,
 } from "./registration.ts";
 import { reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
+import {
+  publishPendingParticipantNotifications,
+  registrationNotificationStatement,
+} from "./participant-notifications.ts";
 import type { Env } from "./types.ts";
 import {
   unstartedRoundOneHeatExistsSql,
@@ -624,6 +628,7 @@ const createWalkUp = async (
         eventId,
         registrationId,
       ),
+      registrationNotificationStatement(env, eventId, registrationId, commandId, now),
     ]);
   } catch {
     const replayCommand = await findCommand(env, commandId);
@@ -647,6 +652,7 @@ const createWalkUp = async (
       error: "Walk-up registration has closed because no unstarted Round One heat remains.",
     }, 409);
   }
+  await publishPendingParticipantNotifications(env);
   return registrationResult(created, false, 201, { privateStatusPath: `/r/${privateToken}` });
 };
 

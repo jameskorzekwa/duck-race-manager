@@ -5,9 +5,14 @@ import test from "node:test";
 
 import {
   EmailSendError,
-  handleEmailQueue,
   sendEmailWithSes,
 } from "./email-notifications.ts";
+import {
+  destinationHmac,
+  handleParticipantNotificationQueue,
+  ParticipantSendError,
+  sendSmsWithAws,
+} from "./participant-notifications.ts";
 import worker from "./index.ts";
 
 const config = (name) => JSON.parse(
@@ -55,15 +60,25 @@ const expectSendError = async (promise, safeCode, retryable) => {
   });
 };
 
-test("production wires the opaque-ID queue consumer, bounded retries, DLQ, and outbox cron", () => {
+test("production wires separate opaque-ID queues, bounded retries, DLQs, and outbox cron", () => {
   const production = config("wrangler.jsonc");
-  assert.deepEqual(production.queues.consumers, [{
-    queue: "quickducks-email",
-    max_batch_size: 10,
-    max_batch_timeout: 5,
-    max_retries: 5,
-    dead_letter_queue: "quickducks-email-dlq",
-  }]);
+  assert.deepEqual(production.queues.consumers, [
+    {
+      queue: "quickducks-email",
+      max_batch_size: 10,
+      max_batch_timeout: 5,
+      max_retries: 5,
+      dead_letter_queue: "quickducks-email-dlq",
+    },
+    {
+      queue: "quickducks-sms",
+      max_batch_size: 10,
+      max_batch_timeout: 5,
+      max_retries: 5,
+      dead_letter_queue: "quickducks-sms-dlq",
+    },
+  ]);
+  assert.deepEqual(production.queues.producers.map((producer) => producer.binding), ["EMAIL_QUEUE", "SMS_QUEUE"]);
   assert.deepEqual(production.triggers.crons, ["*/1 * * * *"]);
   assert.equal(production.vars.EMAIL_FROM_ADDRESS, "race@quickducks.com");
   assert.equal(typeof worker.queue, "function");
@@ -85,9 +100,11 @@ test("the consumer acknowledges malformed bodies without reading D1 or calling a
   const env = {
     DB: { prepare() { assert.fail("malformed queue bodies must not read D1"); } },
   };
-  await handleEmailQueue({ messages, queue: "quickducks-email" }, env, async () => {
+  await handleParticipantNotificationQueue({ messages, queue: "quickducks-email" }, env, async () => {
     assert.fail("malformed queue bodies must not call the email sender");
-  });
+  }, async () => {
+    assert.fail("malformed queue bodies must not call the SMS sender");
+  }, async () => false);
   assert.deepEqual(acknowledged, [0, 1, 2]);
   assert.equal(retried, false);
 });
@@ -207,4 +224,59 @@ test("invalid or missing SES configuration fails closed before fetch", async (co
     await expectSendError(sendEmailWithSes(outboundEmail, env), "SES_CONFIGURATION_INVALID", false);
   }
   assert.equal(fetchCalled, false);
+});
+
+test("destination identifiers are secret-keyed, channel-separated, and non-enumerable", async () => {
+  const env = { PARTICIPANT_DESTINATION_HMAC_KEY: "unit-test-only-hmac-key-at-least-thirty-two-bytes" };
+  const email = await destinationHmac("EMAIL", "Racer@Example.Test", env);
+  const sms = await destinationHmac("SMS", "(817) 320-6150", env);
+  assert.match(email, /^[0-9a-f]{64}$/);
+  assert.match(sms, /^[0-9a-f]{64}$/);
+  assert.notEqual(email, sms);
+  assert.notEqual(email, createHash("sha256").update("EMAIL:racer@example.test").digest("hex"));
+  assert.equal(email, await destinationHmac("EMAIL", "racer@example.test", env));
+  await assert.rejects(
+    destinationHmac("EMAIL", "racer@example.test", { PARTICIPANT_DESTINATION_HMAC_KEY: "short" }),
+    (error) => error instanceof ParticipantSendError
+      && error.safeCode === "DESTINATION_HMAC_CONFIGURATION_INVALID",
+  );
+});
+
+test("AWS SMS sends a transactional message and classifies failures without reading provider bodies", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const env = {
+    ...sesEnv,
+    SMS_ORIGINATION_IDENTITY: "origination-identity",
+  };
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return new Response(JSON.stringify({ MessageId: "sms-message-123" }), { status: 200 });
+  };
+  assert.deepEqual(await sendSmsWithAws({
+    to: "+18173206150",
+    body: "QuickDucks: Round One, Heat 1 is next. Reply STOP to opt out.",
+  }, env), { providerMessageId: "sms-message-123" });
+  assert.equal(request.url, "https://sms-voice.us-east-1.amazonaws.com/v2/sms/text");
+  assert.deepEqual(JSON.parse(request.options.body), {
+    DestinationPhoneNumber: "+18173206150",
+    MessageBody: "QuickDucks: Round One, Heat 1 is next. Reply STOP to opt out.",
+    MessageType: "TRANSACTIONAL",
+    OriginationIdentity: "origination-identity",
+  });
+
+  let bodyRead = false;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 429,
+    async json() { bodyRead = true; return { destination: "+18173206150" }; },
+    async text() { bodyRead = true; return "private provider detail"; },
+  });
+  await assert.rejects(sendSmsWithAws({ to: "+18173206150", body: "test" }, env), (error) =>
+    error instanceof ParticipantSendError
+      && error.safeCode === "SMS_TEMPORARY_FAILURE"
+      && error.retryable === true);
+  assert.equal(bodyRead, false);
 });
