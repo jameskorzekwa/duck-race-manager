@@ -9,6 +9,7 @@ import {
 } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
 import { hasAnyRole, type OperationalRole } from "./authorization.ts";
+import { getDuckPhotoPageRecord } from "./duck-operations.ts";
 import {
   announcerScript,
   appDatePickerScript,
@@ -62,6 +63,7 @@ import {
   renderStaffAccess,
   renderStaffHome,
   renderStaffInventory,
+  renderStaffDuckPhoto,
   renderStaffLogin,
   renderStaffNoAccess,
   renderStaffPairing,
@@ -118,9 +120,9 @@ const html = (body: string, status = 200, noindex = false, formActionOrigin?: st
     },
   });
 
-// Camera access stays denied for the whole site except the authenticated staff
-// duck-pairing page, which is the only surface that scans a participant QR
-// code. Public pages, APIs, and every other staff station keep `camera=()`.
+// Camera access stays denied for the whole site except authenticated staff
+// pages that actually scan a participant QR code or capture an NFC-intake duck
+// photo. Public pages, APIs, and every other staff station keep `camera=()`.
 const withCameraAccess = (response: Response): Response => {
   response.headers.set(
     "permissions-policy",
@@ -540,13 +542,40 @@ export const createWorker = (
       if (!hasAnyRole(actor, inventoryRoles)) {
         return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use duck inventory.", actor), 403, true));
       }
-      return withSessionCookies(staffHtml(renderStaffInventory(
+      return withSessionCookies(withCameraAccess(staffHtml(renderStaffInventory(
         actor.displayName ?? actor.email,
         appOrigin.origin,
         actor.isSystemAdmin,
         actor.roles,
         await publicPhase(),
-      )));
+      ))));
+    }
+
+    const staffDuckPhotoMatch = url.pathname.match(
+      /^\/staff\/inventory\/ducks\/([A-Za-z0-9_-]{1,128})\/photo$/,
+    );
+    if (staffDuckPhotoMatch !== null && request.method === "GET") {
+      const actor = await authenticateRequest(request, env);
+      if (actor === null) {
+        const login = new URL("/staff", env.APP_ORIGIN);
+        login.searchParams.set("returnTo", url.pathname);
+        return withSessionCookies(new Response(null, { status: 303, headers: { ...securityHeaders, location: login.pathname + login.search } }));
+      }
+      if (!hasAnyRole(actor, inventoryRoles)) {
+        return withSessionCookies(html(renderStaffAuthError("This account does not have permission to view duck inventory photos.", actor), 403, true));
+      }
+      const record = await getDuckPhotoPageRecord(env, staffDuckPhotoMatch[1]);
+      return withSessionCookies(record === null
+        ? html(renderNotFound(), 404, true)
+        : staffHtml(renderStaffDuckPhoto(
+          actor.displayName ?? actor.email,
+          record.duckId,
+          record.visibleNumber,
+          record.status,
+          actor.isSystemAdmin,
+          actor.roles,
+          await publicPhase(),
+        )));
     }
 
     const station = stationPages.get(url.pathname);

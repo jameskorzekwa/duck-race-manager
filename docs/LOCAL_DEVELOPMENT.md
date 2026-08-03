@@ -141,8 +141,8 @@ it, plain http fails in three ways at once:
   staff sign-in loops forever with no error.
 - The CSP sets `upgrade-insecure-requests`, so every script, image, and `fetch`
   is rewritten to `https://` and the page breaks.
-- Web NFC refuses to run outside a secure context, so the inventory station
-  cannot work at all.
+- Web NFC and camera capture refuse to run outside a secure context, so the
+  inventory station cannot work at all.
 
 So `isLocalPreviewOrigin` accepts a private IPv4 address **only over https**.
 Plain http off loopback fails at the guard, which names both conditions and shows
@@ -168,11 +168,20 @@ brew install mkcert && mkcert -install
 `npm run dev:network` uses `mkcert` automatically once it is installed. Install
 the CA on the device too (`mkcert -CAROOT`) and the warning disappears.
 
-**Android Chrome needs this for NFC.** Chrome withholds powerful features,
-Web NFC among them, from an origin whose certificate it does not trust — so
+**Android Chrome needs this for NFC and camera capture.** Chrome withholds
+powerful features from an origin whose certificate it does not trust — so
 `/staff/inventory-intake` needs a `mkcert` certificate the phone trusts, not a
 tapped-through warning. That is the one part of the site a self-signed
 certificate will not get you.
+
+The local Worker stores captured JPEGs in Wrangler's local simulation of the
+`DUCK_PHOTOS` R2 binding; it never reaches the production bucket. To exercise
+hardware, sign in on `/staff/inventory-intake`, grant camera access once, process
+at least two blank stickers, and confirm Chrome keeps one camera stream active
+between ducks and releases it when **End NFC provisioning** is pressed. Deny the
+permission once to verify the in-page settings guidance and retry path. Hardware
+testing supplements, but does not replace, the automated Playwright camera/NFC
+fixtures and real-handler storage tests.
 
 ### Picking an address
 

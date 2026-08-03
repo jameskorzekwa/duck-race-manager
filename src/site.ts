@@ -144,6 +144,9 @@ button { min-width:0; max-width:100%; overflow-wrap:anywhere; white-space:normal
 .qr-scanner[hidden] { display:none; }
 .qr-video { width:100%; max-width:26rem; min-width:0; margin:0 auto; aspect-ratio:1; border-radius:.65rem; background:var(--ink); object-fit:cover; }
 .qr-scanner .actions { margin:0; }
+.intake-camera { display:grid; gap:.8rem; margin-top:1rem; padding:1rem; border:3px solid var(--water-dark); border-radius:.9rem; background:#f4fbfd; }
+.intake-camera-video { display:block; width:100%; max-width:30rem; min-width:0; margin:0 auto; aspect-ratio:4 / 3; border-radius:.7rem; background:var(--ink); object-fit:cover; }
+.duck-photo { display:block; width:100%; max-width:42rem; height:auto; margin:1rem auto; border:3px solid var(--ink); border-radius:1rem; background:#fff; }
 form { display:grid; width:100%; min-width:0; max-width:100%; gap:1.15rem; clear:both; }
 .field-grid { display:grid; min-width:0; max-width:100%; gap:1rem; }
 .field-grid > *,form > *,label,fieldset { min-width:0; max-width:100%; }
@@ -1825,6 +1828,7 @@ export const renderStaffInventory = (
         <div class="notice" data-intake-runtime aria-live="polite"><strong>Checking this device.</strong> <span data-intake-runtime-message>Scanning stays unavailable until this device’s NFC requirements are confirmed. Everything else on this page still works.</span></div>
         <div data-intake-controls hidden>
           <p class="lede">Press Start once. Then hold one blank writable NFC sticker to this device until success, remove it, and present the next duck. A sticker already in inventory opens its duck below instead.</p>
+          <p class="muted">Each newly provisioned duck must have its private photo captured and saved before success.</p>
           <label>Station location (optional)<input data-intake-location maxlength="100" autocomplete="off" placeholder="Intake table"><span>This one location is applied automatically to stickers provisioned during this station run.</span></label>
           <div class="actions">
             <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
@@ -1837,6 +1841,18 @@ export const renderStaffInventory = (
             <button class="button danger" type="button" data-takeover-provisioning>Take over pending sticker</button>
           </article>
           <article class="operation-card station-state" role="status" aria-live="polite" aria-atomic="true"><p class="eyebrow">Station state</p><h3 data-intake-state>Not started</h3><p class="message-line muted" data-intake-message>Press Start once when you are ready to scan.</p></article>
+          <section class="intake-camera" data-intake-camera hidden aria-labelledby="intake-camera-title">
+            <p class="eyebrow">Required photo</p><h3 id="intake-camera-title" data-intake-camera-title>Photograph this duck</h3>
+            <p class="muted">Center the physical duck in the view. One press captures and automatically saves its private inventory photo.</p>
+            <video class="intake-camera-video" data-intake-camera-video muted playsinline></video>
+            <canvas data-intake-camera-canvas hidden></canvas>
+            <div class="actions">
+              <button class="button station-control" type="button" data-capture-intake-photo disabled>Capture and save photo</button>
+              <button class="button secondary station-control" type="button" data-retry-intake-photo hidden>Retry camera</button>
+              <button class="button secondary station-control" type="button" data-cancel-intake-photo>Cancel capture</button>
+            </div>
+            <p class="message-line muted" data-intake-camera-message aria-live="assertive">Waiting for a duck.</p>
+          </section>
           <div class="station-counters" aria-label="Inventory counts">
             <div class="station-counter"><span>Reserved for race</span><strong data-reserved-count>0</strong></div>
             <div class="station-counter"><span>Added this session</span><strong data-session-count>0</strong></div>
@@ -1865,6 +1881,7 @@ export const renderStaffInventory = (
           <aside class="operation-card inventory-detail-panel" id="inventory-detail-panel" role="region" aria-labelledby="inventory-detail-title" data-inventory-detail hidden>
             <div class="inventory-detail-heading"><h3 id="inventory-detail-title" data-inventory-name>Duck detail</h3><button class="button secondary small" type="button" data-close-inventory-detail>Close</button></div><dl class="facts compact-facts" data-inventory-facts></dl>
             <div class="actions"><button class="button secondary small" type="button" data-print-label>Open label data</button><span class="muted" data-label-result></span></div>
+            <section class="operation-card" data-inventory-photo><h3>Private intake photo</h3><p class="muted" data-inventory-photo-status>No photo status loaded.</p><a class="button secondary small" data-inventory-photo-link hidden>View private photo</a></section>
             <form class="operation-card" data-inventory-duck-name-form hidden><h3>Duck name</h3><label>Name shown beside the number<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Public. Staff names go through the same wordlist as a participant’s own.</span></label><div class="actions"><button class="button secondary small" type="submit">Save duck name</button><button class="button danger small" type="button" data-clear-duck-name hidden>Clear name</button></div></form>
             <details class="operation-card"><summary>Assign or reassign duck</summary><form data-inventory-assign-form><label>Participant race-entry ID<input name="raceEntryId" maxlength="128" required></label><label>Reason<input name="reason" minlength="4" maxlength="500" required placeholder="Walk-up pairing correction"></label><button class="button" type="submit">Assign selected duck</button></form></details>
             <form class="operation-card" data-inventory-unassign-form hidden><h3>Unpair duck</h3><label>Reason<input name="reason" minlength="4" maxlength="500" required></label><label class="check"><input name="releaseReservation" type="checkbox"><span class="label-text">Also release this duck from the event</span></label><button class="button danger" type="submit">Unpair duck</button></form>
@@ -1881,6 +1898,34 @@ export const renderStaffInventory = (
       <script src="/assets/staff-inventory.js" defer></script>
       ${staffFooter(displayName)}
     </section>`,
+});
+
+export const renderStaffDuckPhoto = (
+  displayName: string,
+  duckId: string,
+  visibleNumber: number,
+  status: "READY" | "REQUIRED" | "LEGACY",
+  isSystemAdmin = false,
+  roles: readonly OperationalRole[] = [],
+  phase: PublicPhase = "PREPARING",
+): string => page({
+  title: `Duck #${visibleNumber} photo`,
+  description: "Protected private duck inventory photo.",
+  robots: "noindex,nofollow",
+  phase,
+  liveNav: false,
+  content: `<section class="page-panel staff-panel">
+    ${staffNav(isSystemAdmin, roles, "/staff/inventory")}
+    <p class="eyebrow">Private inventory photo</p>
+    <h1 class="page-title">Duck #${visibleNumber}</h1>
+    ${status === "READY"
+      ? `<img class="duck-photo" src="/api/v1/staff/inventory/ducks/${escapeHtml(duckId)}/photo" alt="Private inventory photo of Duck #${visibleNumber}">`
+      : status === "REQUIRED"
+        ? '<div class="notice"><strong>Photo incomplete.</strong> <span>Return to the NFC inventory station to capture and save this required photo.</span></div>'
+        : '<div class="notice"><strong>No intake photo is available.</strong> <span>This duck was added before required photo capture was introduced.</span></div>'}
+    <p><a class="button secondary" href="/staff/inventory?duck=${escapeHtml(duckId)}">Back to duck record</a></p>
+    ${staffFooter(displayName)}
+  </section>`,
 });
 
 export const renderStaffDuck = (

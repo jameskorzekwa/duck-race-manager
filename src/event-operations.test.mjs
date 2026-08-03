@@ -42,6 +42,7 @@ const readyStats = {
   active_entry_without_duck_count: 0,
   active_entry_without_round_one_heat_count: 0,
   pending_provisioning_count: 0,
+  pending_duck_photo_count: 0,
   round_one_heat_count: 2,
   round_one_unready_heat_count: 0,
   round_one_unfinished_heat_count: 0,
@@ -673,6 +674,7 @@ test("readiness reports actionable blockers without changing the event", async (
         submitted_registration_count: 2,
         active_entry_without_round_one_heat_count: 1,
         pending_provisioning_count: 1,
+        pending_duck_photo_count: 1,
         round_one_heat_count: 0,
         any_heat_count: 0,
       };
@@ -690,6 +692,7 @@ test("readiness reports actionable blockers without changing the event", async (
   assert.equal(body.readiness["start-round-one"].allowed, false);
   assert.match(body.readiness["start-round-one"].blockers.join(" "), /submitted participant/);
   assert.match(body.readiness["start-round-one"].blockers.join(" "), /pending NFC sticker/);
+  assert.match(body.readiness["start-round-one"].blockers.join(" "), /required duck photo/);
   assert.equal(body.readiness["reopen-registration"].allowed, true);
   assert.equal(db.batches.length, 0);
 });
@@ -861,6 +864,7 @@ for (const [action, fromStatus, toStatus, commandType] of lifecycleCases) {
       assert.match(command.sql, /START_DUCK_PROVISIONING/);
       assert.match(command.sql, /d\.inventory_status = 'NEW'.*d\.physical_condition = 'NEEDS_TAG'.*dt\.status = 'RESERVED'/s);
       assert.match(command.sql, /event_ducks ed.*ed\.released_at IS NULL/s);
+      assert.match(command.sql, /duck_photos dp.*dp\.status = 'PENDING'/s);
     }
     assert.match(update.sql, new RegExp(`status = '${toStatus}'`));
     assert.doesNotMatch(update.sql, /SET status = \?/);
@@ -974,6 +978,7 @@ test("atomic round-one start rejects provisioning begun after readiness prefligh
     "0021_email_delivery_claim.sql",
     "0022_pending_heat_result_announcement.sql",
     "0023_participant_notifications.sql",
+    "0024_duck_intake_photos.sql",
   ]) {
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
   }

@@ -4,8 +4,8 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0023_participant_notifications.sql`, browser
-scripts, and automated tests. When this document conflicts with an older
+the Worker, D1 migrations through `0024_duck_intake_photos.sql`, browser scripts,
+and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
 The terms in this document have precise meanings:
@@ -1905,10 +1905,20 @@ Blank-sticker provisioning uses a durable two-phase protocol:
    to `GOOD`/`RESERVED_FOR_EVENT`, changes the tag to `ACTIVE` with written,
    verified, and activated timestamps, creates the event reservation and
    `DUCK_INTAKE` history, and writes redacted audit history. Event state and
-   pending ownership/state are guarded again inside the transaction. Same-command
-   replay and a concurrent second confirmation return the authoritative existing
-   result without duplicating the reservation or history.
-4. If the owning station is abandoned, the pending record remains protected for
+   pending ownership/state are guarded again inside the transaction. The same
+   batch creates one `PENDING` private photo requirement keyed to that exact duck
+   and reservation. Same-command replay and a concurrent second confirmation
+   return the authoritative existing result without duplicating the reservation,
+   history, or requirement.
+4. The station immediately opens its in-page camera, prefers the
+   environment-facing camera, and identifies the physical duck by number. One
+   press encodes a bounded JPEG and posts it with a new idempotent command. R2
+   stores bytes under an opaque command-specific key; D1 remains the serving and
+   association authority and permits exactly one photo row per duck. Only a
+   server-confirmed `READY` response increments the session count and presents
+   the next intake as ready. The active camera stream is retained for the next
+   duck and released when the station or page exits, or when the track fails.
+5. If the owning station is abandoned, the pending record remains protected for
    at least 10 minutes after its latest start or takeover ownership audit. After
    that interval, recovery may show a race director or administrator only the
    pending duck's internal number and an explicit takeover action. A duck manager
@@ -1924,8 +1934,9 @@ Blank-sticker provisioning uses a durable two-phase protocol:
 **Operator step:** in current Android Chrome on an NFC-capable device, keep the
 top-level HTTPS page visible and online. Select the race, optionally enter the
 station location, and press Start once. Then tap one blank writable NDEF sticker,
-hold it still until the station beeps/vibrates and displays success, remove that
-duck during the short **Remove duck** state, and immediately tap the next one.
+hold it still until the station opens **Photograph Duck #…**, center that physical
+duck, and press **Capture and save photo** once. Wait for server-confirmed success,
+remove that duck during the short **Remove duck** state, and immediately tap the next one.
 QuickDucks automatically writes exactly one URL record containing the canonical
 `https://quickducks.com/t/<token>` URL. It uses successful `write()` resolution
 as physical-write verification and does not call `makeReadOnly`, so a sticker
@@ -1934,9 +1945,20 @@ stays writable for reuse after the event is deleted.
 **End NFC provisioning** is visible only while Web NFC scanning is active. It
 aborts the browser scan and restores **Start NFC provisioning** without clearing
 confirmed counts or history. It is disabled while a reading or removal state is
-active and whenever the station owns a pending server reservation; the operator
-must finish that exact sticker before ending, so the control cannot silently
-abandon a `PENDING_WRITE` item.
+active and whenever the station owns a pending server reservation or required
+photo; the operator must finish that exact duck before ending, so the control
+cannot silently abandon a `PENDING_WRITE` or `PHOTO_REQUIRED` item. Ending the
+station and leaving the page stop every retained camera track.
+
+Camera denial, cancellation, an ended track, and object-storage or network
+failure never complete the intake. The persisted duck remains reserved, its
+photo stays visibly incomplete, event selection and the next sticker remain
+blocked, and recovery returns the exact pending duck after reload. The page
+explains how to allow camera access for the site and offers camera, capture, or
+save retry as appropriate. Save retries reuse the same JPEG and command ID;
+different material or a second command cannot replace a completed photo or
+associate it with another duck. Round one, the final, and event completion cannot
+start while any required photo is `PENDING`.
 
 The browser allows one operation in flight and has no scan queue. It uses an NFC
 hardware serial only as an in-memory same-reading debounce and never as duck
@@ -2035,6 +2057,16 @@ stored name and whether the read-time filter is already hiding it. Raw tag token
 are not returned in detail/history responses. Participant names are included
 only when the actor also has `REGISTRATION`, has `RACE_DIRECTOR`, or is an
 administrator.
+
+Inventory detail also reports **Private intake photo**. A completed NFC intake
+links to a protected server-rendered photo page; the image request is separately
+authenticated and authorized for `DUCK_MANAGER`, `RACE_DIRECTOR`, or an
+administrator and is served through the Worker with `no-store` and `nosniff`.
+An incomplete NFC intake says that its required photo is missing. Ducks created
+before migration `0024`, and ducks added by hand, show a clear legacy no-photo
+placeholder. Public tag, duck-number, board, registration, My Ducks, HTML, and
+live-update projections contain no photo existence, object key, digest, size,
+route, or bytes.
 
 ### Deleting a Duck
 

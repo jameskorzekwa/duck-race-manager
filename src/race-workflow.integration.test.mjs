@@ -124,6 +124,7 @@ const createWorkerHarness = (
   const queueAttempts = [];
   const sentEmails = [];
   const sentSms = [];
+  const privatePhotoObjects = new Map();
   let remainingQueueSendFailures = queueSendFailures;
   let env;
   const emailSender = async (email) => {
@@ -145,6 +146,14 @@ const createWorkerHarness = (
     COGNITO_USER_POOL_CLIENT_ID: "client-example",
     COGNITO_DOMAIN: "https://quickducks-staff.example.com",
     DB: createD1(database),
+    DUCK_PHOTOS: {
+      async put(key, value) { privatePhotoObjects.set(key, new Uint8Array(value)); },
+      async get(key) {
+        const value = privatePhotoObjects.get(key);
+        return value === undefined ? null : { body: value };
+      },
+      async delete(key) { privatePhotoObjects.delete(key); },
+    },
     EMAIL_QUEUE: {
       async send(notificationId) {
         const notificationType = database.prepare(
@@ -190,6 +199,19 @@ const createWorkerHarness = (
       body,
     }), env, { waitUntil(promise) { updateTasks.push(promise); } });
   };
+  const photo = (duckId, commandId = crypto.randomUUID(), token = staffToken) => worker.fetch(
+    new Request(`https://quickducks.com/api/v1/staff/inventory/ducks/${duckId}/photo`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "image/jpeg",
+        "x-quickducks-command-id": commandId,
+      },
+      body: new Uint8Array([0xff, 0xd8, 0x11, 0x22, 0xff, 0xd9]),
+    }),
+    env,
+    { waitUntil(promise) { updateTasks.push(promise); } },
+  );
   return {
     api,
     env,
@@ -199,6 +221,8 @@ const createWorkerHarness = (
     sentEmails,
     sentSms,
     updateTasks,
+    photo,
+    privatePhotoObjects,
     post: (path, body, token = staffToken) => api(path, { method: "POST", body, token }),
   };
 };
@@ -422,6 +446,7 @@ const raceToAwaitingFinal = async (
     post,
     env,
     worker,
+    photo,
     queuedNotifications,
     queueAttempts,
     sentEmails,
@@ -495,6 +520,7 @@ const raceToAwaitingFinal = async (
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm duck");
+    await jsonBody(await photo(provisioning.duckId), 201, "save required duck photo");
     const pairing = await jsonBody(await post(`/api/v1/staff/ducks/${participant.tagToken}/assignments`, {
       commandId: crypto.randomUUID(),
       eventId,
@@ -507,6 +533,7 @@ const raceToAwaitingFinal = async (
   await afterPairing?.({
     api,
     post,
+    photo,
     env,
     worker,
     eventId,
@@ -533,6 +560,7 @@ const raceToAwaitingFinal = async (
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm the spare duck");
+    await jsonBody(await photo(provisioning.duckId), 201, "save required spare-duck photo");
     const spare = await jsonBody(await api(
       `/api/v1/staff/inventory/ducks/${provisioning.duckId}`,
       { token: staffToken },
@@ -1432,7 +1460,7 @@ test("a queued notification is cancelled when a real handler replaces its origin
     racerCount: 3,
     heatCapacity: 3,
     optInRegistrationIndex: 0,
-    afterPairing: async ({ post, eventId, participants }) => {
+    afterPairing: async ({ post, photo, eventId, participants }) => {
       const participant = participants[0];
       const provisioning = await jsonBody(await post("/api/v1/staff/inventory/provisioning", {
         commandId: crypto.randomUUID(),
@@ -1445,6 +1473,7 @@ test("a queued notification is cancelled when a real handler replaces its origin
         provisioningCommandId: provisioning.provisioningCommandId,
         physicalWriteVerified: true,
       }), 201, "confirm replacement duck");
+      await jsonBody(await photo(provisioning.duckId), 201, "save required replacement-duck photo");
       const assigned = await jsonBody(await post(
         `/api/v1/staff/inventory/ducks/${provisioning.duckId}/assignments`,
         {
@@ -2270,7 +2299,7 @@ test("scanned podium places are least-privileged, validated, and cleared by a re
 test("a final reduced by a withdrawal is still published and the event completed", async (context) => {
   const { database } = createDatabase();
   context.after(() => database.close());
-  const { api, post } = createWorkerHarness(database);
+  const { api, post, photo } = createWorkerHarness(database);
 
   const created = await jsonBody(await post("/api/v1/staff/events", {
     commandId: crypto.randomUUID(),
@@ -2328,6 +2357,7 @@ test("a final reduced by a withdrawal is still published and the event completed
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm duck");
+    await jsonBody(await photo(provisioning.duckId), 201, "save required duck photo");
     const pairing = await jsonBody(await post(`/api/v1/staff/ducks/${participant.tagToken}/assignments`, {
       commandId: crypto.randomUUID(),
       eventId,
@@ -2903,6 +2933,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0021_email_delivery_claim.sql",
     "0022_pending_heat_result_announcement.sql",
     "0023_participant_notifications.sql",
+    "0024_duck_intake_photos.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -2922,6 +2953,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       ('staff-director', 'staff', 'RACE_DIRECTOR', '2026-07-26T00:00:00Z');
   `);
 
+  const privatePhotoObjects = new Map();
   const env = {
     APP_ORIGIN: "https://quickducks.com",
     AWS_ACCESS_KEY_ID: "test-access-key",
@@ -2931,6 +2963,14 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     COGNITO_USER_POOL_CLIENT_ID: "client-example",
     COGNITO_DOMAIN: "https://quickducks-staff.example.com",
     DB: createD1(database),
+    DUCK_PHOTOS: {
+      async put(key, value) { privatePhotoObjects.set(key, new Uint8Array(value)); },
+      async get(key) {
+        const value = privatePhotoObjects.get(key);
+        return value === undefined ? null : { body: value };
+      },
+      async delete(key) { privatePhotoObjects.delete(key); },
+    },
     EMAIL_QUEUE: { async send() {} },
     PUBLIC_SEARCH_RATE_LIMITER: { async limit() { return { success: true }; } },
     RACE_UPDATES: {
@@ -2973,6 +3013,18 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     }), env, executionContext);
   };
   const post = (path, body, token = staffToken) => api(path, { method: "POST", body, token });
+  const postPhoto = (duckId, commandId, token = staffToken) => worker.fetch(new Request(
+    `https://quickducks.com/api/v1/staff/inventory/ducks/${duckId}/photo`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "image/jpeg",
+        "x-quickducks-command-id": commandId,
+      },
+      body: new Uint8Array([0xff, 0xd8, 0x11, 0x22, 0xff, 0xd9]),
+    },
+  ), env, executionContext);
 
   let turnstileChecks = 0;
   context.mock.method(globalThis, "fetch", async (input) => {
@@ -3084,6 +3136,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   assert.equal(openBoard.event.name, "Annual Duck Race");
   assert.deepEqual(openBoard.event.roundOneHeats, []);
   assert.equal(/id|email|phone|token|lookup/i.test(JSON.stringify(openBoard)), false);
+  assert.equal(/photo|object[_A-Z]?key|contentSha/i.test(JSON.stringify(openBoard)), false);
 
   // Nine racers at three per heat fill exactly three round-one heats, which is
   // the smallest layout that still produces a complete three-place final.
@@ -3176,10 +3229,22 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     }), 201, `confirm provisioned duck ${participant.visibleNumber}`);
     participant.duckId = intake.duck.id;
     assert.equal(intake.duck.inventoryStatus, "RESERVED_FOR_EVENT");
+    assert.equal(intake.photo.status, "REQUIRED");
+    const savedPhoto = await jsonBody(
+      await postPhoto(participant.duckId, crypto.randomUUID()),
+      201,
+      `save private photo for duck ${participant.visibleNumber}`,
+    );
+    assert.equal(savedPhoto.photo.status, "READY");
 
     const anonymousTag = await jsonBody(await api(`/api/v1/ducks/${participant.tagToken}`), 200, "unpaired tag privacy");
     assert.deepEqual(anonymousTag, { destination: "HOME" });
+    assert.equal(/photo|object[_A-Z]?key|contentSha/i.test(JSON.stringify(anonymousTag)), false);
   }
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM duck_photos WHERE status = 'READY'",
+  ).get().count, participants.length);
+  assert.equal(privatePhotoObjects.size, participants.length);
 
   const staffRegistrations = await jsonBody(await api(
     `/api/v1/staff/events/${eventId}/registrations`,
@@ -3841,6 +3906,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "event_ducks",
     "duck_assignments",
     "duck_inventory_events",
+    "duck_photos",
     "heats",
     "heat_entries",
     "heat_results",
@@ -3854,6 +3920,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
   for (const table of purgedTables) {
     assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, table);
   }
+  assert.equal(privatePhotoObjects.size, 0, "force delete removes private photo objects");
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_profiles").get().count, 2);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM staff_role_assignments").get().count, 6);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM organization_event_defaults").get().count, 1);

@@ -958,6 +958,21 @@ test("requires same-origin protection for cookie-authenticated provisioning", as
   );
   assert.equal(takeover.status, 403);
   assert.deepEqual(await takeover.json(), { error: "Same-origin staff request required." });
+
+  const photo = await createWorker(async () => cookieActor).fetch(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/photo", {
+      method: "POST",
+      headers: {
+        "content-type": "image/jpeg",
+        "x-quickducks-command-id": crypto.randomUUID(),
+        origin: "https://attacker.example",
+      },
+      body: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+    }),
+    env,
+  );
+  assert.equal(photo.status, 403);
+  assert.deepEqual(await photo.json(), { error: "Same-origin staff request required." });
 });
 
 const refreshedActor = {
@@ -1173,7 +1188,7 @@ test("the QR decoder is served same-origin so browsers without native detection 
   assert.match(response.headers.get("permissions-policy") ?? "", /(^|, )camera=\(\)/);
 });
 
-test("camera access is granted only to the authenticated duck-pairing page", async () => {
+test("camera access is granted only to authenticated pairing and inventory-intake pages", async () => {
   const token = "a".repeat(32);
   const authenticated = createWorker(async () => ({
     id: "staff_test",
@@ -1189,8 +1204,16 @@ test("camera access is granted only to the authenticated duck-pairing page", asy
     id: "result_test", cognitoSub: "result-sub", email: "result@example.com",
     displayName: "Result Staff", isSystemAdmin: false, roles: ["RESULT_TAKER"], authentication: "cookie",
   })).fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
+  const inventoryWorker = createWorker(async () => ({
+    id: "inventory_test", cognitoSub: "inventory-sub", email: "inventory@example.com",
+    displayName: "Inventory Staff", isSystemAdmin: false, roles: ["DUCK_MANAGER"], authentication: "cookie",
+  }));
+  const inventory = await inventoryWorker.fetch(new Request("https://quickducks.com/staff/inventory"), env);
+  const intake = await inventoryWorker.fetch(new Request("https://quickducks.com/staff/inventory-intake"), env);
 
   assert.equal(pairing.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
+  assert.equal(inventory.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
+  assert.equal(intake.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
 
   // Every other surface, signed in or not, keeps the camera denied.
   const others = await Promise.all([
@@ -1205,6 +1228,71 @@ test("camera access is granted only to the authenticated duck-pairing page", asy
   for (const response of others) {
     assert.match(response.headers.get("permissions-policy") ?? "", /(^|, )camera=\(\)/);
   }
+});
+
+test("private duck photo pages require inventory access and render ready or legacy state without object keys", async () => {
+  const duckId = "duck-photo-test";
+  const photoEnv = {
+    ...env,
+    DB: {
+      prepare(sql) {
+        return {
+          bind() { return this; },
+          async first() {
+            if (sql.includes("LEFT JOIN duck_photos")) {
+              return { duck_id: duckId, visible_number: 42, photo_status: "READY" };
+            }
+            return { ok: 1, status: "DRAFT" };
+          },
+        };
+      },
+    },
+  };
+  const inventoryActor = {
+    id: "inventory", cognitoSub: "inventory-sub", email: "inventory@example.com",
+    displayName: "Inventory Staff", isSystemAdmin: false, roles: ["DUCK_MANAGER"], authentication: "cookie",
+  };
+  const ready = await createWorker(async () => inventoryActor).fetch(
+    new Request(`https://quickducks.com/staff/inventory/ducks/${duckId}/photo`),
+    photoEnv,
+  );
+  const readyBody = await ready.text();
+  assert.equal(ready.status, 200);
+  assert.match(readyBody, new RegExp(`/api/v1/staff/inventory/ducks/${duckId}/photo`));
+  assert.match(readyBody, /Private inventory photo/);
+  assert.doesNotMatch(readyBody, /duck-photos\//);
+  assert.match(ready.headers.get("permissions-policy") ?? "", /camera=\(\)/);
+
+  const legacy = await createWorker(async () => inventoryActor).fetch(
+    new Request(`https://quickducks.com/staff/inventory/ducks/${duckId}/photo`),
+    {
+      ...photoEnv,
+      DB: {
+        prepare(sql) {
+          return {
+            bind() { return this; },
+            async first() {
+              return sql.includes("LEFT JOIN duck_photos")
+                ? { duck_id: duckId, visible_number: 42, photo_status: null }
+                : { ok: 1, status: "DRAFT" };
+            },
+          };
+        },
+      },
+    },
+  );
+  assert.match(await legacy.text(), /added before required photo capture was introduced/);
+
+  const denied = await createWorker(async () => ({ ...inventoryActor, roles: ["REGISTRATION"] })).fetch(
+    new Request(`https://quickducks.com/staff/inventory/ducks/${duckId}/photo`),
+    photoEnv,
+  );
+  assert.equal(denied.status, 403);
+  const anonymous = await worker.fetch(
+    new Request(`https://quickducks.com/staff/inventory/ducks/${duckId}/photo`),
+    photoEnv,
+  );
+  assert.equal(anonymous.status, 303);
 });
 
 test("starts hosted Cognito sign-in and renders safe callback failures", async () => {

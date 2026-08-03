@@ -1042,7 +1042,7 @@ test("My Ducks consumes only the matching same-origin relative private handoff o
 });
 
 const inventoryHelpers = () => new Function(
-  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
+  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreateProvisioningMachine, intakeCreateCameraSession, intakeCreateNfcStation };`,
 )();
 
 const androidChromeUserAgent = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
@@ -1296,7 +1296,7 @@ const makeProvisioningMachine = (overrides = {}) => {
   };
   const calls = {
     accepted: [], classifications: [], confirms: [], feedback: [], messages: [],
-    ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
+    photos: [], ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
   };
   let nextCommand = 0;
   const machine = intakeCreateProvisioningMachine({
@@ -1332,11 +1332,91 @@ const makeProvisioningMachine = (overrides = {}) => {
     message: (...value) => calls.messages.push(value),
     state: (value) => calls.states.push(value),
     feedback: (value) => calls.feedback.push(value),
+    ...(overrides.photograph ? { photograph: (value) => {
+      calls.photos.push(value);
+      return overrides.photograph(value);
+    } } : {}),
     commandId: () => `command-${++nextCommand}`,
     scheduleReady: (callback) => calls.ready.push(callback),
   });
   return { calls, machine, pending };
 };
+
+test("the intake camera reuses one rear-facing stream for two captures and releases it on exit", async () => {
+  const { intakeCreateCameraSession } = inventoryHelpers();
+  const listeners = new Map();
+  let stops = 0;
+  const track = {
+    readyState: "live",
+    addEventListener: (name, listener) => listeners.set(name, listener),
+    removeEventListener: (name, listener) => {
+      if (listeners.get(name) === listener) listeners.delete(name);
+    },
+    stop() { stops += 1; this.readyState = "ended"; },
+  };
+  const stream = { getVideoTracks: () => [track], getTracks: () => [track] };
+  const constraints = [];
+  const video = { srcObject: null, videoWidth: 1600, videoHeight: 1200, async play() {} };
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ({ drawImage() {} }),
+    toBlob: (callback, type) => callback(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type })),
+  };
+  const session = intakeCreateCameraSession({
+    video,
+    canvas,
+    getUserMedia: async (value) => { constraints.push(value); return stream; },
+    onEnded: () => assert.fail("the live stream must not end"),
+  });
+
+  assert.equal(await session.start(), true);
+  const first = await session.capture();
+  assert.equal(await session.start(), true);
+  const second = await session.capture();
+  assert.equal(constraints.length, 1, "the second duck reuses the granted stream");
+  assert.deepEqual(constraints[0], { audio: false, video: { facingMode: { ideal: "environment" } } });
+  assert.equal(first.type, "image/jpeg");
+  assert.equal(second.type, "image/jpeg");
+  assert.equal(stops, 0, "capture and upload boundaries do not stop the camera");
+  assert.equal(session.release(), true);
+  assert.equal(stops, 1);
+  assert.equal(video.srcObject, null);
+  assert.equal(session.release(), false);
+});
+
+test("confirmed NFC intake stays incomplete until the matching photo save is confirmed", async () => {
+  const current = makeProvisioningMachine({ photograph: () => {} });
+  const result = await current.machine.reading({ serialNumber: "serial-photo", canonicalUrls: [] });
+
+  assert.deepEqual(result, { accepted: false, reason: "photo-required", duckId: current.pending.duckId });
+  assert.equal(current.machine.hasPending(), true);
+  assert.equal(current.machine.end(), false);
+  assert.equal(current.calls.accepted.length, 0);
+  assert.equal(current.calls.photos.length, 1);
+  assert.equal(current.calls.photos[0].duckId, current.pending.duckId);
+  assert.equal(await current.machine.photoSaved("another-duck"), false);
+  assert.equal(await current.machine.photoSaved(current.pending.duckId), true);
+  assert.equal(current.machine.hasPending(), false);
+  assert.deepEqual(current.calls.accepted, [{ outcome: "added" }]);
+  assert.equal(current.calls.refreshes, 1);
+  assert.equal(current.calls.states.at(-1), "remove");
+});
+
+test("reload recovery automatically reopens the exact incomplete duck photo", async () => {
+  const photo = { duckId: "duck-recovered", visibleNumber: 77, status: "PHOTO_REQUIRED" };
+  const current = makeProvisioningMachine({ recover: () => photo, photograph: () => {} });
+  const recovered = await current.machine.recover();
+
+  assert.equal(recovered.stage, "photo");
+  assert.equal(recovered.duckId, photo.duckId);
+  assert.equal(current.machine.hasPending(), true);
+  assert.deepEqual(current.calls.starts, []);
+  assert.equal(current.calls.photos.length, 1);
+  assert.equal(current.calls.photos[0].visibleNumber, 77);
+  assert.equal(await current.machine.photoSaved(photo.duckId), true);
+  assert.deepEqual(current.calls.accepted, [{ outcome: "added" }]);
+});
 
 test("blank NFC reading performs one generated start, exact write, and confirmation", async () => {
   const { calls, machine, pending } = makeProvisioningMachine();

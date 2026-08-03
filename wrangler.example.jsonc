@@ -26,6 +26,12 @@
       "migrations_dir": "db/migrations"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "DUCK_PHOTOS",
+      "bucket_name": "REPLACE_AFTER_PRIVATE_R2_CREATE"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

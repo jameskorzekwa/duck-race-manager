@@ -27,6 +27,7 @@ const migrationNames = [
   "0021_email_delivery_claim.sql",
   "0022_pending_heat_result_announcement.sql",
   "0023_participant_notifications.sql",
+  "0024_duck_intake_photos.sql",
 ];
 
 const lifecycleStatuses = [
@@ -69,6 +70,44 @@ const createDatabase = () => {
   applyMigrations(database);
   return database;
 };
+
+test("0024 adds one private photo slot per NFC duck without backfilling existing ducks", () => {
+  const database = createDatabase();
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('photo-staff', 'photo-staff-sub', 'photo-staff@example.test');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('photo-event', 'photo-event', 'Photo Event', 'UTC', 'DRAFT');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES
+      ('photo-duck-1', 901, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00.000Z'),
+      ('photo-duck-2', 902, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00.000Z'),
+      ('legacy-duck', 903, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00.000Z');
+    INSERT INTO event_ducks
+      (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES
+      ('photo-event-duck-1', 'photo-event', 'photo-duck-1', '2026-08-03T00:00:00.000Z', 'photo-staff'),
+      ('photo-event-duck-2', 'photo-event', 'photo-duck-2', '2026-08-03T00:00:00.000Z', 'photo-staff'),
+      ('legacy-event-duck', 'photo-event', 'legacy-duck', '2026-08-03T00:00:00.000Z', 'photo-staff');
+    INSERT INTO duck_photos
+      (duck_id, event_id, event_duck_id, required_by_staff_profile_id, created_at)
+    VALUES
+      ('photo-duck-1', 'photo-event', 'photo-event-duck-1', 'photo-staff', '2026-08-03T00:00:00.000Z'),
+      ('photo-duck-2', 'photo-event', 'photo-event-duck-2', 'photo-staff', '2026-08-03T00:00:00.000Z');
+  `);
+
+  assert.equal(count(database, "duck_photos"), 2, "one operator and event may own many duck photos");
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM duck_photos WHERE duck_id = 'legacy-duck'",
+  ).get().count, 0, "legacy ducks are not backfilled");
+  assert.throws(() => database.exec(`
+    INSERT INTO duck_photos
+      (duck_id, event_id, event_duck_id, required_by_staff_profile_id, created_at)
+    VALUES ('photo-duck-1', 'photo-event', 'photo-event-duck-1', 'photo-staff', '2026-08-03T00:00:00.000Z');
+  `), /UNIQUE constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
 
 test("participant notification migration defaults SMS off and keys outbox work by channel and lifecycle", () => {
   const database = createDatabase();

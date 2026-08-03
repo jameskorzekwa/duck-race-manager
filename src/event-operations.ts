@@ -835,6 +835,7 @@ interface ReadinessStats {
   active_entry_without_duck_count: number;
   active_entry_without_round_one_heat_count: number;
   pending_provisioning_count: number;
+  pending_duck_photo_count: number;
   round_one_heat_count: number;
   round_one_undersized_heat_count: number;
   round_one_ineligible_heat_count: number;
@@ -888,7 +889,9 @@ const getReadinessStats = (eventId: string, env: Env): Promise<ReadinessStats | 
             AND NOT EXISTS (
               SELECT 1 FROM event_ducks ed
                WHERE ed.duck_id = d.id AND ed.released_at IS NULL
-            )) AS pending_provisioning_count,
+             )) AS pending_provisioning_count,
+         (SELECT COUNT(*) FROM duck_photos dp
+           WHERE dp.event_id = e.id AND dp.status = 'PENDING') AS pending_duck_photo_count,
         (SELECT COUNT(*) FROM heats h
          WHERE h.event_id = e.id AND h.round = 'ROUND_ONE') AS round_one_heat_count,
         (SELECT COUNT(*) FROM heats h
@@ -1055,7 +1058,11 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
               AND NOT EXISTS (
                 SELECT 1 FROM event_ducks ed
                  WHERE ed.duck_id = d.id AND ed.released_at IS NULL
-              )
+               )
+          )
+         AND NOT EXISTS (
+           SELECT 1 FROM duck_photos dp
+            WHERE dp.event_id = e.id AND dp.status = 'PENDING'
          )
          AND EXISTS (
           SELECT 1 FROM race_entries re JOIN registrations r ON r.id = re.registration_id
@@ -1108,6 +1115,10 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
      SELECT ?, e.id, 'START_FINAL', e.id, ?, ?, ?
        FROM events e
       WHERE e.id = ? AND e.status = 'ROUND_ONE'
+        AND NOT EXISTS (
+          SELECT 1 FROM duck_photos dp
+           WHERE dp.event_id = e.id AND dp.status = 'PENDING'
+        )
         AND EXISTS (SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'ROUND_ONE' AND h.status = 'FINALIZED')
         AND NOT EXISTS (
           SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'ROUND_ONE'
@@ -1148,6 +1159,10 @@ const lifecycleDefinitions: Record<LifecycleAction, LifecycleDefinition> = {
      SELECT ?, e.id, 'COMPLETE_EVENT', e.id, ?, ?, ?
        FROM events e
       WHERE e.id = ? AND e.status = 'FINAL'
+        AND NOT EXISTS (
+          SELECT 1 FROM duck_photos dp
+           WHERE dp.event_id = e.id AND dp.status = 'PENDING'
+        )
         AND EXISTS (SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'FINAL' AND h.status = 'FINALIZED')
         AND NOT EXISTS (
           SELECT 1 FROM heats h WHERE h.event_id = e.id AND h.round = 'FINAL'
@@ -1353,6 +1368,11 @@ const readinessFor = (
           ? "Finish the pending NFC sticker before starting round one."
           : `Finish ${stats.pending_provisioning_count} pending NFC stickers before starting round one.`);
       }
+      if (stats.pending_duck_photo_count > 0) {
+        blockers.push(stats.pending_duck_photo_count === 1
+          ? "Save the required duck photo before starting round one."
+          : `Save ${stats.pending_duck_photo_count} required duck photos before starting round one.`);
+      }
       if (stats.round_one_heat_count === 0) blockers.push("At least one round-one heat is required.");
       if (stats.round_one_undersized_heat_count > 0) {
         blockers.push(
@@ -1375,6 +1395,11 @@ const readinessFor = (
       if (stats.round_one_unready_heat_count > 0) blockers.push("Round-one heats must not have started.");
       break;
     case "start-final":
+      if (stats.pending_duck_photo_count > 0) {
+        blockers.push(stats.pending_duck_photo_count === 1
+          ? "Save the required duck photo before starting the final."
+          : `Save ${stats.pending_duck_photo_count} required duck photos before starting the final.`);
+      }
       if (stats.round_one_finalized_heat_count === 0) blockers.push("At least one round-one heat must be finalized.");
       if (stats.round_one_unfinished_heat_count > 0) blockers.push("Every round-one heat must be finalized or cancelled.");
       if (stats.round_one_auto_resolvable_heat_count > 0) {
@@ -1395,6 +1420,11 @@ const readinessFor = (
       if (stats.final_unready_heat_count > 0) blockers.push("Final heats must not have started.");
       break;
     case "complete":
+      if (stats.pending_duck_photo_count > 0) {
+        blockers.push(stats.pending_duck_photo_count === 1
+          ? "Save the required duck photo before completing the event."
+          : `Save ${stats.pending_duck_photo_count} required duck photos before completing the event.`);
+      }
       if (stats.final_finalized_heat_count === 0) blockers.push("At least one final heat must be finalized.");
       if (stats.final_unfinished_heat_count > 0) blockers.push("Every final heat must be finalized or cancelled.");
       // Names which side is short, because only one direction is a problem. A
@@ -2194,6 +2224,20 @@ const forceDeleteEvent = async (
     return json({ error: "Force delete requires this to be the only race dataset." }, 409);
   }
 
+  const privatePhotos = await env.DB.prepare(
+    "SELECT object_key FROM duck_photos WHERE event_id = ? AND status = 'READY' ORDER BY duck_id",
+  ).bind(eventId).all<{ object_key: string }>();
+  if (privatePhotos.results.length > 0) {
+    if (!env.DUCK_PHOTOS) {
+      return json({ error: "Private photo storage is unavailable, so the event was not deleted." }, 503);
+    }
+    try {
+      await Promise.all(privatePhotos.results.map((photo) => env.DUCK_PHOTOS.delete(photo.object_key)));
+    } catch {
+      return json({ error: "Private duck photos could not be removed. Retry deletion; the event remains available." }, 503);
+    }
+  }
+
   const now = new Date().toISOString();
   const fingerprint = canonicalFingerprint({ operation: "FORCE_DELETE_EVENT", eventId, revision });
   // Every later statement is guarded so a stale-revision race deletes nothing.
@@ -2237,6 +2281,7 @@ const forceDeleteEvent = async (
       scoped("heat_entries"),
       scoped("heats"),
       scoped("duck_assignments"),
+      scoped("duck_photos"),
       scoped("event_ducks"),
       scoped("duck_inventory_events"),
       global("browser_collection_registrations"),

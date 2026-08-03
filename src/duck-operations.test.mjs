@@ -1164,7 +1164,27 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
       (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
     VALUES ('duck_seed', 41, 'AVAILABLE', '2026-07-26T00:00:00Z', 'GOOD');
   `);
-  const env = makeEnv(sqliteD1(database));
+  const photoObjects = new Map();
+  let photoPuts = 0;
+  let failNextPhotoPut = false;
+  const env = {
+    ...makeEnv(sqliteD1(database)),
+    DUCK_PHOTOS: {
+      async put(key, value) {
+        photoPuts += 1;
+        if (failNextPhotoPut) {
+          failNextPhotoPut = false;
+          throw new Error("simulated private storage outage");
+        }
+        photoObjects.set(key, new Uint8Array(value));
+      },
+      async get(key) {
+        const value = photoObjects.get(key);
+        return value === undefined ? null : { body: value };
+      },
+      async delete(key) { photoObjects.delete(key); },
+    },
+  };
   const otherActor = { ...actor, id: "staff_other", cognitoSub: "other-sub", email: "other@example.com" };
   const startCommandId = crypto.randomUUID();
   const startPayload = {
@@ -1278,6 +1298,53 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM event_ducks WHERE duck_id = ?").get(provisioning.duckId).count, 1);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM duck_inventory_events WHERE duck_id = ? AND action = 'DUCK_INTAKE'").get(provisioning.duckId).count, 1);
   assert.equal(database.prepare("SELECT details_json FROM audit_events").all().some((row) => row.details_json.includes(token)), false);
+  assert.equal(database.prepare("SELECT status FROM duck_photos WHERE duck_id = ?").get(provisioning.duckId).status, "PENDING");
+
+  const photoRecovery = await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/provisioning?eventId=event_test"), env, actor,
+  );
+  assert.deepEqual(await photoRecovery.json(), {
+    provisioning: {
+      duckId: provisioning.duckId,
+      visibleNumber: provisioning.visibleNumber,
+      status: "PHOTO_REQUIRED",
+    },
+  });
+  const photoCommandId = crypto.randomUUID();
+  const jpeg = new Uint8Array([0xff, 0xd8, 0x11, 0x22, 0xff, 0xd9]);
+  const photoRequest = (commandId = photoCommandId, body = jpeg) => new Request(
+    `https://quickducks.com/api/v1/staff/inventory/ducks/${provisioning.duckId}/photo`,
+    {
+      method: "POST",
+      headers: { "content-type": "image/jpeg", "x-quickducks-command-id": commandId },
+      body,
+    },
+  );
+  failNextPhotoPut = true;
+  const failedPhoto = await handleDuckOperations(photoRequest(), env, actor);
+  assert.equal(failedPhoto.status, 503);
+  assert.equal(database.prepare("SELECT status FROM duck_photos WHERE duck_id = ?").get(provisioning.duckId).status, "PENDING");
+  assert.equal(photoObjects.size, 0);
+  const storedPhoto = await handleDuckOperations(photoRequest(), env, actor);
+  assert.equal(storedPhoto.status, 201);
+  assert.equal((await storedPhoto.json()).photo.status, "READY");
+  assert.equal(photoObjects.size, 1);
+  assert.equal(photoPuts, 2);
+  const replayedPhoto = await handleDuckOperations(photoRequest(), env, actor);
+  assert.equal(replayedPhoto.status, 200);
+  assert.equal((await replayedPhoto.json()).replayed, true);
+  assert.equal(photoPuts, 2, "an identical retry does not write another object");
+  const changedReplay = await handleDuckOperations(
+    photoRequest(photoCommandId, new Uint8Array([0xff, 0xd8, 0x33, 0x44, 0xff, 0xd9])), env, actor,
+  );
+  assert.equal(changedReplay.status, 409);
+  const duplicatePhoto = await handleDuckOperations(photoRequest(crypto.randomUUID()), env, actor);
+  assert.equal(duplicatePhoto.status, 409);
+  const privatePhoto = await handleDuckOperations(
+    new Request(`https://quickducks.com/api/v1/staff/inventory/ducks/${provisioning.duckId}/photo`), env, actor,
+  );
+  assert.equal(privatePhoto.status, 200);
+  assert.deepEqual(new Uint8Array(await privatePhoto.arrayBuffer()), jpeg);
 
   const confirmReplay = await handleDuckOperations(confirmRequest(confirmCommandId, provisioning), env, actor);
   assert.equal(confirmReplay.status, 200);
@@ -1332,7 +1399,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   const deletedBody = await deleted.json();
   assert.equal(deleted.status, 201);
   assert.equal(deletedBody.erased, true);
-  for (const table of ["ducks", "duck_tags", "event_ducks", "duck_inventory_events"]) {
+  for (const table of ["ducks", "duck_tags", "event_ducks", "duck_inventory_events", "duck_photos"]) {
     const column = table === "ducks" ? "id" : "duck_id";
     assert.equal(
       database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column} = ?`).get(intakeBody.duck.id).count,
@@ -1340,6 +1407,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
       `${table} rows must go with the duck`,
     );
   }
+  assert.equal(photoObjects.size, 0, "deleting the duck removes its private object");
   // The audit row is what survives an erased duck.
   assert.equal(
     database.prepare(

@@ -289,6 +289,10 @@ test("station roles enforce the complete operational matrix with live D1 actors"
   await intake(102, duckTwoToken);
   for (const [index, token] of fillerTokens.entries()) await intake(200 + index, token);
   assert.equal((await api(actors.registration, "/api/v1/staff/inventory/ducks")).status, 403);
+  assert.equal((await api(actors.registration, "/api/v1/staff/inventory/ducks/missing/photo")).status, 403);
+  assert.equal((await api(actors.ducks, "/api/v1/staff/inventory/ducks/missing/photo")).status, 404);
+  assert.equal((await api(actors.director, "/api/v1/staff/inventory/ducks/missing/photo")).status, 404);
+  assert.equal((await api(actors.admin, "/api/v1/staff/inventory/ducks/missing/photo")).status, 404);
 
   const walkUp = await json(await post(
     actors.registration,

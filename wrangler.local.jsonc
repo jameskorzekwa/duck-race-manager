@@ -10,7 +10,7 @@
 //   3. `COGNITO_DOMAIN` points back at the local Worker so the OAuth redirects
 //      resolve locally. It must stay a valid absolute URL: staff pages parse it
 //      to build their CSP form-action.
-//   4. Every resource identity is local. The Worker name, D1 database, and queue
+//   4. Every resource identity is local. The Worker name, D1 database, R2 bucket, and queue
 //      are all distinct from production, and no route, workers.dev subdomain, or
 //      preview URL is published.
 //
@@ -56,6 +56,12 @@
       "database_name": "quickducks-local",
       "database_id": "00000000-0000-4000-8000-000000000001",
       "migrations_dir": "db/migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "DUCK_PHOTOS",
+      "bucket_name": "quickducks-duck-photos-local"
     }
   ],
   "durable_objects": {
