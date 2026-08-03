@@ -27,15 +27,20 @@ import {
 import { isLocalPreviewOrigin } from "./local-preview.ts";
 import {
   dispatchPendingEmailNotifications,
+  handleEmailUnsubscribe,
   handleEmailQueue,
   sendEmailWithSes,
+  sendSmsWithAws,
   type EmailSender,
+  type SmsSender,
 } from "./email-notifications.ts";
 import {
   phaseAllowsRaceStatus,
   phaseShowsMyDucks,
+  publicContextForRender,
   publicPhaseForRender,
   type PublicPhase,
+  type PublicRenderContext,
 } from "./public-phase.ts";
 import { getPublicRaceBoard } from "./race-board.ts";
 import {
@@ -193,6 +198,7 @@ export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
   emailSender: EmailSender = sendEmailWithSes,
+  smsSender: SmsSender = sendSmsWithAws,
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -212,6 +218,9 @@ export const createWorker = (
     // no page on this path can 500 because of the phase query alone.
     let phaseResolution: Promise<PublicPhase> | undefined;
     const publicPhase = (): Promise<PublicPhase> => (phaseResolution ??= publicPhaseForRender(env));
+    let contextResolution: Promise<PublicRenderContext> | undefined;
+    const publicContext = (): Promise<PublicRenderContext> =>
+      (contextResolution ??= publicContextForRender(env));
     let sessionAuthentication: Awaited<ReturnType<typeof authenticateStaffSession>> | undefined;
     const authenticateRequest: typeof authenticateStaff = async (authRequest, authEnv) => {
       sessionAuthentication ??= await authenticateStaffSession(authRequest, authEnv, authenticate, tokenFetch);
@@ -336,6 +345,10 @@ export const createWorker = (
       });
     }
 
+    if (url.pathname === "/notifications/unsubscribe") {
+      return withSecurityHeaders(await handleEmailUnsubscribe(request, env));
+    }
+
     if (url.pathname.startsWith("/api/v1/")) {
       return withSessionCookies(await handleApi(request, env, authenticateRequest, ctx));
     }
@@ -354,7 +367,13 @@ export const createWorker = (
       // bypass form on a preview that has only a secret, and the API would then
       // reject every submission it invited.
       const protectionWaived = env.TURNSTILE_SECRET_KEY === undefined && localPreview;
-      return html(renderRegistration(configuredSiteKey, await publicPhase(), protectionWaived), 200, true);
+      const context = await publicContext();
+      return html(renderRegistration(
+        configuredSiteKey,
+        context.phase,
+        protectionWaived,
+        context.smsNotificationsAvailable,
+      ), 200, true);
     }
     // Race Status exists only once there is a race to report on. Before that
     // there is no stage, no heat, and no result, and the nav does not offer the
@@ -638,7 +657,7 @@ export const createWorker = (
     return html(renderNotFound(), 404, true);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, emailSender);
+    await handleEmailQueue(batch, env, emailSender, smsSender);
   },
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(dispatchPendingEmailNotifications(env));

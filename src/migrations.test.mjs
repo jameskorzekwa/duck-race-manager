@@ -26,6 +26,7 @@ const migrationNames = [
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
   "0022_pending_heat_result_announcement.sql",
+  "0023_participant_notifications.sql",
 ];
 
 const lifecycleStatuses = [
@@ -68,6 +69,51 @@ const createDatabase = () => {
   applyMigrations(database);
   return database;
 };
+
+test("participant notification migration defaults SMS off and keys outbox work by channel and lifecycle", () => {
+  const database = createDatabase();
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('notification-event', 'notification-event', 'Notification Event', 'UTC', 'DRAFT');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, email, phone, status, lookup_code,
+       private_token_hash, email_notifications_enabled, sms_notifications_enabled,
+       submitted_at, status_changed_at)
+    VALUES
+      ('notification-registration', 'notification-event', 'Test', 'Racer',
+       'test@example.invalid', '+15550100000', 'SUBMITTED', 'TEST1234', 'private-hash', 1, 1,
+       '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z');
+    INSERT INTO race_commands
+      (id, event_id, command_type, requested_at, completed_at)
+    VALUES
+      ('notification-command', 'notification-event', 'CREATE_REGISTRATION',
+       '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z');
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, channel, lifecycle_key,
+       created_by_command_id, status)
+    VALUES
+      ('notification-email', 'notification-event', 'notification-registration',
+       'REGISTRATION_CONFIRMED', 'EMAIL', 'registration:one', 'notification-command', 'PENDING'),
+      ('notification-sms', 'notification-event', 'notification-registration',
+       'REGISTRATION_CONFIRMED', 'SMS', 'registration:one', 'notification-command', 'PENDING');
+  `);
+  assert.equal(database.prepare(
+    "SELECT sms_notifications_enabled FROM events WHERE id = 'notification-event'",
+  ).get().sms_notifications_enabled, 0);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM email_notifications WHERE event_id = 'notification-event'",
+  ).get().count, 2);
+  assert.throws(() => database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, channel, lifecycle_key,
+       created_by_command_id, status)
+    VALUES
+      ('notification-sms-duplicate', 'notification-event', 'notification-registration',
+       'REGISTRATION_CONFIRMED', 'SMS', 'registration:one', 'notification-command', 'PENDING');
+  `), /UNIQUE constraint failed/);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
 
 test("fresh migrations enforce event, duck, heat, and result relationships", () => {
   const database = createDatabase();
@@ -829,6 +875,7 @@ test("0014 from an empty database leaves the simplified schema", () => {
       updated_at: database.prepare("SELECT updated_at FROM events WHERE id = 'event-DRAFT'").get().updated_at,
       public_name_policy: "FIRST_NAME_LAST_INITIAL",
       revision: 0,
+      sms_notifications_enabled: 0,
     },
   );
 

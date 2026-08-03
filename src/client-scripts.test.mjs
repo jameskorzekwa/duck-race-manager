@@ -456,6 +456,11 @@ test("browser clients are valid JavaScript and target protected APIs", () => {
   assert.match(participantScript, /Open private status/);
   assert.match(participantScript, /registration\.paired/);
   assert.match(participantScript, /Show this code to staff at registration table to get your duck!/);
+  // Missing or malformed capability data must hide SMS rather than treating an
+  // older response shape as permission to expose stored phone preferences.
+  assert.match(participantScript, /smsNotificationsAvailable: value\.smsNotificationsAvailable === true/);
+  assert.match(participantScript, /const smsAvailable = contact\.smsNotificationsAvailable === true;/);
+  assert.doesNotMatch(participantScript, /smsNotificationsAvailable !== false/);
   // The collection's current-assignment projection is the only visibility
   // boundary. Stale duck, heat, or outcome fields must not reveal assigned
   // details while the authoritative paired field says this card is awaiting.
@@ -2318,6 +2323,7 @@ test("saving contact details keeps the owned card while the authoritative refres
     phone: "(555) 010-7777",
     emailNotificationsEnabled: false,
     smsNotificationsEnabled: false,
+    smsNotificationsAvailable: true,
     revision: 0,
   };
   const harness = myDucksHarness((url, options) => {
@@ -2332,6 +2338,7 @@ test("saving contact details keeps the owned card while the authoritative refres
         phone: update.phone,
         emailNotificationsEnabled: update.emailNotificationsEnabled,
         smsNotificationsEnabled: update.smsNotificationsEnabled,
+        smsNotificationsAvailable: true,
         revision: 1,
       };
       return Response.json({ ...contact, replayed: false });

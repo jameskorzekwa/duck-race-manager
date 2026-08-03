@@ -9,7 +9,7 @@ import {
   watchBrowserErrors,
 } from "./helpers.mjs";
 
-test("an opted-in participant receives assignment and called-heat reminders", async ({ page }) => {
+test("an opted-in participant receives assignment and next-runnable reminders", async ({ page }) => {
   // Two seeded racers plus the participant registered below make one valid
   // three-duck heat. Keep this event throughout the scenario: seedState resets
   // the database and must never be used as a mid-test advancement helper.
@@ -73,7 +73,7 @@ test("an opted-in participant receives assignment and called-heat reminders", as
 
   await expect.poll(async () => (await targetEmails()).length).toBe(2);
   const upcoming = (await targetEmails())[1];
-  expect(upcoming.subject).toContain("Round One, Heat 1 is being called now");
+  expect(upcoming.subject).toContain("Round One, Heat 1 is coming up next");
   expect(upcoming.text).toContain("Please bring Duck #502 to the pond");
   expect(upcoming.text).not.toMatch(/\b\d{1,2}:\d{2}\b/);
 

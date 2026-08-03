@@ -50,6 +50,7 @@ import {
   scheduleRaceUpdate,
 } from "./live-updates.ts";
 import { getCurrentPublicEvent, getPublicRaceBoard, publicDisplayName } from "./race-board.ts";
+import { participantNotificationStatements, publishEmailNotification } from "./email-notifications.ts";
 import type { Env, EventRecord, RegistrationStatusRecord } from "./types.ts";
 
 const apiHeaders = {
@@ -74,7 +75,7 @@ const getCurrentEvent = (env: Env): Promise<EventRecord | null> =>
   env.DB.prepare(
     `SELECT id, slug, name, event_date, timezone, status,
             registration_opens_at, registration_closes_at, email_required,
-            public_name_policy
+            public_name_policy, sms_notifications_enabled
        FROM events
       WHERE status IN (
         'REGISTRATION_OPEN',
@@ -100,7 +101,7 @@ const getOpenEvent = (env: Env, eventId: string): Promise<EventRecord | null> =>
   return env.DB.prepare(
     `SELECT id, slug, name, event_date, timezone, status,
             registration_opens_at, registration_closes_at, email_required,
-            public_name_policy
+             public_name_policy, sms_notifications_enabled
        FROM events
       WHERE id = ?
         AND status = 'REGISTRATION_OPEN'
@@ -121,6 +122,7 @@ const eventResponse = (event: EventRecord): Record<string, unknown> => ({
   registrationClosesAt: event.registration_closes_at,
   emailRequired: event.email_required === 1,
   publicNamePolicy: event.public_name_policy,
+  smsAvailable: event.sms_notifications_enabled === 1,
 });
 
 export const findDuckRaceStatus = async (
@@ -359,6 +361,9 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
 
   const event = await getOpenEvent(env, payload.eventId);
   if (event === null) return json({ error: "Registration is not open for this event." }, 409);
+  if (payload.smsNotificationsEnabled === true && event.sms_notifications_enabled !== 1) {
+    return json({ error: "SMS updates are not available for this event." }, 409);
+  }
 
   const form = new FormData();
   if (typeof payload.firstName === "string") form.set("first_name", payload.firstName);
@@ -404,6 +409,16 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
   const lookupCode = randomLookupCode();
   const value = validation.value;
   const collection = await prepareBrowserCollection(request, env);
+  const registrationNotifications = participantNotificationStatements(env, {
+    eventId: event.id,
+    registrationId,
+    heatId: null,
+    type: "REGISTRATION_CONFIRMED",
+    lifecycleKey: `registration:${registrationId}`,
+    commandId: payload.commandId,
+    commandType: "CREATE_REGISTRATION",
+    now,
+  });
 
   try {
     const statements = [
@@ -448,6 +463,7 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         now,
         JSON.stringify({ created_via: "PUBLIC" }),
       ),
+      ...registrationNotifications.statements,
       ...await collectionStatements(env, collection, registrationId, now, tokenHash),
     ];
     await env.DB.batch(statements);
@@ -475,6 +491,8 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
     }
     return json({ error: "Registration could not be saved. Please retry with the same command identifier." }, 409);
   }
+
+  await Promise.all(registrationNotifications.ids.map((id) => publishEmailNotification(env, id)));
 
   return registrationResponse(
     registrationId,
@@ -1047,6 +1065,7 @@ interface OwnedContactRow {
   sms_notifications_enabled: number;
   revision: number;
   email_required: number;
+  sms_notifications_available: number;
 }
 
 const contactResponse = (row: OwnedContactRow, replayed?: boolean): Record<string, unknown> => ({
@@ -1055,6 +1074,7 @@ const contactResponse = (row: OwnedContactRow, replayed?: boolean): Record<strin
   phone: row.phone,
   emailNotificationsEnabled: row.email_notifications_enabled === 1,
   smsNotificationsEnabled: row.sms_notifications_enabled === 1,
+  smsNotificationsAvailable: row.sms_notifications_available === 1,
   revision: row.revision,
   ...(replayed === undefined ? {} : { replayed }),
 });
@@ -1072,7 +1092,8 @@ const getOwnedContact = async (
   const row = await env.DB.prepare(
     `SELECT r.id AS registration_id, r.email, r.phone,
             r.email_notifications_enabled, r.sms_notifications_enabled,
-            r.revision, e.email_required
+             r.revision, e.email_required,
+             e.sms_notifications_enabled AS sms_notifications_available
        FROM browser_collection_registrations bcr
        JOIN registrations r ON r.id = bcr.registration_id
        JOIN events e ON e.id = r.event_id
@@ -1255,6 +1276,13 @@ const updateMyContact = async (
   if (!rateLimit.success) return json({ error: "Too many requests. Please wait and try again." }, 429);
   const target = await getOwnedContact(request, env, registrationId);
   if (target === null) return json({ error: "Contact details are not available." }, 404);
+  if (
+    smsNotificationsEnabled === true
+    && target.row.sms_notifications_enabled !== 1
+    && target.row.sms_notifications_available !== 1
+  ) {
+    return json({ error: "SMS updates are not available for this event." }, 409);
+  }
   const validation = validateContactPreferences({
     email: email as string | null,
     phone: phone as string | null,
@@ -1350,7 +1378,7 @@ const updateMyContact = async (
             SET status = 'CANCELLED', terminal_at = ?,
                 status_reason = 'EMAIL_NOT_OPTED_IN', retry_after = NULL,
                 last_error_code = NULL, updated_at = ?
-          WHERE registration_id = ? AND ? = 0
+           WHERE registration_id = ? AND channel = 'EMAIL' AND ? = 0
             AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
             AND EXISTS (
               SELECT 1 FROM race_commands rc
@@ -1364,6 +1392,22 @@ const updateMyContact = async (
         value.emailNotificationsEnabled ? 1 : 0,
         commandId,
         registrationId,
+      ),
+      env.DB.prepare(
+        `UPDATE email_notifications
+            SET status = 'CANCELLED', terminal_at = ?,
+                status_reason = 'SMS_NOT_OPTED_IN', retry_after = NULL,
+                last_error_code = NULL, updated_at = ?
+          WHERE registration_id = ? AND channel = 'SMS' AND ? = 0
+            AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
+            AND EXISTS (
+              SELECT 1 FROM race_commands rc
+               WHERE rc.id = ? AND rc.command_type = 'UPDATE_PARTICIPANT_CONTACT'
+                 AND rc.result_id = ?
+            )`,
+      ).bind(
+        now, now, registrationId, value.smsNotificationsEnabled ? 1 : 0,
+        commandId, registrationId,
       ),
       env.DB.prepare(
         `INSERT INTO audit_events

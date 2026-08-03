@@ -243,6 +243,15 @@ export const seed = async (options) => {
   step(`Configured ${options.heatSize} ducks per heat, ${heatCount} round-one heats expected`);
   if (options.state === "draft") return { state: options.state, eventId, accounts, event: configured.body.event };
 
+  if (options.smsEnabled !== false) {
+    await client.patch(`/api/v1/staff/events/${eventId}/sms-notifications`, {
+      commandId: crypto.randomUUID(),
+      revision: configured.body.event.revision,
+      enabled: true,
+    }, { label: "enable SMS for local fixture" });
+    step("Enabled SMS for the local fixture");
+  }
+
   await client.post(`/api/v1/staff/events/${eventId}/open-registration`, {
     commandId: crypto.randomUUID(),
   }, { label: "open registration" });

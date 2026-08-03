@@ -38,6 +38,14 @@ Resources:
               - ses:SendEmail
               - ses:SendRawEmail
             Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+          - Sid: ParticipantMessagingRuntime
+            Effect: Allow
+            Action:
+              - ses:GetSuppressedDestination
+              - sms-voice:DescribeOptedOutNumbers
+              - sms-voice:DescribeOptOutLists
+              - sms-voice:SendTextMessage
+            Resource: "*"
           - Sid: AdministerOnlyQuickDucksStaffPools
             Effect: Allow
             Action:

@@ -6,7 +6,9 @@ import test from "node:test";
 import {
   EmailSendError,
   handleEmailQueue,
+  isSmsOptedOutByAws,
   sendEmailWithSes,
+  sendSmsWithAws,
 } from "./email-notifications.ts";
 import worker from "./index.ts";
 
@@ -28,6 +30,13 @@ const outboundEmail = {
   subject: "Round One, Heat 2 is being called now",
   text: "Please bring Duck #17 to the pond.",
   html: "<p>Please bring Duck #17 to the pond.</p>",
+};
+
+const smsEnv = {
+  ...sesEnv,
+  NOTIFICATION_HMAC_SECRET: "test-notification-hmac-secret-32-bytes-minimum",
+  SMS_ORIGINATION_IDENTITY: "+18005550199",
+  SMS_OPT_OUT_LIST_NAME: "quickducks-production",
 };
 
 const fixedDate = (context) => {
@@ -155,7 +164,7 @@ test("SES failures are safely classified without reading provider response bodie
   context.after(() => { globalThis.fetch = originalFetch; });
 
   globalThis.fetch = async () => { throw new Error("private network detail"); };
-  await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), "SES_NETWORK_ERROR", true);
+  await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), "DELIVERY_OUTCOME_UNKNOWN", false);
 
   for (const [status, safeCode, retryable] of [
     [408, "SES_TEMPORARY_FAILURE", true],
@@ -188,6 +197,60 @@ test("SES acceptance does not depend on a usable provider message ID", async (co
     globalThis.fetch = async () => new Response(body, { status: 202 });
     assert.deepEqual(await sendEmailWithSes(outboundEmail, sesEnv), { providerMessageId: null });
   }
+});
+
+test("AWS SMS uses the transactional API and checks every configured opt-out-list page", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (String(url).includes("opted-out-numbers")) {
+      return requests.filter((request) => request.url.includes("opted-out-numbers")).length === 1
+        ? Response.json({
+          OptedOutNumbers: [{ OptedOutNumber: "+18175550000" }],
+          NextToken: "next+/= page",
+        })
+        : Response.json({ OptedOutNumbers: [{ OptedOutNumber: "+18173206150" }] });
+    }
+    return Response.json({ MessageId: "sms-message-123" });
+  };
+  assert.deepEqual(await sendSmsWithAws({
+    to: "+18173206150",
+    text: "Your heat is next. Reply STOP to opt out.",
+  }, smsEnv), { providerMessageId: "sms-message-123" });
+  assert.equal(requests[0].url, "https://sms-voice.us-east-1.amazonaws.com/v1/sms/text");
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    DestinationPhoneNumber: "+18173206150",
+    OriginationIdentity: "+18005550199",
+    MessageBody: "Your heat is next. Reply STOP to opt out.",
+    MessageType: "TRANSACTIONAL",
+  });
+  assert.equal(await isSmsOptedOutByAws("+18173206150", smsEnv), true);
+  assert.equal(
+    requests[1].url,
+    "https://sms-voice.us-east-1.amazonaws.com/v1/sms/opt-out-lists/quickducks-production/opted-out-numbers?MaxResults=100",
+  );
+  assert.equal(requests[1].options.method, "GET");
+  assert.equal(requests[1].options.body, undefined);
+  assert.equal(
+    requests[2].url,
+    "https://sms-voice.us-east-1.amazonaws.com/v1/sms/opt-out-lists/quickducks-production/opted-out-numbers?MaxResults=100&NextToken=next%2B%2F%3D%20page",
+  );
+  assert.equal(requests[2].options.method, "GET");
+  assert.match(requests[2].options.headers.authorization, /SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date/);
+});
+
+test("ambiguous SMS transport outcomes are terminal", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => { throw new Error("ambiguous network outcome"); };
+  await expectSendError(sendSmsWithAws({
+    to: "+18173206150",
+    text: "Your heat is next. Reply STOP to opt out.",
+  }, smsEnv), "DELIVERY_OUTCOME_UNKNOWN", false);
 });
 
 test("invalid or missing SES configuration fails closed before fetch", async (context) => {

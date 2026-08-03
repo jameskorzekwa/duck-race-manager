@@ -73,6 +73,16 @@ export const homePhaseCta: Readonly<Record<PublicPhase, PublicPhaseCta | null>> 
 // database hiccup can never invite a visitor into a flow that is not open.
 export const fallbackPublicPhase: PublicPhase = "PREPARING";
 
+export interface PublicRenderContext {
+  phase: PublicPhase;
+  smsNotificationsAvailable: boolean;
+}
+
+export const fallbackPublicRenderContext: PublicRenderContext = {
+  phase: fallbackPublicPhase,
+  smsNotificationsAvailable: false,
+};
+
 // One lightweight query so every server-rendered page can paint the correct
 // navigation immediately. The status ordering matches `GET /api/v1/events/current`
 // in `api.ts`, which is the same projection the browser re-reads when the live
@@ -106,6 +116,36 @@ export const getPublicPhase = async (env: Env): Promise<PublicPhase> => {
   return publicPhaseForStatus(row?.status);
 };
 
+// `/register` needs the same phase plus one event-level capability. It resolves
+// both in this single query rather than adding a second D1 read to that page.
+export const getPublicRenderContext = async (env: Env): Promise<PublicRenderContext> => {
+  const row = await env.DB.prepare(
+    `SELECT status, sms_notifications_enabled
+       FROM events
+      WHERE status IN (
+        'REGISTRATION_OPEN',
+        'REGISTRATION_CLOSED',
+        'ROUND_ONE',
+        'FINAL',
+        'COMPLETED'
+      )
+      ORDER BY CASE status
+        WHEN 'REGISTRATION_OPEN' THEN 0
+        WHEN 'REGISTRATION_CLOSED' THEN 1
+        WHEN 'ROUND_ONE' THEN 2
+        WHEN 'FINAL' THEN 3
+        ELSE 5
+      END,
+      event_date IS NULL,
+      event_date
+      LIMIT 1`,
+  ).first<{ status: string; sms_notifications_enabled: number }>();
+  return {
+    phase: publicPhaseForStatus(row?.status),
+    smsNotificationsAvailable: row?.sms_notifications_enabled === 1,
+  };
+};
+
 // Navigation chrome is not worth an outage. Before the site became
 // phase-driven, public pages such as the home page rendered without touching D1
 // at all, so an unavailable, degraded, or transient D1 failure must not turn a
@@ -117,15 +157,23 @@ export const getPublicPhase = async (env: Env): Promise<PublicPhase> => {
 // sees the true phase within seconds of D1 recovering.
 //
 // Only HTML page renders may use this. API routes must keep failing loudly.
-export const publicPhaseForRender = async (env: Env): Promise<PublicPhase> => {
+export const publicContextForRender = async (env: Env): Promise<PublicRenderContext> => {
   try {
-    return await getPublicPhase(env);
+    return await getPublicRenderContext(env);
   } catch {
     // Deliberately not logged: Worker invocation logs stay disabled because
     // private credentials occur in URL paths. The failure stays observable
     // where that is already the convention — `/health` and every API route that
     // reads the same data still fail on a broken database — so this catch
     // narrows a page render, not the diagnosis.
+    return fallbackPublicRenderContext;
+  }
+};
+
+export const publicPhaseForRender = async (env: Env): Promise<PublicPhase> => {
+  try {
+    return await getPublicPhase(env);
+  } catch {
     return fallbackPublicPhase;
   }
 };
