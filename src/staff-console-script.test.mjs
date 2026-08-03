@@ -918,6 +918,7 @@ test("registration desk creates SMS controls only for an enabled event", () => {
   assert.match(staffHomeScript, /if \(available\) slot\.append\(createStaffSmsField\(\)\);/);
   assert.match(staffHomeScript, /slot\.replaceChildren\(\.\.\.\(available \? \[createStaffSmsConsent\(\)\] : \[\]\)\);/);
   assert.match(staffHomeScript, /renderSmsAvailability\(currentEvent\.smsNotificationsEnabled === true\);/);
+  assert.match(staffHomeScript, /eventSmsForm\.elements\.enabled\.dataset\.liveDirty !== "true"/);
   assert.match(staffHomeScript, /emailNotificationsEnabled: values\.get\("emailNotificationsEnabled"\) === "on"/);
   assert.match(staffHomeScript, /smsNotificationsEnabled: values\.get\("smsNotificationsEnabled"\) === "on"/);
   assert.match(staffHomeScript, /participantEditForm\.elements\.emailNotificationsEnabled\.checked = registration\.emailNotificationsEnabled/);

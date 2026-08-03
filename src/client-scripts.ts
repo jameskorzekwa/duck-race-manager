@@ -6216,7 +6216,9 @@ const renderSmsAvailability = (enabled) => {
     renderedSmsAvailability = available;
     bindParticipantContactForms();
   }
-  if (eventSmsForm) eventSmsForm.elements.enabled.checked = available;
+  if (eventSmsForm && eventSmsForm.elements.enabled.dataset.liveDirty !== "true") {
+    eventSmsForm.elements.enabled.checked = available;
+  }
 };
 
 const closeForceDeleteDialog = () => {

@@ -103,6 +103,15 @@ test("participant notification migration defaults SMS off and keys outbox work b
   assert.equal(database.prepare(
     "SELECT COUNT(*) AS count FROM email_notifications WHERE event_id = 'notification-event'",
   ).get().count, 2);
+  assert.equal(database.prepare(
+    "SELECT result_revision FROM email_notifications WHERE id = 'notification-email'",
+  ).get().result_revision, null, "the previously deployed Worker can omit the nullable revision");
+  database.prepare(
+    "UPDATE email_notifications SET result_revision = 1 WHERE id = 'notification-email'",
+  ).run();
+  assert.throws(() => database.prepare(
+    "UPDATE email_notifications SET result_revision = 0 WHERE id = 'notification-email'",
+  ).run(), /CHECK constraint failed/);
   assert.throws(() => database.exec(`
     INSERT INTO email_notifications
       (id, event_id, registration_id, notification_type, channel, lifecycle_key,

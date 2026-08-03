@@ -1358,19 +1358,6 @@ const transitionHeat = async (
     }
   }
 
-  const upcomingRecipients = transition === "call"
-    ? (await env.DB.prepare(
-      `SELECT r.id AS registration_id
-         FROM heat_entries he
-         JOIN race_entries re ON re.id = he.race_entry_id AND re.event_id = he.event_id
-         JOIN registrations r ON r.id = re.registration_id AND r.event_id = he.event_id
-        WHERE he.event_id = ? AND he.heat_id = ?
-          AND r.status = 'ACTIVE'
-        ORDER BY he.slot_number`,
-    ).bind(eventId, heatId).all<{ registration_id: string }>()).results
-      .filter((recipient) => typeof recipient.registration_id === "string")
-    : [];
-
   const now = new Date().toISOString();
   const commandLockGuard = transition === "lock"
     ? `AND h.roster_locked_at IS NULL
@@ -1433,16 +1420,6 @@ const transitionHeat = async (
     ${updateLockGuard} ${updateStartGuard}`;
   updateArgs.push(heatId, eventId, definition.expected, revision);
 
-  const upcomingNotifications = upcomingRecipients.map((recipient) => participantNotificationStatements(env, {
-    eventId,
-    registrationId: recipient.registration_id,
-    heatId,
-    type: "HEAT_UPCOMING",
-    lifecycleKey: `run:${heat.run_sequence}`,
-    commandId,
-    commandType: definition.command,
-    now,
-  }));
   const statements: D1PreparedStatement[] = [
       env.DB.prepare(
         `INSERT INTO race_commands
@@ -1460,7 +1437,6 @@ const transitionHeat = async (
       ),
       env.DB.prepare(updateSql).bind(...updateArgs),
   ];
-  for (const notification of upcomingNotifications) statements.push(...notification.statements);
   statements.push(
       env.DB.prepare(
         `INSERT INTO audit_events
@@ -1480,8 +1456,6 @@ const transitionHeat = async (
       : "The heat transition conflicted with another update. Refresh and try again.";
     return json({ error: message }, 409);
   }
-  await Promise.all(upcomingNotifications.flatMap((notification) => notification.ids)
-    .map((notificationId) => publishEmailNotification(env, notificationId)));
   const updated = await getHeatSummary(env, eventId, heatId);
   return json({ heat: updated === null ? null : heatSummary(updated), replayed: false }, 201);
 };
@@ -2073,7 +2047,7 @@ const confirmWinnerAnnouncement = async (
   const nextHeat = context.round === "ROUND_ONE" ? await env.DB.prepare(
     `SELECT id, run_sequence FROM heats
       WHERE event_id = ? AND round = 'ROUND_ONE' AND id <> ?
-        AND status IN ('LOADING', 'READY')
+        AND status IN ('LOADING', 'READY', 'CALLING')
       ORDER BY heat_number LIMIT 1`,
   ).bind(eventId, heatId).first<{ id: string; run_sequence: number }>() : null;
   const nextHeatRecipients = nextHeat === null ? [] : (await env.DB.prepare(

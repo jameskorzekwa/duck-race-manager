@@ -19,6 +19,10 @@ ALTER TABLE email_notifications
   CHECK (result_place IS NULL OR result_place > 0);
 
 ALTER TABLE email_notifications
+  ADD COLUMN result_revision INTEGER
+  CHECK (result_revision IS NULL OR result_revision > 0);
+
+ALTER TABLE email_notifications
   ADD COLUMN advanced_to_final INTEGER
   CHECK (advanced_to_final IS NULL OR advanced_to_final IN (0, 1));
 

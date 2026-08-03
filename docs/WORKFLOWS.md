@@ -3297,11 +3297,12 @@ not return `details_json`, contact data, tokens, or provider details.
 
 ### Notification Support
 
-Operational race reminders are sent to a participant only when their current
-registration has both an email address and email updates enabled. Pairing creates
-one `HEAT_ASSIGNED` notification in the same D1 batch as the duck assignment and
-heat place. Moving a Round One or Final heat from `READY` to `CALLING` creates one
-`HEAT_UPCOMING` notification for each eligible opted-in racer on that heat. A
+Operational race notifications are sent only through channels whose current
+contact and explicit opt-in remain valid. Pairing creates one `HEAT_ASSIGNED`
+notification in the same D1 batch as the duck assignment and heat place. A round
+start creates `HEAT_UPCOMING` for its first heat; each later heat becomes upcoming
+only when the preceding official result is announced. Calling a later heat while
+another is running or awaiting its result does not advance notifications. A
 matching command retry cannot create another logical message.
 
 The mutation publishes only the opaque notification ID to `EMAIL_QUEUE`; no
@@ -3312,9 +3313,10 @@ The consumer reloads the current consent, address, active registration, heat
 place, duck assignment, and heat state from D1 before it renders versioned text
 and HTML and asks SES to send. The originating assignment must still be the
 current one; a legacy row without that proof is cancelled rather than guessed.
-Opt-out, withdrawal, deletion, a changed assignment, or a heat that is no longer
-upcoming cancels stale work without sending. Email failure never rolls back
-pairing or a heat transition, and the onsite announcer remains authoritative.
+Opt-out, withdrawal, deletion, a changed assignment, a heat that is no longer
+upcoming, or a result revision superseded by correction cancels stale work
+without sending. Email failure never rolls back pairing or a heat transition,
+and the onsite announcer remains authoritative.
 
 Each email names the event, participant, current duck number, and Round One or
 Final heat. Assignment mail asks the participant to stay near the pond; upcoming

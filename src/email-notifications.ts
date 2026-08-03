@@ -66,7 +66,7 @@ export const participantNotificationStatements = (
       `INSERT INTO email_notifications
         (id, event_id, registration_id, heat_id, duck_assignment_id,
          notification_type, channel, lifecycle_key, status, template_version,
-         result_place, advanced_to_final,
+         result_place, result_revision, advanced_to_final,
          created_by_command_id, scheduled_at, updated_at)
        SELECT ?, r.event_id, r.id, ?,
               CASE WHEN ? IS NULL THEN NULL ELSE (
@@ -75,7 +75,7 @@ export const participantNotificationStatements = (
                   ON da.race_entry_id = re.id AND da.event_id = re.event_id AND da.valid_to IS NULL
                 WHERE re.registration_id = r.id LIMIT 1
               ) END,
-              ?, ?, ?, 'PENDING', 1, ?, ?, ?, ?, ?
+              ?, ?, ?, 'PENDING', 1, ?, ?, ?, ?, ?, ?
          FROM registrations r JOIN events e ON e.id = r.event_id
         WHERE r.id = ? AND r.event_id = ? AND r.status IN ('SUBMITTED', 'ACTIVE')
           AND EXISTS (SELECT 1 FROM race_commands c
@@ -88,6 +88,7 @@ export const participantNotificationStatements = (
       ids[index], target.heatId, target.heatId,
       target.type, channel, target.lifecycleKey,
       target.resultPlace ?? null,
+      target.resultRevision ?? null,
       target.type === "ROUND_RESULT" ? (target.resultPlace === 1 ? 1 : 0) : null,
       target.commandId, target.now, target.now,
       target.registrationId, target.eventId, target.commandId, target.commandType,
@@ -119,6 +120,7 @@ interface NotificationRow {
   notification_type: string;
   lifecycle_key: string | null;
   result_place: number | null;
+  result_revision: number | null;
   advanced_to_final: number | null;
   template_version: number;
   status: string;
@@ -140,6 +142,7 @@ interface NotificationRow {
   heat_number: number | null;
   heat_status: string | null;
   heat_run_sequence: number | null;
+  official_result_revision: number | null;
   visible_number: number | null;
 }
 
@@ -462,7 +465,7 @@ const notificationRow = (env: Env, notificationId: string): Promise<Notification
   env.DB.prepare(
     `SELECT n.id, n.event_id, n.registration_id, n.channel, n.duck_assignment_id,
             da.id AS active_duck_assignment_id, n.notification_type,
-            n.lifecycle_key, n.result_place, n.advanced_to_final,
+            n.lifecycle_key, n.result_place, n.result_revision, n.advanced_to_final,
             n.template_version, n.status,
             n.sending_started_at, n.retry_after,
             e.name AS event_name, e.status AS event_status,
@@ -472,7 +475,11 @@ const notificationRow = (env: Env, notificationId: string): Promise<Notification
             r.status AS registration_status, n.heat_id,
             he.id AS heat_entry_id, h.round AS heat_round,
             h.heat_number, h.status AS heat_status,
-            h.run_sequence AS heat_run_sequence, d.visible_number
+            h.run_sequence AS heat_run_sequence,
+            (SELECT MAX(hr.revision) FROM heat_results hr
+              WHERE hr.event_id = n.event_id AND hr.heat_id = n.heat_id
+                AND hr.status = 'FINALIZED') AS official_result_revision,
+            d.visible_number
        FROM email_notifications n
        JOIN events e ON e.id = n.event_id
        JOIN registrations r ON r.id = n.registration_id AND r.event_id = n.event_id
@@ -648,9 +655,13 @@ const validationFailure = (row: NotificationRow): string | null => {
   )) {
     return "HEAT_NO_LONGER_UPCOMING";
   }
-  if (new Set(["ROUND_RESULT", "FINAL_RESULT"]).has(row.notification_type)
-    && (row.heat_id === null || row.heat_entry_id === null || row.heat_status !== "FINALIZED")) {
-    return "RESULT_NO_LONGER_OFFICIAL";
+  if (new Set(["ROUND_RESULT", "FINAL_RESULT"]).has(row.notification_type)) {
+    if (row.heat_id === null || row.heat_entry_id === null || row.heat_status !== "FINALIZED") {
+      return "RESULT_NO_LONGER_OFFICIAL";
+    }
+    if (row.result_revision === null || row.official_result_revision !== row.result_revision) {
+      return "RESULT_REVISION_SUPERSEDED";
+    }
   }
   return null;
 };

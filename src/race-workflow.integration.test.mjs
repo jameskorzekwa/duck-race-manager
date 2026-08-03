@@ -729,6 +729,137 @@ test("opted-in racers receive each committed lifecycle email once", async (conte
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
 });
 
+test("a called heat waits for running and result blockers before its upcoming reminder", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const blockerStatuses = [];
+  let officialReminderObserved = false;
+  const reminderCount = () => database.prepare(
+    `SELECT COUNT(*) AS count
+       FROM email_notifications n
+       JOIN heats h ON h.id = n.heat_id
+      WHERE n.notification_type = 'HEAT_UPCOMING'
+        AND h.round = 'ROUND_ONE' AND h.heat_number = 2`,
+  ).get().count;
+
+  await raceToAwaitingFinal(database, {
+    name: "Authoritative Reminder Race",
+    slug: "authoritative-reminder-race",
+    racerCount: 6,
+    heatCapacity: 3,
+    optInRegistrationIndex: 3,
+    afterRoundOneTransition: async ({ heat, operation, transition }) => {
+      if (heat.number === 1 && (operation === "start" || operation === "finish")) {
+        const nextHeat = { ...database.prepare(
+          `SELECT id, heat_number AS number, status, revision
+             FROM heats WHERE event_id = ? AND round = 'ROUND_ONE' AND heat_number = 2`,
+        ).get(heat.eventId) };
+        await transition(nextHeat, "ready");
+        await transition(nextHeat, "call");
+        assert.equal(
+          reminderCount(),
+          0,
+          `calling the later heat while the current heat is ${heat.status} is not authoritative progression`,
+        );
+        blockerStatuses.push(heat.status);
+        await transition(nextHeat, "reset");
+      }
+      if (heat.number === 2 && operation === "ready") {
+        assert.equal(reminderCount(), 1, "the preceding official result creates the reminder exactly once");
+        assert.equal(database.prepare(
+          `SELECT c.command_type
+             FROM email_notifications n
+             JOIN heats h ON h.id = n.heat_id
+             JOIN race_commands c ON c.id = n.created_by_command_id
+            WHERE n.notification_type = 'HEAT_UPCOMING'
+              AND h.round = 'ROUND_ONE' AND h.heat_number = 2`,
+        ).get().command_type, "CONFIRM_WINNER_ANNOUNCEMENT");
+        officialReminderObserved = true;
+      }
+    },
+    afterRoundOneResultRecorded: async ({ heat }) => {
+      if (heat.number === 1) {
+        assert.equal(reminderCount(), 0, "recording an unannounced result does not advance reminders");
+      }
+    },
+  });
+
+  assert.deepEqual(blockerStatuses, ["RUNNING", "AWAITING_RESULT"]);
+  assert.equal(officialReminderObserved, true);
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("the consumer cancels a result notification superseded before delivery", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Corrected Result Race",
+    slug: "corrected-result-race",
+    racerCount: 6,
+    heatCapacity: 3,
+    optInRegistrationIndex: 0,
+  });
+  const original = await race.recordAndAnnounce(race.finalHeat, [
+    { raceEntryId: race.finalists[0].raceEntryId, place: 1 },
+    { raceEntryId: race.finalists[1].raceEntryId, place: 2 },
+  ], "original final result");
+  const originalNotification = database.prepare(
+    `SELECT id, result_revision, result_place
+       FROM email_notifications
+      WHERE registration_id = ? AND heat_id = ? AND notification_type = 'FINAL_RESULT'`,
+  ).get(race.finalists[0].registrationId, race.finalHeat.id);
+  assert.deepEqual({ ...originalNotification }, { id: originalNotification.id, result_revision: 1, result_place: 1 });
+
+  await jsonBody(await race.post(
+    `/api/v1/staff/events/${race.eventId}/heats/${race.finalHeat.id}/results/correct`,
+    {
+      commandId: crypto.randomUUID(),
+      revision: original.heat.revision,
+      reason: "The finish-line review reversed the first two places.",
+      results: [
+        { raceEntryId: race.finalists[1].raceEntryId, place: 1 },
+        { raceEntryId: race.finalists[0].raceEntryId, place: 2 },
+      ],
+    },
+  ), 201, "correct the final before queued delivery");
+
+  const notifications = database.prepare(
+    `SELECT id, result_revision, result_place, status
+       FROM email_notifications
+      WHERE registration_id = ? AND heat_id = ? AND notification_type = 'FINAL_RESULT'
+      ORDER BY result_revision`,
+  ).all(race.finalists[0].registrationId, race.finalHeat.id).map((row) => ({ ...row }));
+  assert.deepEqual(notifications.map(({ result_revision, result_place, status }) => ({
+    result_revision,
+    result_place,
+    status,
+  })), [
+    { result_revision: 1, result_place: 1, status: "QUEUED" },
+    { result_revision: 2, result_place: 2, status: "QUEUED" },
+  ]);
+
+  const sent = [];
+  assert.equal(await processEmailNotification(race.env, notifications[0].id, async (email) => {
+    sent.push(email);
+    return { providerMessageId: "obsolete-result" };
+  }), "CANCELLED");
+  assert.equal(sent.length, 0);
+  assert.deepEqual({ ...database.prepare(
+    "SELECT status, status_reason FROM email_notifications WHERE id = ?",
+  ).get(notifications[0].id) }, {
+    status: "CANCELLED",
+    status_reason: "RESULT_REVISION_SUPERSEDED",
+  });
+
+  assert.equal(await processEmailNotification(race.env, notifications[1].id, async (email) => {
+    sent.push(email);
+    return { providerMessageId: "corrected-result" };
+  }), "SENT");
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /You placed 2nd in the Final\./);
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
 test("the consumer rechecks consent and bounds temporary SES retries without exposing provider details", async (context) => {
   const { database } = createDatabase();
   context.after(() => database.close());
