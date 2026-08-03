@@ -65,6 +65,7 @@ test("staff operations console script is valid, DOM-safe, and covers every opera
   assert.match(staffHomeScript, /Result awaiting winner announcement/);
   assert.match(staffHomeScript, /pendingResults\.length === 0/);
   assert.match(staffHomeScript, /It stays private until finish-line staff confirm Winner announced/);
+  assert.match(staffHomeScript, /notification\.channel === "SMS" \? "SMS" : "Email"/);
   assert.doesNotMatch(staffHomeScript, /canReturns|loadReturnReview|loadPurgeGate|reviewEvent/);
   assert.ok(!staffHomeScript.includes("/api/v1/staff/profiles"), "staff profiles moved off the console");
 });
@@ -608,6 +609,19 @@ test("every form field the console client writes exists on every page that loads
       }
       const namedControls = new Set([...form.matchAll(/name="([^"]+)"/g)].map((match) => match[1]));
       for (const name of referenced) {
+        if (variable === "participantEditForm" && ["phone", "smsNotificationsEnabled"].includes(name)) {
+          assert.ok(
+            staffHomeScript.includes(`input.name = "${name}";`),
+            `${name} must be created only after SMS availability is confirmed`,
+          );
+          assert.match(
+            staffHomeScript,
+            new RegExp(`if \\(participantEditForm\\.elements\\.${name}\\)`),
+            `${name} writes must tolerate the event-level control being absent`,
+          );
+          assert.equal(namedControls.has(name), false, `${path}: ${name} must not ship before SMS is enabled`);
+          continue;
+        }
         assert.ok(
           namedControls.has(name),
           `${path}: ${variable}.elements.${name} has no matching named control and would throw`,
@@ -615,6 +629,12 @@ test("every form field the console client writes exists on every page that loads
       }
     }
   }
+
+  assert.match(staffHomeScript, /const available = enabled === true;/);
+  assert.match(staffHomeScript, /if \(available\) slot\.append\(createStaffSmsField\(\)\);/);
+  assert.match(staffHomeScript, /slot\.replaceChildren\(\.\.\.\(available \? \[createStaffSmsConsent\(\)\] : \[\]\)\);/);
+  assert.match(staffHomeScript, /phone: values\.get\("phone"\) === null \? selectedRegistration\.phone/);
+  assert.match(staffHomeScript, /smsNotificationsControl[\s\S]*?\? smsNotificationsControl\.checked[\s\S]*?: selectedRegistration\.smsNotificationsEnabled/);
 
   // The two pages both carry the whole participants surface, so its hooks are
   // never partially present.
@@ -877,20 +897,35 @@ test("registration desk has no advance duck disposition controls", () => {
   assert.doesNotMatch(staffHomeScript, /duckKeepPreference|duck_keep_preference/);
 });
 
-test("registration desk creates and edits independent contact consent", () => {
+test("registration desk creates SMS controls only for an enabled event", () => {
   const markup = renderStaffRegistration("Registration Staff", false, ["REGISTRATION"]);
-  for (const hook of ["data-walkup-form", "data-participant-edit-form"]) {
+  for (const [hook, slot] of [
+    ["data-walkup-form", "walkup"],
+    ["data-participant-edit-form", "edit"],
+  ]) {
     const form = markup.match(new RegExp(`<form ${hook}>[\\s\\S]*?<\\/form>`))?.[0];
     assert.ok(form, hook);
     assert.match(form, /name="emailNotificationsEnabled" type="checkbox"/);
-    assert.match(form, /name="smsNotificationsEnabled" type="checkbox"/);
     assert.match(form, /data-contact-error="email"/);
-    assert.match(form, /data-contact-error="phone"/);
+    assert.doesNotMatch(form, /name="phone"|name="smsNotificationsEnabled"|data-contact-error="phone"/);
+    assert.match(form, new RegExp(`data-sms-field-slot="${slot}"`));
+    assert.match(form, new RegExp(`data-sms-consent-slot="${slot}"`));
   }
+  assert.match(staffHomeScript, /const createStaffSmsField = \(\) => \{/);
+  assert.match(staffHomeScript, /input\.name = "phone";/);
+  assert.match(staffHomeScript, /const createStaffSmsConsent = \(\) => \{/);
+  assert.match(staffHomeScript, /input\.name = "smsNotificationsEnabled";/);
+  assert.match(staffHomeScript, /if \(available\) slot\.append\(createStaffSmsField\(\)\);/);
+  assert.match(staffHomeScript, /slot\.replaceChildren\(\.\.\.\(available \? \[createStaffSmsConsent\(\)\] : \[\]\)\);/);
+  assert.match(staffHomeScript, /renderSmsAvailability\(currentEvent\.smsNotificationsEnabled === true\);/);
+  assert.match(staffHomeScript, /eventSmsForm\.elements\.enabled\.dataset\.liveDirty !== "true"/);
   assert.match(staffHomeScript, /emailNotificationsEnabled: values\.get\("emailNotificationsEnabled"\) === "on"/);
   assert.match(staffHomeScript, /smsNotificationsEnabled: values\.get\("smsNotificationsEnabled"\) === "on"/);
   assert.match(staffHomeScript, /participantEditForm\.elements\.emailNotificationsEnabled\.checked = registration\.emailNotificationsEnabled/);
-  assert.match(staffHomeScript, /participantEditForm\.elements\.smsNotificationsEnabled\.checked = registration\.smsNotificationsEnabled/);
+  assert.match(staffHomeScript, /if \(participantEditForm\.elements\.smsNotificationsEnabled\) \{[\s\S]*?registration\.smsNotificationsEnabled;/);
+  assert.match(staffHomeScript, /values\.get\("phone"\) === null \? selectedRegistration\.phone/);
+  assert.match(staffHomeScript, /const smsNotificationsControl = form\.elements\.smsNotificationsEnabled;/);
+  assert.match(staffHomeScript, /smsNotificationsEnabled: smsNotificationsControl[\s\S]*?smsNotificationsControl\.checked[\s\S]*?selectedRegistration\.smsNotificationsEnabled/);
   assert.match(staffHomeScript, /quickDucksContact\.bindForm\(walkUpForm\)/);
   assert.match(staffHomeScript, /quickDucksContact\.bindForm\(participantEditForm\)/);
 });

@@ -2,6 +2,8 @@ import type { StaffActor } from "./auth.ts";
 import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
+import { isLocalPreviewOrigin } from "./local-preview.ts";
+import { participantNotificationStatements, publishEmailNotification } from "./email-notifications.ts";
 import { autoResolvableRoundOneHeatSql, reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
 import type { Env } from "./types.ts";
 import { unstartedRoundOneHeatExistsSql, walkUpAdmissionFor } from "./walk-up-admission.ts";
@@ -64,6 +66,7 @@ interface EventRow {
   round_one_heat_capacity: number;
   final_heat_capacity: number;
   public_name_policy: "FIRST_NAME_ONLY" | "FIRST_NAME_LAST_INITIAL" | "FULL_NAME";
+  sms_notifications_enabled: number;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -88,7 +91,7 @@ interface ExistingCommand {
 const eventColumns = `id, slug, name, event_date, timezone, status,
   registration_opens_at, registration_closes_at, email_required,
   heat_assignment_mode, round_one_heat_capacity, final_heat_capacity,
-  public_name_policy, revision, created_at, updated_at`;
+  public_name_policy, sms_notifications_enabled, revision, created_at, updated_at`;
 
 const eventResponse = (event: EventRow): Record<string, unknown> => ({
   id: event.id,
@@ -104,6 +107,7 @@ const eventResponse = (event: EventRow): Record<string, unknown> => ({
   roundOneHeatCapacity: event.round_one_heat_capacity,
   finalHeatCapacity: event.final_heat_capacity,
   publicNamePolicy: event.public_name_policy,
+  smsNotificationsEnabled: event.sms_notifications_enabled === 1,
   revision: event.revision,
   createdAt: event.created_at,
   updatedAt: event.updated_at,
@@ -438,6 +442,7 @@ const createEvent = async (
     round_one_heat_capacity: ducksPerHeat,
     final_heat_capacity: defaults.final_heat_capacity,
     public_name_policy: defaults.public_name_policy,
+    sms_notifications_enabled: 0,
     revision: 0,
     created_at: now,
     updated_at: now,
@@ -701,10 +706,127 @@ const configureEvent = async (
     round_one_heat_capacity: next.roundOneHeatCapacity,
     final_heat_capacity: next.finalHeatCapacity,
     public_name_policy: next.publicNamePolicy,
+    sms_notifications_enabled: event.sms_notifications_enabled,
     revision: event.revision + 1,
     updated_at: now,
   };
   return json({ event: eventResponse(configured), replayed: false });
+};
+
+const smsProviderConfigured = (env: Env): boolean => isLocalPreviewOrigin(env.APP_ORIGIN) || (
+  env.AWS_REGION === "us-east-1"
+  && typeof env.AWS_ACCESS_KEY_ID === "string" && env.AWS_ACCESS_KEY_ID.length >= 16
+  && typeof env.AWS_SECRET_ACCESS_KEY === "string" && env.AWS_SECRET_ACCESS_KEY.length >= 32
+  && typeof env.NOTIFICATION_HMAC_SECRET === "string" && env.NOTIFICATION_HMAC_SECRET.length >= 32
+  && typeof env.SMS_ORIGINATION_IDENTITY === "string"
+  && /^[A-Za-z0-9+_.:/-]{1,256}$/.test(env.SMS_ORIGINATION_IDENTITY)
+  && typeof env.SMS_OPT_OUT_LIST_NAME === "string"
+  && /^[A-Za-z0-9_:/-]{1,256}$/.test(env.SMS_OPT_OUT_LIST_NAME)
+);
+
+const configureEventSms = async (
+  request: Request,
+  eventId: string,
+  env: Env,
+  actor: StaffActor,
+): Promise<Response> => {
+  const denied = adminRequired(actor);
+  if (denied !== null) return denied;
+  const payload = await readJson(request);
+  const commandId = payload?.commandId;
+  const revision = payload?.revision;
+  const enabled = payload?.enabled;
+  if (
+    typeof commandId !== "string" || !isCommandId(commandId)
+    || !Number.isSafeInteger(revision) || (revision as number) < 0
+    || typeof enabled !== "boolean"
+  ) return json({ error: "Command, revision, and enabled boolean are required." }, 400);
+  const fingerprint = canonicalFingerprint({ operation: "CONFIGURE_EVENT_SMS", eventId, revision, enabled });
+  const previous = await findCommand(commandId, env);
+  if (previous !== null) {
+    if (
+      previous.event_id !== eventId || previous.command_type !== "CONFIGURE_EVENT_SMS"
+      || previous.request_fingerprint !== fingerprint
+    ) return json({ error: "This command identifier was already used for another operation." }, 409);
+    const replay = await getEvent(eventId, env);
+    return replay === null
+      ? json({ error: "Event not found." }, 404)
+      : json({ event: eventResponse(replay), replayed: true });
+  }
+  if (enabled && !smsProviderConfigured(env)) {
+    return json({ error: "SMS cannot be enabled until the production origination identity, opt-out list, signing credentials, and notification HMAC are configured." }, 409);
+  }
+  const event = await getEvent(eventId, env);
+  if (event === null) return json({ error: "Event not found." }, 404);
+  if (event.revision !== revision) {
+    return json({ error: "The event changed. Refresh and retry with its current revision.", event: eventResponse(event) }, 409);
+  }
+  const now = new Date().toISOString();
+  try {
+    const results = await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at,
+           actor_staff_profile_id, request_fingerprint)
+         SELECT ?, id, 'CONFIGURE_EVENT_SMS', id, ?, ?, ?, ?
+           FROM events WHERE id = ? AND revision = ?`,
+      ).bind(commandId, now, now, actor.id, fingerprint, eventId, revision),
+      env.DB.prepare(
+       `UPDATE events SET sms_notifications_enabled = ?, revision = revision + 1, updated_at = ?
+          WHERE id = ? AND revision = ?
+            AND EXISTS (
+              SELECT 1 FROM race_commands
+               WHERE id = ? AND event_id = ? AND command_type = 'CONFIGURE_EVENT_SMS'
+                 AND request_fingerprint = ?
+            )`,
+      ).bind(enabled ? 1 : 0, now, eventId, revision, commandId, eventId, fingerprint),
+      env.DB.prepare(
+        `UPDATE email_notifications
+            SET status = 'CANCELLED', terminal_at = ?, status_reason = 'SMS_DISABLED_FOR_EVENT',
+                retry_after = NULL, last_error_code = NULL, updated_at = ?
+          WHERE event_id = ? AND channel = 'SMS' AND ? = 0
+            AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
+            AND EXISTS (
+              SELECT 1 FROM race_commands
+               WHERE id = ? AND event_id = ? AND command_type = 'CONFIGURE_EVENT_SMS'
+                 AND request_fingerprint = ?
+            )`,
+      ).bind(now, now, eventId, enabled ? 1 : 0, commandId, eventId, fingerprint),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+          SELECT ?, ?, ?, ?, 'EVENT', ?, 'STAFF', ?, ?
+            FROM race_commands
+           WHERE id = ? AND event_id = ? AND command_type = 'CONFIGURE_EVENT_SMS'
+             AND request_fingerprint = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM audit_events existing
+                WHERE existing.command_id = ? AND existing.action IN ('EVENT_SMS_ENABLED', 'EVENT_SMS_DISABLED')
+             )`,
+      ).bind(
+        crypto.randomUUID(), eventId, commandId,
+        enabled ? "EVENT_SMS_ENABLED" : "EVENT_SMS_DISABLED", eventId, now,
+        JSON.stringify({ staff_profile_id: actor.id, enabled }),
+        commandId, eventId, fingerprint, commandId,
+      ),
+    ]);
+    if (results[0]?.meta.changes === 0 || results[1]?.meta.changes === 0) throw new Error("stale");
+  } catch {
+    const raced = await findCommand(commandId, env);
+    if (
+      raced?.event_id === eventId && raced.command_type === "CONFIGURE_EVENT_SMS"
+      && raced.request_fingerprint === fingerprint
+    ) {
+      const replay = await getEvent(eventId, env);
+      if (replay !== null) return json({ event: eventResponse(replay), replayed: true });
+    }
+    return json({ error: "The SMS setting conflicted with another update. Refresh and try again." }, 409);
+  }
+  const updated = await getEvent(eventId, env);
+  return updated === null
+    ? json({ error: "The saved event could not be loaded." }, 500)
+    : json({ event: eventResponse(updated), replayed: false });
 };
 
 interface ReadinessStats {
@@ -1926,12 +2048,44 @@ const runLifecycleCommand = async (
   // never disagree. Every added statement carries the same command-committed
   // guard as `updateSql`, so a transition that loses its race writes nothing.
   const sideEffects = await lifecycleSideEffects(definition, eventId, commandId, now, env, actor);
+  const firstHeatNotifications: ReturnType<typeof participantNotificationStatements>[] = [];
+  if (definition.action === "start-round-one" || definition.action === "start-final") {
+    const round = definition.action === "start-round-one" ? "ROUND_ONE" : "FINAL";
+    const firstHeat = await env.DB.prepare(
+      `SELECT id, run_sequence FROM heats
+        WHERE event_id = ? AND round = ? AND status = 'PLANNED'
+        ORDER BY heat_number LIMIT 1`,
+    ).bind(eventId, round).first<{ id: string; run_sequence: number }>();
+    if (firstHeat !== null) {
+      const recipients = await env.DB.prepare(
+        `SELECT r.id AS registration_id
+           FROM heat_entries he
+           JOIN race_entries re ON re.id = he.race_entry_id
+           JOIN registrations r ON r.id = re.registration_id
+          WHERE he.event_id = ? AND he.heat_id = ? AND r.status = 'ACTIVE'
+          ORDER BY he.slot_number`,
+      ).bind(eventId, firstHeat.id).all<{ registration_id: string }>();
+      for (const recipient of recipients.results) {
+        firstHeatNotifications.push(participantNotificationStatements(env, {
+          eventId,
+          registrationId: recipient.registration_id,
+          heatId: firstHeat.id,
+          type: "HEAT_UPCOMING",
+          lifecycleKey: `run:${firstHeat.run_sequence}`,
+          commandId,
+          commandType: definition.commandType,
+          now,
+        }));
+      }
+    }
+  }
   let results: D1Result<unknown>[];
   try {
     results = await env.DB.batch([
       env.DB.prepare(definition.commandSql).bind(commandId, now, now, fingerprint, eventId),
       env.DB.prepare(definition.updateSql).bind(now, eventId, commandId),
       ...sideEffects.statements,
+      ...firstHeatNotifications.flatMap((notification) => notification.statements),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -1977,6 +2131,8 @@ const runLifecycleCommand = async (
     revision: event.revision + 1,
     updated_at: now,
   };
+  await Promise.all(firstHeatNotifications.flatMap((notification) => notification.ids)
+    .map((id) => publishEmailNotification(env, id)));
   // The moves are reported with the transition that made them, and only when
   // that transition genuinely committed. Every rebalance statement shares the
   // command-committed guard of `updateSql`, and the two `meta.changes` checks
@@ -2155,6 +2311,13 @@ export const handleEventOperations = async (
   );
   if (configurationMatch !== null && (request.method === "PATCH" || request.method === "PUT")) {
     return configureEvent(request, configurationMatch[1], env, actor);
+  }
+
+  const smsConfigurationMatch = url.pathname.match(
+    new RegExp(`^/api/v1/staff/events/${eventIdPattern}/sms-notifications$`),
+  );
+  if (smsConfigurationMatch !== null && (request.method === "PUT" || request.method === "PATCH")) {
+    return configureEventSms(request, smsConfigurationMatch[1], env, actor);
   }
 
   const readinessMatch = url.pathname.match(

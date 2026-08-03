@@ -22,6 +22,20 @@ Parameters:
     Default: us-east-1_QuEKwmLhI
     AllowedPattern: "^us-east-1_[A-Za-z0-9]+$"
     Description: Exact production user pool available to the Worker runtime
+  SmsOriginationIdentityArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[a-z0-9-]+:sms-voice:us-east-1:[0-9]{12}:[A-Za-z0-9_./:+-]+$"
+    Description: Exact registered SMS origination identity ARN; empty grants no SMS send access
+  SmsOptOutListArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[a-z0-9-]+:sms-voice:us-east-1:[0-9]{12}:opt-out-list/[A-Za-z0-9_./:+-]+$"
+    Description: Exact SMS opt-out list ARN; empty grants no STOP-list access
+
+Conditions:
+  HasSmsOriginationIdentityArn: !Not [!Equals [!Ref SmsOriginationIdentityArn, ""]]
+  HasSmsOptOutListArn: !Not [!Equals [!Ref SmsOptOutListArn, ""]]
 
 Resources:
   WorkerPermissionsBoundary:
@@ -38,6 +52,24 @@ Resources:
               - ses:SendEmail
               - ses:SendRawEmail
             Resource: !Sub arn:${AWS::Partition}:ses:us-east-1:${AWS::AccountId}:identity/quickducks.com
+          - Sid: ReadSesSuppressionState
+            Effect: Allow
+            Action: ses:GetSuppressedDestination
+            Resource: "*"
+          - !If
+            - HasSmsOriginationIdentityArn
+            - Sid: SendOnlyFromRegisteredSmsIdentity
+              Effect: Allow
+              Action: sms-voice:SendTextMessage
+              Resource: !Ref SmsOriginationIdentityArn
+            - !Ref AWS::NoValue
+          - !If
+            - HasSmsOptOutListArn
+            - Sid: ReadOnlyRegisteredSmsOptOutList
+              Effect: Allow
+              Action: sms-voice:DescribeOptedOutNumbers
+              Resource: !Ref SmsOptOutListArn
+            - !Ref AWS::NoValue
           - Sid: AdministerOnlyQuickDucksStaffPools
             Effect: Allow
             Action:

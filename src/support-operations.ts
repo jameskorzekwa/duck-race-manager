@@ -179,6 +179,7 @@ interface NotificationListRow {
   id: string;
   registration_id: string;
   notification_type: string;
+  channel: string;
   status: string;
   template_version: number;
   scheduled_at: string | null;
@@ -219,7 +220,7 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
   if (before !== null) args.push(before);
   args.push(limit);
   const rows = await env.DB.prepare(
-    `SELECT n.id, n.registration_id, n.notification_type, n.status,
+    `SELECT n.id, n.registration_id, n.notification_type, n.channel, n.status,
             n.template_version, n.scheduled_at, n.queued_at, n.sent_at,
             n.terminal_at, n.status_reason, n.last_error_code, n.created_at,
             r.first_name, r.last_name, h.heat_number, h.round,
@@ -247,6 +248,7 @@ const listNotifications = async (url: URL, env: Env, eventId: string): Promise<R
       registrationId: row.registration_id,
       participantName: `${row.first_name} ${row.last_name}`,
       type: row.notification_type,
+      channel: row.channel,
       status: row.status,
       terminal: terminalNotificationStatuses.has(row.status),
       templateVersion: row.template_version,

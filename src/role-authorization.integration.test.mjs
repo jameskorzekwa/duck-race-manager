@@ -296,7 +296,7 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     {
       commandId: command(), privateToken: "c".repeat(43), firstName: "Daisy", lastName: "Duck",
       email: "daisy@example.com", phone: "8173206150", emailNotificationsEnabled: true,
-      smsNotificationsEnabled: true,
+      smsNotificationsEnabled: false,
       notes: "Role matrix test",
     },
   ), 201, "registration creates walk-up");

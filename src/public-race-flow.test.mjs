@@ -5,7 +5,9 @@ import { liveRuntimeHelpersScript, liveScript, liveUiScript, participantScript, 
 import worker from "./index.ts";
 import {
   fallbackPublicPhase,
+  fallbackPublicRenderContext,
   getPublicPhase,
+  getPublicRenderContext,
   homePhaseCta,
   phaseAllowsRaceStatus,
   phaseAllowsRegistration,
@@ -190,6 +192,24 @@ test("the phase query is one lightweight status read that excludes DRAFT", async
   assert.doesNotMatch(sql, /first_name|last_name|email|phone|lookup_code|private_token|tag_token/i);
 });
 
+test("the registration render context resolves phase and SMS availability in one read", async () => {
+  const queries = [];
+  const env = {
+    DB: {
+      prepare(sql) {
+        queries.push(sql);
+        return { async first() { return { status: "REGISTRATION_OPEN", sms_notifications_enabled: 1 }; } };
+      },
+    },
+  };
+  assert.deepEqual(await getPublicRenderContext(env), {
+    phase: "REGISTRATION",
+    smsNotificationsAvailable: true,
+  });
+  assert.equal(queries.length, 1);
+  assert.match(queries[0], /SELECT status, sms_notifications_enabled\s+FROM events/);
+});
+
 test("no current event resolves to Preparing without inventing a status", async () => {
   const env = { DB: { prepare: () => ({ async first() { return null; } }) } };
 
@@ -214,7 +234,7 @@ const brokenPhaseEnv = () => {
     DB: {
       prepare: (sql) => {
         queries.push(sql);
-        const isPhaseQuery = /^SELECT status\s+FROM events/.test(sql);
+        const isPhaseQuery = /^SELECT status(?:, sms_notifications_enabled)?\s+FROM events/.test(sql);
         return {
           async first() {
             if (isPhaseQuery) throw d1Failure();
@@ -255,6 +275,10 @@ test("the render-time resolver degrades a failed phase query to Preparing", asyn
   // event" produces, and it advertises neither Register nor Race Status, so a
   // database hiccup can never invite a visitor into a flow that is not open.
   assert.equal(fallbackPublicPhase, "PREPARING");
+  assert.deepEqual(fallbackPublicRenderContext, {
+    phase: "PREPARING",
+    smsNotificationsAvailable: false,
+  });
   assert.equal(await publicPhaseForRender(deadDatabaseEnv()), "PREPARING");
   assert.equal(await publicPhaseForRender(brokenPhaseEnv()), "PREPARING");
   // A working query is passed through untouched.
@@ -274,7 +298,7 @@ test("every public page still renders with the Preparing nav when the phase quer
     assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8", path);
     assert.equal(response.headers.get("strict-transport-security"), "max-age=31536000", path);
     // The query really was attempted; the page is not skipping the read.
-    assert.ok(queries.some((sql) => /^SELECT status\s+FROM events/.test(sql)), path);
+    assert.ok(queries.some((sql) => /^SELECT status(?:, sms_notifications_enabled)?\s+FROM events/.test(sql)), path);
     assert.deepEqual(visibleNav(body), expectedNav.PREPARING, path);
     assert.match(navMarkup(body), /data-phase="PREPARING"/, path);
     // A degraded paint never advertises a flow that may not be open.

@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0019_round_one_walk_up_admission.sql`, browser
+the Worker, D1 migrations through `0023_participant_notifications.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -61,6 +61,7 @@ not authorized.
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
 | Open the `/staff` Admin view | `RACE_DIRECTOR` | Yes |
 | Create/configure draft; reopen registration | None | Yes |
+| Enable or disable per-event participant SMS | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
 | Open `/staff/access` and the console's Support view | None | Yes |
 | Delete event: the whole dataset in any state | None | Yes |
@@ -129,6 +130,35 @@ Pairing changes `SUBMITTED` to `ACTIVE`. Reactivation returns a registration to
 `ACTIVE` when it still has a current duck assignment, otherwise to `SUBMITTED`.
 Withdrawal and disqualification do not themselves close an assignment or
 remove a heat entry.
+
+### Participant Notifications
+
+Email and SMS are independent explicit opt-ins. Email is available for every
+event. SMS defaults off per event and only a system administrator may enable or
+disable it in Event Details; provider readiness is checked before enabling.
+While SMS is off, public and staff contact forms omit its phone and opt-in
+controls, direct APIs cannot establish a new SMS opt-in, pending SMS is
+cancelled, and email continues unchanged. Existing private phone/consent data is
+neither exposed nor used for delivery.
+
+A committed registration, Round One assignment, Final assignment, authoritative
+next-runnable heat, and official result create durable channel-specific outbox
+rows in the same D1 batch as the domain fact. The first heat becomes next when
+its round starts; later heats become next after the preceding official result.
+Automatic settlement follows the same rule: an uncontested winner receives the
+official result and Final assignment, and skipping or settling a heat marks its
+authoritative successor upcoming.
+Command retries, queue retries, reconciliation, and repeated station actions use
+logical lifecycle keys so each participant/channel/event fact sends at most
+once. A reset increments the heat running sequence and can therefore create one
+new reminder for the genuine rerun.
+
+The queue carries only an opaque notification ID. Immediately before provider
+submission the consumer reloads current consent, contact, event SMS state,
+assignment, heat/result state, local suppression, and provider suppression/STOP
+state. Email unsubscribe is a signed, recipient-bound capability that disables
+email consent and pending email only. Ambiguous provider acceptance is terminal
+and never retried because neither provider offers an application idempotency key.
 
 ### Round One Walk-Ups
 
@@ -3270,11 +3300,12 @@ not return `details_json`, contact data, tokens, or provider details.
 
 ### Notification Support
 
-Operational race reminders are sent to a participant only when their current
-registration has both an email address and email updates enabled. Pairing creates
-one `HEAT_ASSIGNED` notification in the same D1 batch as the duck assignment and
-heat place. Moving a Round One or Final heat from `READY` to `CALLING` creates one
-`HEAT_UPCOMING` notification for each eligible opted-in racer on that heat. A
+Operational race notifications are sent only through channels whose current
+contact and explicit opt-in remain valid. Pairing creates one `HEAT_ASSIGNED`
+notification in the same D1 batch as the duck assignment and heat place. A round
+start creates `HEAT_UPCOMING` for its first heat; each later heat becomes upcoming
+only when the preceding official result is announced. Calling a later heat while
+another is running or awaiting its result does not advance notifications. A
 matching command retry cannot create another logical message.
 
 The mutation publishes only the opaque notification ID to `EMAIL_QUEUE`; no
@@ -3285,9 +3316,10 @@ The consumer reloads the current consent, address, active registration, heat
 place, duck assignment, and heat state from D1 before it renders versioned text
 and HTML and asks SES to send. The originating assignment must still be the
 current one; a legacy row without that proof is cancelled rather than guessed.
-Opt-out, withdrawal, deletion, a changed assignment, or a heat that is no longer
-upcoming cancels stale work without sending. Email failure never rolls back
-pairing or a heat transition, and the onsite announcer remains authoritative.
+Opt-out, withdrawal, deletion, a changed assignment, a heat that is no longer
+upcoming, or a result revision superseded by correction cancels stale work
+without sending. Email failure never rolls back pairing or a heat transition,
+and the onsite announcer remains authoritative.
 
 Each email names the event, participant, current duck number, and Round One or
 Final heat. Assignment mail asks the participant to stay near the pond; upcoming

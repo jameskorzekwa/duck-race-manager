@@ -877,6 +877,7 @@ export const renderRegistration = (
   turnstileSiteKey?: string,
   phase: PublicPhase = "PREPARING",
   localPreviewWithoutProtection = false,
+  smsNotificationsEnabled = false,
 ): string => {
   if (phase === "PREPARING") {
     return page({
@@ -925,10 +926,10 @@ export const renderRegistration = (
         <p class="muted" data-public-name-policy>Loading how your name will appear publicly…</p>
         <div class="field-grid">
           <label><span class="label-text" data-email-label>Email (optional)</span><input name="email" type="email" autocomplete="email" maxlength="254" placeholder="jamie@example.com"><span>Used only for operational race updates.</span><span class="field-error" data-field-error="email" data-contact-error="email"></span></label>
-          <label>Phone (optional)<input name="phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="32" placeholder="(817) 320-6150"><span class="field-error" data-field-error="phone" data-contact-error="phone"></span></label>
+          ${smsNotificationsEnabled ? '<label data-registration-sms>Phone (optional)<input name="phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="32" placeholder="(817) 320-6150"><span class="field-error" data-field-error="phone" data-contact-error="phone"></span></label>' : ""}
         </div>
         <label class="check"><input name="email_notifications_enabled" type="checkbox" disabled><span>Send operational race updates by email<span class="field-error" data-field-error="email_notifications_enabled" data-contact-error="email_notifications_enabled"></span></span></label>
-        <label class="check"><input name="sms_notifications_enabled" type="checkbox" disabled><span>Send operational race updates by SMS<span class="field-error" data-field-error="sms_notifications_enabled" data-contact-error="sms_notifications_enabled"></span></span></label>
+        ${smsNotificationsEnabled ? '<label class="check" data-registration-sms><input name="sms_notifications_enabled" type="checkbox" disabled><span>Send operational race updates by SMS<span class="field-error" data-field-error="sms_notifications_enabled" data-contact-error="sms_notifications_enabled"></span></span></label>' : ""}
         ${turnstileSiteKey !== undefined
           ? `<div class="cf-turnstile" data-sitekey="${escapeHtml(turnstileSiteKey)}" data-size="flexible"></div><script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>`
           : localPreviewWithoutProtection
@@ -1425,9 +1426,9 @@ const participantsSurface = (): string => `
             <p class="muted" data-walkup-availability aria-live="polite">Checking walk-up availability…</p>
             <form data-walkup-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
-               <div class="field-grid"><label>Email<input name="email" type="email" aria-label="Email" maxlength="254"><span class="field-error" data-contact-error="email"></span></label><label>Phone<input name="phone" type="tel" aria-label="Phone" inputmode="tel" maxlength="32" placeholder="(817) 320-6150"><span class="field-error" data-contact-error="phone"></span></label></div>
+              <div class="field-grid" data-sms-field-slot="walkup"><label>Email<input name="email" type="email" aria-label="Email" maxlength="254"><span class="field-error" data-contact-error="email"></span></label></div>
                <label class="check"><input name="emailNotificationsEnabled" type="checkbox" disabled><span>Send operational race updates by email<span class="field-error" data-contact-error="emailNotificationsEnabled"></span></span></label>
-               <label class="check"><input name="smsNotificationsEnabled" type="checkbox" disabled><span>Send operational race updates by SMS<span class="field-error" data-contact-error="smsNotificationsEnabled"></span></span></label>
+                <div data-sms-consent-slot="walkup"></div>
               <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
               <button class="button" type="submit">Create walk-up</button>
             </form><p class="private-result muted" data-walkup-result aria-live="polite"></p>
@@ -1437,9 +1438,9 @@ const participantsSurface = (): string => `
             <form data-participant-duck-name-form hidden><label>Duck name<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Shown publicly beside the duck’s number. Staff names go through the same wordlist as a participant’s own.</span></label><button class="button secondary" type="submit">Save duck name</button></form>
             <form data-participant-edit-form>
               <div class="field-grid"><label>First name<input name="firstName" maxlength="80" required></label><label>Last name<input name="lastName" maxlength="80" required></label></div>
-               <div class="field-grid"><label>Email<input name="email" type="email" aria-label="Email" maxlength="254"><span class="field-error" data-contact-error="email"></span></label><label>Phone<input name="phone" type="tel" aria-label="Phone" inputmode="tel" maxlength="32" placeholder="(817) 320-6150"><span class="field-error" data-contact-error="phone"></span></label></div>
+              <div class="field-grid" data-sms-field-slot="edit"><label>Email<input name="email" type="email" aria-label="Email" maxlength="254"><span class="field-error" data-contact-error="email"></span></label></div>
                <label class="check"><input name="emailNotificationsEnabled" type="checkbox" disabled><span>Send operational race updates by email<span class="field-error" data-contact-error="emailNotificationsEnabled"></span></span></label>
-               <label class="check"><input name="smsNotificationsEnabled" type="checkbox" disabled><span>Send operational race updates by SMS<span class="field-error" data-contact-error="smsNotificationsEnabled"></span></span></label>
+                <div data-sms-consent-slot="edit"></div>
               <label>Staff notes<textarea name="notes" maxlength="2000"></textarea></label>
               <button class="button secondary" type="submit">Save participant details</button>
             </form>
@@ -1521,7 +1522,8 @@ export const renderStaffHome = (
                 <button class="button" type="submit">Save draft configuration</button>
               </form>
             </details>` : ""}
-            <article class="operation-card"><h3>Readiness and lifecycle</h3><p class="muted">${canRaceRead ? "Every transition is checked again by the server." : "Use your assigned station section for operational work."}</p><div class="data-list" data-event-readiness></div></article>
+             <article class="operation-card"><h3>Readiness and lifecycle</h3><p class="muted">${canRaceRead ? "Every transition is checked again by the server." : "Use your assigned station section for operational work."}</p><div class="data-list" data-event-readiness></div></article>
+             ${isSystemAdmin ? `<article class="operation-card" data-event-sms-card hidden><h3>Participant SMS</h3><p class="muted">Off by default. Enable only for an event that needs text updates; disabling stops pending sends and usage charges.</p><form data-event-sms-form><label class="check"><input name="enabled" type="checkbox"><span>Enable SMS updates for this event</span></label><button class="button secondary" type="submit">Save SMS setting</button></form></article>` : ""}
             ${isSystemAdmin ? `<article class="operation-card danger-zone" data-force-delete-card hidden>
               <h3>Delete event</h3><p class="muted">Administrator-only. Permanently deletes this event and every record for it in any state.</p>
               <button class="button danger" type="button" data-open-force-delete>Delete event</button>
