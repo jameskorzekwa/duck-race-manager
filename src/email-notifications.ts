@@ -47,6 +47,7 @@ export interface ParticipantNotificationTarget {
   now: string;
   resultRevision?: number | null;
   resultPlace?: number | null;
+  requireAuthoritativeUpcoming?: boolean;
 }
 
 /**
@@ -60,6 +61,24 @@ export const participantNotificationStatements = (
 ): { ids: string[]; statements: D1PreparedStatement[] } => {
   const ids = [crypto.randomUUID(), crypto.randomUUID()];
   const channels: NotificationChannel[] = ["EMAIL", "SMS"];
+  const authoritativeUpcomingGuard = target.requireAuthoritativeUpcoming === true
+    ? `AND EXISTS (
+         SELECT 1 FROM heats candidate
+          WHERE candidate.id = ? AND candidate.event_id = r.event_id
+            AND candidate.status IN ('LOADING', 'READY', 'CALLING')
+            AND NOT EXISTS (
+              SELECT 1 FROM heats earlier
+               WHERE earlier.event_id = candidate.event_id AND earlier.round = candidate.round
+                 AND earlier.heat_number < candidate.heat_number
+                 AND earlier.status NOT IN ('FINALIZED', 'CANCELLED')
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM heats active
+               WHERE active.event_id = candidate.event_id AND active.id <> candidate.id
+                 AND active.status IN ('RUNNING', 'AWAITING_RESULT')
+            )
+       )`
+    : "";
   return {
     ids,
     statements: channels.map((channel, index) => env.DB.prepare(
@@ -80,10 +99,19 @@ export const participantNotificationStatements = (
         WHERE r.id = ? AND r.event_id = ? AND r.status IN ('SUBMITTED', 'ACTIVE')
           AND EXISTS (SELECT 1 FROM race_commands c
                        WHERE c.id = ? AND c.event_id = r.event_id AND c.command_type = ?)
-          AND ((? = 'EMAIL' AND r.email IS NOT NULL AND r.email_notifications_enabled = 1)
-            OR (? = 'SMS' AND e.sms_notifications_enabled = 1
-              AND r.phone IS NOT NULL AND r.sms_notifications_enabled = 1))
-       ON CONFLICT DO NOTHING`,
+           AND ((? = 'EMAIL' AND r.email IS NOT NULL AND r.email_notifications_enabled = 1)
+             OR (? = 'SMS' AND e.sms_notifications_enabled = 1
+               AND r.phone IS NOT NULL AND r.sms_notifications_enabled = 1))
+           ${authoritativeUpcomingGuard}
+        ON CONFLICT DO UPDATE SET
+          duck_assignment_id = excluded.duck_assignment_id,
+          status = 'PENDING', terminal_at = NULL, status_reason = NULL,
+          last_error_code = NULL, retry_after = NULL,
+          created_by_command_id = excluded.created_by_command_id,
+          scheduled_at = excluded.scheduled_at, updated_at = excluded.updated_at
+        WHERE excluded.notification_type = 'HEAT_UPCOMING'
+          AND email_notifications.status = 'CANCELLED'
+          AND email_notifications.status_reason = 'HEAT_NO_LONGER_NEXT'`,
     ).bind(
       ids[index], target.heatId, target.heatId,
       target.type, channel, target.lifecycleKey,
@@ -93,6 +121,7 @@ export const participantNotificationStatements = (
       target.commandId, target.now, target.now,
       target.registrationId, target.eventId, target.commandId, target.commandType,
       channel, channel,
+      ...(target.requireAuthoritativeUpcoming === true ? [target.heatId] : []),
     )),
   };
 };
@@ -142,6 +171,8 @@ interface NotificationRow {
   heat_number: number | null;
   heat_status: string | null;
   heat_run_sequence: number | null;
+  unfinished_predecessor_count: number;
+  active_other_heat_count: number;
   official_result_revision: number | null;
   visible_number: number | null;
 }
@@ -224,12 +255,6 @@ const keyedDigest = async (env: Env, domain: string, value: string): Promise<str
 const awsEncode = (value: string): string => encodeURIComponent(value)
   .replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 
-const canonicalQuery = (values: Record<string, string>): string => Object.entries(values)
-  .map(([name, value]) => [awsEncode(name), awsEncode(value)] as const)
-  .sort(([left], [right]) => left.localeCompare(right))
-  .map(([name, value]) => `${name}=${value}`)
-  .join("&");
-
 const signedAwsHeaders = async (
   env: Env,
   service: string,
@@ -238,13 +263,18 @@ const signedAwsHeaders = async (
   path: string,
   query: string,
   body: string,
+  target?: string,
 ): Promise<Record<string, string>> => {
   const payloadHash = hex(await sha256(body));
   const now = new Date();
   const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
   const date = amzDate.slice(0, 8);
-  const signedHeaders = "content-type;host;x-amz-content-sha256;x-amz-date";
-  const canonicalHeaders = `content-type:application/json\nhost:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`;
+  const contentType = target === undefined ? "application/json" : "application/x-amz-json-1.0";
+  const signedHeaders = target === undefined
+    ? "content-type;host;x-amz-content-sha256;x-amz-date"
+    : "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target";
+  const canonicalHeaders = `content-type:${contentType}\nhost:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`
+    + (target === undefined ? "" : `x-amz-target:${target}\n`);
   const canonicalRequest = `${method}\n${path}\n${query}\n${canonicalHeaders}${signedHeaders}\n${payloadHash}`;
   const scope = `${date}/${env.AWS_REGION}/${service}/aws4_request`;
   const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${hex(await sha256(canonicalRequest))}`;
@@ -255,9 +285,10 @@ const signedAwsHeaders = async (
   const signature = hex(await hmac(signingKey, stringToSign));
   return {
     authorization: `AWS4-HMAC-SHA256 Credential=${env.AWS_ACCESS_KEY_ID}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
-    "content-type": "application/json",
+    "content-type": contentType,
     "x-amz-content-sha256": payloadHash,
     "x-amz-date": amzDate,
+    ...(target === undefined ? {} : { "x-amz-target": target }),
   };
 };
 
@@ -354,23 +385,45 @@ const validSmsConfiguration = (env: Env): boolean => validAwsRuntime(env)
   && typeof env.SMS_ORIGINATION_IDENTITY === "string"
   && /^[A-Za-z0-9+_.:/-]{1,256}$/.test(env.SMS_ORIGINATION_IDENTITY)
   && typeof env.SMS_OPT_OUT_LIST_NAME === "string"
-  && /^[A-Za-z0-9_.-]{1,64}$/.test(env.SMS_OPT_OUT_LIST_NAME)
+  && /^[A-Za-z0-9_:/-]{1,256}$/.test(env.SMS_OPT_OUT_LIST_NAME)
   && typeof env.NOTIFICATION_HMAC_SECRET === "string"
   && env.NOTIFICATION_HMAC_SECRET.length >= 32;
+
+const awsErrorType = async (response: Response): Promise<string | null> => {
+  const header = response.headers.get("x-amzn-errortype");
+  if (header !== null) {
+    const type = header.split(":", 1)[0];
+    if (/^[A-Za-z]+Exception$/.test(type)) return type;
+  }
+  try {
+    const body = await response.json() as { __type?: unknown };
+    if (typeof body.__type !== "string") return null;
+    const type = body.__type.split(/[#:]|\//).at(-1) ?? "";
+    return /^[A-Za-z]+Exception$/.test(type) ? type : null;
+  } catch {
+    return null;
+  }
+};
+
+const awsResponseRetryable = async (response: Response): Promise<boolean> =>
+  response.status === 408 || response.status === 429 || response.status >= 500
+  || (response.status === 400 && await awsErrorType(response) === "ThrottlingException");
 
 export const sendSmsWithAws: SmsSender = async (sms, env) => {
   if (!validSmsConfiguration(env) || !/^\+1[2-9][0-9]{9}$/.test(sms.to)) {
     throw new EmailSendError("SMS_CONFIGURATION_INVALID", false);
   }
   const host = `sms-voice.${env.AWS_REGION}.amazonaws.com`;
-  const path = "/v1/sms/text";
+  const path = "/";
+  const target = "PinpointSMSVoiceV2.SendTextMessage";
   const body = JSON.stringify({
     DestinationPhoneNumber: sms.to,
     OriginationIdentity: env.SMS_ORIGINATION_IDENTITY,
     MessageBody: sms.text,
     MessageType: "TRANSACTIONAL",
+    TimeToLive: 300,
   });
-  const headers = await signedAwsHeaders(env, "sms-voice", "POST", host, path, "", body);
+  const headers = await signedAwsHeaders(env, "sms-voice", "POST", host, path, "", body, target);
   let response: Response;
   try {
     response = await withDeadline(fetch(`https://${host}${path}`, {
@@ -383,7 +436,7 @@ export const sendSmsWithAws: SmsSender = async (sms, env) => {
     throw new EmailSendError("DELIVERY_OUTCOME_UNKNOWN", false);
   }
   if (!response.ok) {
-    const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+    const retryable = await awsResponseRetryable(response);
     throw new EmailSendError(retryable ? "SMS_TEMPORARY_FAILURE" : "SMS_REJECTED", retryable);
   }
   let providerMessageId: string | null = null;
@@ -421,27 +474,29 @@ export const isEmailSuppressedBySes = async (email: string, env: Env): Promise<b
 export const isSmsOptedOutByAws = async (phone: string, env: Env): Promise<boolean> => {
   if (!validSmsConfiguration(env)) throw new EmailSendError("SMS_CONFIGURATION_INVALID", false);
   const host = `sms-voice.${env.AWS_REGION}.amazonaws.com`;
-  const list = awsEncode(env.SMS_OPT_OUT_LIST_NAME!);
-  const path = `/v1/sms/opt-out-lists/${list}/opted-out-numbers`;
+  const path = "/";
+  const target = "PinpointSMSVoiceV2.DescribeOptedOutNumbers";
   let nextToken: string | null = null;
   const seen = new Set<string>();
   for (let page = 0; page < 20; page += 1) {
-    const query = canonicalQuery({
-      MaxResults: "100",
+    const body = JSON.stringify({
+      MaxResults: 100,
+      OptOutListName: env.SMS_OPT_OUT_LIST_NAME,
       ...(nextToken === null ? {} : { NextToken: nextToken }),
     });
-    const headers = await signedAwsHeaders(env, "sms-voice", "GET", host, path, query, "");
+    const headers = await signedAwsHeaders(env, "sms-voice", "POST", host, path, "", body, target);
     let response: Response;
     try {
-      response = await withDeadline(fetch(`https://${host}${path}?${query}`, {
-        method: "GET",
+      response = await withDeadline(fetch(`https://${host}${path}`, {
+        method: "POST",
         headers,
+        body,
         signal: AbortSignal.timeout(10_000),
       }));
     } catch {
       throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", true);
     }
-    if (!response.ok) throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", response.status >= 500 || response.status === 429);
+    if (!response.ok) throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", await awsResponseRetryable(response));
     let result: { OptedOutNumbers?: unknown; NextToken?: unknown };
     try {
       result = await response.json() as { OptedOutNumbers?: unknown; NextToken?: unknown };
@@ -452,7 +507,7 @@ export const isSmsOptedOutByAws = async (phone: string, env: Env): Promise<boole
     if (numbers.some((entry) => entry !== null && typeof entry === "object"
       && (entry as { OptedOutNumber?: unknown }).OptedOutNumber === phone)) return true;
     if (result.NextToken === undefined || result.NextToken === null || result.NextToken === "") return false;
-    if (typeof result.NextToken !== "string" || result.NextToken.length > 2048 || seen.has(result.NextToken)) {
+    if (typeof result.NextToken !== "string" || result.NextToken.length > 1024 || seen.has(result.NextToken)) {
       throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", true);
     }
     seen.add(result.NextToken);
@@ -476,6 +531,13 @@ const notificationRow = (env: Env, notificationId: string): Promise<Notification
             he.id AS heat_entry_id, h.round AS heat_round,
             h.heat_number, h.status AS heat_status,
             h.run_sequence AS heat_run_sequence,
+            (SELECT COUNT(*) FROM heats earlier
+              WHERE h.id IS NOT NULL AND earlier.event_id = h.event_id
+                AND earlier.round = h.round AND earlier.heat_number < h.heat_number
+                AND earlier.status NOT IN ('FINALIZED', 'CANCELLED')) AS unfinished_predecessor_count,
+            (SELECT COUNT(*) FROM heats active
+              WHERE h.id IS NOT NULL AND active.event_id = h.event_id AND active.id <> h.id
+                AND active.status IN ('RUNNING', 'AWAITING_RESULT')) AS active_other_heat_count,
             (SELECT MAX(hr.revision) FROM heat_results hr
               WHERE hr.event_id = n.event_id AND hr.heat_id = n.heat_id
                 AND hr.status = 'FINALIZED') AS official_result_revision,
@@ -655,6 +717,10 @@ const validationFailure = (row: NotificationRow): string | null => {
   )) {
     return "HEAT_NO_LONGER_UPCOMING";
   }
+  if (row.notification_type === "HEAT_UPCOMING"
+    && (row.unfinished_predecessor_count > 0 || row.active_other_heat_count > 0)) {
+    return "HEAT_NO_LONGER_NEXT";
+  }
   if (new Set(["ROUND_RESULT", "FINAL_RESULT"]).has(row.notification_type)) {
     if (row.heat_id === null || row.heat_entry_id === null || row.heat_status !== "FINALIZED") {
       return "RESULT_NO_LONGER_OFFICIAL";
@@ -769,6 +835,10 @@ const renderSms = (row: NotificationRow, env: Env, destination: string): Outboun
   text: `${singleLine(notificationAction(row).action)} ${new URL("/race", env.APP_ORIGIN)} Reply STOP to opt out.`,
 });
 
+const notificationDestination = (row: NotificationRow): string | null => row.channel === "EMAIL"
+  ? row.email
+  : row.phone === null ? null : smsDestination(row.phone);
+
 export const processEmailNotification = async (
   env: Env,
   notificationId: string,
@@ -831,7 +901,7 @@ export const processEmailNotification = async (
   // Recipient, consent, assignment, and lifecycle state can all change while a
   // queue message is waiting. Claim first, then reload the authoritative join
   // so no pre-claim snapshot is rendered or sent.
-  const row = await notificationRow(env, notificationId);
+  let row = await notificationRow(env, notificationId);
   if (row === null) {
     await cancelNotification(env, notificationId, attemptId, "RACE_ASSIGNMENT_CHANGED");
     return "CANCELLED";
@@ -846,11 +916,10 @@ export const processEmailNotification = async (
     return "CANCELLED";
   }
 
-  const canonicalPhone = row.channel === "SMS" ? smsDestination(row.phone!) : null;
   // Phone numbers are stored in the readable form shown in participant forms.
   // Hash, suppress, and submit one canonical E.164 value so local and provider
   // STOP decisions address exactly the same destination.
-  const destination = row.channel === "EMAIL" ? row.email! : canonicalPhone!;
+  const destination = notificationDestination(row)!;
   let destinationHash: string;
   try {
     destinationHash = await keyedDigest(env, `destination:${row.channel}`, destination.toLowerCase());
@@ -883,6 +952,40 @@ export const processEmailNotification = async (
       await suppressNotification(env, row, attemptId, destinationHash, "PROVIDER");
       return "CANCELLED";
     }
+
+    // Provider suppression reads can be slow. Consent, contact, assignment,
+    // event SMS state, heat progression, or an official result can change while
+    // that request is in flight, so reload once more immediately before the
+    // irreversible provider submission. A changed destination is cancelled
+    // rather than submitted without a suppression check for that destination.
+    const currentRow = await notificationRow(env, notificationId);
+    if (currentRow === null) {
+      await cancelNotification(env, notificationId, attemptId, "RACE_ASSIGNMENT_CHANGED");
+      return "CANCELLED";
+    }
+    const currentInvalid = validationFailure(currentRow);
+    if (currentInvalid === "UNSUPPORTED_TEMPLATE") {
+      await failNotification(env, notificationId, attemptId, currentInvalid);
+      return "FAILED";
+    }
+    if (currentInvalid !== null) {
+      await cancelNotification(env, notificationId, attemptId, currentInvalid);
+      return "CANCELLED";
+    }
+    const currentDestination = notificationDestination(currentRow);
+    if (currentDestination === null || currentDestination.toLowerCase() !== destination.toLowerCase()) {
+      await cancelNotification(env, notificationId, attemptId, "NOTIFICATION_DESTINATION_CHANGED");
+      return "CANCELLED";
+    }
+    const newlySuppressed = await env.DB.prepare(
+      `SELECT 1 AS suppressed FROM notification_suppressions
+        WHERE channel = ? AND destination_hash = ? LIMIT 1`,
+    ).bind(currentRow.channel, destinationHash).first<{ suppressed: number }>();
+    if (newlySuppressed !== null) {
+      await suppressNotification(env, currentRow, attemptId, destinationHash, "PROVIDER");
+      return "CANCELLED";
+    }
+    row = currentRow;
     result = row.channel === "EMAIL"
       ? await sender(await renderEmail(row, env, destinationHash), env)
       : await smsSender(renderSms(row, env, destination), env);

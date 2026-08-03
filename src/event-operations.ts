@@ -721,7 +721,7 @@ const smsProviderConfigured = (env: Env): boolean => isLocalPreviewOrigin(env.AP
   && typeof env.SMS_ORIGINATION_IDENTITY === "string"
   && /^[A-Za-z0-9+_.:/-]{1,256}$/.test(env.SMS_ORIGINATION_IDENTITY)
   && typeof env.SMS_OPT_OUT_LIST_NAME === "string"
-  && /^[A-Za-z0-9_.-]{1,64}$/.test(env.SMS_OPT_OUT_LIST_NAME)
+  && /^[A-Za-z0-9_:/-]{1,256}$/.test(env.SMS_OPT_OUT_LIST_NAME)
 );
 
 const configureEventSms = async (
@@ -741,9 +741,6 @@ const configureEventSms = async (
     || !Number.isSafeInteger(revision) || (revision as number) < 0
     || typeof enabled !== "boolean"
   ) return json({ error: "Command, revision, and enabled boolean are required." }, 400);
-  if (enabled && !smsProviderConfigured(env)) {
-    return json({ error: "SMS cannot be enabled until the production origination identity, opt-out list, signing credentials, and notification HMAC are configured." }, 409);
-  }
   const fingerprint = canonicalFingerprint({ operation: "CONFIGURE_EVENT_SMS", eventId, revision, enabled });
   const previous = await findCommand(commandId, env);
   if (previous !== null) {
@@ -755,6 +752,9 @@ const configureEventSms = async (
     return replay === null
       ? json({ error: "Event not found." }, 404)
       : json({ event: eventResponse(replay), replayed: true });
+  }
+  if (enabled && !smsProviderConfigured(env)) {
+    return json({ error: "SMS cannot be enabled until the production origination identity, opt-out list, signing credentials, and notification HMAC are configured." }, 409);
   }
   const event = await getEvent(eventId, env);
   if (event === null) return json({ error: "Event not found." }, 404);

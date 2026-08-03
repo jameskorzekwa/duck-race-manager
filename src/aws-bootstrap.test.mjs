@@ -78,14 +78,22 @@ test("CloudFormation execution role is limited to application resource types and
   const boundary = section(bootstrap, "  WorkerPermissionsBoundary:", "  GitHubActionsOidcProvider:");
   assert.match(boundary, /ManagedPolicyName: quickducks-worker-ses-boundary/);
   assert.match(boundary, /- ses:SendEmail\n\s+- ses:SendRawEmail/);
-  assert.match(boundary, /- ses:GetSuppressedDestination/);
-  assert.match(boundary, /- sms-voice:DescribeOptedOutNumbers/);
-  assert.match(boundary, /- sms-voice:DescribeOptOutLists/);
-  assert.match(boundary, /- sms-voice:SendTextMessage/);
+  assert.match(boundary, /Action: ses:GetSuppressedDestination/);
+  assert.match(boundary, /Action: sms-voice:DescribeOptedOutNumbers/);
+  assert.match(boundary, /Action: sms-voice:SendTextMessage/);
+  assert.match(boundary, /Resource: !Ref SmsOriginationIdentityArn/);
+  assert.match(boundary, /Resource: !Ref SmsOptOutListArn/);
+  assert.doesNotMatch(boundary, /DescribeOptOutLists/);
+  assert.doesNotMatch(
+    section(boundary, "SendOnlyFromRegisteredSmsIdentity", "ReadOnlyRegisteredSmsOptOutList"),
+    /Resource: "\*"/,
+  );
   assert.match(boundary, /identity\/quickducks\.com/);
   assert.match(boundary, /userpool\/\$\{StaffUserPoolId\}/);
   assert.doesNotMatch(boundary, /userpool\/\*/);
   assert.doesNotMatch(boundary, /ses:\*/);
+  assert.match(application, /Action: sms-voice:SendTextMessage\n\s+Resource: !Ref SmsOriginationIdentityArn/);
+  assert.match(application, /Action: sms-voice:DescribeOptedOutNumbers\n\s+Resource: !Ref SmsOptOutListArn/);
   assert.match(executionRole, /Action: iam:PutUserPermissionsBoundary/);
   assert.doesNotMatch(executionRole, /iam:DeleteUserPermissionsBoundary/);
   assert.match(executionRole, /iam:PermissionsBoundary: !Ref WorkerPermissionsBoundary/);
@@ -138,6 +146,11 @@ test("GitHub deployment role controls only the application stack and execution r
 
 test("release requires the bootstrap execution role without weakening deployment gates", () => {
   assert.match(release, /AWS_CLOUDFORMATION_ROLE_ARN: \$\{\{ vars\.AWS_CLOUDFORMATION_ROLE_ARN \}\}/);
+  assert.match(release, /SMS_ORIGINATION_IDENTITY_ARN: \$\{\{ vars\.SMS_ORIGINATION_IDENTITY_ARN \}\}/);
+  assert.match(release, /SMS_OPT_OUT_LIST_ARN: \$\{\{ vars\.SMS_OPT_OUT_LIST_ARN \}\}/);
+  assert.match(release, /SMS_ORIGINATION_IDENTITY_ARN and SMS_OPT_OUT_LIST_ARN must be configured together/);
+  assert.match(release, /"SmsOriginationIdentityArn=\$SMS_ORIGINATION_IDENTITY_ARN"/);
+  assert.match(release, /"SmsOptOutListArn=\$SMS_OPT_OUT_LIST_ARN"/);
   assert.match(release, /AWS_CLOUDFORMATION_ROLE_ARN\n\s+AWS_DEPLOY_ROLE_ARN/);
   assert.match(release, /arn:aws:iam::\$\{expectedAccountId\}:role\/quickducks-cloudformation-execution/);
   assert.match(release, /infra\/aws\/github-actions-bootstrap\.yaml infra\/aws\/quickducks\.yaml/);

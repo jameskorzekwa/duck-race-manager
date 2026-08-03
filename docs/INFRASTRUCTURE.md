@@ -38,9 +38,11 @@ are production resources. Do not create substitutes during a release.
   `quickducks-worker-ses-boundary`. The application stack can attach only that
   boundary to the exact Worker user; it cannot create or alter boundary policy
   versions or remove the boundary. The boundary fixes effective email sending
-  to the `quickducks.com` identity, provider suppression reads, transactional
-  text submission and opt-out reads, and staff administration to the production
-  Cognito pool.
+  to the `quickducks.com` identity, provider suppression reads, and staff
+  administration to the production Cognito pool. SMS access is absent by
+  default; after carrier registration, separate conditional statements scope
+  sending and STOP-list reads to the exact configured origination and opt-out
+  list ARNs.
 - The Worker's runtime AWS key pair and both Turnstile keys exist only as
   encrypted Cloudflare Worker secrets. They are not GitHub Actions secrets and
   the release does not replace them.
@@ -573,9 +575,10 @@ it may represent SES acceptance followed by a failed D1 finalization. This
 at-most-once recovery policy can miss a reminder after a pre-send Worker stop,
 but cannot duplicate a message whose post-send persistence was ambiguous.
 
-The consumer signs a structured SES v2 `SendEmail` request or AWS End User
-Messaging SMS `SendTextMessage` request with the Worker's
-encrypted AWS key. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
+The consumer signs a structured SES v2 `SendEmail` request or AWS JSON 1.0
+`PinpointSMSVoiceV2.SendTextMessage` request with the Worker's encrypted AWS
+key. SMS submissions have a five-minute provider TTL so a delayed carrier
+handoff cannot surface a race update hours later. `EMAIL_FROM_ADDRESS` is the non-secret committed sender
 `race@quickducks.com`; it remains under the verified `quickducks.com` identity.
 Current consent, address, assignment, and heat state are loaded only after the
 opaque ID is received. Migration `0020_email_notification_assignment.sql` adds
@@ -595,6 +598,17 @@ usage charges without affecting email. The registered number may remain leased
 year-round at approximately $2/month; turning the event switch off does not end
 that lease.
 
+Until registration and sandbox exit are confirmed, leave the production
+environment variables `SMS_ORIGINATION_IDENTITY_ARN` and
+`SMS_OPT_OUT_LIST_ARN` empty; both CloudFormation templates then grant no SMS
+runtime action. After AWS provisions the resources, update the bootstrap stack
+with both exact ARNs, set the same two GitHub production environment variables,
+and review the application change set before release. Configure
+`SMS_ORIGINATION_IDENTITY` and `SMS_OPT_OUT_LIST_NAME` Worker secrets with those
+same full ARNs. Never use `Resource: "*"` for `SendTextMessage` or
+`DescribeOptedOutNumbers`, and never grant the unused `DescribeOptOutLists`
+action.
+
 To release the number, disable event SMS, confirm no SMS row remains sendable,
 release the origination identity through AWS End User Messaging SMS, and remove
 `SMS_ORIGINATION_IDENTITY` from Worker secrets. Using SMS again then requires a
@@ -602,7 +616,7 @@ new identity and completed carrier registration before restoring the secret and
 enabling an event. Never substitute an unregistered identity.
 
 After deployment, use a synthetic controlled registration to opt into email,
-pair it, and call its heat. Confirm the support view reaches `SENT` for the
+pair it, and advance its heat through authoritative race progression. Confirm the support view reaches `SENT` for the
 assignment and upcoming notification and that the controlled mailbox receives
 the expected text. Do not use participant data for this canary. Inspect the main
 queue and DLQ metrics for retries. If sending misbehaves, pause the queue
@@ -715,8 +729,8 @@ The Worker needs this exact encrypted-secret set:
 | `AWS_ACCESS_KEY_ID` | Access key created for CloudFormation output `SesIamUser` |
 | `AWS_SECRET_ACCESS_KEY` | Matching secret access key, available only at creation |
 | `NOTIFICATION_HMAC_SECRET` | Independent random secret of at least 32 bytes for destination HMACs and unsubscribe capabilities |
-| `SMS_ORIGINATION_IDENTITY` | Registered AWS End User Messaging SMS toll-free identity |
-| `SMS_OPT_OUT_LIST_NAME` | Exact AWS-managed opt-out list associated with that identity |
+| `SMS_ORIGINATION_IDENTITY` | Full ARN of the registered AWS End User Messaging SMS toll-free identity |
+| `SMS_OPT_OUT_LIST_NAME` | Full ARN of the exact AWS-managed opt-out list associated with that identity |
 | `TURNSTILE_SECRET_KEY` | Turnstile widget secret |
 | `TURNSTILE_SITE_KEY` | Turnstile widget site key; intentionally encrypted in current production |
 

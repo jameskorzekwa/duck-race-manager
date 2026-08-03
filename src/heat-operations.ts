@@ -1501,6 +1501,25 @@ const resetHeat = async (
   }
 
   const now = new Date().toISOString();
+  const resetRecipients = (await env.DB.prepare(
+    `SELECT r.id AS registration_id
+       FROM heat_entries he
+       JOIN race_entries re ON re.id = he.race_entry_id AND re.event_id = he.event_id
+       JOIN registrations r ON r.id = re.registration_id AND r.event_id = he.event_id
+      WHERE he.event_id = ? AND he.heat_id = ? AND r.status = 'ACTIVE'
+      ORDER BY he.slot_number`,
+  ).bind(eventId, heatId).all<{ registration_id: string }>()).results;
+  const rerunNotifications = resetRecipients.map((recipient) => participantNotificationStatements(env, {
+    eventId,
+    registrationId: recipient.registration_id,
+    heatId,
+    type: "HEAT_UPCOMING",
+    lifecycleKey: `run:${heat.run_sequence + 1}`,
+    commandId,
+    commandType: "RESET_HEAT",
+    now,
+    requireAuthoritativeUpcoming: true,
+  }));
   try {
     await env.DB.batch([
       env.DB.prepare(
@@ -1566,6 +1585,7 @@ const resetHeat = async (
       // thrown away. Leaving them would let the next running of this final
       // inherit places nobody scanned for it.
       clearPodiumSelectionsStatement(env, eventId, heatId, commandId),
+      ...rerunNotifications.flatMap((notification) => notification.statements),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -1579,6 +1599,8 @@ const resetHeat = async (
   } catch {
     return json({ error: "The heat changed, lost its locked roster, or gained a published result. Refresh and try again." }, 409);
   }
+  await Promise.all(rerunNotifications.flatMap((notification) => notification.ids)
+    .map((notificationId) => publishEmailNotification(env, notificationId)));
   const updated = await getHeatSummary(env, eventId, heatId);
   return json({ heat: updated === null ? null : heatSummary(updated), replayed: false }, 201);
 };

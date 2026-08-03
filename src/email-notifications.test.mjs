@@ -206,8 +206,9 @@ test("AWS SMS uses the transactional API and checks every configured opt-out-lis
   const requests = [];
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
-    if (String(url).includes("opted-out-numbers")) {
-      return requests.filter((request) => request.url.includes("opted-out-numbers")).length === 1
+    if (options.headers["x-amz-target"] === "PinpointSMSVoiceV2.DescribeOptedOutNumbers") {
+      return requests.filter((request) => request.options.headers["x-amz-target"]
+        === "PinpointSMSVoiceV2.DescribeOptedOutNumbers").length === 1
         ? Response.json({
           OptedOutNumbers: [{ OptedOutNumber: "+18175550000" }],
           NextToken: "next+/= page",
@@ -220,26 +221,53 @@ test("AWS SMS uses the transactional API and checks every configured opt-out-lis
     to: "+18173206150",
     text: "Your heat is next. Reply STOP to opt out.",
   }, smsEnv), { providerMessageId: "sms-message-123" });
-  assert.equal(requests[0].url, "https://sms-voice.us-east-1.amazonaws.com/v1/sms/text");
+  assert.equal(requests[0].url, "https://sms-voice.us-east-1.amazonaws.com/");
   assert.deepEqual(JSON.parse(requests[0].options.body), {
     DestinationPhoneNumber: "+18173206150",
     OriginationIdentity: "+18005550199",
     MessageBody: "Your heat is next. Reply STOP to opt out.",
     MessageType: "TRANSACTIONAL",
+    TimeToLive: 300,
   });
+  assert.equal(requests[0].options.headers["content-type"], "application/x-amz-json-1.0");
+  assert.equal(requests[0].options.headers["x-amz-target"], "PinpointSMSVoiceV2.SendTextMessage");
+  assert.match(requests[0].options.headers.authorization, /SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target/);
   assert.equal(await isSmsOptedOutByAws("+18173206150", smsEnv), true);
-  assert.equal(
-    requests[1].url,
-    "https://sms-voice.us-east-1.amazonaws.com/v1/sms/opt-out-lists/quickducks-production/opted-out-numbers?MaxResults=100",
+  assert.equal(requests[1].url, "https://sms-voice.us-east-1.amazonaws.com/");
+  assert.equal(requests[1].options.method, "POST");
+  assert.deepEqual(JSON.parse(requests[1].options.body), {
+    MaxResults: 100,
+    OptOutListName: "quickducks-production",
+  });
+  assert.equal(requests[1].options.headers["x-amz-target"], "PinpointSMSVoiceV2.DescribeOptedOutNumbers");
+  assert.equal(requests[2].url, "https://sms-voice.us-east-1.amazonaws.com/");
+  assert.equal(requests[2].options.method, "POST");
+  assert.deepEqual(JSON.parse(requests[2].options.body), {
+    MaxResults: 100,
+    OptOutListName: "quickducks-production",
+    NextToken: "next+/= page",
+  });
+  assert.match(requests[2].options.headers.authorization, /SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target/);
+});
+
+test("AWS SMS safely classifies JSON throttling as retryable", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => Response.json({
+    __type: "com.amazonaws.pinpointsmsvoicev2#ThrottlingException",
+    message: "provider detail that must not be persisted",
+  }, { status: 400 });
+
+  await expectSendError(sendSmsWithAws({
+    to: "+18173206150",
+    text: "Your heat is next. Reply STOP to opt out.",
+  }, smsEnv), "SMS_TEMPORARY_FAILURE", true);
+  await expectSendError(
+    isSmsOptedOutByAws("+18173206150", smsEnv),
+    "SMS_SUPPRESSION_CHECK_FAILED",
+    true,
   );
-  assert.equal(requests[1].options.method, "GET");
-  assert.equal(requests[1].options.body, undefined);
-  assert.equal(
-    requests[2].url,
-    "https://sms-voice.us-east-1.amazonaws.com/v1/sms/opt-out-lists/quickducks-production/opted-out-numbers?MaxResults=100&NextToken=next%2B%2F%3D%20page",
-  );
-  assert.equal(requests[2].options.method, "GET");
-  assert.match(requests[2].options.headers.authorization, /SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date/);
 });
 
 test("ambiguous SMS transport outcomes are terminal", async (context) => {

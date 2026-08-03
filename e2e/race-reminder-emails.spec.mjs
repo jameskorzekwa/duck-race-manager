@@ -81,5 +81,14 @@ test("an opted-in participant receives assignment and next-runnable reminders", 
   const ownershipProofs = await page.evaluate(() =>
     Object.values(JSON.parse(localStorage.getItem("quickducks.participant-ownership.v1") || "{}")));
   for (const proof of ownershipProofs) expect(serialized).not.toContain(proof);
+
+  const unsubscribeUrl = assignment.text.match(/http:\/\/localhost:\d+\/notifications\/unsubscribe\?token=\S+/)?.[0];
+  expect(unsubscribeUrl).toBeTruthy();
+  await page.goto(unsubscribeUrl);
+  await expect(page.getByRole("heading", { name: "Stop email updates?" })).toBeVisible();
+  await page.getByRole("button", { name: "Stop email updates" }).click();
+  await expect(page.getByRole("heading", { name: "Email updates are off." })).toBeVisible();
+  await page.goto("/my-ducks");
+  await expect(card.locator("[data-contact-summary]")).toContainText("Email updates: Not opted in");
   expect(errors).toEqual([]);
 });

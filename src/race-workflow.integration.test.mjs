@@ -123,11 +123,16 @@ const createWorkerHarness = (
   const queuedNotifications = [];
   const queueAttempts = [];
   const sentEmails = [];
+  const sentSms = [];
   let remainingQueueSendFailures = queueSendFailures;
   let env;
   const emailSender = async (email) => {
     sentEmails.push(email);
     return { providerMessageId: `test-${sentEmails.length}` };
+  };
+  const smsSender = async (sms) => {
+    sentSms.push(sms);
+    return { providerMessageId: `test-sms-${sentSms.length}` };
   };
   env = {
     APP_ORIGIN: "https://quickducks.com",
@@ -153,7 +158,7 @@ const createWorkerHarness = (
         queueAttempts.push({ notificationId, accepted: true });
         queuedNotifications.push(notificationId);
         if (deliverEmails) {
-          await processEmailNotification(env, notificationId, emailSender);
+          await processEmailNotification(env, notificationId, emailSender, 1, smsSender);
         }
       },
     },
@@ -192,6 +197,7 @@ const createWorkerHarness = (
     queuedNotifications,
     queueAttempts,
     sentEmails,
+    sentSms,
     updateTasks,
     post: (path, body, token = staffToken) => api(path, { method: "POST", body, token }),
   };
@@ -225,12 +231,24 @@ test("event SMS is default-off, administrator-controlled, provider-gated, and em
 
   env.SMS_ORIGINATION_IDENTITY = "+18005550199";
   env.SMS_OPT_OUT_LIST_NAME = "quickducks-production";
+  const enableCommandId = crypto.randomUUID();
   const enabled = await jsonBody(await api(`/api/v1/staff/events/${eventId}/sms-notifications`, {
     method: "PATCH",
     token: adminToken,
-    body: { commandId: crypto.randomUUID(), revision: created.event.revision, enabled: true },
+    body: { commandId: enableCommandId, revision: created.event.revision, enabled: true },
   }), 200, "enable event SMS");
   assert.equal(enabled.event.smsNotificationsEnabled, true);
+  delete env.SMS_ORIGINATION_IDENTITY;
+  delete env.SMS_OPT_OUT_LIST_NAME;
+  const enableReplay = await jsonBody(await api(`/api/v1/staff/events/${eventId}/sms-notifications`, {
+    method: "PATCH",
+    token: adminToken,
+    body: { commandId: enableCommandId, revision: created.event.revision, enabled: true },
+  }), 200, "replay event SMS enable after provider configuration changes");
+  assert.equal(enableReplay.replayed, true);
+  assert.equal(enableReplay.event.smsNotificationsEnabled, true);
+  env.SMS_ORIGINATION_IDENTITY = "+18005550199";
+  env.SMS_OPT_OUT_LIST_NAME = "quickducks-production";
   const opened = await jsonBody(await post(`/api/v1/staff/events/${eventId}/open-registration`, {
     commandId: crypto.randomUUID(),
   }), 201, "open SMS event");
@@ -286,6 +304,43 @@ test("event SMS is default-off, administrator-controlled, provider-gated, and em
   ), "SENT");
   assert.equal(canonicalized.registration.phone, "(817) 320-6199");
   assert.deepEqual(deliveredSms.map((sms) => sms.to), ["+18173206199"]);
+
+  const stopped = await jsonBody(await post(`/api/v1/staff/events/${eventId}/registrations`, {
+    commandId: crypto.randomUUID(),
+    privateToken: randomToken(),
+    firstName: "Stopped",
+    lastName: "Number",
+    email: "stopped-number@example.com",
+    phone: "+18173206198",
+    emailNotificationsEnabled: false,
+    smsNotificationsEnabled: true,
+  }), 201, "register a provider-suppressed SMS destination");
+  const stoppedSms = database.prepare(
+    `SELECT id FROM email_notifications
+      WHERE registration_id = ? AND channel = 'SMS'
+        AND notification_type = 'REGISTRATION_CONFIRMED'`,
+  ).get(stopped.registration.registrationId);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async (_url, options) => {
+    assert.equal(options.headers["x-amz-target"], "PinpointSMSVoiceV2.DescribeOptedOutNumbers");
+    return Response.json({ OptedOutNumbers: [{ OptedOutNumber: "+18173206198" }] });
+  };
+  assert.equal(await processEmailNotification(
+    env,
+    stoppedSms.id,
+    async () => assert.fail("an SMS notification must not call the email sender"),
+  ), "CANCELLED");
+  assert.deepEqual({ ...database.prepare(
+    "SELECT status, status_reason FROM email_notifications WHERE id = ?",
+  ).get(stoppedSms.id) }, {
+    status: "SUPPRESSED",
+    status_reason: "DESTINATION_SUPPRESSED",
+  });
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM notification_suppressions WHERE channel = 'SMS'",
+  ).get().count, 1);
+  globalThis.fetch = originalFetch;
 
   const disabled = await jsonBody(await api(`/api/v1/staff/events/${eventId}/sms-notifications`, {
     method: "PATCH",
@@ -347,7 +402,9 @@ const raceToAwaitingFinal = async (
   database,
   { name, slug, racerCount, heatCapacity, releasedSpareDucks = 0, optInRegistrationIndex = null,
     optInRegistrationIndexes = null, deliverEmails = false, afterPairing = null,
-    afterRoundOneTransition = null, afterRoundOneResultRecorded = null, queueSendFailures = 0 },
+    afterRoundOneTransition = null, afterRoundOneResultRecorded = null,
+    afterRoundOneResultFinalized = null, queueSendFailures = 0,
+    smsEnabled = false, smsOptInRegistrationIndexes = [] },
 ) => {
   const {
     api,
@@ -357,6 +414,7 @@ const raceToAwaitingFinal = async (
     queuedNotifications,
     queueAttempts,
     sentEmails,
+    sentSms,
   } = createWorkerHarness(database, { deliverEmails, queueSendFailures });
   const created = await jsonBody(await post("/api/v1/staff/events", {
     commandId: crypto.randomUUID(),
@@ -366,7 +424,7 @@ const raceToAwaitingFinal = async (
     roundOneHeatCapacity: heatCapacity,
   }, adminToken), 201, "create event");
   const eventId = created.event.id;
-  await jsonBody(await api(`/api/v1/staff/events/${eventId}/configuration`, {
+  const configured = await jsonBody(await api(`/api/v1/staff/events/${eventId}/configuration`, {
     method: "PATCH",
     token: adminToken,
     body: {
@@ -377,6 +435,19 @@ const raceToAwaitingFinal = async (
       publicNamePolicy: "FIRST_NAME_LAST_INITIAL",
     },
   }), 200, "configure event");
+  if (smsEnabled) {
+    env.SMS_ORIGINATION_IDENTITY = "+18005550199";
+    env.SMS_OPT_OUT_LIST_NAME = "quickducks-production";
+    await jsonBody(await api(`/api/v1/staff/events/${eventId}/sms-notifications`, {
+      method: "PATCH",
+      token: adminToken,
+      body: {
+        commandId: crypto.randomUUID(),
+        revision: configured.event.revision,
+        enabled: true,
+      },
+    }), 200, "enable SMS for the race fixture");
+  }
   await jsonBody(await post(`/api/v1/staff/events/${eventId}/open-registration`, {
     commandId: crypto.randomUUID(),
   }), 201, "open registration");
@@ -393,7 +464,7 @@ const raceToAwaitingFinal = async (
       emailNotificationsEnabled: optInRegistrationIndexes === null
         ? index === optInRegistrationIndex
         : optInRegistrationIndexes.includes(index),
-      smsNotificationsEnabled: false,
+      smsNotificationsEnabled: smsOptInRegistrationIndexes.includes(index),
     }), 201, `walk-up registration ${index}`);
     const participant = {
       registrationId: registration.registration.registrationId,
@@ -525,6 +596,16 @@ const raceToAwaitingFinal = async (
       ), 200, "replay winner announcement confirmation");
       assert.equal(replay.replayed, true);
     }
+    await afterRoundOneResultFinalized?.({
+      database,
+      env,
+      api,
+      post,
+      eventId,
+      heat,
+      detail,
+      finalized,
+    });
   }
 
   await jsonBody(await post(`/api/v1/staff/events/${eventId}/start-final`, {
@@ -551,7 +632,7 @@ const raceToAwaitingFinal = async (
       ? optInRegistrationIndex === 0
       : optInRegistrationIndexes.includes(0),
   );
-  assert.equal(retainedContact.smsNotificationsEnabled, false);
+  assert.equal(retainedContact.smsNotificationsEnabled, smsOptInRegistrationIndexes.includes(0));
 
   // The participant record for each finalist, in the roster order the promotion
   // wrote, so a caller can name a podium finisher by position.
@@ -602,6 +683,7 @@ const raceToAwaitingFinal = async (
     queuedNotifications,
     queueAttempts,
     sentEmails,
+    sentSms,
   };
 };
 
@@ -729,6 +811,38 @@ test("opted-in racers receive each committed lifecycle email once", async (conte
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
 });
 
+test("SMS delivers the complete race lifecycle and the non-winner Round One result", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const race = await raceToAwaitingFinal(database, {
+    name: "Complete SMS Race",
+    slug: "complete-sms-race",
+    racerCount: 6,
+    heatCapacity: 3,
+    deliverEmails: true,
+    smsEnabled: true,
+    smsOptInRegistrationIndexes: [0, 1],
+  });
+  await race.recordAndAnnounce(race.finalHeat, [
+    { raceEntryId: race.finalists[0].raceEntryId, place: 1 },
+    { raceEntryId: race.finalists[1].raceEntryId, place: 2 },
+  ], "SMS final result");
+
+  const messagesFor = (phone) => race.sentSms.filter((sms) => sms.to === phone).map((sms) => sms.text);
+  const winnerMessages = messagesFor("+18173206000");
+  const nonWinnerMessages = messagesFor("+18173206001");
+  assert.equal(winnerMessages.length, 7, "registration, both assignments, both reminders, and both results");
+  assert.ok(winnerMessages.some((message) => /advanced to the Final/.test(message)));
+  assert.ok(winnerMessages.some((message) => /placed 1st in the Final/.test(message)));
+  assert.equal(nonWinnerMessages.length, 4, "registration, Round One assignment, reminder, and result");
+  assert.ok(nonWinnerMessages.some((message) => /did not advance to the Final/.test(message)));
+  assert.ok(nonWinnerMessages.every((message) => /Reply STOP to opt out\./.test(message)));
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM email_notifications WHERE channel = 'SMS' AND status <> 'SENT'",
+  ).get().count, 0);
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
 test("a called heat waits for running and result blockers before its upcoming reminder", async (context) => {
   const { database } = createDatabase();
   context.after(() => database.close());
@@ -786,6 +900,74 @@ test("a called heat waits for running and result blockers before its upcoming re
 
   assert.deepEqual(blockerStatuses, ["RUNNING", "AWAITING_RESULT"]);
   assert.equal(officialReminderObserved, true);
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("an upcoming reminder waits through a predecessor reopen and rearms after reannouncement", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  let checked = false;
+  await raceToAwaitingFinal(database, {
+    name: "Reopened Progression Race",
+    slug: "reopened-progression-race",
+    racerCount: 6,
+    heatCapacity: 3,
+    optInRegistrationIndex: 3,
+    afterRoundOneResultFinalized: async ({ env, eventId, heat, detail, post }) => {
+      if (heat.number !== 1 || checked) return;
+      const reminder = database.prepare(
+        `SELECT n.id
+           FROM email_notifications n JOIN heats h ON h.id = n.heat_id
+          WHERE n.notification_type = 'HEAT_UPCOMING'
+            AND h.round = 'ROUND_ONE' AND h.heat_number = 2`,
+      ).get();
+      assert.ok(reminder);
+      const reopened = await jsonBody(await post(
+        `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/reopen`,
+        {
+          commandId: crypto.randomUUID(),
+          revision: heat.revision,
+          reason: "The announced winner requires another finish-line review.",
+        },
+      ), 201, "reopen the preceding result");
+      heat.revision = reopened.heat.revision;
+      heat.status = reopened.heat.status;
+
+      let senderCalled = false;
+      assert.equal(await processEmailNotification(env, reminder.id, async () => {
+        senderCalled = true;
+        return { providerMessageId: "must-not-send" };
+      }), "CANCELLED");
+      assert.equal(senderCalled, false);
+      assert.equal(database.prepare(
+        "SELECT status_reason FROM email_notifications WHERE id = ?",
+      ).get(reminder.id).status_reason, "HEAT_NO_LONGER_NEXT");
+
+      const rerecorded = await jsonBody(await post(
+        `/api/v1/staff/events/${eventId}/heats/${heat.id}/results/finalize`,
+        {
+          commandId: crypto.randomUUID(),
+          revision: heat.revision,
+          results: [{ raceEntryId: detail.roster[0].raceEntryId, place: 1 }],
+        },
+      ), 201, "record the reviewed predecessor result");
+      heat.revision = rerecorded.heat.revision;
+      const reannounced = await jsonBody(await post(
+        `/api/v1/staff/events/${eventId}/heats/${heat.id}/winner-announced`,
+        { commandId: crypto.randomUUID(), revision: heat.revision },
+      ), 201, "reannounce the preceding result");
+      heat.revision = reannounced.heat.revision;
+      heat.status = reannounced.heat.status;
+      assert.equal(database.prepare(
+        "SELECT status FROM email_notifications WHERE id = ?",
+      ).get(reminder.id).status, "PENDING");
+      assert.equal(await processEmailNotification(env, reminder.id, async () => ({
+        providerMessageId: "rearmed-reminder",
+      })), "SENT");
+      checked = true;
+    },
+  });
+  assert.equal(checked, true);
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
 });
 
@@ -857,6 +1039,61 @@ test("the consumer cancels a result notification superseded before delivery", as
   }), "SENT");
   assert.equal(sent.length, 1);
   assert.match(sent[0].text, /You placed 2nd in the Final\./);
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("the consumer rechecks a result after the provider suppression lookup", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const race = await raceToAwaitingFinal(database, {
+    name: "Concurrent Correction Race",
+    slug: "concurrent-correction-race",
+    racerCount: 6,
+    heatCapacity: 3,
+    optInRegistrationIndex: 0,
+  });
+  const original = await race.recordAndAnnounce(race.finalHeat, [
+    { raceEntryId: race.finalists[0].raceEntryId, place: 1 },
+    { raceEntryId: race.finalists[1].raceEntryId, place: 2 },
+  ], "concurrent original final result");
+  const notification = database.prepare(
+    `SELECT id FROM email_notifications
+      WHERE registration_id = ? AND heat_id = ? AND notification_type = 'FINAL_RESULT'`,
+  ).get(race.finalists[0].registrationId, race.finalHeat.id);
+  let corrected = false;
+  let providerSendCalled = false;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/v2/email/suppression/addresses/")) {
+      await jsonBody(await race.post(
+        `/api/v1/staff/events/${race.eventId}/heats/${race.finalHeat.id}/results/correct`,
+        {
+          commandId: crypto.randomUUID(),
+          revision: original.heat.revision,
+          reason: "The finish-line review reversed the first two places.",
+          results: [
+            { raceEntryId: race.finalists[1].raceEntryId, place: 1 },
+            { raceEntryId: race.finalists[0].raceEntryId, place: 2 },
+          ],
+        },
+      ), 201, "correct the result during provider suppression lookup");
+      corrected = true;
+      return new Response(null, { status: 404 });
+    }
+    providerSendCalled = true;
+    return Response.json({ MessageId: "must-not-send" });
+  };
+
+  assert.equal(await processEmailNotification(race.env, notification.id), "CANCELLED");
+  assert.equal(corrected, true);
+  assert.equal(providerSendCalled, false);
+  assert.deepEqual({ ...database.prepare(
+    "SELECT status, status_reason FROM email_notifications WHERE id = ?",
+  ).get(notification.id) }, {
+    status: "CANCELLED",
+    status_reason: "RESULT_REVISION_SUPERSEDED",
+  });
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
 });
 
@@ -970,12 +1207,20 @@ test("a delayed upcoming reminder is cancelled after the called heat is reset", 
       if (operation !== "call" || cancellationChecked) return;
       cancellationChecked = true;
       const notification = database.prepare(
-        `SELECT id FROM email_notifications
+        `SELECT id, lifecycle_key FROM email_notifications
           WHERE heat_id = ? AND notification_type = 'HEAT_UPCOMING'`,
       ).get(heat.id);
       assert.ok(notification);
+      assert.equal(notification.lifecycle_key, "run:1");
       await transition(heat, "reset");
       assert.equal(heat.status, "LOADING");
+      const rerun = database.prepare(
+        `SELECT id, lifecycle_key, status FROM email_notifications
+          WHERE heat_id = ? AND notification_type = 'HEAT_UPCOMING'
+            AND lifecycle_key = 'run:2'`,
+      ).get(heat.id);
+      assert.ok(rerun);
+      assert.equal(rerun.status, "QUEUED");
       let senderCalled = false;
       assert.equal(await processEmailNotification(env, notification.id, async () => {
         senderCalled = true;
@@ -988,8 +1233,15 @@ test("a delayed upcoming reminder is cancelled after the called heat is reset", 
         status: "CANCELLED",
         status_reason: "HEAT_NO_LONGER_UPCOMING",
       });
+      const rerunMessages = [];
+      assert.equal(await processEmailNotification(env, rerun.id, async (email) => {
+        rerunMessages.push(email);
+        return { providerMessageId: "rerun-reminder" };
+      }), "SENT");
+      assert.equal(rerunMessages.length, 1);
+      assert.match(rerunMessages[0].subject, /coming up next/);
       // Continue the ordinary lifecycle after proving that reset invalidated
-      // the queued work. Logical-message uniqueness prevents another reminder.
+      // the old running and created one reminder for the genuine rerun.
       await transition(heat, "ready");
       await transition(heat, "call");
     },

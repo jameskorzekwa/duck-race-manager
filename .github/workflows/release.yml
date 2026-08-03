@@ -276,6 +276,8 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       PRODUCTION_URL: ${{ vars.PRODUCTION_URL }}
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      SMS_OPT_OUT_LIST_ARN: ${{ vars.SMS_OPT_OUT_LIST_ARN }}
+      SMS_ORIGINATION_IDENTITY_ARN: ${{ vars.SMS_ORIGINATION_IDENTITY_ARN }}
       SOURCE_SHA: ${{ needs.validate.outputs.source-sha }}
       WRANGLER_SEND_METRICS: "false"
       WWW_URL: ${{ vars.WWW_URL }}
@@ -499,13 +501,24 @@ jobs:
 
       - name: Deploy AWS infrastructure
         run: |
+          parameter_overrides=("AppOrigin=$PRODUCTION_URL")
+          if [[ -n "${SMS_ORIGINATION_IDENTITY_ARN:-}" || -n "${SMS_OPT_OUT_LIST_ARN:-}" ]]; then
+            if [[ -z "${SMS_ORIGINATION_IDENTITY_ARN:-}" || -z "${SMS_OPT_OUT_LIST_ARN:-}" ]]; then
+              printf 'SMS_ORIGINATION_IDENTITY_ARN and SMS_OPT_OUT_LIST_ARN must be configured together.\n' >&2
+              exit 1
+            fi
+            parameter_overrides+=(
+              "SmsOriginationIdentityArn=$SMS_ORIGINATION_IDENTITY_ARN"
+              "SmsOptOutListArn=$SMS_OPT_OUT_LIST_ARN"
+            )
+          fi
           aws cloudformation deploy \
             --region "$AWS_REGION" \
             --stack-name "$AWS_STACK_NAME" \
             --template-file infra/aws/quickducks.yaml \
             --role-arn "$AWS_CLOUDFORMATION_ROLE_ARN" \
             --capabilities CAPABILITY_NAMED_IAM \
-            --parameter-overrides "AppOrigin=$PRODUCTION_URL" \
+            --parameter-overrides "${parameter_overrides[@]}" \
             --tags Project=quickducks Environment=production "Version=$RELEASE_VERSION" "Commit=$SOURCE_SHA" \
             --no-fail-on-empty-changeset \
             --no-cli-pager

@@ -5,6 +5,20 @@ Parameters:
   AppOrigin:
     Type: String
     Default: https://quickducks.com
+  SmsOriginationIdentityArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[a-z0-9-]+:sms-voice:us-east-1:[0-9]{12}:[A-Za-z0-9_./:+-]+$"
+    Description: Exact registered SMS origination identity ARN; empty keeps runtime SMS access disabled
+  SmsOptOutListArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^$|^arn:[a-z0-9-]+:sms-voice:us-east-1:[0-9]{12}:opt-out-list/[A-Za-z0-9_./:+-]+$"
+    Description: Exact SMS opt-out list ARN; empty keeps runtime STOP-list access disabled
+
+Conditions:
+  HasSmsOriginationIdentityArn: !Not [!Equals [!Ref SmsOriginationIdentityArn, ""]]
+  HasSmsOptOutListArn: !Not [!Equals [!Ref SmsOptOutListArn, ""]]
 
 Resources:
   StaffUserPool:
@@ -124,12 +138,20 @@ Resources:
                   - ses:SendRawEmail
                 Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/quickducks.com
               - Effect: Allow
-                Action:
-                  - ses:GetSuppressedDestination
-                  - sms-voice:DescribeOptedOutNumbers
-                  - sms-voice:DescribeOptOutLists
-                  - sms-voice:SendTextMessage
+                Action: ses:GetSuppressedDestination
                 Resource: "*"
+              - !If
+                - HasSmsOriginationIdentityArn
+                - Effect: Allow
+                  Action: sms-voice:SendTextMessage
+                  Resource: !Ref SmsOriginationIdentityArn
+                - !Ref AWS::NoValue
+              - !If
+                - HasSmsOptOutListArn
+                - Effect: Allow
+                  Action: sms-voice:DescribeOptedOutNumbers
+                  Resource: !Ref SmsOptOutListArn
+                - !Ref AWS::NoValue
               - Effect: Allow
                 Action:
                   - cognito-idp:AdminCreateUser
