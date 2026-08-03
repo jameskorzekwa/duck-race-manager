@@ -85,6 +85,12 @@ const createDatabase = () => {
 
 const adminToken = "admin.test.token";
 const staffToken = "staff.test.token";
+const tinyJpeg = new Uint8Array([
+  0xff, 0xd8,
+  0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+  0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00,
+  0x00, 0xff, 0xd9,
+]);
 
 const verifyStaffToken = async (token) => {
   if (token === adminToken) return { sub: "admin-sub" };
@@ -123,6 +129,7 @@ const createWorkerHarness = (
   const queuedNotifications = [];
   const queueAttempts = [];
   const sentEmails = [];
+  const photoObjects = new Map();
   let remainingQueueSendFailures = queueSendFailures;
   let env;
   const emailSender = async (email) => {
@@ -139,6 +146,16 @@ const createWorkerHarness = (
     COGNITO_USER_POOL_CLIENT_ID: "client-example",
     COGNITO_DOMAIN: "https://quickducks-staff.example.com",
     DB: createD1(database),
+    DUCK_PHOTOS: {
+      async put(key, value) {
+        photoObjects.set(key, new Uint8Array(await new Response(value).arrayBuffer()));
+      },
+      async get(key) {
+        const bytes = photoObjects.get(key);
+        return bytes === undefined ? null : { body: new Response(bytes).body, size: bytes.byteLength };
+      },
+      async delete(key) { photoObjects.delete(key); },
+    },
     EMAIL_QUEUE: {
       async send(notificationId) {
         if (remainingQueueSendFailures > 0) {
@@ -171,7 +188,9 @@ const createWorkerHarness = (
     const headers = new Headers(options.headers);
     if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
     let body;
-    if (options.body !== undefined) {
+    if (options.rawBody !== undefined) {
+      body = options.rawBody;
+    } else if (options.body !== undefined) {
       headers.set("content-type", "application/json");
       body = JSON.stringify(options.body);
     }
@@ -188,8 +207,22 @@ const createWorkerHarness = (
     queuedNotifications,
     queueAttempts,
     sentEmails,
+    photoObjects,
     updateTasks,
     post: (path, body, token = staffToken) => api(path, { method: "POST", body, token }),
+    putPhoto: (duckId, eventId, commandId = crypto.randomUUID(), token = staffToken) => api(
+      `/api/v1/staff/inventory/ducks/${duckId}/photo`,
+      {
+        method: "PUT",
+        token,
+        headers: {
+          "content-type": "image/jpeg",
+          "x-quickducks-command-id": commandId,
+          "x-quickducks-event-id": eventId,
+        },
+        rawBody: tinyJpeg,
+      },
+    ),
   };
 };
 
@@ -211,6 +244,7 @@ const raceToAwaitingFinal = async (
   const {
     api,
     post,
+    putPhoto,
     env,
     worker,
     queuedNotifications,
@@ -272,6 +306,11 @@ const raceToAwaitingFinal = async (
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm duck");
+    await jsonBody(
+      await putPhoto(provisioning.duckId, eventId),
+      201,
+      `store required photo for duck ${participant.visibleNumber}`,
+    );
     const pairing = await jsonBody(await post(`/api/v1/staff/ducks/${participant.tagToken}/assignments`, {
       commandId: crypto.randomUUID(),
       eventId,
@@ -284,6 +323,7 @@ const raceToAwaitingFinal = async (
   await afterPairing?.({
     api,
     post,
+    putPhoto,
     env,
     worker,
     eventId,
@@ -310,6 +350,11 @@ const raceToAwaitingFinal = async (
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm the spare duck");
+    await jsonBody(
+      await putPhoto(provisioning.duckId, eventId),
+      201,
+      `store required photo for spare duck ${provisioning.visibleNumber}`,
+    );
     const spare = await jsonBody(await api(
       `/api/v1/staff/inventory/ducks/${provisioning.duckId}`,
       { token: staffToken },
@@ -771,7 +816,7 @@ test("a queued notification is cancelled when a real handler replaces its origin
     racerCount: 3,
     heatCapacity: 3,
     optInRegistrationIndex: 0,
-    afterPairing: async ({ post, eventId, participants }) => {
+    afterPairing: async ({ post, putPhoto, eventId, participants }) => {
       const participant = participants[0];
       const provisioning = await jsonBody(await post("/api/v1/staff/inventory/provisioning", {
         commandId: crypto.randomUUID(),
@@ -784,6 +829,11 @@ test("a queued notification is cancelled when a real handler replaces its origin
         provisioningCommandId: provisioning.provisioningCommandId,
         physicalWriteVerified: true,
       }), 201, "confirm replacement duck");
+      await jsonBody(
+        await putPhoto(provisioning.duckId, eventId),
+        201,
+        "store required replacement duck photo",
+      );
       const assigned = await jsonBody(await post(
         `/api/v1/staff/inventory/ducks/${provisioning.duckId}/assignments`,
         {
@@ -1606,7 +1656,7 @@ test("scanned podium places are least-privileged, validated, and cleared by a re
 test("a final reduced by a withdrawal is still published and the event completed", async (context) => {
   const { database } = createDatabase();
   context.after(() => database.close());
-  const { api, post } = createWorkerHarness(database);
+  const { api, post, putPhoto } = createWorkerHarness(database);
 
   const created = await jsonBody(await post("/api/v1/staff/events", {
     commandId: crypto.randomUUID(),
@@ -1664,6 +1714,11 @@ test("a final reduced by a withdrawal is still published and the event completed
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm duck");
+    await jsonBody(
+      await putPhoto(provisioning.duckId, eventId),
+      201,
+      `store required photo for duck ${participant.visibleNumber}`,
+    );
     const pairing = await jsonBody(await post(`/api/v1/staff/ducks/${participant.tagToken}/assignments`, {
       commandId: crypto.randomUUID(),
       eventId,
@@ -2238,6 +2293,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0020_email_notification_assignment.sql",
     "0021_email_delivery_claim.sql",
     "0022_pending_heat_result_announcement.sql",
+    "0023_duck_photos.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -2257,6 +2313,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
       ('staff-director', 'staff', 'RACE_DIRECTOR', '2026-07-26T00:00:00Z');
   `);
 
+  const photoObjects = new Map();
   const env = {
     APP_ORIGIN: "https://quickducks.com",
     AWS_ACCESS_KEY_ID: "test-access-key",
@@ -2266,6 +2323,16 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     COGNITO_USER_POOL_CLIENT_ID: "client-example",
     COGNITO_DOMAIN: "https://quickducks-staff.example.com",
     DB: createD1(database),
+    DUCK_PHOTOS: {
+      async put(key, value) {
+        photoObjects.set(key, new Uint8Array(await new Response(value).arrayBuffer()));
+      },
+      async get(key) {
+        const bytes = photoObjects.get(key);
+        return bytes === undefined ? null : { body: new Response(bytes).body, size: bytes.byteLength };
+      },
+      async delete(key) { photoObjects.delete(key); },
+    },
     EMAIL_QUEUE: { async send() {} },
     PUBLIC_SEARCH_RATE_LIMITER: { async limit() { return { success: true }; } },
     RACE_UPDATES: {
@@ -2297,7 +2364,9 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
     if (options.cookie !== undefined) headers.set("cookie", options.cookie);
     let body;
-    if (options.body !== undefined) {
+    if (options.rawBody !== undefined) {
+      body = options.rawBody;
+    } else if (options.body !== undefined) {
       headers.set("content-type", "application/json");
       body = JSON.stringify(options.body);
     }
@@ -2308,6 +2377,19 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     }), env, executionContext);
   };
   const post = (path, body, token = staffToken) => api(path, { method: "POST", body, token });
+  const putPhoto = (duckId, photoEventId) => api(
+    `/api/v1/staff/inventory/ducks/${duckId}/photo`,
+    {
+      method: "PUT",
+      token: staffToken,
+      headers: {
+        "content-type": "image/jpeg",
+        "x-quickducks-command-id": crypto.randomUUID(),
+        "x-quickducks-event-id": photoEventId,
+      },
+      rawBody: tinyJpeg,
+    },
+  );
 
   let turnstileChecks = 0;
   context.mock.method(globalThis, "fetch", async (input) => {
@@ -2511,6 +2593,11 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     }), 201, `confirm provisioned duck ${participant.visibleNumber}`);
     participant.duckId = intake.duck.id;
     assert.equal(intake.duck.inventoryStatus, "RESERVED_FOR_EVENT");
+    await jsonBody(
+      await putPhoto(provisioning.duckId, eventId),
+      201,
+      `store required photo for duck ${participant.visibleNumber}`,
+    );
 
     const anonymousTag = await jsonBody(await api(`/api/v1/ducks/${participant.tagToken}`), 200, "unpaired tag privacy");
     assert.deepEqual(anonymousTag, { destination: "HOME" });
@@ -3176,6 +3263,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "event_ducks",
     "duck_assignments",
     "duck_inventory_events",
+    "duck_photos",
     "heats",
     "heat_entries",
     "heat_results",

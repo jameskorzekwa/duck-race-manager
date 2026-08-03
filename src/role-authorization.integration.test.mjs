@@ -207,6 +207,7 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     insertRole.run(`${profileId}-${role}`, profileId, role, "2026-07-26T00:00:00Z");
   }
 
+  const photoObjects = new Map();
   const env = {
     APP_ORIGIN: "https://quickducks.com",
     AWS_ACCESS_KEY_ID: "test-access-key",
@@ -216,6 +217,14 @@ test("station roles enforce the complete operational matrix with live D1 actors"
     COGNITO_USER_POOL_CLIENT_ID: "client-example",
     COGNITO_DOMAIN: "https://quickducks-staff.example.com",
     DB: d1(database),
+    DUCK_PHOTOS: {
+      async get(key) {
+        const bytes = photoObjects.get(key);
+        return bytes === undefined ? null : { body: new Response(bytes).body, size: bytes.byteLength };
+      },
+      async put(key, value) { photoObjects.set(key, new Uint8Array(await new Response(value).arrayBuffer())); },
+      async delete(key) { photoObjects.delete(key); },
+    },
     EMAIL_QUEUE: { async send() {} },
     PUBLIC_SEARCH_RATE_LIMITER: { async limit() { return { success: true }; } },
   };
@@ -285,10 +294,40 @@ test("station roles enforce the complete operational matrix with live D1 actors"
       condition: "GOOD", location: "Race tent", notes: null, physicallyPresent: true,
     },
   ), 201, `duck manager intakes duck ${number}`);
-  await intake(101, duckOneToken);
+  const duckOne = await intake(101, duckOneToken);
   await intake(102, duckTwoToken);
   for (const [index, token] of fillerTokens.entries()) await intake(200 + index, token);
   assert.equal((await api(actors.registration, "/api/v1/staff/inventory/ducks")).status, 403);
+
+  const photoKey = `duck-photos/${eventId}/${duckOne.duck.id}.jpg`;
+  const intakeCommand = database.prepare(
+    "SELECT id FROM race_commands WHERE event_id = ? AND result_id = ? LIMIT 1",
+  ).get(eventId, duckOne.duck.id).id;
+  database.prepare(`
+    INSERT INTO duck_photos
+      (duck_id, event_id, provisioning_command_id, owner_staff_profile_id,
+       object_key, status, upload_command_id, content_sha256, byte_size,
+       width, height, created_at, updated_at, stored_at)
+    VALUES (?, ?, ?, 'ducks', ?, 'STORED', ?, ?, 3, 1, 1, ?, ?, ?)
+  `).run(
+    duckOne.duck.id,
+    eventId,
+    intakeCommand,
+    photoKey,
+    crypto.randomUUID(),
+    "a".repeat(64),
+    "2026-08-03T00:00:00Z",
+    "2026-08-03T00:00:00Z",
+    "2026-08-03T00:00:00Z",
+  );
+  photoObjects.set(photoKey, new Uint8Array([0xff, 0xd8, 0xd9]));
+  const photoPath = `/api/v1/staff/inventory/ducks/${duckOne.duck.id}/photo`;
+  for (const allowed of [actors.admin, actors.ducks, actors.director]) {
+    assert.equal((await api(allowed, photoPath)).status, 200);
+  }
+  for (const denied of [actors.registration, actors.announcer, actors.heats, actors.results, actors.none]) {
+    assert.equal((await api(denied, photoPath)).status, 403);
+  }
 
   const walkUp = await json(await post(
     actors.registration,

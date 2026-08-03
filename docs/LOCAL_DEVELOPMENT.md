@@ -53,8 +53,10 @@ retaining their application-side authorization, queue, and persistence paths.
 | `COGNITO_DOMAIN` | the Cognito hosted UI | the same origin as `APP_ORIGIN` |
 | `name` / `routes` | `quickducks`, both custom domains | `quickducks-local`, none |
 
-The D1, Durable Object, queue, and rate-limiter bindings are identical, because
-Wrangler simulates all four locally. Do not remove the `ratelimits` block from
+The D1, private R2 bucket, Durable Object, queue, and rate-limiter binding shapes
+are identical, because Wrangler simulates all five locally. The local photo
+bucket is named `quickducks-duck-photos-local` and persists only under the chosen
+local Wrangler state directory; it never reaches the production bucket. Do not remove the `ratelimits` block from
 the local config: `src/api.ts` reads that binding without an undefined guard, so
 public search, follow, unfollow, duck naming, and self-service delete would throw.
 
@@ -143,6 +145,7 @@ it, plain http fails in three ways at once:
   is rewritten to `https://` and the page breaks.
 - Web NFC refuses to run outside a secure context, so the inventory station
   cannot work at all.
+- Camera capture for the required intake photo is also a secure-context feature.
 
 So `isLocalPreviewOrigin` accepts a private IPv4 address **only over https**.
 Plain http off loopback fails at the guard, which names both conditions and shows
@@ -169,7 +172,7 @@ brew install mkcert && mkcert -install
 the CA on the device too (`mkcert -CAROOT`) and the warning disappears.
 
 **Android Chrome needs this for NFC.** Chrome withholds powerful features,
-Web NFC among them, from an origin whose certificate it does not trust — so
+Web NFC and camera access among them, from an origin whose certificate it does not trust — so
 `/staff/inventory-intake` needs a `mkcert` certificate the phone trusts, not a
 tapped-through warning. That is the one part of the site a self-signed
 certificate will not get you.

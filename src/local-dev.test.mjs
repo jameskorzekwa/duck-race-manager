@@ -117,6 +117,7 @@ test("the local configuration is loopback-only and binds no production resource"
   // `wrangler dev --remote`, where these identifiers are what would resolve.
   assert.notEqual(local.d1_databases[0].database_id, production.d1_databases[0].database_id);
   assert.notEqual(local.d1_databases[0].database_name, production.d1_databases[0].database_name);
+  assert.notEqual(local.r2_buckets[0].bucket_name, production.r2_buckets[0].bucket_name);
   assert.notEqual(local.queues.producers[0].queue, production.queues.producers[0].queue);
   assert.notEqual(local.queues.consumers[0].queue, production.queues.consumers[0].queue);
   assert.notEqual(local.queues.consumers[0].dead_letter_queue, production.queues.consumers[0].dead_letter_queue);
@@ -126,6 +127,10 @@ test("the local configuration is loopback-only and binds no production resource"
   assert.deepEqual(
     local.d1_databases.map((database) => database.binding),
     production.d1_databases.map((database) => database.binding),
+  );
+  assert.deepEqual(
+    local.r2_buckets.map((bucket) => bucket.binding),
+    production.r2_buckets.map((bucket) => bucket.binding),
   );
   assert.deepEqual(local.durable_objects, production.durable_objects);
   assert.deepEqual(

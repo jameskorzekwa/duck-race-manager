@@ -4445,14 +4445,206 @@ const intakeSafeTakeoverCandidate = (record) => {
   };
 };
 
+const intakeCreatePhotoCapture = ({
+  video, canvas, getUserMedia, upload, commandId = () => crypto.randomUUID(),
+  show, hide, message, controls, complete, changed = () => {},
+}) => {
+  let stream = null;
+  let required = null;
+  let savedBlob = null;
+  let uploadCommandId = null;
+  let busy = false;
+  let cameraGeneration = 0;
+
+  const cameraProblem = (error) => error && ["NotAllowedError", "SecurityError"].includes(error.name)
+    ? "Camera access is blocked. Enable camera access for this site in Chrome settings, then press Retry camera access."
+    : "The rear camera could not start. Enable camera access for this site in Chrome settings if it is blocked, or close any other app using it, then press Retry camera access.";
+
+  // Acquiring a stream does not guarantee that the video element has started
+  // presenting frames yet. Give muted inline playback a short opportunity to
+  // start before enabling the one-press capture control; this also resumes an
+  // existing stream after the photo panel was hidden between ducks. An empty or
+  // synthetic MediaStream can leave play() pending forever, so it must never
+  // strand intake or prevent the operator from ending the station.
+  const attachCamera = async (cameraStream) => {
+    video.srcObject = cameraStream;
+    if (typeof video.play !== "function") return;
+    let timer = null;
+    try {
+      await Promise.race([
+        Promise.resolve(video.play()).catch(() => undefined),
+        new Promise((resolve) => { timer = setTimeout(resolve, 250); }),
+      ]);
+    } catch {
+      // Muted autoplay may already have succeeded despite a redundant play()
+      // rejection. Capture remains recoverable through its frame-level check.
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
+  };
+
+  const ensureCamera = async () => {
+    if (!required || busy) return false;
+    if (stream !== null && stream.getTracks().some((track) => track.readyState === "ended")) {
+      stream = null;
+      video.srcObject = null;
+    }
+    if (stream !== null) {
+      const activeStream = stream;
+      const generation = cameraGeneration;
+      await attachCamera(activeStream);
+      if (generation !== cameraGeneration || stream !== activeStream) return false;
+      controls({ capture: true, retryCamera: false, retrySave: savedBlob !== null });
+      return true;
+    }
+    busy = true;
+    controls({ capture: false, retryCamera: false, retrySave: false });
+    message("Starting the rear camera…", false);
+    const generation = cameraGeneration;
+    try {
+      const candidate = await getUserMedia({ audio: false, video: { facingMode: { ideal: "environment" } } });
+      if (generation !== cameraGeneration || !required) {
+        for (const track of candidate.getTracks()) track.stop();
+        return false;
+      }
+      stream = candidate;
+      await attachCamera(candidate);
+      if (generation !== cameraGeneration || stream !== candidate || !required) {
+        for (const track of candidate.getTracks()) track.stop();
+        if (stream === candidate) stream = null;
+        if (video.srcObject === candidate) video.srcObject = null;
+        return false;
+      }
+      message("Center Duck #" + required.visibleNumber + " in the camera, then capture once.", false);
+      controls({ capture: true, retryCamera: false, retrySave: savedBlob !== null });
+      return true;
+    } catch (error) {
+      stream = null;
+      if (generation !== cameraGeneration) return false;
+      message(cameraProblem(error), true);
+      controls({ capture: false, retryCamera: true, retrySave: savedBlob !== null });
+      return false;
+    } finally {
+      busy = false;
+      changed();
+    }
+  };
+
+  const saveCaptured = async () => {
+    message("Saving Duck #" + required.visibleNumber + " securely…", false);
+    try {
+      const result = await upload(required, uploadCommandId, savedBlob);
+      if (!result || !result.photo || result.photo.duckId !== required.duckId || result.photo.status !== "STORED") {
+        throw new Error("invalid-photo-confirmation");
+      }
+      const completedDuckId = required.duckId;
+      required = null;
+      savedBlob = null;
+      uploadCommandId = null;
+      hide();
+      complete(completedDuckId);
+      return true;
+    } catch {
+      message("The required photo is not stored yet. Keep this duck here and press Retry saving photo.", true);
+      controls({ capture: false, retryCamera: false, retrySave: true });
+      return false;
+    }
+  };
+
+  const save = async () => {
+    if (!required || !savedBlob || busy) return false;
+    busy = true;
+    controls({ capture: false, retryCamera: false, retrySave: false });
+    try {
+      return await saveCaptured();
+    } finally {
+      busy = false;
+      changed();
+    }
+  };
+
+  const capture = async () => {
+    if (!required || stream === null || busy) return false;
+    if (stream.getTracks().some((track) => track.readyState === "ended")) {
+      stream = null;
+      video.srcObject = null;
+      message("The camera stopped before capture. Press Retry camera access and keep this duck here.", true);
+      controls({ capture: false, retryCamera: true, retrySave: false });
+      return false;
+    }
+    // Lock before canvas encoding: two quick presses must not replace the saved
+    // retry blob while the first upload is uncertain under the same command ID.
+    busy = true;
+    controls({ capture: false, retryCamera: false, retrySave: false });
+    try {
+      const sourceWidth = Number(video.videoWidth) || 1280;
+      const sourceHeight = Number(video.videoHeight) || 960;
+      const scale = Math.min(1, 1280 / sourceWidth, 1280 / sourceHeight);
+      canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+      canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) {
+        message("The camera frame could not be captured. Keep this duck here and try again.", true);
+        controls({ capture: true, retryCamera: false, retrySave: false });
+        return false;
+      }
+      try {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        savedBlob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.82));
+      } catch {
+        savedBlob = null;
+      }
+      if (!savedBlob) {
+        message("The camera frame could not be captured. Keep this duck here and try again.", true);
+        controls({ capture: true, retryCamera: false, retrySave: false });
+        return false;
+      }
+      return await saveCaptured();
+    } finally {
+      busy = false;
+      changed();
+    }
+  };
+
+  return {
+    async begin(record) {
+      if (!record || typeof record.duckId !== "string" || !Number.isSafeInteger(record.visibleNumber)) return false;
+      required = { duckId: record.duckId, eventId: record.eventId, visibleNumber: record.visibleNumber };
+      uploadCommandId = typeof record.uploadCommandId === "string" ? record.uploadCommandId : commandId();
+      savedBlob = null;
+      show(required);
+      return ensureCamera();
+    },
+    capture,
+    retryCamera: ensureCamera,
+    retrySave: save,
+    stop() {
+      cameraGeneration += 1;
+      if (stream !== null) {
+        for (const track of stream.getTracks()) track.stop();
+      }
+      stream = null;
+      video.srcObject = null;
+      if (required) {
+        message("Camera stopped. The required photo is incomplete; press Retry camera access to continue.", true);
+        controls({ capture: false, retryCamera: true, retrySave: savedBlob !== null });
+      }
+    },
+    hasRequiredPhoto() { return required !== null; },
+    isBusy() { return busy; },
+  };
+};
+
 const intakeCreateProvisioningMachine = ({
   eventId, location, recover, start, classify, write, confirm: confirmProvisioning, refresh,
-  accepted, message, state, feedback, changed = () => {},
+  accepted, photoRequired = () => {}, message, state, feedback, changed = () => {},
   commandId = () => crypto.randomUUID(),
   scheduleReady = (callback) => setTimeout(callback, 900),
   beginBusy = () => () => {},
 }) => {
   let pending = null;
+  let photoPending = null;
+  let photoCompleting = false;
   let inFlight = false;
   let removing = false;
   let lastSerial = null;
@@ -4476,12 +4668,32 @@ const intakeCreateProvisioningMachine = ({
     return pending;
   };
 
+  const adoptPhoto = (record) => {
+    if (
+      !record || typeof record.duckId !== "string"
+      || typeof record.eventId !== "string"
+      || !Number.isSafeInteger(record.visibleNumber) || record.visibleNumber <= 0
+    ) return null;
+    photoPending = {
+      duckId: record.duckId,
+      eventId: record.eventId,
+      visibleNumber: record.visibleNumber,
+      uploadCommandId: typeof record.uploadCommandId === "string" ? record.uploadCommandId : null,
+    };
+    state("photo");
+    message("Duck #" + photoPending.visibleNumber + " is saved. Its required photo must be stored before the next intake.", false);
+    photoRequired(photoPending);
+    changed();
+    return photoPending;
+  };
+
   const recoverPending = async () => {
     const selectedEventId = eventId();
     if (!selectedEventId) return null;
     const record = await recover(selectedEventId);
-    if (record) adopt(record);
-    return pending;
+    if (record && record.status === "PHOTO_REQUIRED") adoptPhoto(record);
+    else if (record) adopt(record);
+    return photoPending || pending;
   };
 
   const beginRemove = () => {
@@ -4520,12 +4732,22 @@ const intakeCreateProvisioningMachine = ({
     }
   };
 
+  const finishAdded = async () => {
+    photoPending = null;
+    nextStartCommandId = commandId();
+    accepted({ outcome: "added" });
+    await refreshAfterOutcome();
+    feedback("added");
+    beginRemove();
+    void recoverPending().catch(() => {});
+  };
+
   const reading = async ({ serialNumber, canonicalUrls }) => {
     const transientSerial = typeof serialNumber === "string" && serialNumber ? serialNumber : null;
     const distinctCanonicalUrls = Array.isArray(canonicalUrls)
       ? Array.from(new Set(canonicalUrls.filter((value) => typeof value === "string")))
       : [];
-    if (inFlight || removing) return { accepted: false, reason: "busy" };
+    if (inFlight || removing || photoPending !== null || photoCompleting) return { accepted: false, reason: "busy" };
     if (transientSerial !== null && transientSerial === lastSerial) {
       return { accepted: false, reason: "repeated" };
     }
@@ -4666,13 +4888,34 @@ const intakeCreateProvisioningMachine = ({
       state("confirming");
       message("The sticker was written. Confirming its race reservation online.", false);
       try {
-        await confirmProvisioning({
+        const confirmed = await confirmProvisioning({
           commandId: pending.confirmCommandId,
           eventId: selectedEventId,
           duckId: pending.duckId,
           provisioningCommandId: pending.provisioningCommandId,
           physicalWriteVerified: true,
         });
+        if (!confirmed || !confirmed.duck || confirmed.duck.id !== pending.duckId) {
+          throw new Error("invalid-confirmation");
+        }
+        const confirmedDuck = pending.duckId;
+        const visibleNumber = confirmed.duck.visibleNumber;
+        pending = null;
+        if (confirmed.photo && confirmed.photo.status === "STORED") {
+          await finishAdded();
+          return { accepted: true, outcome: "added" };
+        }
+        if (!confirmed.photo || confirmed.photo.status === "MISSING" || confirmed.photo.status === "UPLOADING") {
+          const adopted = adoptPhoto({
+            duckId: confirmedDuck,
+            eventId: selectedEventId,
+            visibleNumber,
+            uploadCommandId: confirmed.photo && confirmed.photo.uploadCommandId,
+          });
+          if (!adopted) throw new Error("invalid-photo-requirement");
+          return { accepted: true, outcome: "photo-required", duckId: confirmedDuck };
+        }
+        throw new Error("invalid-photo-state");
       } catch (error) {
         lastSerial = null;
         state("error");
@@ -4682,14 +4925,7 @@ const intakeCreateProvisioningMachine = ({
         return { accepted: false, reason: "confirm-uncertain" };
       }
 
-      pending = null;
-      nextStartCommandId = commandId();
-      accepted({ outcome: "added" });
-      await refreshAfterOutcome();
-      feedback("added");
-      beginRemove();
-      void recoverPending().catch(() => {});
-      return { accepted: true, outcome: "added" };
+      return { accepted: true, outcome: "photo-required", duckId: photoPending && photoPending.duckId };
     } finally {
       inFlight = false;
       endBusy();
@@ -4701,15 +4937,31 @@ const intakeCreateProvisioningMachine = ({
     reading,
     recover: recoverPending,
     adoptTakeover: adopt,
+    async completePhoto(duckId) {
+      if (!photoPending || photoPending.duckId !== duckId || photoCompleting) return false;
+      photoCompleting = true;
+      changed();
+      try {
+        await finishAdded();
+        return true;
+      } finally {
+        photoCompleting = false;
+        changed();
+      }
+    },
     end() {
-      if (inFlight || removing || pending !== null) return false;
+      // Once confirmation has durably created the photo requirement, the NFC
+      // operation itself is finished. Permit End while that reading's final
+      // microtask unwinds so a denied camera cannot leave the station stuck in
+      // its pre-photo busy state.
+      if (removing || pending !== null || photoCompleting || (inFlight && photoPending === null)) return false;
       lastSerial = null;
       nextStartCommandId = commandId();
       changed();
       return true;
     },
     resetForEvent() {
-      if (inFlight || removing || pending !== null) return false;
+      if (inFlight || removing || pending !== null || photoPending !== null) return false;
       pending = null;
       removing = false;
       lastSerial = null;
@@ -4717,8 +4969,10 @@ const intakeCreateProvisioningMachine = ({
       changed();
       return true;
     },
-    hasPending() { return pending !== null; },
-    isBusy() { return inFlight || removing; },
+    hasPending() { return pending !== null || photoPending !== null; },
+    hasNfcPending() { return pending !== null; },
+    hasPhotoPending() { return photoPending !== null; },
+    isBusy() { return inFlight || removing || photoCompleting; },
   };
 };
 
@@ -5116,6 +5370,9 @@ const releaseReservationForm = document.querySelector("[data-reservation-release
 const deleteDuckForm = document.querySelector("[data-duck-delete-form]");
 const deleteDuckEffect = document.querySelector("[data-delete-duck-effect]");
 const inventoryCloseButton = document.querySelector("[data-close-inventory-detail]");
+const inventoryPhoto = document.querySelector("[data-inventory-photo]");
+const inventoryPhotoImage = document.querySelector("[data-inventory-photo-image]");
+const inventoryPhotoStatus = document.querySelector("[data-inventory-photo-status]");
 
 let currentEvent = null;
 let selectedDuck = null;
@@ -5224,6 +5481,11 @@ const clearInventoryDetail = () => {
   inventoryFacts.replaceChildren();
   inventoryHistory.replaceChildren();
   document.querySelector("[data-label-result]").replaceChildren();
+  inventoryPhoto.hidden = true;
+  inventoryPhotoImage.removeAttribute("src");
+  inventoryPhotoImage.alt = "";
+  inventoryPhotoImage.hidden = true;
+  inventoryPhotoStatus.textContent = "";
   for (const form of inventoryDetail.querySelectorAll("form")) form.reset();
   for (const disclosure of inventoryDetail.querySelectorAll("details")) disclosure.open = false;
   inventoryDuckNameForm.hidden = true;
@@ -5310,6 +5572,7 @@ const renderDuckDetail = (body) => {
     ["Duck name", duck.duckName ? inventoryDuckNameLabel(duck) : "Not named"],
     ["Location", duck.location || "Not set"],
     ["Tag", duck.tag ? humanize(duck.tag.status) : "No tag"],
+    ["Required photo", duck.photo ? humanize(duck.photo.status) : "Not required for this intake"],
     ["Reservation", duck.reservation ? duck.reservation.event.name + (duck.reservation.releasedAt ? " · released" : " · active") : "None"],
     ["Participant", duck.participant
       ? duck.participant.firstName
@@ -5327,6 +5590,26 @@ const renderDuckDetail = (body) => {
   unassignForm.hidden = !duck.assignment;
   releaseReservationForm.hidden = !duck.reservation || Boolean(duck.reservation.releasedAt) || Boolean(duck.assignment);
   renderDeleteEffect(duck);
+  if (duck.photo) {
+    inventoryPhoto.hidden = false;
+    inventoryPhotoStatus.textContent = duck.photo.status === "STORED"
+      ? "Required intake photo stored privately."
+      : "Required intake photo incomplete. Return to the blank sticker station to capture it.";
+    if (duck.photo.status === "STORED" && typeof duck.photo.url === "string") {
+      inventoryPhotoImage.src = duck.photo.url;
+      inventoryPhotoImage.alt = "Inventory photo of Duck #" + duck.visibleNumber;
+      inventoryPhotoImage.hidden = false;
+    } else {
+      inventoryPhotoImage.removeAttribute("src");
+      inventoryPhotoImage.alt = "";
+      inventoryPhotoImage.hidden = true;
+    }
+  } else {
+    inventoryPhoto.hidden = true;
+    inventoryPhotoImage.removeAttribute("src");
+    inventoryPhotoImage.hidden = true;
+    inventoryPhotoStatus.textContent = "";
+  }
   inventoryHistory.replaceChildren();
   for (const item of body.history.inventoryEvents) {
     inventoryHistory.append(historyCard(humanize(item.action), item.occurredAt + " · " + (item.actor.displayName || "Staff")));
@@ -5525,6 +5808,14 @@ const intakeTakeoverButton = document.querySelector("[data-takeover-provisioning
 const intakeRuntimeNotice = document.querySelector("[data-intake-runtime]");
 const intakeRuntimeMessage = document.querySelector("[data-intake-runtime-message]");
 const intakeControls = document.querySelector("[data-intake-controls]");
+const intakePhotoRoot = document.querySelector("[data-intake-photo]");
+const intakePhotoPrompt = document.querySelector("[data-intake-photo-prompt]");
+const intakePhotoVideo = document.querySelector("[data-intake-photo-video]");
+const intakePhotoCanvas = document.querySelector("[data-intake-photo-canvas]");
+const intakePhotoMessage = document.querySelector("[data-intake-photo-message]");
+const intakeCapturePhotoButton = document.querySelector("[data-capture-intake-photo]");
+const intakeRetryCameraButton = document.querySelector("[data-retry-intake-camera]");
+const intakeRetryPhotoButton = document.querySelector("[data-retry-intake-photo]");
 const intakeAppOrigin = inventoryRoot.dataset.appOrigin;
 
 let intakeTopLevel = false;
@@ -5557,6 +5848,7 @@ let intakeAudio = null;
 let intakeTakeoverCandidate = null;
 let intakeNfcStation = null;
 let intakeMachine = null;
+let intakePhotoCapture = null;
 const intakeEnabled = intakeRuntimeIssue() === null;
 
 const intakeSetMessage = (value, isError = false) => {
@@ -5574,6 +5866,7 @@ const intakeSetState = (value) => {
     ended: "Ended",
     ready: "Ready",
     remove: "Remove duck",
+    photo: "Photo required",
     reserving: "Reserving URL",
     writing: "Writing sticker",
   };
@@ -5587,12 +5880,20 @@ const intakeUpdateControls = () => {
   if (!intakeEnabled) return;
   const active = intakeStarted && intakeNfcStation?.isActive() === true;
   const pending = intakeMachine?.hasPending() === true;
-  const busy = intakeMachine?.isBusy() === true;
+  const machineBusy = intakeMachine?.isBusy() === true;
+  const photoBusy = intakePhotoCapture?.isBusy() === true;
+  const busy = machineBusy || photoBusy;
   const running = active || intakeStarting;
-  intakeNfcButton.disabled = !intakeSupported || !intakeCanProvision() || running;
+  intakeNfcButton.disabled = !intakeSupported || !intakeCanProvision() || running
+    || intakeMachine?.hasPhotoPending() === true;
   intakeNfcButton.textContent = active ? "NFC provisioning active" : "Start NFC provisioning";
   intakeEndNfcButton.hidden = !active;
-  intakeEndNfcButton.disabled = !active || busy || pending;
+  // A confirmed duck waiting on its photo is safe to leave even if the NFC
+  // reading is still unwinding. Camera/upload work has its own durable retry;
+  // an unconfirmed NFC reservation remains non-exitable.
+  intakeEndNfcButton.disabled = !active || intakeMachine?.hasNfcPending() === true
+    || (machineBusy && intakeMachine?.hasPhotoPending() !== true)
+    || (photoBusy && intakeMachine?.hasPhotoPending() !== true);
   eventSelect.disabled = running || pending;
   intakeLocation.disabled = running;
 };
@@ -5665,6 +5966,55 @@ if (intakeEnabled) {
   intakeRuntimeNotice.hidden = true;
   intakeControls.hidden = false;
 
+  const intakePhotoControls = ({ capture, retryCamera, retrySave }) => {
+    intakeCapturePhotoButton.disabled = !capture;
+    intakeRetryCameraButton.hidden = !retryCamera;
+    intakeRetryPhotoButton.hidden = !retrySave;
+    intakeUpdateControls();
+  };
+  intakePhotoCapture = intakeCreatePhotoCapture({
+    video: intakePhotoVideo,
+    canvas: intakePhotoCanvas,
+    getUserMedia: (constraints) => navigator.mediaDevices.getUserMedia(constraints),
+    upload: (record, commandId, blob) => api(
+      "/api/v1/staff/inventory/ducks/" + encodeURIComponent(record.duckId) + "/photo",
+      {
+        method: "PUT",
+        headers: {
+          accept: "application/json",
+          "content-type": "image/jpeg",
+          "x-quickducks-command-id": commandId,
+          "x-quickducks-event-id": record.eventId,
+        },
+        body: blob,
+      },
+    ),
+    show: (record) => {
+      intakePhotoPrompt.textContent = "Photograph Duck #" + record.visibleNumber;
+      intakePhotoRoot.hidden = false;
+      intakePhotoRoot.focus();
+      intakePhotoRoot.scrollIntoView({ block: "start", behavior: "smooth" });
+    },
+    hide: () => { intakePhotoRoot.hidden = true; },
+    message: (value, isError) => {
+      intakePhotoMessage.textContent = value;
+      intakePhotoMessage.classList.toggle("error-text", isError);
+    },
+    controls: intakePhotoControls,
+    complete: (duckId) => {
+      void intakeMachine.completePhoto(duckId).finally(() => {
+        // An operator may end NFC while keeping an incomplete photo retry on
+        // screen. If that retry later succeeds, the ended station must not keep
+        // the newly reopened camera alive.
+        if (!intakeStarted) intakePhotoCapture.stop();
+      });
+    },
+    changed: intakeUpdateControls,
+  });
+  intakeCapturePhotoButton.addEventListener("click", () => { void intakePhotoCapture.capture(); });
+  intakeRetryCameraButton.addEventListener("click", () => { void intakePhotoCapture.retryCamera(); });
+  intakeRetryPhotoButton.addEventListener("click", () => { void intakePhotoCapture.retrySave(); });
+
   intakeMachine = intakeCreateProvisioningMachine({
     eventId: () => (currentEvent ? currentEvent.id : ""),
     location: () => intakeLocation.value.trim(),
@@ -5682,6 +6032,7 @@ if (intakeEnabled) {
     confirm: (body) => intakePost("/api/v1/staff/inventory/provisioning/confirm", body),
     refresh: intakeRefreshStation,
     accepted: intakeAddHistory,
+    photoRequired: (record) => { void intakePhotoCapture.begin(record); },
     message: intakeSetMessage,
     state: (value) => {
       intakeSetState(value);
@@ -5703,10 +6054,15 @@ if (intakeEnabled) {
       intakeSetMessage("NFC scanning could not start. Use current Android Chrome over HTTPS, allow NFC, and keep this top-level page visible.", true);
     },
     onActive: () => {
-      intakeSetState("ready");
-      intakeSetMessage(intakeMachine.hasPending()
-        ? "A pending sticker was recovered. Retap that same sticker to finish it before using another."
-        : "Ready. Tap a sticker.", false);
+      if (intakeMachine.hasPhotoPending()) {
+        intakeSetState("photo");
+        intakeSetMessage("This duck's required photo is incomplete. Finish the photo before another intake.", true);
+      } else {
+        intakeSetState("ready");
+        intakeSetMessage(intakeMachine.hasPending()
+          ? "A pending sticker was recovered. Retap that same sticker to finish it before using another."
+          : "Ready. Tap a sticker.", false);
+      }
     },
   });
 
@@ -5794,16 +6150,29 @@ if (intakeEnabled) {
       return;
     }
     intakeNfcStation.stop();
+    intakePhotoCapture.stop();
     intakeStarted = false;
     if (intakeAudio && typeof intakeAudio.close === "function") void intakeAudio.close().catch(() => {});
     intakeAudio = null;
-    intakeSetState("ended");
-    intakeSetMessage("Scanning ended. Press Start to resume when ready.", false);
+    if (intakeMachine.hasPhotoPending()) {
+      intakeSetState("photo");
+      intakeSetMessage("Scanning ended, but this duck's required photo is incomplete. Retry the camera before starting another intake.", true);
+    } else {
+      intakeSetState("ended");
+      intakeSetMessage("Scanning ended. Press Start to resume when ready.", false);
+    }
     intakeUpdateControls();
   });
 } else {
   intakeShowRuntimeIssue(intakeRuntimeIssue());
 }
+
+window.addEventListener?.("pagehide", () => {
+  intakeNfcStation?.stop();
+  intakePhotoCapture?.stop();
+  if (intakeAudio && typeof intakeAudio.close === "function") void intakeAudio.close().catch(() => {});
+  intakeAudio = null;
+});
 
 const intakeRecoverSelected = async () => {
   if (!intakeEnabled) return;
@@ -5815,7 +6184,9 @@ const intakeRecoverSelected = async () => {
   // instruction. A recovered pending sticker still takes priority because it is
   // the only sticker the active reader may safely accept next.
   const active = intakeNfcStation?.isActive() === true;
-  intakeSetMessage(pending
+  intakeSetMessage(intakeMachine.hasPhotoPending()
+    ? "This duck is already saved, but its required photo is incomplete. Finish the photo before another intake."
+    : pending
     ? active
       ? "A pending sticker was recovered. Retap that same sticker to finish it before using another."
       : "A pending sticker is waiting. Press Start, then retap that same sticker."
@@ -9359,6 +9730,10 @@ const submitRegistrationSearch = () => {
   if (!registrationSearchInput) return;
   clearTimeout(registrationSearchTimer);
   registrationSearchInput.blur();
+  // Remove the prior result set before an explicit search. Otherwise a caller
+  // can focus a stale button while the replacement request is in flight, then
+  // lose focus when that old node is detached on a narrow/mobile viewport.
+  registrationResults?.replaceChildren();
   void runRegistrationSearch(registrationSearchInput.value, true);
 };
 

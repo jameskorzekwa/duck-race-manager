@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0019_round_one_walk_up_admission.sql`, browser
+the Worker, D1 migrations through `0023_duck_photos.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -1144,7 +1144,7 @@ manual field also accepts a pasted canonical tag URL or visible duck number.
 Both paths only select a roster entry; neither submits a result. Inventory tag
 provisioning and participant QR scanning remain separate from the finish station.
 Response headers continue to disable browser camera access at the finish station;
-only the duck-pairing page enables the camera.
+only the duck-pairing page and the role-protected inventory page enable it.
 
 The blank-sticker station is the **Scan ducks** section of `/staff/inventory`.
 The standalone `/staff/inventory-intake` entry renders that same complete,
@@ -1180,6 +1180,41 @@ browser writes exactly `APP_ORIGIN/t/<token>` as one URL record and does not mak
 the tag read-only. NFC hardware serial numbers are used only as transient
 in-memory read debouncing; they are never persisted, transmitted, displayed,
 logged, or used as duck identity.
+
+After the NFC write and server-side reservation are confirmed, the same station
+automatically opens an in-page photo task for the exact returned duck ID. It asks
+for the environment-facing camera, names the new visible duck number, and one
+**Capture and save photo** press canvas-encodes a bounded JPEG and uploads it.
+The canvas conversion strips camera-file metadata. The session count, remove-duck
+interlock, and next-sticker Ready state do not advance until the server reports
+that exact duck's association as `STORED`.
+
+The confirmation transaction creates one durable `MISSING` requirement before
+the photo begins. A reload recovers that requirement, and a new provisioning
+command for the same operator and event is refused until it is complete. Camera
+denial, capture failure, network loss, and object-storage failure leave the duck
+and tag persisted but keep the station in a visible retry state. Upload retries
+reuse one command and the same captured blob after an uncertain response; D1
+serializes the per-duck upload claim and each physical R2 write uses an isolated
+private candidate key. A delayed request that loses a stale-claim takeover cannot
+overwrite or finalize the winning object, and its unassociated candidate is
+deleted immediately or through the cleanup outbox. Retries therefore cannot
+allocate another duck, cross-associate a photo, or retain multiple intended
+photos.
+
+The station reuses its active camera stream across ducks. Ending intake or
+leaving the page stops every camera track. If Chrome blocks access, the station
+instructs the operator to enable camera access for this site and offers a retry;
+it never treats a missing photo as successful intake.
+
+Duck managers, race directors, and administrators can see photo status and the
+stored photo in the protected inventory detail. The image is proxied through a
+same-origin authenticated endpoint with `no-store` and never exposes an R2 key
+or public bucket URL. Public tag, numbered-duck, My Ducks, race-board, live-update,
+and participant-status projections contain no photo presence, URL, key, digest,
+or bytes. Deleting a duck or the event immediately removes the D1 association;
+a durable cleanup outbox deletes the now-inaccessible private object and retries
+through the scheduled Worker when object storage is temporarily unavailable.
 
 On iPhone, the operating system opens `/t/<tag-token>`. While a running or
 awaiting-result heat is displayed, the finish station keeps a one-minute

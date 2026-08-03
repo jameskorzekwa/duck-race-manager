@@ -266,6 +266,7 @@ export const rejectSensitiveKeys = (value) => {
     "emailNotificationsEnabled", "smsNotificationsEnabled", "ownershipProof",
     "email_notifications_enabled", "sms_notifications_enabled", "ownershipProofHash",
     "ownership_proof_hash", "notes", "location", "storageLocation", "audit", "tagToken",
+    "photo", "photoUrl", "photoKey", "objectKey", "contentSha256", "uploadCommandId",
   ]);
   const visit = (candidate) => {
     if (Array.isArray(candidate)) return candidate.forEach(visit);

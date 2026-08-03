@@ -131,6 +131,18 @@ test("the staff pairing page offers scanning, manual search, and a cancel path",
   assert.doesNotMatch(page, /QD1:/);
 });
 
+test("the inventory intake includes one automatic required-photo camera task", () => {
+  const page = renderStaffInventory("Inventory staff", "https://quickducks.com");
+  assert.match(page, /A photo finishes each intake\./);
+  assert.match(page, /data-intake-photo hidden[^>]*tabindex="-1"/);
+  assert.match(page, /<video class="duck-photo-video" data-intake-photo-video autoplay muted playsinline/);
+  assert.match(page, /data-capture-intake-photo disabled>Capture and save photo/);
+  assert.match(page, /data-retry-intake-camera hidden>Retry camera access/);
+  assert.match(page, /data-retry-intake-photo hidden>Retry saving photo/);
+  assert.match(page, /data-inventory-photo hidden/);
+  assert.match(style, /\.duck-photo-video \{[^}]*width:100%/);
+});
+
 test("result taker duck inspection exposes only the winner surface, not pairing controls", () => {
   const page = renderStaffDuck("a".repeat(32), "Result staff", false, ["RESULT_TAKER"]);
 

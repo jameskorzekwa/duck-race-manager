@@ -26,6 +26,12 @@
       "migrations_dir": "db/migrations"
     }
   ],
+  "r2_buckets": [
+    {
+      "binding": "DUCK_PHOTOS",
+      "bucket_name": "quickducks-duck-photos"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

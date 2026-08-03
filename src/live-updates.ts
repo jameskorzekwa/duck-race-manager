@@ -238,6 +238,12 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && pathname === "/api/v1/staff/inventory/ducks") {
     return domains("ducks", "event");
   }
+  // A successful private-photo upload changes the protected inventory detail
+  // projection from incomplete to stored. The signal carries no photo material;
+  // authorized inventory clients refetch the same authenticated endpoint.
+  if (method === "PUT" && /^\/api\/v1\/staff\/inventory\/ducks\/[^/]{1,128}\/photo$/.test(pathname)) {
+    return domains("ducks");
+  }
   // Deleting a duck reaches all three: the duck leaves inventory, its
   // participant goes back to the pairing queue, and their heat is left with a
   // racer holding nothing.

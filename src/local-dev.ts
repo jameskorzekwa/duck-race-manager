@@ -20,6 +20,7 @@ import {
   type OutboundEmail,
 } from "./email-notifications.ts";
 import { createWorker } from "./index.ts";
+import { drainDuckPhotoCleanup } from "./duck-operations.ts";
 import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
 import { escapeHtml } from "./site.ts";
 import type { Env } from "./types.ts";
@@ -411,6 +412,7 @@ const localWorker: ExportedHandler<Env> = {
   },
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    ctx.waitUntil(drainDuckPhotoCleanup(env));
   },
 };
 

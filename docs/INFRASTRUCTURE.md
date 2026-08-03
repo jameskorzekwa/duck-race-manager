@@ -9,6 +9,7 @@
 | Redirect origin | `https://www.quickducks.com` | Worker Custom Domain; application returns `308` |
 | Web and API | Cloudflare Worker `quickducks` | `wrangler.jsonc` and merge-driven production releases |
 | Database | Cloudflare D1 `quickducks-prod` | Wrangler and `db/migrations` |
+| Private duck photos | Cloudflare R2 `quickducks-duck-photos`, binding `DUCK_PHOTOS` | One-time private bucket creation and `wrangler.jsonc` |
 | Live refresh fan-out | Durable Object class `RaceUpdates`, binding `RACE_UPDATES` | Wrangler class migration and Worker deployment |
 | Public search limit | Workers binding `PUBLIC_SEARCH_RATE_LIMITER` | `wrangler.jsonc` |
 | Email queue | Cloudflare Queue `quickducks-email` | Wrangler producer/consumer and `EMAIL_QUEUE` binding |
@@ -20,7 +21,8 @@
 
 Porkbun remains the registrar. Cloudflare becomes the authoritative DNS
 provider after the registrar uses the nameservers assigned to the Cloudflare
-zone. The Worker, Durable Object namespace, D1 database, queues, zone, Turnstile widget, and AWS account
+zone. The Worker, Durable Object namespace, D1 database, private R2 bucket,
+queues, zone, Turnstile widget, and AWS account
 are production resources. Do not create substitutes during a release.
 
 ## Security Boundaries
@@ -481,11 +483,13 @@ registrar.
 
 Create a dedicated Cloudflare deployment token scoped to only this account and
 the `quickducks.com` zone. Start from **Edit Cloudflare Workers**, remove
-unrelated KV/R2 permissions, and grant the current permission names needed by
-this repository:
+unrelated KV permissions, and grant the current permission names needed by this
+repository:
 
 - Account: Workers Scripts Write.
 - Account: D1 Write, for `quickducks-prod` migrations.
+- Account: the narrow R2 object read/write permission scoped to the existing
+  `quickducks-duck-photos` bucket, for the Worker's private binding.
 - Account: Account Settings Read, if Wrangler requires account discovery.
 - Zone `quickducks.com`: Workers Routes Write, for both Custom Domains.
 
@@ -503,13 +507,14 @@ Use the narrowest resource scopes available. Put the token only in the GitHub
 `production` environment as `CLOUDFLARE_API_TOKEN`. Put the non-secret account
 ID in `CLOUDFLARE_ACCOUNT_ID`. Do not use a Global API Key.
 
-### D1 and Queues
+### D1, R2, and Queues
 
 With a browser-authenticated local Wrangler session, create the named resources
 once if they do not already exist:
 
 ```sh
 npx wrangler d1 create quickducks-prod
+npx wrangler r2 bucket create quickducks-duck-photos
 npx wrangler queues create quickducks-email
 npx wrangler queues create quickducks-email-dlq
 ```
@@ -518,6 +523,26 @@ Put the returned D1 database ID in `wrangler.jsonc` and commit it. The committed
 binding must remain named `DB`, the database must remain `quickducks-prod`, and
 `migrations_dir` must remain `db/migrations`; the package scripts deliberately
 use the database name to avoid applying a migration to a renamed binding.
+
+Keep `quickducks-duck-photos` private. Do not attach a public development URL or
+custom domain and do not publish object keys or presigned URLs. The committed R2
+binding is named `DUCK_PHOTOS`; create the bucket before releasing the Worker.
+Wrangler validates the binding during deployment but this repository does not
+create production storage from a model or from application code. Migration
+`0023_duck_photos.sql` is additive and therefore safe if the migration lands but
+a missing bucket makes Worker deployment fail: the prior Worker ignores the new
+tables, and the release must be retried only after the named private bucket and
+token scope are corrected.
+
+Photo bytes live only in R2. D1 stores the protected association, bounded image
+metadata, and an event-independent cleanup outbox. Duck and event deletion remove
+the association transactionally; the request and one-minute scheduled handler
+drain object deletes idempotently. Cleanup for an in-flight upload — whether its
+association was deleted or a stale claim was taken over — waits through a
+five-minute safety grace so a delayed R2 write cannot appear after cleanup already
+ran. Monitor jobs that persist beyond that grace as a private-storage cleanup
+incident. Do not manually expose the bucket to work around a failed authenticated
+image read.
 
 Migration `0012_staff_role_assignments.sql` adds normalized, constrained staff
 role assignments and role-set revisions. It creates no assignment rows for
@@ -754,7 +779,8 @@ historical bootstrap gates, not approval steps to repeat for every merge:
   dedicated CloudFormation execution role.
 - The CloudFormation outputs match committed Wrangler variables.
 - SES identity, DKIM, MAIL FROM, production access, and test delivery are ready.
-- The D1 database and email queues exist in `CLOUDFLARE_ACCOUNT_ID`.
+- The D1 database, private `quickducks-duck-photos` R2 bucket, and email queues
+  exist in `CLOUDFLARE_ACCOUNT_ID`.
 - The account supports Durable Objects and the deployment token can apply the
   committed `RaceUpdates` class migration.
 - All existing migrations pass locally and production contains no manually
@@ -913,8 +939,8 @@ administrator workstation:
 npx wrangler rollback <known-good-worker-version-id>
 ```
 
-A Worker rollback does not roll back D1, Durable Object class migrations,
-queues, bindings, secrets, DNS, Cognito, IAM, or SES. Every rollback target must
+A Worker rollback does not roll back D1, R2 objects, Durable Object class
+migrations, queues, bindings, secrets, DNS, Cognito, IAM, or SES. Every rollback target must
 therefore be from a deployment at or after `RaceUpdates` migration `v1`, retain
 the recorded class lifecycle, and operate correctly with the current D1 schema.
 While the email consumer and cron bindings are active, the target must also
@@ -923,6 +949,13 @@ pre-email Worker. Pause or remove the consumer through a reviewed deployment
 before selecting such a target, then restore it only after a compatible forward
 release. If no compatible target exists, fix forward. Never select code that
 cannot operate on the current schemas and bindings.
+
+After migration `0023`, a pre-photo Worker is not an operational rollback target
+while NFC intake is available: it would ignore durable incomplete-photo rows and
+could present the next duck as ready. Retain the `DUCK_PHOTOS` binding and the
+scheduled cleanup handler in every rollback target. If no previously deployed
+photo-aware version exists, pause intake and deploy a forward fix rather than
+rolling back across this enforcement boundary.
 
 If live updates fail while HTTP and D1 remain healthy, do not restore D1 or
 alter race rows. Disconnected clients continue their five-second polling

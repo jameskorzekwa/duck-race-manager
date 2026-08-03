@@ -1,4 +1,5 @@
 import type { StaffActor } from "./auth.ts";
+import { drainDuckPhotoCleanup } from "./duck-operations.ts";
 import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
@@ -2083,6 +2084,10 @@ const forceDeleteEvent = async (
       scoped("duck_assignments"),
       scoped("event_ducks"),
       scoped("duck_inventory_events"),
+      // Remove private associations while the duck and its provisioning command
+      // still exist. The table's delete trigger writes event-independent R2
+      // cleanup jobs, which are drained after this transaction commits.
+      scoped("duck_photos"),
       global("browser_collection_registrations"),
       global("browser_registration_collections"),
       // `duck_tags.supersedes_tag_id` is the only self-reference in this delete
@@ -2130,6 +2135,7 @@ const forceDeleteEvent = async (
   if (results[0]?.meta.changes === 0 || results[results.length - 1]?.meta.changes === 0) {
     return json({ error: "Event deletion conflicted with another update. Refresh and try again." }, 409);
   }
+  await drainDuckPhotoCleanup(env);
   return json({ deleted: true, alreadyDeleted: false });
 };
 

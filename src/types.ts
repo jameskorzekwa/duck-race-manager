@@ -8,6 +8,7 @@ export interface Env {
   COGNITO_USER_POOL_CLIENT_ID: string;
   COGNITO_DOMAIN: string;
   DB: D1Database;
+  DUCK_PHOTOS: R2Bucket;
   EMAIL_QUEUE: Queue;
   PARTICIPANT_CONTACT_READ_RATE_LIMITER: RateLimit;
   PUBLIC_SEARCH_RATE_LIMITER: RateLimit;

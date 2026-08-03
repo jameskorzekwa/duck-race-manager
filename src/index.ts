@@ -9,6 +9,7 @@ import {
 } from "./api.ts";
 import { authenticateStaff } from "./auth.ts";
 import { hasAnyRole, type OperationalRole } from "./authorization.ts";
+import { drainDuckPhotoCleanup } from "./duck-operations.ts";
 import {
   announcerScript,
   appDatePickerScript,
@@ -113,9 +114,9 @@ const html = (body: string, status = 200, noindex = false, formActionOrigin?: st
     },
   });
 
-// Camera access stays denied for the whole site except the authenticated staff
-// duck-pairing page, which is the only surface that scans a participant QR
-// code. Public pages, APIs, and every other staff station keep `camera=()`.
+// Camera access stays denied except on authenticated staff pages that actively
+// scan a participant QR code or capture a required inventory photo. Public
+// pages, APIs, and every other staff station keep `camera=()`.
 const withCameraAccess = (response: Response): Response => {
   response.headers.set(
     "permissions-policy",
@@ -521,13 +522,13 @@ export const createWorker = (
       if (!hasAnyRole(actor, inventoryRoles)) {
         return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use duck inventory.", actor), 403, true));
       }
-      return withSessionCookies(staffHtml(renderStaffInventory(
+      return withSessionCookies(withCameraAccess(staffHtml(renderStaffInventory(
         actor.displayName ?? actor.email,
         appOrigin.origin,
         actor.isSystemAdmin,
         actor.roles,
         await publicPhase(),
-      )));
+      ))));
     }
 
     const station = stationPages.get(url.pathname);
@@ -642,6 +643,7 @@ export const createWorker = (
   },
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    ctx.waitUntil(drainDuckPhotoCleanup(env));
   },
 });
 

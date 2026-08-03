@@ -26,6 +26,7 @@ const migrationNames = [
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
   "0022_pending_heat_result_announcement.sql",
+  "0023_duck_photos.sql",
 ];
 
 const lifecycleStatuses = [
@@ -132,6 +133,104 @@ test("fresh migrations enforce event, duck, heat, and result relationships", () 
     VALUES ('bad-result', 'event', 'heat-1', 'entry-1', 'assignment-2', 1, '2026-07-25T00:00:00Z', 'staff', 'command-3');
   `), /FOREIGN KEY constraint failed/);
 
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0023 adds private one-photo requirements without backfilling existing ducks", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0023_duck_photos.sql"));
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES
+      ('staff', 'staff-sub', 'staff@example.com'),
+      ('uploading-staff', 'uploading-staff-sub', 'uploading@example.com');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event', 'test-race', 'Test Race', 'America/Denver', 'DRAFT');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('existing-duck', 1, 'AVAILABLE', '2026-08-03T00:00:00Z');
+  `);
+
+  applyMigrations(database, ["0023_duck_photos.sql"]);
+  assert.equal(count(database, "duck_photos"), 0, "existing/manual ducks are not invented as incomplete");
+
+  // The previously deployed Worker can keep inserting ducks without knowing the
+  // additive table exists.
+  database.exec(`
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('old-worker-duck', 2, 'AVAILABLE', '2026-08-03T00:00:01Z');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('confirm-command', 'event', 'CONFIRM_DUCK_PROVISIONING', 'old-worker-duck',
+            '2026-08-03T00:00:02Z', '2026-08-03T00:00:02Z');
+    INSERT INTO duck_photos
+      (duck_id, event_id, provisioning_command_id, owner_staff_profile_id,
+       status, created_at, updated_at)
+    VALUES ('old-worker-duck', 'event', 'confirm-command', 'staff', 'MISSING',
+            '2026-08-03T00:00:02Z', '2026-08-03T00:00:02Z');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO duck_photos
+      (duck_id, event_id, provisioning_command_id, owner_staff_profile_id,
+       status, created_at, updated_at)
+    VALUES ('existing-duck', 'event', 'confirm-command', 'staff', 'MISSING',
+            '2026-08-03T00:00:03Z', '2026-08-03T00:00:03Z');
+  `), /UNIQUE constraint failed/);
+  assert.throws(() => database.exec(`
+    UPDATE duck_photos SET status = 'STORED' WHERE duck_id = 'old-worker-duck';
+  `), /CHECK constraint failed/);
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('other-event', 'other-race', 'Other Race', 'UTC', 'DRAFT');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('cross-event-duck', 3, 'AVAILABLE', '2026-08-03T00:00:03Z');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('cross-event-command', 'event', 'CONFIRM_DUCK_PROVISIONING', 'cross-event-duck',
+            '2026-08-03T00:00:03Z', '2026-08-03T00:00:03Z');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO duck_photos
+      (duck_id, event_id, provisioning_command_id, owner_staff_profile_id,
+       status, created_at, updated_at)
+    VALUES ('cross-event-duck', 'other-event', 'cross-event-command', 'staff', 'MISSING',
+            '2026-08-03T00:00:03Z', '2026-08-03T00:00:03Z');
+  `), /FOREIGN KEY constraint failed/);
+  database.exec(`
+    INSERT INTO duck_photos
+      (duck_id, event_id, provisioning_command_id, owner_staff_profile_id,
+       object_key, status, upload_command_id, content_sha256, byte_size, width, height,
+       created_at, updated_at)
+    VALUES ('cross-event-duck', 'event', 'cross-event-command', 'uploading-staff',
+            'duck-photos/event/cross-event-duck/uploading.jpg', 'UPLOADING',
+            '22222222-2222-4222-8222-222222222222', '${"b".repeat(64)}', 100, 20, 10,
+            '2026-08-03T00:00:03Z', '2026-08-03T00:00:03Z');
+    DELETE FROM duck_photos WHERE duck_id = 'cross-event-duck';
+  `);
+  assert.equal(database.prepare(`
+    SELECT requested_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+4 minutes') AS delayed
+      FROM duck_photo_cleanup_jobs
+     WHERE object_key = 'duck-photos/event/cross-event-duck/uploading.jpg'
+  `).get().delayed, 1, "an in-flight write cannot appear after its cleanup job already ran");
+
+  database.exec(`
+    UPDATE duck_photos
+       SET status = 'STORED', object_key = 'duck-photos/event/old-worker-duck/candidate.jpg',
+           upload_command_id = '11111111-1111-4111-8111-111111111111',
+           content_sha256 = '${"a".repeat(64)}', byte_size = 100, width = 20, height = 10,
+           stored_at = '2026-08-03T00:00:04Z', updated_at = '2026-08-03T00:00:04Z'
+     WHERE duck_id = 'old-worker-duck';
+    DELETE FROM ducks WHERE id = 'old-worker-duck';
+  `);
+  assert.equal(count(database, "duck_photos"), 0);
+  assert.deepEqual(
+    database.prepare(`
+      SELECT object_key, attempts FROM duck_photo_cleanup_jobs
+       WHERE object_key = 'duck-photos/event/old-worker-duck/candidate.jpg'
+    `).all().map((row) => ({ ...row })),
+    [{ object_key: "duck-photos/event/old-worker-duck/candidate.jpg", attempts: 0 }],
+  );
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

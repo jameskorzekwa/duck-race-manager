@@ -1037,7 +1037,7 @@ test("My Ducks consumes only the matching same-origin relative private handoff o
 });
 
 const inventoryHelpers = () => new Function(
-  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
+  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreatePhotoCapture, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
 )();
 
 const androidChromeUserAgent = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
@@ -1291,7 +1291,7 @@ const makeProvisioningMachine = (overrides = {}) => {
   };
   const calls = {
     accepted: [], classifications: [], confirms: [], feedback: [], messages: [],
-    ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
+    photos: [], ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
   };
   let nextCommand = 0;
   const machine = intakeCreateProvisioningMachine({
@@ -1317,13 +1317,19 @@ const makeProvisioningMachine = (overrides = {}) => {
     },
     confirm: async (material) => {
       calls.confirms.push({ ...material });
-      return overrides.confirm ? overrides.confirm(material) : { replayed: false };
+      const result = overrides.confirm ? await overrides.confirm(material) : { replayed: false };
+      return {
+        duck: { id: pending.duckId, visibleNumber: pending.visibleNumber },
+        photo: { status: "STORED" },
+        ...result,
+      };
     },
     refresh: async () => {
       calls.refreshes += 1;
       if (overrides.refresh) return overrides.refresh();
     },
     accepted: (value) => calls.accepted.push(value),
+    photoRequired: (value) => calls.photos.push(value),
     message: (...value) => calls.messages.push(value),
     state: (value) => calls.states.push(value),
     feedback: (value) => calls.feedback.push(value),
@@ -1354,6 +1360,209 @@ test("blank NFC reading performs one generated start, exact write, and confirmat
   assert.deepEqual(await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }), { accepted: false, reason: "busy" });
   calls.ready[0]();
   assert.deepEqual(await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }), { accepted: false, reason: "repeated" });
+});
+
+test("confirmed NFC intake blocks the next duck until its required photo is stored", async () => {
+  const { calls, machine, pending } = makeProvisioningMachine({
+    confirm: async () => ({ photo: { status: "MISSING", uploadCommandId: null } }),
+  });
+  const result = await machine.reading({ serialNumber: "serial-photo", canonicalUrls: [] });
+
+  assert.deepEqual(result, { accepted: true, outcome: "photo-required", duckId: pending.duckId });
+  assert.equal(machine.hasPhotoPending(), true);
+  assert.equal(machine.hasPending(), true);
+  assert.equal(calls.accepted.length, 0, "a persisted duck is not a completed session addition yet");
+  assert.equal(calls.refreshes, 0);
+  assert.deepEqual(calls.photos, [{
+    duckId: pending.duckId,
+    eventId: "event-1",
+    visibleNumber: pending.visibleNumber,
+    uploadCommandId: null,
+  }]);
+  assert.deepEqual(
+    await machine.reading({ serialNumber: "another-duck", canonicalUrls: [] }),
+    { accepted: false, reason: "busy" },
+  );
+
+  assert.equal(await machine.completePhoto("another-duck"), false);
+  assert.equal(await machine.completePhoto(pending.duckId), true);
+  assert.equal(machine.hasPending(), false);
+  assert.deepEqual(calls.accepted, [{ outcome: "added" }]);
+  assert.equal(calls.refreshes, 1);
+  assert.equal(calls.states.at(-1), "remove");
+});
+
+test("server-confirmed photo completion stays serialized through the authoritative refresh", async () => {
+  let finishRefresh;
+  const refreshGate = new Promise((resolve) => { finishRefresh = resolve; });
+  const { machine, pending } = makeProvisioningMachine({
+    confirm: async () => ({ photo: { status: "MISSING", uploadCommandId: null } }),
+    refresh: () => refreshGate,
+  });
+  await machine.reading({ serialNumber: "serial-photo", canonicalUrls: [] });
+
+  const completion = machine.completePhoto(pending.duckId);
+  assert.equal(machine.isBusy(), true);
+  assert.deepEqual(
+    await machine.reading({ serialNumber: "next-too-early", canonicalUrls: [] }),
+    { accepted: false, reason: "busy" },
+  );
+  assert.equal(machine.end(), false);
+
+  finishRefresh();
+  assert.equal(await completion, true);
+  assert.equal(machine.isBusy(), true, "the remove-duck interlock follows the refresh");
+});
+
+test("inventory photo capture prefers and reuses the rear camera, retries one blob, and releases tracks", async () => {
+  const { intakeCreatePhotoCapture } = inventoryHelpers();
+  const calls = { constraints: [], controls: [], messages: [], uploads: [], complete: [], shown: [] };
+  let stopped = 0;
+  const stream = { getTracks: () => [{ stop: () => { stopped += 1; } }] };
+  const video = { srcObject: null, videoWidth: 800, videoHeight: 600 };
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ({ drawImage() {} }),
+    toBlob: (callback) => callback(new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" })),
+  };
+  let uploadAttempts = 0;
+  const capture = intakeCreatePhotoCapture({
+    video,
+    canvas,
+    getUserMedia: async (constraints) => { calls.constraints.push(constraints); return stream; },
+    upload: async (record, commandId, blob) => {
+      calls.uploads.push({ record, commandId, blob });
+      uploadAttempts += 1;
+      if (uploadAttempts === 1) throw new Error("storage unavailable");
+      return { photo: { duckId: record.duckId, status: "STORED" } };
+    },
+    commandId: () => "11111111-1111-4111-8111-111111111111",
+    show: (record) => calls.shown.push(record),
+    hide: () => calls.shown.push("hidden"),
+    message: (...message) => calls.messages.push(message),
+    controls: (state) => calls.controls.push(state),
+    complete: (duckId) => calls.complete.push(duckId),
+  });
+
+  const first = { duckId: "duck-1", eventId: "event-1", visibleNumber: 42 };
+  assert.equal(await capture.begin(first), true);
+  assert.deepEqual(calls.constraints, [{ audio: false, video: { facingMode: { ideal: "environment" } } }]);
+  assert.equal(await capture.capture(), false);
+  assert.match(calls.messages.at(-1)[0], /not stored yet/);
+  assert.equal(await capture.retrySave(), true);
+  assert.equal(calls.uploads.length, 2);
+  assert.equal(calls.uploads[0].blob, calls.uploads[1].blob, "an uncertain retry resends the same capture");
+  assert.equal(calls.uploads[0].commandId, calls.uploads[1].commandId);
+  assert.deepEqual(calls.complete, ["duck-1"]);
+
+  assert.equal(await capture.begin({ duckId: "duck-2", eventId: "event-1", visibleNumber: 43 }), true);
+  assert.equal(calls.constraints.length, 1, "the active permission and stream are reused for the next duck");
+  capture.stop();
+  assert.equal(stopped, 1);
+  assert.equal(video.srcObject, null);
+});
+
+test("inventory photo capture serializes quick repeated presses around one retry blob", async () => {
+  const { intakeCreatePhotoCapture } = inventoryHelpers();
+  const callbacks = [];
+  let uploads = 0;
+  const capture = intakeCreatePhotoCapture({
+    video: {
+      srcObject: null,
+      videoWidth: 800,
+      videoHeight: 600,
+    },
+    canvas: {
+      getContext: () => ({ drawImage() {} }),
+      toBlob: (callback) => callbacks.push(callback),
+    },
+    getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }),
+    upload: async () => {
+      uploads += 1;
+      return { photo: { duckId: "duck-1", status: "STORED" } };
+    },
+    show() {}, hide() {}, complete() {}, message() {}, controls() {},
+  });
+  await capture.begin({ duckId: "duck-1", eventId: "event-1", visibleNumber: 42 });
+
+  const first = capture.capture();
+  assert.equal(await capture.capture(), false, "a second press cannot replace the in-flight capture");
+  callbacks[0](new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" }));
+  assert.equal(await first, true);
+  assert.equal(uploads, 1);
+});
+
+test("inventory photo capture waits for live video playback before enabling one-press capture", async () => {
+  const { intakeCreatePhotoCapture } = inventoryHelpers();
+  let releasePlayback;
+  const playback = new Promise((resolve) => { releasePlayback = resolve; });
+  const controls = [];
+  const capture = intakeCreatePhotoCapture({
+    video: {
+      srcObject: null,
+      play: () => playback,
+    },
+    canvas: {},
+    getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }),
+    upload: async () => assert.fail("capture stays disabled before playback"),
+    show() {}, hide() {}, complete() {}, message() {},
+    controls: (value) => controls.push(value),
+  });
+
+  const beginning = capture.begin({ duckId: "duck-1", eventId: "event-1", visibleNumber: 42 });
+  await Promise.resolve();
+  assert.equal(capture.isBusy(), true);
+  assert.equal(controls.at(-1).capture, false);
+  assert.equal(await capture.capture(), false);
+  releasePlayback();
+  assert.equal(await beginning, true);
+  assert.equal(capture.isBusy(), false);
+  assert.equal(controls.at(-1).capture, true);
+});
+
+test("inventory camera denial gives site-permission recovery guidance", async () => {
+  const { intakeCreatePhotoCapture } = inventoryHelpers();
+  for (const name of ["NotAllowedError", "SecurityError"]) {
+    const messages = [];
+    const controls = [];
+    const denied = new Error("denied");
+    denied.name = name;
+    const capture = intakeCreatePhotoCapture({
+      video: { srcObject: null },
+      canvas: {},
+      getUserMedia: async () => { throw denied; },
+      upload: async () => assert.fail("no upload without a camera"),
+      show() {}, hide() {}, complete() {},
+      message: (...value) => messages.push(value),
+      controls: (value) => controls.push(value),
+    });
+    assert.equal(await capture.begin({ duckId: "duck-1", eventId: "event-1", visibleNumber: 42 }), false);
+    assert.match(messages.at(-1)[0], /Enable camera access for this site in Chrome settings/);
+    assert.equal(messages.at(-1)[1], true);
+    assert.equal(controls.at(-1).retryCamera, true);
+  }
+});
+
+test("leaving intake while camera permission is pending releases the late stream", async () => {
+  const { intakeCreatePhotoCapture } = inventoryHelpers();
+  let resolveCamera;
+  let stopped = 0;
+  const video = { srcObject: null };
+  const capture = intakeCreatePhotoCapture({
+    video,
+    canvas: {},
+    getUserMedia: () => new Promise((resolve) => { resolveCamera = resolve; }),
+    upload: async () => assert.fail("no upload after intake exits"),
+    show() {}, hide() {}, complete() {}, message() {}, controls() {},
+  });
+  const beginning = capture.begin({ duckId: "duck-1", eventId: "event-1", visibleNumber: 42 });
+  capture.stop();
+  resolveCamera({ getTracks: () => [{ stop: () => { stopped += 1; } }] });
+
+  assert.equal(await beginning, false);
+  assert.equal(stopped, 1);
+  assert.equal(video.srcObject, null);
 });
 
 test("provisioning serializes physical reads without queueing a second sticker", async () => {

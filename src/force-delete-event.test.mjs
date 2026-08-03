@@ -183,6 +183,15 @@ const seedFullEventDataset = (database, status) => {
     VALUES
       ('inventory-event', 'event_test', 'duck', 'DUCK_ASSIGNED', 'admin_test',
        '11111111-1111-4111-8111-111111111111', '2026-07-26T00:00:00Z', '{}');
+    INSERT INTO duck_photos
+      (duck_id, event_id, provisioning_command_id, owner_staff_profile_id,
+       object_key, status, upload_command_id, content_sha256, byte_size,
+       width, height, created_at, updated_at, stored_at)
+    VALUES
+      ('duck', 'event_test', '11111111-1111-4111-8111-111111111111', 'admin_test',
+       'duck-photos/event_test/duck.jpg', 'STORED',
+       '44444444-4444-4444-8444-444444444444', '${"a".repeat(64)}', 3, 1, 1,
+       '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
     INSERT INTO heats (id, event_id, round, heat_number, status)
     VALUES ('heat', 'event_test', 'ROUND_ONE', 1, 'PLANNED');
     INSERT INTO heat_entries
@@ -266,6 +275,7 @@ const eventLinkedTables = [
   "event_ducks",
   "duck_assignments",
   "duck_inventory_events",
+  "duck_photos",
   "heats",
   "heat_entries",
   "heat_results",
@@ -467,7 +477,15 @@ for (const status of [
     const database = migratedDatabase();
     context.after(() => database.close());
     seedFullEventDataset(database, status);
-    const env = makeEnv(sqliteD1(database));
+    const photoObjects = new Map([
+      ["duck-photos/event_test/duck.jpg", new Uint8Array([0xff, 0xd8, 0xd9])],
+    ]);
+    const env = {
+      ...makeEnv(sqliteD1(database)),
+      DUCK_PHOTOS: {
+        async delete(key) { photoObjects.delete(key); },
+      },
+    };
     const seededCommands = count(database, "race_commands");
 
     const wrongName = await handleEventOperations(
@@ -508,6 +526,8 @@ for (const status of [
     assert.equal(count(database, "staff_profiles"), 2);
     assert.equal(count(database, "staff_role_assignments"), 1);
     assert.equal(count(database, "organization_event_defaults"), 1);
+    assert.equal(count(database, "duck_photo_cleanup_jobs"), 0);
+    assert.equal(photoObjects.size, 0, "force delete drains the private photo object");
 
     const replay = await handleEventOperations(
       forceDeleteRequest({ commandId, revision: 0, confirmName: "Test Duck Race" }),
