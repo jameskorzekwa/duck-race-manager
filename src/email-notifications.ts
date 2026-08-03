@@ -501,7 +501,6 @@ export const isSmsOptedOutByAws = async (phone: string, env: Env): Promise<boole
   }
   const numbers = Array.isArray(result.OptedOutNumbers) ? result.OptedOutNumbers : [];
   return numbers.some((entry) => entry !== null && typeof entry === "object"
-    && (entry as { EndUserOptedOut?: unknown }).EndUserOptedOut === true
     && (entry as { OptedOutNumber?: unknown }).OptedOutNumber === phone);
 };
 

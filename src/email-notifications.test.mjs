@@ -208,7 +208,8 @@ test("AWS SMS uses the transactional API and checks the destination against the 
     requests.push({ url: String(url), options });
     if (options.headers["x-amz-target"] === "PinpointSMSVoiceV2.DescribeOptedOutNumbers") {
       return Response.json({
-        OptedOutNumbers: [{ EndUserOptedOut: true, OptedOutNumber: "+18173206150" }],
+        // false means staff/provider initiated the suppression, not sendable.
+        OptedOutNumbers: [{ EndUserOptedOut: false, OptedOutNumber: "+18173206150" }],
       });
     }
     return Response.json({ MessageId: "sms-message-123" });

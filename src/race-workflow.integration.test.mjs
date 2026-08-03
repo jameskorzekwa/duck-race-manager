@@ -355,6 +355,9 @@ test("event SMS is default-off, administrator-controlled, provider-gated, and em
     jsonBody(response, 200, `concurrent disable event SMS request ${index + 1}`)));
   assert.deepEqual(disabledBodies.map((body) => body.replayed).sort(), [false, true]);
   const disabled = disabledBodies[0].replayed ? disabledBodies[1] : disabledBodies[0];
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM audit_events WHERE command_id = ?",
+  ).get(disableCommandId).count, 1);
   assert.equal(disabled.event.smsNotificationsEnabled, false);
   assert.deepEqual({ ...database.prepare(
     `SELECT status, status_reason FROM email_notifications

@@ -772,28 +772,43 @@ const configureEventSms = async (
            FROM events WHERE id = ? AND revision = ?`,
       ).bind(commandId, now, now, actor.id, fingerprint, eventId, revision),
       env.DB.prepare(
-        `UPDATE events SET sms_notifications_enabled = ?, revision = revision + 1, updated_at = ?
+       `UPDATE events SET sms_notifications_enabled = ?, revision = revision + 1, updated_at = ?
           WHERE id = ? AND revision = ?
-            AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'CONFIGURE_EVENT_SMS')`,
-      ).bind(enabled ? 1 : 0, now, eventId, revision, commandId),
+            AND EXISTS (
+              SELECT 1 FROM race_commands
+               WHERE id = ? AND event_id = ? AND command_type = 'CONFIGURE_EVENT_SMS'
+                 AND request_fingerprint = ?
+            )`,
+      ).bind(enabled ? 1 : 0, now, eventId, revision, commandId, eventId, fingerprint),
       env.DB.prepare(
         `UPDATE email_notifications
             SET status = 'CANCELLED', terminal_at = ?, status_reason = 'SMS_DISABLED_FOR_EVENT',
                 retry_after = NULL, last_error_code = NULL, updated_at = ?
           WHERE event_id = ? AND channel = 'SMS' AND ? = 0
             AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
-            AND EXISTS (SELECT 1 FROM race_commands WHERE id = ? AND command_type = 'CONFIGURE_EVENT_SMS')`,
-      ).bind(now, now, eventId, enabled ? 1 : 0, commandId),
+            AND EXISTS (
+              SELECT 1 FROM race_commands
+               WHERE id = ? AND event_id = ? AND command_type = 'CONFIGURE_EVENT_SMS'
+                 AND request_fingerprint = ?
+            )`,
+      ).bind(now, now, eventId, enabled ? 1 : 0, commandId, eventId, fingerprint),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
            actor_type, occurred_at, details_json)
-         SELECT ?, ?, ?, ?, 'EVENT', ?, 'STAFF', ?, ?
-           FROM race_commands WHERE id = ? AND command_type = 'CONFIGURE_EVENT_SMS'`,
+          SELECT ?, ?, ?, ?, 'EVENT', ?, 'STAFF', ?, ?
+            FROM race_commands
+           WHERE id = ? AND event_id = ? AND command_type = 'CONFIGURE_EVENT_SMS'
+             AND request_fingerprint = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM audit_events existing
+                WHERE existing.command_id = ? AND existing.action IN ('EVENT_SMS_ENABLED', 'EVENT_SMS_DISABLED')
+             )`,
       ).bind(
         crypto.randomUUID(), eventId, commandId,
         enabled ? "EVENT_SMS_ENABLED" : "EVENT_SMS_DISABLED", eventId, now,
-        JSON.stringify({ staff_profile_id: actor.id, enabled }), commandId,
+        JSON.stringify({ staff_profile_id: actor.id, enabled }),
+        commandId, eventId, fingerprint, commandId,
       ),
     ]);
     if (results[0]?.meta.changes === 0 || results[1]?.meta.changes === 0) throw new Error("stale");
