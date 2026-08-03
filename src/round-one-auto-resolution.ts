@@ -4,6 +4,11 @@ import {
   noOtherUnstartedRoundOneHeatSql,
   pendingUnplacedWalkUpExistsSql,
 } from "./heat-operations.ts";
+import {
+  participantNotificationStatements,
+  publishEmailNotification,
+  publishPendingParticipantNotifications,
+} from "./email-notifications.ts";
 import type { Env } from "./types.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
 
@@ -113,7 +118,9 @@ interface CandidateRow {
   revision: number;
   eligible_count: number;
   race_entry_id: string | null;
+  registration_id: string | null;
   duck_assignment_id: string | null;
+  result_revision: number;
   final_heat_id: string | null;
   final_heat_capacity: number;
 }
@@ -135,7 +142,14 @@ const soleEligibleRacerColumn = (column: string): string => `(
 const candidateSql = `SELECT h.id, h.heat_number, h.revision,
        ${eligibleEntryCountSql("h.event_id", "h.id")} AS eligible_count,
        ${soleEligibleRacerColumn("sole.race_entry_id")} AS race_entry_id,
+       ${soleEligibleRacerColumn("sole_entry.registration_id")} AS registration_id,
        ${soleEligibleRacerColumn("sole_assignment.id")} AS duck_assignment_id,
+       MAX(
+         COALESCE((SELECT MAX(published.revision) FROM heat_results published
+                    WHERE published.heat_id = h.id), 0),
+         COALESCE((SELECT MAX(superseded.revision) FROM heat_result_history superseded
+                    WHERE superseded.heat_id = h.id), 0)
+       ) + 1 AS result_revision,
        (SELECT existing_final.id FROM heats existing_final
          WHERE existing_final.event_id = h.event_id AND existing_final.round = 'FINAL'
          LIMIT 1) AS final_heat_id,
@@ -220,16 +234,12 @@ const uncontestedStatements = (
   candidate: CandidateRow,
   raceEntryId: string,
   duckAssignmentId: string,
-  // Re-read for every heat rather than carried from the candidate snapshot: the
-  // first uncontested heat of a reconciliation creates the final, and the second
-  // one must promote into that final rather than inventing a second one it would
-  // then insert its finalist against.
-  existingFinalHeatId: string | null,
+  finalHeatId: string,
+  createFinalHeat: boolean,
   actorId: string,
   commandId: string,
   now: string,
 ): D1PreparedStatement[] => {
-  const finalHeatId = existingFinalHeatId ?? crypto.randomUUID();
   const statements: D1PreparedStatement[] = [
     env.DB.prepare(
       `INSERT INTO race_commands
@@ -308,7 +318,7 @@ const uncontestedStatements = (
       commandId, eventId, candidate.id,
     ),
   ];
-  if (existingFinalHeatId === null) {
+  if (createFinalHeat) {
     statements.push(env.DB.prepare(
       `INSERT INTO heats (id, event_id, round, heat_number, status, target_size, source_command_id)
        SELECT ?, ?, 'FINAL', 1, 'PLANNED', ?, ?
@@ -391,6 +401,7 @@ export const reconcileRoundOneHeats = async (
     .all<CandidateRow>().catch(() => null);
   if (candidates === null) return [];
   const resolutions: RoundOneAutoResolution[] = [];
+  const notificationIds: string[] = [];
   for (const candidate of candidates.results) {
     const now = new Date().toISOString();
     // A server-generated RFC 4122 v4 identifier, exactly like every other
@@ -409,6 +420,7 @@ export const reconcileRoundOneHeats = async (
       ).bind(eventId).first<{ id: string }>().catch(() => null);
       existingFinalHeatId = currentFinal === null ? null : currentFinal.id;
     }
+    const finalHeatId = existingFinalHeatId ?? crypto.randomUUID();
     const statements = uncontested
       ? uncontestedStatements(
         env,
@@ -416,12 +428,70 @@ export const reconcileRoundOneHeats = async (
         candidate,
         candidate.race_entry_id as string,
         candidate.duck_assignment_id as string,
-        existingFinalHeatId,
+        finalHeatId,
+        existingFinalHeatId === null,
         actorId,
         commandId,
         now,
       )
       : skipStatements(env, eventId, candidate, actorId, commandId, now);
+    const notifications: ReturnType<typeof participantNotificationStatements>[] = [];
+    if (uncontested && typeof candidate.registration_id === "string") {
+      notifications.push(
+        participantNotificationStatements(env, {
+          eventId,
+          registrationId: candidate.registration_id,
+          heatId: candidate.id,
+          type: "ROUND_RESULT",
+          lifecycleKey: `result:${candidate.id}:${candidate.result_revision}`,
+          commandId,
+          commandType: COMMAND_TYPES.UNCONTESTED_WINNER,
+          now,
+          resultRevision: candidate.result_revision,
+          resultPlace: 1,
+        }),
+        participantNotificationStatements(env, {
+          eventId,
+          registrationId: candidate.registration_id,
+          heatId: finalHeatId,
+          type: "FINAL_ASSIGNED",
+          lifecycleKey: `assignment:${finalHeatId}`,
+          commandId,
+          commandType: COMMAND_TYPES.UNCONTESTED_WINNER,
+          now,
+        }),
+      );
+    }
+    const nextHeat = await env.DB.prepare(
+      `SELECT id, run_sequence FROM heats
+        WHERE event_id = ? AND round = 'ROUND_ONE' AND id <> ?
+          AND status IN ('LOADING', 'READY', 'CALLING')
+        ORDER BY heat_number LIMIT 1`,
+    ).bind(eventId, candidate.id).first<{ id: string; run_sequence: number }>().catch(() => null);
+    if (nextHeat !== null) {
+      const recipients = await env.DB.prepare(
+        `SELECT r.id AS registration_id
+           FROM heat_entries he
+           JOIN race_entries re ON re.id = he.race_entry_id AND re.event_id = he.event_id
+           JOIN registrations r ON r.id = re.registration_id AND r.event_id = he.event_id
+          WHERE he.event_id = ? AND he.heat_id = ? AND r.status = 'ACTIVE'
+          ORDER BY he.slot_number`,
+      ).bind(eventId, nextHeat.id).all<{ registration_id: string }>().catch(() => null);
+      for (const recipient of recipients?.results ?? []) {
+        notifications.push(participantNotificationStatements(env, {
+          eventId,
+          registrationId: recipient.registration_id,
+          heatId: nextHeat.id,
+          type: "HEAT_UPCOMING",
+          lifecycleKey: `run:${nextHeat.run_sequence}`,
+          commandId,
+          commandType: uncontested ? COMMAND_TYPES.UNCONTESTED_WINNER : COMMAND_TYPES.SKIPPED,
+          now,
+          requireAuthoritativeUpcoming: true,
+        }));
+      }
+    }
+    statements.push(...notifications.flatMap((notification) => notification.statements));
     try {
       await env.DB.batch(statements);
     } catch {
@@ -434,6 +504,7 @@ export const reconcileRoundOneHeats = async (
       "SELECT id FROM race_commands WHERE id = ? AND event_id = ? LIMIT 1",
     ).bind(commandId, eventId).first<{ id: string }>().catch(() => null);
     if (committed === null) continue;
+    notificationIds.push(...notifications.flatMap((notification) => notification.ids));
     resolutions.push({
       heatId: candidate.id,
       heatNumber: candidate.heat_number,
@@ -441,5 +512,7 @@ export const reconcileRoundOneHeats = async (
       raceEntryId: uncontested ? candidate.race_entry_id : null,
     });
   }
+  await Promise.all(notificationIds.map((notificationId) => publishEmailNotification(env, notificationId)));
+  await publishPendingParticipantNotifications(env);
   return resolutions;
 };

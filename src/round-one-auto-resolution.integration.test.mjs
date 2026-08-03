@@ -92,7 +92,7 @@ const lookupCodeFor = (index) => {
   return code;
 };
 
-const seed = (database, { ducksPerHeat = 3, participantCount = 9 } = {}) => {
+const seed = (database, { ducksPerHeat = 3, participantCount = 9, optInIndexes = [] } = {}) => {
   database.exec("PRAGMA foreign_keys = ON");
   for (const name of migrationNames) {
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
@@ -111,15 +111,17 @@ const seed = (database, { ducksPerHeat = 3, participantCount = 9 } = {}) => {
        'REGISTRATION_OPEN', 'IMMEDIATE_FIXED', ${ducksPerHeat}, 50);
   `);
   const participants = [];
+  const optedIn = new Set(optInIndexes);
   for (let index = 1; index <= participantCount; index += 1) {
     const lookupCode = lookupCodeFor(index);
     const token = `tag-token-${String(index).padStart(16, "0")}`;
     database.exec(`
       INSERT INTO registrations
-        (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
-         submitted_at, status_changed_at)
+        (id, event_id, first_name, last_name, email, email_notifications_enabled,
+         status, lookup_code, private_token_hash, submitted_at, status_changed_at)
       VALUES
-        ('registration-${index}', 'event_test', 'Racer', 'Number${index}', 'SUBMITTED',
+        ('registration-${index}', 'event_test', 'Racer', 'Number${index}',
+         ${optedIn.has(index) ? `'racer${index}@example.test', 1` : "NULL, 0"}, 'SUBMITTED',
          '${lookupCode}', 'private-hash-${index}', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
       INSERT INTO race_entries (id, event_id, registration_id)
       VALUES ('entry-${index}', 'event_test', 'registration-${index}');
@@ -291,6 +293,14 @@ const auditActions = (database, action) => database.prepare(
   "SELECT subject_id, details_json FROM audit_events WHERE action = ? ORDER BY occurred_at, id",
 ).all(action);
 
+const notificationsFor = (database, registrationId) => database.prepare(
+  `SELECT n.notification_type, n.lifecycle_key, n.result_revision, n.result_place,
+          n.status, h.round, h.heat_number
+     FROM email_notifications n LEFT JOIN heats h ON h.id = n.heat_id
+    WHERE n.registration_id = ?
+    ORDER BY n.notification_type, n.lifecycle_key`,
+).all(registrationId).map((row) => ({ ...row }));
+
 const eventStatus = (database) =>
   database.prepare("SELECT status FROM events WHERE id = 'event_test'").get().status;
 
@@ -375,14 +385,18 @@ const setup = async (context, options) => {
   const database = new DatabaseSync(":memory:");
   context.after(() => database.close());
   const participants = seed(database, options);
-  const env = { DB: sqliteD1(database) };
+  const queuedNotifications = [];
+  const env = {
+    DB: sqliteD1(database),
+    EMAIL_QUEUE: { async send(notificationId) { queuedNotifications.push(notificationId); } },
+  };
   for (const participant of participants) await pair(env, participant);
   assert.equal((await lifecycle(env, "close-registration")).status, 201);
   const started = await lifecycle(env, "start-round-one");
   assert.equal(started.status, 201, await started.clone().text());
   assert.equal(eventStatus(database), "ROUND_ONE");
   assert.equal(heatRow(database, 3).status, "LOADING");
-  return { database, env, participants };
+  return { database, env, participants, queuedNotifications };
 };
 
 const heatThree = (participants) => participants.filter((participant) => participant.index >= 7);
@@ -408,7 +422,7 @@ test("two eligible racers left keeps the existing heat-running workflow", async 
 });
 
 test("one eligible racer left resolves the heat and promotes them to the final", async (context) => {
-  const { database, env, participants } = await setup(context);
+  const { database, env, participants } = await setup(context, { optInIndexes: [9] });
   const roster = rosterOf(database, 3);
   const [first, second, sole] = heatThree(participants);
 
@@ -425,6 +439,27 @@ test("one eligible racer left resolves the heat and promotes them to the final",
     "the only racer who could win is the winner, with no finish-line scan",
   );
   assert.equal(resultsOf(database, heat.id)[0].revision, 1);
+  assert.deepEqual(notificationsFor(database, sole.registrationId).filter((row) =>
+    ["FINAL_ASSIGNED", "ROUND_RESULT"].includes(row.notification_type)), [
+    {
+      notification_type: "FINAL_ASSIGNED",
+      lifecycle_key: `assignment:${finalHeat(database).id}`,
+      result_revision: null,
+      result_place: null,
+      status: "QUEUED",
+      round: "FINAL",
+      heat_number: 1,
+    },
+    {
+      notification_type: "ROUND_RESULT",
+      lifecycle_key: `result:${heat.id}:1`,
+      result_revision: 1,
+      result_place: 1,
+      status: "QUEUED",
+      round: "ROUND_ONE",
+      heat_number: 3,
+    },
+  ]);
   // Promotion happened in the same settlement, into a final created for it.
   assert.equal(finalHeat(database).status, "PLANNED");
   assert.deepEqual(finalRoster(database), [
@@ -623,6 +658,26 @@ test("no eligible racers left skips the heat, records no winner, and promotes no
     reason: "NO_ELIGIBLE_RACER",
   });
   assert.doesNotMatch(audit[0].details_json, /Racer|Number\d|tag-token/);
+  assertStructurallySound(database);
+});
+
+test("skipping an empty first heat atomically marks the next heat upcoming", async (context) => {
+  const { database, env, participants } = await setup(context, { optInIndexes: [4] });
+  withdrawWithLostReconciliation(database, participants[0].registrationId);
+  withdrawWithLostReconciliation(database, participants[1].registrationId);
+  const response = await withdraw(env, database, participants[2].registrationId);
+  assert.equal(response.status, 201, await response.clone().text());
+  assert.equal(heatRow(database, 1).status, "CANCELLED");
+  assert.deepEqual(notificationsFor(database, participants[3].registrationId).filter((row) =>
+    row.notification_type === "HEAT_UPCOMING"), [{
+    notification_type: "HEAT_UPCOMING",
+    lifecycle_key: "run:1",
+    result_revision: null,
+    result_place: null,
+    status: "QUEUED",
+    round: "ROUND_ONE",
+    heat_number: 2,
+  }]);
   assertStructurallySound(database);
 });
 

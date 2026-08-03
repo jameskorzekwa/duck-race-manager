@@ -149,8 +149,10 @@ test("release requires the bootstrap execution role without weakening deployment
   assert.match(release, /SMS_ORIGINATION_IDENTITY_ARN: \$\{\{ vars\.SMS_ORIGINATION_IDENTITY_ARN \}\}/);
   assert.match(release, /SMS_OPT_OUT_LIST_ARN: \$\{\{ vars\.SMS_OPT_OUT_LIST_ARN \}\}/);
   assert.match(release, /SMS_ORIGINATION_IDENTITY_ARN and SMS_OPT_OUT_LIST_ARN must be configured together/);
-  assert.match(release, /"SmsOriginationIdentityArn=\$SMS_ORIGINATION_IDENTITY_ARN"/);
-  assert.match(release, /"SmsOptOutListArn=\$SMS_OPT_OUT_LIST_ARN"/);
+  assert.match(release, /"SmsOriginationIdentityArn=\$\{SMS_ORIGINATION_IDENTITY_ARN:-\}"/);
+  assert.match(release, /"SmsOptOutListArn=\$\{SMS_OPT_OUT_LIST_ARN:-\}"/);
+  assert.match(release, /CloudFormation SMS origination identity does not match the production environment/);
+  assert.match(release, /CloudFormation SMS opt-out list does not match the production environment/);
   assert.match(release, /AWS_CLOUDFORMATION_ROLE_ARN\n\s+AWS_DEPLOY_ROLE_ARN/);
   assert.match(release, /arn:aws:iam::\$\{expectedAccountId\}:role\/quickducks-cloudformation-execution/);
   assert.match(release, /infra\/aws\/github-actions-bootstrap\.yaml infra\/aws\/quickducks\.yaml/);

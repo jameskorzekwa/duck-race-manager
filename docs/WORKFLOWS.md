@@ -145,6 +145,9 @@ A committed registration, Round One assignment, Final assignment, authoritative
 next-runnable heat, and official result create durable channel-specific outbox
 rows in the same D1 batch as the domain fact. The first heat becomes next when
 its round starts; later heats become next after the preceding official result.
+Automatic settlement follows the same rule: an uncontested winner receives the
+official result and Final assignment, and skipping or settling a heat marks its
+authoritative successor upcoming.
 Command retries, queue retries, reconciliation, and repeated station actions use
 logical lifecycle keys so each participant/channel/event fact sends at most
 once. A reset increments the heat running sequence and can therefore create one

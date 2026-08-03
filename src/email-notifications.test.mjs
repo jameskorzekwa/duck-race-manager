@@ -199,7 +199,7 @@ test("SES acceptance does not depend on a usable provider message ID", async (co
   }
 });
 
-test("AWS SMS uses the transactional API and checks every configured opt-out-list page", async (context) => {
+test("AWS SMS uses the transactional API and checks the destination against the configured opt-out list", async (context) => {
   fixedDate(context);
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
@@ -207,13 +207,9 @@ test("AWS SMS uses the transactional API and checks every configured opt-out-lis
   globalThis.fetch = async (url, options) => {
     requests.push({ url: String(url), options });
     if (options.headers["x-amz-target"] === "PinpointSMSVoiceV2.DescribeOptedOutNumbers") {
-      return requests.filter((request) => request.options.headers["x-amz-target"]
-        === "PinpointSMSVoiceV2.DescribeOptedOutNumbers").length === 1
-        ? Response.json({
-          OptedOutNumbers: [{ OptedOutNumber: "+18175550000" }],
-          NextToken: "next+/= page",
-        })
-        : Response.json({ OptedOutNumbers: [{ OptedOutNumber: "+18173206150" }] });
+      return Response.json({
+        OptedOutNumbers: [{ EndUserOptedOut: true, OptedOutNumber: "+18173206150" }],
+      });
     }
     return Response.json({ MessageId: "sms-message-123" });
   };
@@ -236,18 +232,11 @@ test("AWS SMS uses the transactional API and checks every configured opt-out-lis
   assert.equal(requests[1].url, "https://sms-voice.us-east-1.amazonaws.com/");
   assert.equal(requests[1].options.method, "POST");
   assert.deepEqual(JSON.parse(requests[1].options.body), {
-    MaxResults: 100,
     OptOutListName: "quickducks-production",
+    OptedOutNumbers: ["+18173206150"],
   });
   assert.equal(requests[1].options.headers["x-amz-target"], "PinpointSMSVoiceV2.DescribeOptedOutNumbers");
-  assert.equal(requests[2].url, "https://sms-voice.us-east-1.amazonaws.com/");
-  assert.equal(requests[2].options.method, "POST");
-  assert.deepEqual(JSON.parse(requests[2].options.body), {
-    MaxResults: 100,
-    OptOutListName: "quickducks-production",
-    NextToken: "next+/= page",
-  });
-  assert.match(requests[2].options.headers.authorization, /SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date;x-amz-target/);
+  assert.equal(requests.length, 2);
 });
 
 test("AWS SMS safely classifies JSON throttling as retryable", async (context) => {

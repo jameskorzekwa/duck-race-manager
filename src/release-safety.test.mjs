@@ -4,7 +4,11 @@ import test from "node:test";
 
 import { checkD1RolePreflight } from "../scripts/check-d1-role-preflight.mjs";
 import { isLocalPreviewOrigin, isLoopbackOrigin } from "./local-preview.ts";
-import { checkWorkerSecrets, requiredWorkerSecrets } from "../scripts/check-worker-secrets.mjs";
+import {
+  checkWorkerSecrets,
+  optionalSmsWorkerSecrets,
+  requiredWorkerSecrets,
+} from "../scripts/check-worker-secrets.mjs";
 import {
   assessReleaseVersion,
   assertReleaseCommitAncestry,
@@ -452,6 +456,13 @@ test("D1 role preflight blocks every active regular profile without an active ro
 
 test("Worker secret preflight requires names without inspecting values", () => {
   assert.doesNotThrow(() => checkWorkerSecrets(requiredWorkerSecrets.map((name) => ({ name }))));
+  assert.doesNotThrow(() => checkWorkerSecrets(
+    [...requiredWorkerSecrets, ...optionalSmsWorkerSecrets].map((name) => ({ name })),
+  ));
+  assert.throws(
+    () => checkWorkerSecrets([...requiredWorkerSecrets, optionalSmsWorkerSecrets[0]].map((name) => ({ name }))),
+    /configured together/,
+  );
   assert.throws(
     () => checkWorkerSecrets(requiredWorkerSecrets.slice(1).map((name) => ({ name }))),
     /AWS_ACCESS_KEY_ID/,

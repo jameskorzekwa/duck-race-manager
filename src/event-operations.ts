@@ -798,6 +798,14 @@ const configureEventSms = async (
     ]);
     if (results[0]?.meta.changes === 0 || results[1]?.meta.changes === 0) throw new Error("stale");
   } catch {
+    const raced = await findCommand(commandId, env);
+    if (
+      raced?.event_id === eventId && raced.command_type === "CONFIGURE_EVENT_SMS"
+      && raced.request_fingerprint === fingerprint
+    ) {
+      const replay = await getEvent(eventId, env);
+      if (replay !== null) return json({ event: eventResponse(replay), replayed: true });
+    }
     return json({ error: "The SMS setting conflicted with another update. Refresh and try again." }, 409);
   }
   const updated = await getEvent(eventId, env);

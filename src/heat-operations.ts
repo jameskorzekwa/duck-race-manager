@@ -2,7 +2,11 @@ import type { StaffActor } from "./auth.ts";
 import { hasAnyRole, requireAnyRole } from "./authorization.ts";
 import { publicDisplayName } from "./race-board.ts";
 import { isCommandId } from "./registration.ts";
-import { participantNotificationStatements, publishEmailNotification } from "./email-notifications.ts";
+import {
+  participantNotificationStatements,
+  publishEmailNotification,
+  publishPendingParticipantNotifications,
+} from "./email-notifications.ts";
 import type { Env } from "./types.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
 
@@ -2250,6 +2254,7 @@ const confirmWinnerAnnouncement = async (
     ...nextHeatNotifications.flatMap((notification) => notification.ids),
     ...(finalAssignmentNotifications?.ids ?? []),
   ].map((id) => publishEmailNotification(env, id)));
+  await publishPendingParticipantNotifications(env);
   return finalizedResultResponse(env, eventId, heatId, false);
 };
 

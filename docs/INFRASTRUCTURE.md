@@ -722,15 +722,17 @@ challenge and a rejected invalid token on the production hostname.
 
 ### Worker Runtime Secrets
 
-The Worker needs this exact encrypted-secret set:
+The Worker needs the required encrypted secrets below. The two SMS secrets are
+an optional pair: omit both while SMS is unprovisioned, or configure both with
+the matching exact ARNs after registration and IAM setup.
 
 | Worker secret | Source |
 | --- | --- |
 | `AWS_ACCESS_KEY_ID` | Access key created for CloudFormation output `SesIamUser` |
 | `AWS_SECRET_ACCESS_KEY` | Matching secret access key, available only at creation |
 | `NOTIFICATION_HMAC_SECRET` | Independent random secret of at least 32 bytes for destination HMACs and unsubscribe capabilities |
-| `SMS_ORIGINATION_IDENTITY` | Full ARN of the registered AWS End User Messaging SMS toll-free identity |
-| `SMS_OPT_OUT_LIST_NAME` | Full ARN of the exact AWS-managed opt-out list associated with that identity |
+| `SMS_ORIGINATION_IDENTITY` | Optional; full ARN of the registered AWS End User Messaging SMS toll-free identity |
+| `SMS_OPT_OUT_LIST_NAME` | Optional; full ARN of the exact AWS-managed opt-out list associated with that identity |
 | `TURNSTILE_SECRET_KEY` | Turnstile widget secret |
 | `TURNSTILE_SITE_KEY` | Turnstile widget site key; intentionally encrypted in current production |
 

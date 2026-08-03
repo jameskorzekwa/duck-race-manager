@@ -501,16 +501,16 @@ jobs:
 
       - name: Deploy AWS infrastructure
         run: |
-          parameter_overrides=("AppOrigin=$PRODUCTION_URL")
+          parameter_overrides=(
+            "AppOrigin=$PRODUCTION_URL"
+            "SmsOriginationIdentityArn=${SMS_ORIGINATION_IDENTITY_ARN:-}"
+            "SmsOptOutListArn=${SMS_OPT_OUT_LIST_ARN:-}"
+          )
           if [[ -n "${SMS_ORIGINATION_IDENTITY_ARN:-}" || -n "${SMS_OPT_OUT_LIST_ARN:-}" ]]; then
             if [[ -z "${SMS_ORIGINATION_IDENTITY_ARN:-}" || -z "${SMS_OPT_OUT_LIST_ARN:-}" ]]; then
               printf 'SMS_ORIGINATION_IDENTITY_ARN and SMS_OPT_OUT_LIST_ARN must be configured together.\n' >&2
               exit 1
             fi
-            parameter_overrides+=(
-              "SmsOriginationIdentityArn=$SMS_ORIGINATION_IDENTITY_ARN"
-              "SmsOptOutListArn=$SMS_OPT_OUT_LIST_ARN"
-            )
           fi
           aws cloudformation deploy \
             --region "$AWS_REGION" \
@@ -552,6 +552,12 @@ jobs:
             if (!value || outputs[key] !== value) throw new Error(`CloudFormation ${key} does not match wrangler.jsonc.`);
           }
           if (parameters.AppOrigin !== config.vars?.APP_ORIGIN) throw new Error("CloudFormation AppOrigin does not match wrangler.jsonc.");
+          if (parameters.SmsOriginationIdentityArn !== (process.env.SMS_ORIGINATION_IDENTITY_ARN ?? "")) {
+            throw new Error("CloudFormation SMS origination identity does not match the production environment.");
+          }
+          if (parameters.SmsOptOutListArn !== (process.env.SMS_OPT_OUT_LIST_ARN ?? "")) {
+            throw new Error("CloudFormation SMS opt-out list does not match the production environment.");
+          }
           if (tags.Version !== process.env.RELEASE_VERSION) throw new Error("CloudFormation Version tag does not match the release version.");
           if (tags.Commit !== process.env.SOURCE_SHA) throw new Error("CloudFormation Commit tag does not match the tagged commit.");
           NODE

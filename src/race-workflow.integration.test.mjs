@@ -324,7 +324,9 @@ test("event SMS is default-off, administrator-controlled, provider-gated, and em
   context.after(() => { globalThis.fetch = originalFetch; });
   globalThis.fetch = async (_url, options) => {
     assert.equal(options.headers["x-amz-target"], "PinpointSMSVoiceV2.DescribeOptedOutNumbers");
-    return Response.json({ OptedOutNumbers: [{ OptedOutNumber: "+18173206198" }] });
+    return Response.json({
+      OptedOutNumbers: [{ EndUserOptedOut: true, OptedOutNumber: "+18173206198" }],
+    });
   };
   assert.equal(await processEmailNotification(
     env,
@@ -342,11 +344,17 @@ test("event SMS is default-off, administrator-controlled, provider-gated, and em
   ).get().count, 1);
   globalThis.fetch = originalFetch;
 
-  const disabled = await jsonBody(await api(`/api/v1/staff/events/${eventId}/sms-notifications`, {
+  const disableCommandId = crypto.randomUUID();
+  const disableRequest = () => api(`/api/v1/staff/events/${eventId}/sms-notifications`, {
     method: "PATCH",
     token: adminToken,
-    body: { commandId: crypto.randomUUID(), revision: opened.event.revision, enabled: false },
-  }), 200, "disable event SMS");
+    body: { commandId: disableCommandId, revision: opened.event.revision, enabled: false },
+  });
+  const disabledResponses = await Promise.all([disableRequest(), disableRequest()]);
+  const disabledBodies = await Promise.all(disabledResponses.map((response, index) =>
+    jsonBody(response, 200, `concurrent disable event SMS request ${index + 1}`)));
+  assert.deepEqual(disabledBodies.map((body) => body.replayed).sort(), [false, true]);
+  const disabled = disabledBodies[0].replayed ? disabledBodies[1] : disabledBodies[0];
   assert.equal(disabled.event.smsNotificationsEnabled, false);
   assert.deepEqual({ ...database.prepare(
     `SELECT status, status_reason FROM email_notifications
@@ -960,7 +968,7 @@ test("an upcoming reminder waits through a predecessor reopen and rearms after r
       heat.status = reannounced.heat.status;
       assert.equal(database.prepare(
         "SELECT status FROM email_notifications WHERE id = ?",
-      ).get(reminder.id).status, "PENDING");
+      ).get(reminder.id).status, "QUEUED");
       assert.equal(await processEmailNotification(env, reminder.id, async () => ({
         providerMessageId: "rearmed-reminder",
       })), "SENT");
@@ -1094,6 +1102,46 @@ test("the consumer rechecks a result after the provider suppression lookup", asy
     status: "CANCELLED",
     status_reason: "RESULT_REVISION_SUPERSEDED",
   });
+  assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
+});
+
+test("the consumer verifies its delivery claim immediately before provider submission", async (context) => {
+  const { database } = createDatabase();
+  context.after(() => database.close());
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const race = await raceToAwaitingFinal(database, {
+    name: "Revoked Claim Race",
+    slug: "revoked-claim-race",
+    racerCount: 3,
+    heatCapacity: 3,
+    optInRegistrationIndex: 0,
+  });
+  const notification = database.prepare(
+    `SELECT id FROM email_notifications
+      WHERE registration_id = ? AND notification_type = 'REGISTRATION_CONFIRMED'`,
+  ).get(race.participants[0].registrationId);
+  let providerSendCalled = false;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes("/v2/email/suppression/addresses/")) {
+      const terminalAt = new Date().toISOString();
+      database.prepare(
+        `UPDATE email_notifications
+            SET status = 'FAILED', terminal_at = ?, status_reason = 'DELIVERY_OUTCOME_UNKNOWN',
+                sending_started_at = NULL, delivery_claim_token = NULL, updated_at = ?
+          WHERE id = ? AND status = 'SENDING'`,
+      ).run(terminalAt, terminalAt, notification.id);
+      return new Response(null, { status: 404 });
+    }
+    providerSendCalled = true;
+    return Response.json({ MessageId: "must-not-send" });
+  };
+
+  assert.equal(await processEmailNotification(race.env, notification.id), "NOOP");
+  assert.equal(providerSendCalled, false);
+  assert.equal(database.prepare(
+    "SELECT status FROM email_notifications WHERE id = ?",
+  ).get(notification.id).status, "FAILED");
   assert.equal(database.prepare("PRAGMA foreign_key_check").all().length, 0);
 });
 

@@ -476,44 +476,33 @@ export const isSmsOptedOutByAws = async (phone: string, env: Env): Promise<boole
   const host = `sms-voice.${env.AWS_REGION}.amazonaws.com`;
   const path = "/";
   const target = "PinpointSMSVoiceV2.DescribeOptedOutNumbers";
-  let nextToken: string | null = null;
-  const seen = new Set<string>();
-  for (let page = 0; page < 20; page += 1) {
-    const body = JSON.stringify({
-      MaxResults: 100,
-      OptOutListName: env.SMS_OPT_OUT_LIST_NAME,
-      ...(nextToken === null ? {} : { NextToken: nextToken }),
-    });
-    const headers = await signedAwsHeaders(env, "sms-voice", "POST", host, path, "", body, target);
-    let response: Response;
-    try {
-      response = await withDeadline(fetch(`https://${host}${path}`, {
-        method: "POST",
-        headers,
-        body,
-        signal: AbortSignal.timeout(10_000),
-      }));
-    } catch {
-      throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", true);
-    }
-    if (!response.ok) throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", await awsResponseRetryable(response));
-    let result: { OptedOutNumbers?: unknown; NextToken?: unknown };
-    try {
-      result = await response.json() as { OptedOutNumbers?: unknown; NextToken?: unknown };
-    } catch {
-      throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", true);
-    }
-    const numbers = Array.isArray(result.OptedOutNumbers) ? result.OptedOutNumbers : [];
-    if (numbers.some((entry) => entry !== null && typeof entry === "object"
-      && (entry as { OptedOutNumber?: unknown }).OptedOutNumber === phone)) return true;
-    if (result.NextToken === undefined || result.NextToken === null || result.NextToken === "") return false;
-    if (typeof result.NextToken !== "string" || result.NextToken.length > 1024 || seen.has(result.NextToken)) {
-      throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", true);
-    }
-    seen.add(result.NextToken);
-    nextToken = result.NextToken;
+  const body = JSON.stringify({
+    OptOutListName: env.SMS_OPT_OUT_LIST_NAME,
+    OptedOutNumbers: [phone],
+  });
+  const headers = await signedAwsHeaders(env, "sms-voice", "POST", host, path, "", body, target);
+  let response: Response;
+  try {
+    response = await withDeadline(fetch(`https://${host}${path}`, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(10_000),
+    }));
+  } catch {
+    throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", true);
   }
-  throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", true);
+  if (!response.ok) throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", await awsResponseRetryable(response));
+  let result: { OptedOutNumbers?: unknown };
+  try {
+    result = await response.json() as { OptedOutNumbers?: unknown };
+  } catch {
+    throw new EmailSendError("SMS_SUPPRESSION_CHECK_FAILED", true);
+  }
+  const numbers = Array.isArray(result.OptedOutNumbers) ? result.OptedOutNumbers : [];
+  return numbers.some((entry) => entry !== null && typeof entry === "object"
+    && (entry as { EndUserOptedOut?: unknown }).EndUserOptedOut === true
+    && (entry as { OptedOutNumber?: unknown }).OptedOutNumber === phone);
 };
 
 const notificationRow = (env: Env, notificationId: string): Promise<NotificationRow | null> =>
@@ -984,6 +973,10 @@ export const processEmailNotification = async (
     if (newlySuppressed !== null) {
       await suppressNotification(env, currentRow, attemptId, destinationHash, "PROVIDER");
       return "CANCELLED";
+    }
+    const activeClaim = await notificationClaimRow(env, notificationId);
+    if (activeClaim?.status !== "SENDING" || activeClaim.delivery_claim_token !== attemptId) {
+      return "NOOP";
     }
     row = currentRow;
     result = row.channel === "EMAIL"
