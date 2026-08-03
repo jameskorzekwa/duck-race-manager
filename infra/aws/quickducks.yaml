@@ -132,6 +132,15 @@ Resources:
                   - cognito-idp:AdminGetUser
                   - cognito-idp:AdminUserGlobalSignOut
                 Resource: !GetAtt StaffUserPool.Arn
+              - Sid: SendQuickDucksSmsAndCheckOptOuts
+                Effect: Allow
+                Action:
+                  - sms-voice:DescribeOptedOutNumbers
+                  - sms-voice:SendTextMessage
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: us-east-1
 
 Outputs:
   UserPoolId:

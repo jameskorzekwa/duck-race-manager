@@ -26,6 +26,7 @@ const migrationNames = [
   "0020_email_notification_assignment.sql",
   "0021_email_delivery_claim.sql",
   "0022_pending_heat_result_announcement.sql",
+  "0023_participant_notifications.sql",
 ];
 
 const lifecycleStatuses = [
@@ -829,6 +830,7 @@ test("0014 from an empty database leaves the simplified schema", () => {
       updated_at: database.prepare("SELECT updated_at FROM events WHERE id = 'event-DRAFT'").get().updated_at,
       public_name_policy: "FIRST_NAME_LAST_INITIAL",
       revision: 0,
+      sms_notifications_enabled: 0,
     },
   );
 
@@ -1354,6 +1356,65 @@ test("0022 keeps pending results private and fails closed for an older Worker", 
   `);
   assert.equal(count(database, "pending_heat_results"), 0);
   assert.equal(count(database, "heat_results"), 1);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
+
+test("0023 generalizes the outbox while preserving old Worker writes and HMAC-only suppression", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0023_participant_notifications.sql"));
+  database.exec(`
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event', 'notice-race', 'Notice Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO registrations
+      (id, event_id, first_name, last_name, status, lookup_code, private_token_hash,
+       submitted_at, status_changed_at)
+    VALUES ('registration', 'event', 'Daisy', 'Duck', 'ACTIVE', 'DAISY123', 'hash',
+            '2026-08-02T00:00:00Z', '2026-08-02T00:00:00Z');
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-existing', 'event', 'registration', 'HEAT_ASSIGNED', 'PENDING');
+  `);
+  applyMigrations(database, ["0023_participant_notifications.sql"]);
+  assert.deepEqual({ ...database.prepare(
+    "SELECT sms_notifications_enabled FROM events WHERE id = 'event'",
+  ).get() }, { sms_notifications_enabled: 0 });
+  assert.deepEqual({ ...database.prepare(
+    "SELECT channel, lifecycle_key FROM email_notifications WHERE id = 'legacy-existing'",
+  ).get() }, { channel: "EMAIL", lifecycle_key: "HEAT_ASSIGNED:" });
+
+  // The old Worker omits every new column. Its insert remains valid, and its
+  // former uniqueness is still enforced during a staggered deployment.
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-new', 'event', 'registration', 'HEAT_UPCOMING', 'PENDING');
+  `);
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-duplicate', 'event', 'registration', 'HEAT_UPCOMING', 'PENDING');
+  `);
+  database.exec(`
+    INSERT INTO email_notifications
+      (id, event_id, registration_id, notification_type, status)
+    VALUES ('legacy-backfill-duplicate', 'event', 'registration', 'HEAT_ASSIGNED', 'PENDING');
+  `);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM email_notifications WHERE event_id = 'event' AND registration_id = 'registration'",
+  ).get().count, 2, "legacy duplicates are ignored without aborting the surrounding old-Worker batch");
+
+  database.exec(`
+    INSERT INTO participant_notification_suppressions
+      (id, channel, destination_hmac, source, created_at)
+    VALUES ('suppression', 'SMS', '${"a".repeat(64)}', 'PROVIDER_STOP', '2026-08-02T00:00:00Z');
+  `);
+  assert.throws(() => database.exec(`
+    INSERT INTO participant_notification_suppressions
+      (id, channel, destination_hmac, source, created_at)
+    VALUES ('raw-contact', 'SMS', '+18173206150', 'PROVIDER_STOP', '2026-08-02T00:00:00Z');
+  `), /CHECK constraint failed/);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
 });

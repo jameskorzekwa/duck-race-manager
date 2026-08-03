@@ -31,6 +31,7 @@ const draftEvent = {
   round_one_heat_capacity: 10,
   final_heat_capacity: 50,
   public_name_policy: "FIRST_NAME_LAST_INITIAL",
+  sms_notifications_enabled: 0,
   revision: 0,
   created_at: "2026-07-26T00:00:00.000Z",
   updated_at: "2026-07-26T00:00:00.000Z",
@@ -87,7 +88,7 @@ const makeDb = (first, all = () => ({ results: [] })) => {
   };
 };
 
-const makeEnv = (db) => ({ APP_ORIGIN: "https://quickducks.com", DB: db });
+const makeEnv = (db, extras = {}) => ({ APP_ORIGIN: "https://quickducks.com", DB: db, ...extras });
 
 const sqliteD1 = (database, beforeBatch = () => {}) => ({
   prepare(sql) {
@@ -612,6 +613,54 @@ test("configuration requires an administrator and the current revision", async (
   assert.equal(staleDb.batches.length, 0);
 });
 
+test("an administrator can change only the SMS switch after racing starts", async () => {
+  const running = { ...draftEvent, status: "ROUND_ONE", revision: 4 };
+  const configuredEnv = (db) => makeEnv(db, {
+    SMS_ORIGINATION_IDENTITY: "pool-example",
+    SMS_OPT_OUT_LIST_NAME: "quickducks-production",
+    NOTIFICATION_DESTINATION_HMAC_KEY: "test-notification-hmac-key-32-bytes-minimum",
+  });
+  const enabledDb = makeDb((sql) => sql.includes("FROM race_commands") ? null : running);
+  const enabled = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
+      commandId: crypto.randomUUID(),
+      revision: 4,
+      smsNotificationsEnabled: true,
+    }),
+    configuredEnv(enabledDb),
+    admin,
+  );
+  assert.equal(enabled.status, 200);
+  assert.equal((await enabled.json()).event.smsNotificationsEnabled, true);
+  assert.match(enabledDb.batches[0][0].sql, /\? = 1 OR status = 'DRAFT'/);
+
+  const structuralDb = makeDb((sql) => sql.includes("FROM race_commands") ? null : running);
+  const structural = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
+      commandId: crypto.randomUUID(), revision: 4, timezone: "UTC",
+    }),
+    configuredEnv(structuralDb),
+    admin,
+  );
+  assert.equal(structural.status, 409);
+  assert.equal(structuralDb.batches.length, 0);
+
+  const disablingDb = makeDb((sql) => sql.includes("FROM race_commands") ? null : {
+    ...running,
+    sms_notifications_enabled: 1,
+  });
+  const disabled = await handleEventOperations(
+    jsonRequest("/api/v1/staff/events/event_test/configuration", "PATCH", {
+      commandId: crypto.randomUUID(), revision: 4, smsNotificationsEnabled: false,
+    }),
+    makeEnv(disablingDb),
+    admin,
+  );
+  assert.equal(disabled.status, 200, "disabling remains available even if provider configuration is absent");
+  assert.match(disablingDb.batches[0][2].sql, /channel = 'SMS'/);
+  assert.match(disablingDb.batches[0][2].sql, /status IN \('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING'\)/);
+});
+
 test("revision-checked configuration updates the event, retained defaults, command, and audit", async () => {
   const db = makeDb((sql) => sql.includes("FROM race_commands") ? null : draftEvent);
   const response = await handleEventOperations(
@@ -638,7 +687,7 @@ test("revision-checked configuration updates the event, retained defaults, comma
   assert.match(db.batches[0][0].sql, /'CONFIGURE_EVENT'.*revision = \?/s);
   assert.match(db.batches[0][1].sql, /EXISTS \(\s*SELECT 1 FROM race_commands/s);
   const sql = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.match(sql, /WHERE id = \? AND status = 'DRAFT' AND revision = \?/);
+  assert.match(sql, /WHERE id = \? AND \(\? = 1 OR status = 'DRAFT'\) AND revision = \?/);
   assert.match(sql, /UPDATE organization_event_defaults/);
   assert.match(sql, /'CONFIGURE_EVENT'/);
   assert.match(sql, /'EVENT_CONFIGURED'/);
@@ -950,17 +999,9 @@ test("atomic round-one start rejects provisioning begun after readiness prefligh
   const database = new DatabaseSync(":memory:");
   context.after(() => database.close());
   database.exec("PRAGMA foreign_keys = ON");
-  for (const name of [
-    "0001_staff_identity.sql",
-    "0002_registration_foundation.sql",
-    "0003_assignment_and_heat_status.sql",
-    "0004_pairing_status_and_purge.sql",
-    "0005_staff_access_management.sql",
-    "0006_participant_operations.sql",
-    "0007_duck_inventory_operations.sql",
-    "0008_event_operations.sql",
-    "0009_heat_result_operations.sql",
-  ]) {
+  for (const name of readdirSync(new URL("../db/migrations/", import.meta.url))
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort()) {
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
   }
   database.exec(`

@@ -6,7 +6,9 @@ import test from "node:test";
 import {
   EmailSendError,
   handleEmailQueue,
+  queuePublicationWithDeadline,
   sendEmailWithSes,
+  sendSmsWithAws,
 } from "./email-notifications.ts";
 import worker from "./index.ts";
 
@@ -29,6 +31,74 @@ const outboundEmail = {
   text: "Please bring Duck #17 to the pond.",
   html: "<p>Please bring Duck #17 to the pond.</p>",
 };
+
+const smsEnv = {
+  ...sesEnv,
+  SMS_OPT_OUT_LIST_NAME: "quickducks-production",
+  SMS_ORIGINATION_IDENTITY: "pool-example",
+};
+
+test("upcoming-notification ordering uses the migrated heat schema in both producer and consumer", () => {
+  const producer = readFileSync(new URL("./participant-notifications.ts", import.meta.url), "utf8");
+  const consumer = readFileSync(new URL("./email-notifications.ts", import.meta.url), "utf8");
+  for (const source of [producer, consumer]) {
+    assert.doesNotMatch(source, /\.round_number\b/);
+    assert.match(source, /earlier\.round = h\.round/);
+    assert.match(source, /earlier\.heat_number < h\.heat_number/);
+  }
+});
+
+test("queue publication deadlines clear their timer after failure or a missing acknowledgement", async () => {
+  const handles = [];
+  let settleMissingAcknowledgement = () => {};
+  const timing = {
+    timeoutMilliseconds: 10_000,
+    set(callback, delay) {
+      const handle = {
+        callback,
+        cleared: false,
+        delay,
+        unrefCalls: 0,
+        unref() { this.unrefCalls += 1; },
+      };
+      handles.push(handle);
+      return handle;
+    },
+    clear(handle) { handle.cleared = true; },
+  };
+
+  try {
+    await assert.rejects(
+      queuePublicationWithDeadline(Promise.reject(new Error("queue rejected")), timing),
+      /queue rejected/,
+    );
+    assert.equal(handles[0].cleared, true, "a prompt queue rejection clears its deadline");
+    assert.equal(handles[0].unrefCalls, 1);
+
+    assert.equal(await queuePublicationWithDeadline(Promise.resolve("queued"), timing), "queued");
+    assert.equal(handles[1].cleared, true, "an accepted queue publication clears its deadline");
+    assert.equal(handles[1].unrefCalls, 1);
+
+    const pendingOperation = new Promise((resolve) => { settleMissingAcknowledgement = resolve; });
+    const missingAcknowledgement = queuePublicationWithDeadline(pendingOperation, timing);
+    // Keep the deadline rejection observed even if an assertion before
+    // assert.rejects fails; the finally block below still settles both promises.
+    missingAcknowledgement.catch(() => {});
+    assert.equal(handles[2].cleared, false);
+    assert.equal(handles[2].unrefCalls, 1, "a Node deadline never holds the process open");
+    handles[2].callback();
+    await assert.rejects(missingAcknowledgement, /QUEUE_PUBLISH_DEADLINE_EXCEEDED/);
+    assert.equal(handles[2].cleared, true, "the deadline removes itself when it bounds a hung publication");
+  } finally {
+    settleMissingAcknowledgement();
+    for (const handle of handles) {
+      if (!handle.cleared) handle.callback();
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+  }
+  assert.equal(handles.every((handle) => handle.cleared), true);
+});
 
 const fixedDate = (context) => {
   const NativeDate = globalThis.Date;
@@ -149,18 +219,18 @@ test("SES v2 requests have a deterministic SigV4 signature and structured UTF-8 
   });
 });
 
-test("SES failures are safely classified without reading provider response bodies", async (context) => {
+test("SES failures are safely classified without retrying ambiguous submissions or reading provider bodies", async (context) => {
   fixedDate(context);
   const originalFetch = globalThis.fetch;
   context.after(() => { globalThis.fetch = originalFetch; });
 
   globalThis.fetch = async () => { throw new Error("private network detail"); };
-  await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), "SES_NETWORK_ERROR", true);
+  await expectSendError(sendEmailWithSes(outboundEmail, sesEnv), "DELIVERY_OUTCOME_UNKNOWN", false);
 
   for (const [status, safeCode, retryable] of [
-    [408, "SES_TEMPORARY_FAILURE", true],
-    [429, "SES_TEMPORARY_FAILURE", true],
-    [503, "SES_TEMPORARY_FAILURE", true],
+    [408, "DELIVERY_OUTCOME_UNKNOWN", false],
+    [429, "SES_THROTTLED", true],
+    [503, "DELIVERY_OUTCOME_UNKNOWN", false],
     [400, "SES_REJECTED", false],
   ]) {
     let bodyRead = false;
@@ -198,13 +268,73 @@ test("invalid or missing SES configuration fails closed before fetch", async (co
     fetchCalled = true;
     assert.fail("invalid SES configuration must not make a request");
   };
-  for (const env of [
-    { ...sesEnv, AWS_REGION: "us-west-2" },
-    { ...sesEnv, EMAIL_FROM_ADDRESS: "other@example.test" },
-    { ...sesEnv, AWS_ACCESS_KEY_ID: undefined },
-    { ...sesEnv, AWS_SECRET_ACCESS_KEY: undefined },
+  for (const [env, code] of [
+    [{ ...sesEnv, AWS_REGION: "us-west-2" }, "AWS_CONFIGURATION_INVALID"],
+    [{ ...sesEnv, EMAIL_FROM_ADDRESS: "other@example.test" }, "SES_CONFIGURATION_INVALID"],
+    [{ ...sesEnv, AWS_ACCESS_KEY_ID: undefined }, "AWS_CONFIGURATION_INVALID"],
+    [{ ...sesEnv, AWS_SECRET_ACCESS_KEY: undefined }, "AWS_CONFIGURATION_INVALID"],
   ]) {
-    await expectSendError(sendEmailWithSes(outboundEmail, env), "SES_CONFIGURATION_INVALID", false);
+    await expectSendError(sendEmailWithSes(outboundEmail, env), code, false);
   }
   assert.equal(fetchCalled, false);
+});
+
+test("SMS checks every opt-out page with signed POSTs before one transactional submission", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, options });
+    if (url.includes("/opted-out-numbers")) {
+      const body = JSON.parse(options.body);
+      return Response.json(body.NextToken
+        ? { OptedOutNumbers: [] }
+        : { OptedOutNumbers: [{ OptedOutNumber: "+18170000000" }], NextToken: "page-2" });
+    }
+    return Response.json({ MessageId: "sms-message-1" });
+  };
+  let finalChecks = 0;
+  assert.deepEqual(await sendSmsWithAws(
+    { to: "+18173206150", text: "QuickDucks: Your heat is next." },
+    smsEnv,
+    async () => { finalChecks += 1; },
+  ), { providerMessageId: "sms-message-1" });
+  assert.equal(requests.length, 3);
+  assert.ok(requests.slice(0, 2).every((request) => request.options.method === "POST"));
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    MaxResults: 100,
+    OptOutListName: "quickducks-production",
+  });
+  assert.deepEqual(JSON.parse(requests[1].options.body), {
+    MaxResults: 100,
+    OptOutListName: "quickducks-production",
+    NextToken: "page-2",
+  });
+  assert.equal(requests[2].url, "https://sms-voice.us-east-1.amazonaws.com/v1/sms/text");
+  assert.deepEqual(JSON.parse(requests[2].options.body), {
+    DestinationPhoneNumber: "+18173206150",
+    OriginationIdentity: "pool-example",
+    MessageBody: "QuickDucks: Your heat is next.",
+    MessageType: "TRANSACTIONAL",
+  });
+  assert.equal(finalChecks, 1, "state is rechecked immediately before submission");
+});
+
+test("provider SMS opt-out suppresses before message submission", async (context) => {
+  fixedDate(context);
+  const originalFetch = globalThis.fetch;
+  context.after(() => { globalThis.fetch = originalFetch; });
+  let requests = 0;
+  globalThis.fetch = async (url) => {
+    requests += 1;
+    assert.match(url, /opted-out-numbers/);
+    return Response.json({ OptedOutNumbers: [{ OptedOutNumber: "+18173206150" }] });
+  };
+  await expectSendError(
+    sendSmsWithAws({ to: "+18173206150", text: "QuickDucks update" }, smsEnv),
+    "SMS_PROVIDER_STOP",
+    false,
+  );
+  assert.equal(requests, 1);
 });

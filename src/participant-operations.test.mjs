@@ -97,10 +97,11 @@ const seed = (database) => {
       ('staff', 'staff-sub', 'staff@example.com', 'Registration Staff', 0),
       ('admin', 'admin-sub', 'admin@example.com', 'Race Administrator', 1);
     INSERT INTO events
-      (id, slug, name, event_date, timezone, status, email_required)
+      (id, slug, name, event_date, timezone, status, email_required,
+       sms_notifications_enabled)
     VALUES
-      ('event-open', 'open-race', 'Open Race', '2026-08-01', 'America/Denver', 'REGISTRATION_OPEN', 0),
-      ('event-complete', 'complete-race', 'Complete Race', '2026-07-01', 'America/Denver', 'COMPLETED', 0);
+      ('event-open', 'open-race', 'Open Race', '2026-08-01', 'America/Denver', 'REGISTRATION_OPEN', 0, 1),
+      ('event-complete', 'complete-race', 'Complete Race', '2026-07-01', 'America/Denver', 'COMPLETED', 0, 0);
     INSERT INTO registrations
       (id, event_id, first_name, last_name, email, phone, status, lookup_code,
        private_token_hash, email_notifications_enabled, created_via, staff_notes,

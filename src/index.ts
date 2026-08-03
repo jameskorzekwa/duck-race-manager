@@ -29,7 +29,11 @@ import {
   dispatchPendingEmailNotifications,
   handleEmailQueue,
   sendEmailWithSes,
+  sendSmsWithAws,
+  unsubscribeEmailNotification,
   type EmailSender,
+  type QueuePublishTiming,
+  type SmsSender,
 } from "./email-notifications.ts";
 import {
   phaseAllowsRaceStatus,
@@ -193,6 +197,8 @@ export const createWorker = (
   authenticate: typeof authenticateStaff = authenticateStaff,
   tokenFetch: typeof fetch = fetch,
   emailSender: EmailSender = sendEmailWithSes,
+  smsSender: SmsSender = sendSmsWithAws,
+  queuePublishTiming?: QueuePublishTiming,
 ): ExportedHandler<Env> => ({
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -336,6 +342,18 @@ export const createWorker = (
       });
     }
 
+    const unsubscribeMatch = url.pathname.match(/^\/email-unsubscribe\/([A-Za-z0-9_.-]{1,256})$/);
+    if (unsubscribeMatch !== null && request.method === "GET") {
+      const result = await unsubscribeEmailNotification(env, unsubscribeMatch[1]);
+      return html(`<section class="page-panel"><h1 class="page-title message-title">${
+        result === "UNSUBSCRIBED" ? "Email updates stopped." : "This unsubscribe link is invalid or expired."
+      }</h1><p class="lede">${
+        result === "UNSUBSCRIBED"
+          ? "Pending email updates for this participant have been suppressed."
+          : "No notification preferences were changed."
+      }</p><div class="actions"><a class="button secondary" href="/">Back to QuickDucks</a></div></section>`, result === "UNSUBSCRIBED" ? 200 : 404, true);
+    }
+
     if (url.pathname.startsWith("/api/v1/")) {
       return withSessionCookies(await handleApi(request, env, authenticateRequest, ctx));
     }
@@ -354,7 +372,24 @@ export const createWorker = (
       // bypass form on a preview that has only a secret, and the API would then
       // reject every submission it invited.
       const protectionWaived = env.TURNSTILE_SECRET_KEY === undefined && localPreview;
-      return html(renderRegistration(configuredSiteKey, await publicPhase(), protectionWaived), 200, true);
+      let smsAvailable = false;
+      try {
+        const sms = await env.DB.prepare(
+          `SELECT sms_notifications_enabled FROM events
+            WHERE status = 'REGISTRATION_OPEN' LIMIT 1`,
+        ).first<{ sms_notifications_enabled: number }>();
+        smsAvailable = sms?.sms_notifications_enabled === 1;
+      } catch {
+        // Like phase resolution, registration-page rendering degrades closed:
+        // a D1 outage must not 500 the public page or expose SMS controls whose
+        // event setting cannot be authoritatively read.
+      }
+      return html(renderRegistration(
+        configuredSiteKey,
+        await publicPhase(),
+        protectionWaived,
+        smsAvailable,
+      ), 200, true);
     }
     // Race Status exists only once there is a race to report on. Before that
     // there is no stage, no heat, and no result, and the nav does not offer the
@@ -638,10 +673,10 @@ export const createWorker = (
     return html(renderNotFound(), 404, true);
   },
   async queue(batch, env): Promise<void> {
-    await handleEmailQueue(batch, env, emailSender);
+    await handleEmailQueue(batch, env, emailSender, smsSender);
   },
   async scheduled(_controller, env, ctx): Promise<void> {
-    ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    ctx.waitUntil(dispatchPendingEmailNotifications(env, queuePublishTiming));
   },
 });
 

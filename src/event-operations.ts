@@ -4,6 +4,7 @@ import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts
 import { isCommandId } from "./registration.ts";
 import { autoResolvableRoundOneHeatSql, reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
 import type { Env } from "./types.ts";
+import { heatNotificationStatements, publishParticipantNotifications } from "./participant-notifications.ts";
 import { unstartedRoundOneHeatExistsSql, walkUpAdmissionFor } from "./walk-up-admission.ts";
 
 const headers = {
@@ -64,6 +65,7 @@ interface EventRow {
   round_one_heat_capacity: number;
   final_heat_capacity: number;
   public_name_policy: "FIRST_NAME_ONLY" | "FIRST_NAME_LAST_INITIAL" | "FULL_NAME";
+  sms_notifications_enabled: number;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -88,7 +90,7 @@ interface ExistingCommand {
 const eventColumns = `id, slug, name, event_date, timezone, status,
   registration_opens_at, registration_closes_at, email_required,
   heat_assignment_mode, round_one_heat_capacity, final_heat_capacity,
-  public_name_policy, revision, created_at, updated_at`;
+  public_name_policy, sms_notifications_enabled, revision, created_at, updated_at`;
 
 const eventResponse = (event: EventRow): Record<string, unknown> => ({
   id: event.id,
@@ -104,6 +106,7 @@ const eventResponse = (event: EventRow): Record<string, unknown> => ({
   roundOneHeatCapacity: event.round_one_heat_capacity,
   finalHeatCapacity: event.final_heat_capacity,
   publicNamePolicy: event.public_name_policy,
+  smsNotificationsEnabled: event.sms_notifications_enabled === 1,
   revision: event.revision,
   createdAt: event.created_at,
   updatedAt: event.updated_at,
@@ -438,6 +441,7 @@ const createEvent = async (
     round_one_heat_capacity: ducksPerHeat,
     final_heat_capacity: defaults.final_heat_capacity,
     public_name_policy: defaults.public_name_policy,
+    sms_notifications_enabled: 0,
     revision: 0,
     created_at: now,
     updated_at: now,
@@ -456,6 +460,7 @@ interface ConfigurationPatch {
   roundOneHeatCapacity?: number;
   finalHeatCapacity?: number;
   publicNamePolicy?: EventRow["public_name_policy"];
+  smsNotificationsEnabled?: boolean;
 }
 
 const parseConfigurationPatch = (
@@ -487,6 +492,12 @@ const parseConfigurationPatch = (
   if ("emailRequired" in payload) {
     if (typeof payload.emailRequired !== "boolean") return { error: "emailRequired must be a boolean." };
     patch.emailRequired = payload.emailRequired;
+  }
+  if ("smsNotificationsEnabled" in payload) {
+    if (typeof payload.smsNotificationsEnabled !== "boolean") {
+      return { error: "smsNotificationsEnabled must be a boolean." };
+    }
+    patch.smsNotificationsEnabled = payload.smsNotificationsEnabled;
   }
   // Heats are filled as participants are paired with ducks. The retired
   // post-close balanced planner is gone, so the only mode an API caller may
@@ -539,6 +550,19 @@ const configureEvent = async (
     return json({ error: parsed.error ?? "Command, revision, and valid configuration are required." }, 400);
   }
   const patch = parsed.patch;
+  // SMS is an operational delivery switch, not immutable race structure. It
+  // must remain independently changeable after the event leaves DRAFT.
+  const smsOnly = Object.keys(patch).length === 1 && patch.smsNotificationsEnabled !== undefined;
+  if (
+    patch.smsNotificationsEnabled === true
+    && (
+      typeof env.SMS_ORIGINATION_IDENTITY !== "string" || env.SMS_ORIGINATION_IDENTITY.trim() === ""
+      || typeof env.SMS_OPT_OUT_LIST_NAME !== "string"
+      || !/^[A-Za-z0-9_-]{1,64}$/.test(env.SMS_OPT_OUT_LIST_NAME)
+      || typeof env.NOTIFICATION_DESTINATION_HMAC_KEY !== "string"
+      || env.NOTIFICATION_DESTINATION_HMAC_KEY.length < 32
+    )
+  ) return json({ error: "SMS provider and origination settings are not configured." }, 409);
   const fingerprint = canonicalFingerprint({
     operation: "CONFIGURE_EVENT",
     eventId,
@@ -562,7 +586,9 @@ const configureEvent = async (
 
   const event = await getEvent(eventId, env);
   if (event === null) return json({ error: "Event not found." }, 404);
-  if (event.status !== "DRAFT") return json({ error: "Only a draft event can be configured." }, 409);
+  if (event.status !== "DRAFT" && !smsOnly) {
+    return json({ error: "Only SMS notifications can be configured after an event starts." }, 409);
+  }
   if (event.revision !== expectedRevision) {
     return json({ error: "The event changed. Refresh and retry with its current revision.", event: eventResponse(event) }, 409);
   }
@@ -585,6 +611,7 @@ const configureEvent = async (
     roundOneHeatCapacity: patch.roundOneHeatCapacity ?? event.round_one_heat_capacity,
     finalHeatCapacity: patch.finalHeatCapacity ?? event.final_heat_capacity,
     publicNamePolicy: patch.publicNamePolicy ?? event.public_name_policy,
+    smsNotificationsEnabled: patch.smsNotificationsEnabled ?? (event.sms_notifications_enabled === 1),
   };
   if (
     next.registrationOpensAt !== null
@@ -601,18 +628,19 @@ const configureEvent = async (
       env.DB.prepare(
         `INSERT INTO race_commands
           (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
-         SELECT ?, id, 'CONFIGURE_EVENT', id, ?, ?, ?
-           FROM events
-          WHERE id = ? AND status = 'DRAFT' AND revision = ?`,
-      ).bind(commandId, now, now, fingerprint, eventId, expectedRevision),
+          SELECT ?, id, 'CONFIGURE_EVENT', id, ?, ?, ?
+            FROM events
+           WHERE id = ? AND (? = 1 OR status = 'DRAFT') AND revision = ?`,
+      ).bind(commandId, now, now, fingerprint, eventId, smsOnly ? 1 : 0, expectedRevision),
       env.DB.prepare(
         `UPDATE events
             SET slug = ?, name = ?, event_date = ?, timezone = ?,
                 registration_opens_at = ?, registration_closes_at = ?,
                 email_required = ?, heat_assignment_mode = ?,
                 round_one_heat_capacity = ?, final_heat_capacity = ?,
-                public_name_policy = ?, revision = revision + 1, updated_at = ?
-          WHERE id = ? AND status = 'DRAFT' AND revision = ?
+                 public_name_policy = ?, sms_notifications_enabled = ?,
+                 revision = revision + 1, updated_at = ?
+          WHERE id = ? AND (? = 1 OR status = 'DRAFT') AND revision = ?
             AND EXISTS (
               SELECT 1 FROM race_commands
                WHERE id = ? AND event_id = ? AND command_type = 'CONFIGURE_EVENT'
@@ -629,12 +657,24 @@ const configureEvent = async (
         next.roundOneHeatCapacity,
         next.finalHeatCapacity,
         next.publicNamePolicy,
+        next.smsNotificationsEnabled ? 1 : 0,
         now,
         eventId,
+        smsOnly ? 1 : 0,
         expectedRevision,
         commandId,
         eventId,
       ),
+      env.DB.prepare(
+        `UPDATE email_notifications
+            SET status = 'CANCELLED', terminal_at = ?,
+                status_reason = 'SMS_DISABLED_FOR_EVENT', retry_after = NULL,
+                last_error_code = NULL, updated_at = ?
+          WHERE event_id = ? AND channel = 'SMS' AND ? = 0
+            AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
+            AND EXISTS (SELECT 1 FROM race_commands
+                         WHERE id = ? AND command_type = 'CONFIGURE_EVENT')`,
+      ).bind(now, now, eventId, next.smsNotificationsEnabled ? 1 : 0, commandId),
       env.DB.prepare(
         `UPDATE organization_event_defaults
             SET timezone = ?, email_required = ?, heat_assignment_mode = ?,
@@ -701,6 +741,7 @@ const configureEvent = async (
     round_one_heat_capacity: next.roundOneHeatCapacity,
     final_heat_capacity: next.finalHeatCapacity,
     public_name_policy: next.publicNamePolicy,
+    sms_notifications_enabled: next.smsNotificationsEnabled ? 1 : 0,
     revision: event.revision + 1,
     updated_at: now,
   };
@@ -1819,9 +1860,23 @@ const lifecycleSideEffects = async (
   }
   if (definition.action === "start-round-one" || definition.action === "start-final") {
     const round = definition.action === "start-round-one" ? "ROUND_ONE" : "FINAL";
+    const firstHeat = await env.DB.prepare(
+      `SELECT id, notification_run_sequence FROM heats
+        WHERE event_id = ? AND round = ?
+        ORDER BY heat_number LIMIT 1`,
+    ).bind(eventId, round).first<{ id: string; notification_run_sequence: number }>();
     return {
       statements: [
         lockRoundStatement(round, definition.commandType, eventId, commandId, actor.id, now, env),
+        ...(firstHeat === null ? [] : heatNotificationStatements(env, {
+          eventId,
+          heatId: firstHeat.id,
+          commandId,
+          type: "HEAT_UPCOMING",
+          lifecycleKeyPrefix: `HEAT_UPCOMING:${firstHeat.id}:${firstHeat.notification_run_sequence}`,
+          heatRunSequence: firstHeat.notification_run_sequence,
+          now,
+        })),
       ],
       audits: [{ action: "HEAT_ROSTERS_LOCKED", round }],
       bagMoves: [],
@@ -1977,6 +2032,7 @@ const runLifecycleCommand = async (
     revision: event.revision + 1,
     updated_at: now,
   };
+  await publishParticipantNotifications(env);
   // The moves are reported with the transition that made them, and only when
   // that transition genuinely committed. Every rebalance statement shares the
   // command-committed guard of `updateSql`, and the two `meta.changes` checks

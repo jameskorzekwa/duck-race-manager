@@ -23,6 +23,11 @@ import {
 import { reconcileRoundOneHeats } from "./round-one-auto-resolution.ts";
 import type { Env } from "./types.ts";
 import {
+  cancelChannelNotificationsStatement,
+  participantNotificationStatements,
+  publishParticipantNotifications,
+} from "./participant-notifications.ts";
+import {
   unstartedRoundOneHeatExistsSql,
   WALK_UP_ADMISSION_WITHOUT_EVENT,
   walkUpAdmissionFor,
@@ -62,6 +67,7 @@ interface EventRow {
   email_required: number;
   registration_opens_at: string | null;
   registration_closes_at: string | null;
+  sms_notifications_enabled: number;
 }
 
 interface RegistrationRow {
@@ -69,6 +75,7 @@ interface RegistrationRow {
   event_id: string;
   event_name: string;
   event_status: string;
+  event_sms_notifications_enabled: number;
   event_date: string | null;
   email_required: number;
   race_entry_id: string;
@@ -104,7 +111,7 @@ interface RegistrationRow {
 const registrationSelect = `
   SELECT r.id AS registration_id, r.event_id,
          e.name AS event_name, e.status AS event_status, e.event_date,
-         e.email_required,
+          e.email_required, e.sms_notifications_enabled AS event_sms_notifications_enabled,
          re.id AS race_entry_id, r.first_name, r.last_name, r.email, r.phone,
          r.status, r.lookup_code, r.private_token_hash,
           r.email_notifications_enabled, r.sms_notifications_enabled,
@@ -292,7 +299,8 @@ const escapeLike = (value: string): string => value.replace(/[\\%_]/g, "\\$&");
 const listRegistrations = async (url: URL, env: Env, eventId: string): Promise<Response> => {
   const event = await env.DB.prepare(
     `SELECT id, name, status, event_date, email_required,
-            registration_opens_at, registration_closes_at
+             registration_opens_at, registration_closes_at,
+             sms_notifications_enabled
        FROM events
       WHERE id = ?
       LIMIT 1`,
@@ -463,7 +471,8 @@ const validateParticipant = (
 const getWalkUpEvent = (env: Env, eventId: string): Promise<EventRow | null> =>
   env.DB.prepare(
     `SELECT id, name, status, event_date, email_required,
-             registration_opens_at, registration_closes_at
+             registration_opens_at, registration_closes_at,
+             sms_notifications_enabled
        FROM events
        WHERE id = ?
        LIMIT 1`,
@@ -495,6 +504,9 @@ const createWalkUp = async (
     return json({ error: "Registration validation failed.", fields: validation.errors }, 422);
   }
   const value = validation.value;
+  if (value.input.smsNotificationsEnabled && event.sms_notifications_enabled === 0) {
+    return json({ error: "SMS updates are not available for this event." }, 409);
+  }
   // Store only a one-way fingerprint of the normalized request material. A
   // matching retry can replay after the cutoff, while changed names, contacts,
   // preferences, notes, or token cannot silently reuse the command identifier.
@@ -624,6 +636,14 @@ const createWalkUp = async (
         eventId,
         registrationId,
       ),
+      ...participantNotificationStatements(env, {
+        eventId,
+        registrationId,
+        commandId,
+        type: "REGISTRATION_CONFIRMED",
+        lifecycleKey: `REGISTRATION_CONFIRMED:${registrationId}`,
+        now,
+      }),
     ]);
   } catch {
     const replayCommand = await findCommand(env, commandId);
@@ -647,6 +667,7 @@ const createWalkUp = async (
       error: "Walk-up registration has closed because no unstarted Round One heat remains.",
     }, 409);
   }
+  await publishParticipantNotifications(env);
   return registrationResult(created, false, 201, { privateStatusPath: `/r/${privateToken}` });
 };
 
@@ -727,6 +748,11 @@ const editRegistration = async (
   }
 
   const value = validation.value;
+  if (
+    value.input.smsNotificationsEnabled
+    && current.sms_notifications_enabled !== 1
+    && current.event_sms_notifications_enabled === 0
+  ) return json({ error: "SMS updates are not available for this event." }, 409);
   // Fingerprint the normalized complete edit rather than the raw JSON. Exact
   // retries therefore survive harmless email case, whitespace, and phone
   // punctuation differences, while changing any resulting contact, consent,
@@ -809,24 +835,11 @@ const editRegistration = async (
       expectedRevision,
     ),
   ];
-  statements.push(env.DB.prepare(
-    `UPDATE email_notifications
-        SET status = 'CANCELLED', terminal_at = ?, status_reason = 'EMAIL_NOT_OPTED_IN',
-            retry_after = NULL, last_error_code = NULL, updated_at = ?
-      WHERE registration_id = ? AND ? = 0
-        AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
-        AND EXISTS (
-          SELECT 1 FROM race_commands rc
-           WHERE rc.id = ? AND rc.command_type = 'UPDATE_REGISTRATION'
-             AND rc.result_id = ?
-        )`,
-  ).bind(
-    now,
-    now,
-    registrationId,
-    value.input.emailNotificationsEnabled ? 1 : 0,
-    commandId,
-    registrationId,
+  if (!value.input.emailNotificationsEnabled) statements.push(cancelChannelNotificationsStatement(
+    env, registrationId, "EMAIL", commandId, now, "EMAIL_NOT_OPTED_IN",
+  ));
+  if (!value.input.smsNotificationsEnabled) statements.push(cancelChannelNotificationsStatement(
+    env, registrationId, "SMS", commandId, now, "SMS_NOT_OPTED_IN",
   ));
   statements.push(env.DB.prepare(
     `INSERT INTO audit_events

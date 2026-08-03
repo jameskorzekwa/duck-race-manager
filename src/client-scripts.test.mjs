@@ -2318,6 +2318,7 @@ test("saving contact details keeps the owned card while the authoritative refres
     phone: "(555) 010-7777",
     emailNotificationsEnabled: false,
     smsNotificationsEnabled: false,
+    smsAvailable: true,
     revision: 0,
   };
   const harness = myDucksHarness((url, options) => {
@@ -2332,6 +2333,7 @@ test("saving contact details keeps the owned card while the authoritative refres
         phone: update.phone,
         emailNotificationsEnabled: update.emailNotificationsEnabled,
         smsNotificationsEnabled: update.smsNotificationsEnabled,
+        smsAvailable: true,
         revision: 1,
       };
       return Response.json({ ...contact, replayed: false });

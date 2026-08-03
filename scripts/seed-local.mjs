@@ -239,6 +239,7 @@ export const seed = async (options) => {
     // The final has to hold one winner from every round-one heat.
     finalHeatCapacity: Math.max(3, heatCount),
     publicNamePolicy: "FIRST_NAME_LAST_INITIAL",
+    smsNotificationsEnabled: options.smsNotificationsEnabled ?? true,
   }, { label: "configure event" });
   step(`Configured ${options.heatSize} ducks per heat, ${heatCount} round-one heats expected`);
   if (options.state === "draft") return { state: options.state, eventId, accounts, event: configured.body.event };

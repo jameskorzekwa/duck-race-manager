@@ -76,6 +76,16 @@ test.describe("complete race journey", () => {
       await configuration.getByRole("button", { name: "Save draft configuration" }).click();
       await expect(page.locator("[data-console-message]")).toHaveText("All operation areas are current.");
 
+      // New events default SMS off. Enable it through the administrator UI so
+      // this broad journey can continue covering both public contact channels.
+      const smsSettings = page.locator("[data-event-sms-form]");
+      await expect(smsSettings).toBeVisible();
+      await smsSettings.getByRole("checkbox", { name: "Offer participant SMS race updates" }).check();
+      await smsSettings.getByRole("button", { name: "Save SMS setting" }).click();
+      await expect.poll(async () =>
+        (await client.get(`/api/v1/staff/events/${event.id}`)).body.event.smsNotificationsEnabled
+      ).toBe(true);
+
       await page.getByRole("button", { name: "Open registration", exact: true }).click();
       await confirmAction(page);
       await expect(page.getByText("Registration open", { exact: true }).first()).toBeVisible();

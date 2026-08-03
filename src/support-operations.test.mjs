@@ -50,7 +50,11 @@ const makeDb = (first = () => null, all = () => ({ results: [] })) => {
   };
 };
 
-const makeEnv = (db, queue = { async send() {} }) => ({ DB: db, EMAIL_QUEUE: queue });
+const makeEnv = (db, queue = { async send() {} }) => ({
+  DB: db,
+  EMAIL_QUEUE: queue,
+  NOTIFICATION_DESTINATION_HMAC_KEY: "test-notification-hmac-key-32-bytes-minimum",
+});
 
 const post = (path, body) => new Request(`https://quickducks.com${path}`, {
   method: "POST",
@@ -144,6 +148,8 @@ test("operational summary reports registration, duck, heat, and notification blo
   assert.equal(body.areas.duck.blockerCount, 2);
   assert.equal(body.areas.heat.blockerCount, 1);
   assert.equal(body.areas.notification.blockerCount, 2);
+  assert.equal(body.areas.notification.email, 0);
+  assert.equal(body.areas.notification.sms, 0);
   assert.equal(body.blockerCount, 7);
 
   // No returns area, no purge-claim projection, and no reads of retired tables.
@@ -200,6 +206,38 @@ test("notification cancellation records the reason outside redacted audit detail
   const audit = db.batches[0][2];
   assert.doesNotMatch(JSON.stringify(audit.args), new RegExp("x{43}"));
   assert.match(JSON.stringify(audit.args), /reason_recorded/);
+});
+
+test("staff suppression persists only a keyed destination digest", async () => {
+  const commandId = crypto.randomUUID();
+  let commandLookups = 0;
+  const db = makeDb((sql) => {
+    if (sql.includes("FROM race_commands WHERE id")) {
+      commandLookups += 1;
+      return commandLookups === 1
+        ? null
+        : { event_id: "event_test", command_type: "SUPPRESS_NOTIFICATION", result_id: "notification_test" };
+    }
+    if (sql.includes("JOIN registrations r")) {
+      return { channel: "SMS", email: null, phone: "(817) 320-6150" };
+    }
+    return null;
+  });
+  const response = await handleSupportOperations(
+    post("/api/v1/staff/support/events/event_test/notifications/notification_test/suppress", {
+      commandId,
+      reason: "Participant requested suppression",
+    }),
+    makeEnv(db),
+    admin,
+  );
+  assert.equal(response.status, 201);
+  const suppression = db.batches[0].find((statement) =>
+    statement.sql.includes("participant_notification_suppressions"));
+  assert.ok(suppression);
+  assert.equal(suppression.args[1], "SMS");
+  assert.match(suppression.args[2], /^[0-9a-f]{64}$/);
+  assert.doesNotMatch(JSON.stringify(db.batches[0].map((statement) => statement.args)), /817|320|6150/);
 });
 
 test("audit timeline selects only redacted fields", async () => {

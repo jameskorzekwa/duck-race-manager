@@ -45,6 +45,12 @@ import { handleStaffApi } from "./staff-api.ts";
 import { handleStaffLifecycleOperations } from "./staff-lifecycle-operations.ts";
 import { handleSupportOperations } from "./support-operations.ts";
 import {
+  cancelChannelNotificationsStatement,
+  participantNotificationStatements,
+  publishParticipantNotifications,
+} from "./participant-notifications.ts";
+import { unsubscribeEmailNotification } from "./email-notifications.ts";
+import {
   handleLiveConnection,
   mutationRefreshDomains,
   scheduleRaceUpdate,
@@ -74,7 +80,7 @@ const getCurrentEvent = (env: Env): Promise<EventRecord | null> =>
   env.DB.prepare(
     `SELECT id, slug, name, event_date, timezone, status,
             registration_opens_at, registration_closes_at, email_required,
-            public_name_policy
+             public_name_policy, sms_notifications_enabled
        FROM events
       WHERE status IN (
         'REGISTRATION_OPEN',
@@ -100,7 +106,7 @@ const getOpenEvent = (env: Env, eventId: string): Promise<EventRecord | null> =>
   return env.DB.prepare(
     `SELECT id, slug, name, event_date, timezone, status,
             registration_opens_at, registration_closes_at, email_required,
-            public_name_policy
+             public_name_policy, sms_notifications_enabled
        FROM events
       WHERE id = ?
         AND status = 'REGISTRATION_OPEN'
@@ -120,6 +126,7 @@ const eventResponse = (event: EventRecord): Record<string, unknown> => ({
   registrationOpensAt: event.registration_opens_at,
   registrationClosesAt: event.registration_closes_at,
   emailRequired: event.email_required === 1,
+  smsAvailable: event.sms_notifications_enabled === 1,
   publicNamePolicy: event.public_name_policy,
 });
 
@@ -359,6 +366,9 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
 
   const event = await getOpenEvent(env, payload.eventId);
   if (event === null) return json({ error: "Registration is not open for this event." }, 409);
+  if (payload.smsNotificationsEnabled === true && event.sms_notifications_enabled === 0) {
+    return json({ error: "SMS updates are not available for this event." }, 409);
+  }
 
   const form = new FormData();
   if (typeof payload.firstName === "string") form.set("first_name", payload.firstName);
@@ -449,6 +459,14 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
         JSON.stringify({ created_via: "PUBLIC" }),
       ),
       ...await collectionStatements(env, collection, registrationId, now, tokenHash),
+      ...participantNotificationStatements(env, {
+        eventId: event.id,
+        registrationId,
+        commandId: payload.commandId,
+        type: "REGISTRATION_CONFIRMED",
+        lifecycleKey: `REGISTRATION_CONFIRMED:${registrationId}`,
+        now,
+      }),
     ];
     await env.DB.batch(statements);
   } catch {
@@ -476,6 +494,7 @@ const createRegistration = async (request: Request, env: Env): Promise<Response>
     return json({ error: "Registration could not be saved. Please retry with the same command identifier." }, 409);
   }
 
+  await publishParticipantNotifications(env);
   return registrationResponse(
     registrationId,
     lookupCode,
@@ -1047,6 +1066,7 @@ interface OwnedContactRow {
   sms_notifications_enabled: number;
   revision: number;
   email_required: number;
+  sms_available: number;
 }
 
 const contactResponse = (row: OwnedContactRow, replayed?: boolean): Record<string, unknown> => ({
@@ -1055,6 +1075,7 @@ const contactResponse = (row: OwnedContactRow, replayed?: boolean): Record<strin
   phone: row.phone,
   emailNotificationsEnabled: row.email_notifications_enabled === 1,
   smsNotificationsEnabled: row.sms_notifications_enabled === 1,
+  smsAvailable: row.sms_available === 1,
   revision: row.revision,
   ...(replayed === undefined ? {} : { replayed }),
 });
@@ -1072,7 +1093,8 @@ const getOwnedContact = async (
   const row = await env.DB.prepare(
     `SELECT r.id AS registration_id, r.email, r.phone,
             r.email_notifications_enabled, r.sms_notifications_enabled,
-            r.revision, e.email_required
+             r.revision, e.email_required,
+             e.sms_notifications_enabled AS sms_available
        FROM browser_collection_registrations bcr
        JOIN registrations r ON r.id = bcr.registration_id
        JOIN events e ON e.id = r.event_id
@@ -1265,6 +1287,11 @@ const updateMyContact = async (
     return json({ error: "Contact validation failed.", fields: validation.errors }, 422);
   }
   const value = validation.value;
+  if (
+    value.smsNotificationsEnabled
+    && target.row.sms_notifications_enabled !== 1
+    && target.row.sms_available !== 1
+  ) return json({ error: "SMS updates are not available for this event." }, 409);
   const fingerprint = await hashToken(`${target.proof}\0${JSON.stringify([
     registrationId,
     revision,
@@ -1345,26 +1372,12 @@ const updateMyContact = async (
         commandId,
         registrationId,
       ),
-      env.DB.prepare(
-        `UPDATE email_notifications
-            SET status = 'CANCELLED', terminal_at = ?,
-                status_reason = 'EMAIL_NOT_OPTED_IN', retry_after = NULL,
-                last_error_code = NULL, updated_at = ?
-          WHERE registration_id = ? AND ? = 0
-            AND status IN ('WAITING_FOR_SYNC', 'PENDING', 'QUEUED', 'RETRY_PENDING')
-            AND EXISTS (
-              SELECT 1 FROM race_commands rc
-               WHERE rc.id = ? AND rc.command_type = 'UPDATE_PARTICIPANT_CONTACT'
-                 AND rc.result_id = ?
-            )`,
-      ).bind(
-        now,
-        now,
-        registrationId,
-        value.emailNotificationsEnabled ? 1 : 0,
-        commandId,
-        registrationId,
-      ),
+      ...(value.emailNotificationsEnabled ? [] : [cancelChannelNotificationsStatement(
+        env, registrationId, "EMAIL", commandId, now, "EMAIL_NOT_OPTED_IN",
+      )]),
+      ...(value.smsNotificationsEnabled ? [] : [cancelChannelNotificationsStatement(
+        env, registrationId, "SMS", commandId, now, "SMS_NOT_OPTED_IN",
+      )]),
       env.DB.prepare(
         `INSERT INTO audit_events
           (id, event_id, command_id, action, subject_type, subject_id,
@@ -1707,6 +1720,21 @@ const handleApiRequest = async (
 
   if (url.pathname === "/api/v1/registrations" && request.method === "POST") {
     return createRegistration(request, env);
+  }
+
+  if (url.pathname === "/api/v1/notifications/email/unsubscribe" && request.method === "POST") {
+    if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+      return json({ error: "Content-Type must be application/json." }, 415);
+    }
+    let token = "";
+    try {
+      const parsed = await request.json<{ token?: unknown }>();
+      token = typeof parsed.token === "string" ? parsed.token : "";
+    } catch {}
+    const result = await unsubscribeEmailNotification(env, token);
+    return result === "UNSUBSCRIBED"
+      ? json({ unsubscribed: true })
+      : json({ error: "This unsubscribe link is invalid or expired." }, 404);
   }
 
   if (url.pathname === "/api/v1/registrations/mine" && request.method === "GET") {

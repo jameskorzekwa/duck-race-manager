@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0019_round_one_walk_up_admission.sql`, browser
+the Worker, D1 migrations through `0023_participant_notifications.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -60,7 +60,7 @@ not authorized.
 | Resolve a final-place duck by tag URL/number on the finish-line form | `RESULT_TAKER` or `RACE_DIRECTOR` | Yes |
 | Event lifecycle, planning, roster changes, result correction/reopen | `RACE_DIRECTOR` | Yes |
 | Open the `/staff` Admin view | `RACE_DIRECTOR` | Yes |
-| Create/configure draft; reopen registration | None | Yes |
+| Create/configure draft; change the event SMS switch in any lifecycle state; reopen registration | None | Yes |
 | Staff management; support diagnostics/notifications/audit | None | Yes |
 | Open `/staff/access` and the console's Support view | None | Yes |
 | Delete event: the whole dataset in any state | None | Yes |
@@ -129,6 +129,32 @@ Pairing changes `SUBMITTED` to `ACTIVE`. Reactivation returns a registration to
 `ACTIVE` when it still has a current duck assignment, otherwise to `SUBMITTED`.
 Withdrawal and disqualification do not themselves close an assignment or
 remove a heat entry.
+
+### Participant Notifications
+
+**Implemented:** operational email and SMS are independently opt-in. The event
+SMS switch is off by default; administrators may enable or disable that switch
+without changing immutable race configuration, including after the race starts.
+When it is disabled the public and staff registration surfaces hide phone/SMS
+choices and pending SMS work is cancelled. Public event projections expose only
+the derived `smsAvailable` capability, never the administrative switch itself.
+
+A committed registration confirmation, Round One assignment, Final assignment,
+official result (including a correction), and the roster of the next runnable
+heat each create durable channel-specific outbox work when that participant has
+consented. A heat reset increments its run sequence and may create one new
+reminder for the rerun; readying or calling a heat does not create another one.
+The next runnable heat is always the earliest heat not finalized or cancelled,
+so overlapping operations cannot notify a later roster first.
+
+The queue contains only opaque notification IDs. Immediately before provider
+submission the consumer reloads consent, validated contact, event SMS state,
+current duck/heat assignment, result revision or heat-run sequence, local keyed
+suppression state, and (for SMS) every page of the AWS opt-out list. Raw contacts
+never enter the queue, outbox, suppression table, audit details, or stored error
+codes. Email unsubscribe and provider SMS STOP outcomes create HMAC-only local
+suppressions. A response lost after provider submission is terminal
+`DELIVERY_OUTCOME_UNKNOWN` and is never automatically or manually retried.
 
 ### Round One Walk-Ups
 

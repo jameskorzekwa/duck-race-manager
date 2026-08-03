@@ -11,10 +11,11 @@
 | Database | Cloudflare D1 `quickducks-prod` | Wrangler and `db/migrations` |
 | Live refresh fan-out | Durable Object class `RaceUpdates`, binding `RACE_UPDATES` | Wrangler class migration and Worker deployment |
 | Public search limit | Workers binding `PUBLIC_SEARCH_RATE_LIMITER` | `wrangler.jsonc` |
-| Email queue | Cloudflare Queue `quickducks-email` | Wrangler producer/consumer and `EMAIL_QUEUE` binding |
-| Email dead-letter queue | Cloudflare Queue `quickducks-email-dlq` | Wrangler consumer retry exhaustion |
+| Participant notification queue | Cloudflare Queue `quickducks-email` | Wrangler producer/consumer and retained `EMAIL_QUEUE` binding |
+| Notification dead-letter queue | Cloudflare Queue `quickducks-email-dlq` | Wrangler consumer retry exhaustion |
 | Staff identity | Cognito user pool `quickducks-staff` in `us-east-1` | CloudFormation |
 | Transactional email identity | Amazon SES identity `quickducks.com` in `us-east-1` | CloudFormation plus DNS |
+| Transactional SMS | AWS End User Messaging SMS in `us-east-1` | Existing reviewed origination identity and opt-out list |
 | Worker AWS identity | IAM user `quickducks-worker-ses` | Application CloudFormation stack; bootstrap-owned permissions boundary; key stored as Worker secrets |
 | Registration challenge | Cloudflare Turnstile widget for `quickducks.com` | Cloudflare dashboard plus Worker variable/secret |
 
@@ -37,7 +38,8 @@ are production resources. Do not create substitutes during a release.
   `quickducks-worker-ses-boundary`. The application stack can attach only that
   boundary to the exact Worker user; it cannot create or alter boundary policy
   versions or remove the boundary. The boundary fixes effective SES access to
-  `SendEmail` and `SendRawEmail` on only the `quickducks.com` identity and
+  `SendEmail` and `SendRawEmail` on only the `quickducks.com` identity, SMS
+  access to `SendTextMessage` and `DescribeOptedOutNumbers` in `us-east-1`, and
   staff-administration access to only the production Cognito pool.
 - The Worker's runtime AWS key pair and both Turnstile keys exist only as
   encrypted Cloudflare Worker secrets. They are not GitHub Actions secrets and
@@ -560,7 +562,7 @@ The Worker sends only opaque notification IDs to `quickducks-email` through the
 `EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
 with five bounded queue attempts and `quickducks-email-dlq` attached. A one-minute
 cron republishes durable `PENDING` work and queue-publication failures, closing
-the D1-commit/queue-publication gap without putting email delivery inside a race
+the D1-commit/queue-publication gap without putting provider delivery inside a race
 control request. Queue duplicates are expected and safe: a D1 claim and the
 logical-message unique index prevent an ordinary duplicate delivery from
 sending twice. Migration `0021_email_delivery_claim.sql` adds the nullable,
@@ -583,6 +585,15 @@ duck. Automatic invocation logs remain disabled, and raw SES responses,
 recipient addresses, rendered bodies, and credentials must not be logged or
 persisted as errors. SES acceptance is recorded honestly as `SENT`;
 delivery/bounce/complaint callbacks are not currently implemented.
+
+Migration `0023_participant_notifications.sql` adds the default-off event SMS
+switch, per-heat run sequence, channel/lifecycle metadata, channel-aware
+uniqueness, due-work index, and HMAC-only suppression table. Defaults and a
+legacy partial unique index keep the previously deployed email-only Worker safe
+during migration-first deployment. The consumer submits transactional SMS only
+after paginating `DescribeOptedOutNumbers` with signed REST-JSON POST requests.
+The event cannot enable SMS unless its origination identity, opt-out-list name,
+and destination-HMAC key are configured.
 
 After deployment, use a synthetic controlled registration to opt into email,
 pair it, and call its heat. Confirm the support view reaches `SENT` for the
@@ -697,6 +708,9 @@ The Worker needs this exact encrypted-secret set:
 | --- | --- |
 | `AWS_ACCESS_KEY_ID` | Access key created for CloudFormation output `SesIamUser` |
 | `AWS_SECRET_ACCESS_KEY` | Matching secret access key, available only at creation |
+| `NOTIFICATION_DESTINATION_HMAC_KEY` | Independently generated random value of at least 32 characters; used only for destination digests and unsubscribe signatures |
+| `SMS_OPT_OUT_LIST_NAME` | Reviewed AWS End User Messaging SMS opt-out-list name in `us-east-1` |
+| `SMS_ORIGINATION_IDENTITY` | Reviewed production origination identity in `us-east-1` |
 | `TURNSTILE_SECRET_KEY` | Turnstile widget secret |
 | `TURNSTILE_SITE_KEY` | Turnstile widget site key; intentionally encrypted in current production |
 
@@ -718,10 +732,19 @@ printing it or writing it to disk:
 )
 ```
 
+Set the three notification values interactively so they do not appear in shell
+history or process arguments:
+
+```sh
+npx wrangler secret put NOTIFICATION_DESTINATION_HMAC_KEY
+npx wrangler secret put SMS_OPT_OUT_LIST_NAME
+npx wrangler secret put SMS_ORIGINATION_IDENTITY
+```
+
 If the bulk operation fails, immediately list and delete the newly created IAM
 key before retrying; AWS will never show its secret value again. Never place
 these runtime keys in `wrangler.jsonc`, `.dev.vars`, GitHub, logs, issues, or
-release notes. Confirm all four secrets with `npx wrangler secret list`, which
+release notes. Confirm all seven secrets with `npx wrangler secret list`, which
 shows names but not values. Every release performs this name-only check before
 CloudFormation, D1, or Worker mutation.
 

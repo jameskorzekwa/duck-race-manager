@@ -4,6 +4,9 @@ export interface Env {
   AWS_REGION: string;
   AWS_SECRET_ACCESS_KEY: string;
   EMAIL_FROM_ADDRESS: string;
+  NOTIFICATION_DESTINATION_HMAC_KEY: string;
+  SMS_ORIGINATION_IDENTITY: string;
+  SMS_OPT_OUT_LIST_NAME: string;
   COGNITO_USER_POOL_ID: string;
   COGNITO_USER_POOL_CLIENT_ID: string;
   COGNITO_DOMAIN: string;
@@ -27,6 +30,7 @@ export interface EventRecord {
   registration_closes_at: string | null;
   email_required: number;
   public_name_policy: "FIRST_NAME_ONLY" | "FIRST_NAME_LAST_INITIAL" | "FULL_NAME";
+  sms_notifications_enabled: number;
 }
 
 export interface RegistrationStatusRecord {

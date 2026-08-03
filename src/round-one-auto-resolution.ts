@@ -6,6 +6,11 @@ import {
 } from "./heat-operations.ts";
 import type { Env } from "./types.ts";
 import { heatHasNeverStartedSql } from "./walk-up-admission.ts";
+import {
+  heatNotificationStatements,
+  participantNotificationStatements,
+  publishParticipantNotifications,
+} from "./participant-notifications.ts";
 
 // A Round One heat stops being a race when the racers in it leave. Withdrawal
 // and disqualification never touch a roster — the duck is sealed in a numbered
@@ -111,8 +116,10 @@ interface CandidateRow {
   id: string;
   heat_number: number;
   revision: number;
+  result_revision: number;
   eligible_count: number;
   race_entry_id: string | null;
+  registration_id: string | null;
   duck_assignment_id: string | null;
   final_heat_id: string | null;
   final_heat_capacity: number;
@@ -133,8 +140,15 @@ const soleEligibleRacerColumn = (column: string): string => `(
     )`;
 
 const candidateSql = `SELECT h.id, h.heat_number, h.revision,
-       ${eligibleEntryCountSql("h.event_id", "h.id")} AS eligible_count,
-       ${soleEligibleRacerColumn("sole.race_entry_id")} AS race_entry_id,
+         MAX(
+           COALESCE((SELECT MAX(published.revision) FROM heat_results published
+                      WHERE published.heat_id = h.id), 0),
+           COALESCE((SELECT MAX(superseded.revision) FROM heat_result_history superseded
+                      WHERE superseded.heat_id = h.id), 0)
+         ) + 1 AS result_revision,
+         ${eligibleEntryCountSql("h.event_id", "h.id")} AS eligible_count,
+        ${soleEligibleRacerColumn("sole.race_entry_id")} AS race_entry_id,
+        ${soleEligibleRacerColumn("sole_entry.registration_id")} AS registration_id,
        ${soleEligibleRacerColumn("sole_assignment.id")} AS duck_assignment_id,
        (SELECT existing_final.id FROM heats existing_final
          WHERE existing_final.event_id = h.event_id AND existing_final.round = 'FINAL'
@@ -353,6 +367,25 @@ const uncontestedStatements = (
       now, commandId, now, candidate.id, eventId, candidate.revision,
       commandId, eventId, COMMAND_TYPES.UNCONTESTED_WINNER, candidate.id,
     ),
+    ...heatNotificationStatements(env, {
+      eventId,
+      heatId: candidate.id,
+      commandId,
+      type: "ROUND_RESULT",
+      lifecycleKeyPrefix: `ROUND_RESULT:${candidate.id}:${candidate.result_revision}`,
+      resultRevision: candidate.result_revision,
+      now,
+    }),
+    ...participantNotificationStatements(env, {
+      eventId,
+      registrationId: candidate.registration_id as string,
+      commandId,
+      type: "FINAL_ASSIGNED",
+      lifecycleKey: `FINAL_ASSIGNED:${finalHeatId}`,
+      heatId: finalHeatId,
+      duckAssignmentId,
+      now,
+    }),
     env.DB.prepare(
       `INSERT INTO audit_events
         (id, event_id, command_id, action, subject_type, subject_id,
@@ -400,6 +433,7 @@ export const reconcileRoundOneHeats = async (
     const commandId = crypto.randomUUID();
     const uncontested = candidate.eligible_count === 1
       && typeof candidate.race_entry_id === "string"
+      && typeof candidate.registration_id === "string"
       && typeof candidate.duck_assignment_id === "string";
     if (candidate.eligible_count !== 0 && !uncontested) continue;
     let existingFinalHeatId = candidate.final_heat_id;
@@ -441,5 +475,6 @@ export const reconcileRoundOneHeats = async (
       raceEntryId: uncontested ? candidate.race_entry_id : null,
     });
   }
+  await publishParticipantNotifications(env).catch(() => undefined);
   return resolutions;
 };

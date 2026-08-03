@@ -164,8 +164,9 @@ test.describe("the public Winners finale", () => {
     // The celebration is decorative and gated. With motion allowed the gold
     // medal animates; with reduced motion requested it does not run at all,
     // while the winners themselves read exactly the same either way.
-    const animationName = async (context) => {
+    const animationName = async (context, reducedMotion) => {
       const view = await context.newPage();
+      await view.emulateMedia({ reducedMotion });
       await view.goto("/race");
       const medal = view.locator(".winners .podium-gold .podium-medal");
       await expect(medal).toBeVisible();
@@ -177,9 +178,9 @@ test.describe("the public Winners finale", () => {
     };
 
     const motion = await browser.newContext({ reducedMotion: "no-preference" });
-    expect(await animationName(motion)).toBe("winner-medal-glow");
+    expect(await animationName(motion, "no-preference")).toBe("winner-medal-glow");
     const reduced = await browser.newContext({ reducedMotion: "reduce" });
-    expect(await animationName(reduced)).toBe("none");
+    expect(await animationName(reduced, "reduce")).toBe("none");
 
     // The Worker paints the same authoritative public projection into the
     // document before the live client starts. With scripting off, real winner

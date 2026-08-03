@@ -255,7 +255,9 @@ test("every rendered form class remains covered by the shared form constraints",
   // The registration desk then added five: the shared participants surface's
   // filter, walk-up, duck-name, and edit forms, plus its own sign-out form. The
   // scanned-duck page adds the emergency-replacement search form.
-  assert.equal(openingForms, 33);
+  // Event Details now includes the administrator-only per-event SMS switch;
+  // Support's redacted notification filter was already included in the count.
+  assert.equal(openingForms, 34);
   assert.equal(closingForms, openingForms);
   // "danger-zone" left the form vocabulary with the two purge forms; it now
   // styles only the <details>/<article> wrappers around destructive actions.

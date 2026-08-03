@@ -39,9 +39,10 @@ devices](#testing-on-other-devices).
 
 ## What makes this work
 
-Three things in production need the network: Cognito, which authenticates staff;
-Turnstile, which protects public registration; and SES, which sends race
-reminders. Local development replaces exactly those external boundaries while
+Four things in production need the network: Cognito, which authenticates staff;
+Turnstile, which protects public registration; SES, which sends email updates;
+and AWS End User Messaging SMS. Local development replaces the Cognito,
+Turnstile, and email boundaries while
 retaining their application-side authorization, queue, and persistence paths.
 
 `wrangler.local.jsonc` differs from `wrangler.jsonc` in four ways:
@@ -76,6 +77,12 @@ the synthetic message in memory instead of contacting SES. Browser tests inspect
 that mailbox at `GET /__local/emails` and clear it with
 `DELETE /__local/emails`; both routes exist only in `src/local-dev.ts` and are
 refused outside a configured local origin.
+
+The event SMS switch is still off by default locally, but an administrator may
+enable it to exercise channel gating, the outbox, and the consumer with a
+synthetic adapter. `GET /__local/sms` exposes that local-only mailbox and
+`DELETE /__local/sms` clears it. Local development never submits a real text
+message or uses a production provider identity.
 
 Everything else is the real thing. Sign-in still runs the production PKCE flow,
 sets the same `__Host-` cookies, refreshes the same way, and — crucially — still

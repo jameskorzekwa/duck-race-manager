@@ -11,6 +11,7 @@ export const seedState = (state, options = {}) => seed({
   state,
   participants: options.participants ?? 9,
   heatSize: options.heatSize ?? 3,
+  smsNotificationsEnabled: options.smsNotificationsEnabled ?? true,
 });
 
 export const bootstrap = async () => {
@@ -112,8 +113,9 @@ export const registerParticipant = async (client, eventId, index, overrides = {}
     firstName,
     lastName,
     email: `racer${index}@example.test`,
-    phone: `+1555020${String(index).padStart(4, "0")}`,
+    phone: overrides.phone ?? `+1555020${String(index).padStart(4, "0")}`,
     emailNotificationsEnabled: false,
+    smsNotificationsEnabled: false,
     turnstileToken: localPreviewTurnstileToken,
   }, { anonymous: true, label: `register synthetic racer ${index}` });
   return {
