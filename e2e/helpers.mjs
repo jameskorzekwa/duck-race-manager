@@ -11,6 +11,7 @@ export const seedState = (state, options = {}) => seed({
   state,
   participants: options.participants ?? 9,
   heatSize: options.heatSize ?? 3,
+  smsEnabled: options.smsEnabled ?? true,
 });
 
 export const bootstrap = async () => {

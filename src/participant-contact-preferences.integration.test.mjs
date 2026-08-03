@@ -81,9 +81,9 @@ const harness = (context) => {
   context.after(() => database.close());
   database.exec(`
     INSERT INTO events
-      (id, slug, name, event_date, timezone, status, public_name_policy)
+      (id, slug, name, event_date, timezone, status, public_name_policy, sms_notifications_enabled)
     VALUES ('event-contact', 'contact-race', 'Contact Race', '2026-08-30', 'UTC',
-            'REGISTRATION_OPEN', 'FIRST_NAME_LAST_INITIAL');
+            'REGISTRATION_OPEN', 'FIRST_NAME_LAST_INITIAL', 1);
   `);
   const env = makeEnv(database);
   const liveFrames = [];
@@ -195,6 +195,7 @@ test("owned contact reads and updates require participant-specific proof", async
     phone: "(555) 010-0001",
     emailNotificationsEnabled: false,
     smsNotificationsEnabled: false,
+    smsNotificationsAvailable: true,
     revision: 0,
   });
   assert.equal(initialResponse.headers.get("cache-control"), "no-store");
@@ -263,6 +264,7 @@ test("owned contact reads and updates require participant-specific proof", async
     phone: "(555) 010-9999",
     emailNotificationsEnabled: true,
     smsNotificationsEnabled: true,
+    smsNotificationsAvailable: true,
     revision: 1,
     replayed: false,
   });
@@ -290,6 +292,7 @@ test("owned contact reads and updates require participant-specific proof", async
     phone: "(555) 010-9999",
     emailNotificationsEnabled: true,
     smsNotificationsEnabled: true,
+    smsNotificationsAvailable: true,
     revision: 1,
   });
 
@@ -610,6 +613,7 @@ test("public registration captures independent contact consent and canonical pho
     phone: "(817) 320-6150",
     emailNotificationsEnabled: false,
     smsNotificationsEnabled: true,
+    smsNotificationsAvailable: true,
     revision: 0,
   });
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);

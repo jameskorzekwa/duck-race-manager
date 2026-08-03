@@ -154,6 +154,47 @@ test("operational summary reports registration, duck, heat, and notification blo
   for (const statement of db.statements) assert.doesNotMatch(statement.sql, /event_test/);
 });
 
+test("notification operations identify the channel without exposing a destination", async () => {
+  const db = makeDb(() => null, (sql) => sql.includes("FROM email_notifications n") ? ({
+    results: [{
+      id: "notification_test",
+      registration_id: "registration_test",
+      notification_type: "HEAT_UPCOMING",
+      channel: "SMS",
+      status: "FAILED",
+      template_version: 1,
+      scheduled_at: null,
+      queued_at: null,
+      sent_at: null,
+      terminal_at: "2026-08-02T12:00:00.000Z",
+      status_reason: "DELIVERY_OUTCOME_UNKNOWN",
+      last_error_code: "DELIVERY_OUTCOME_UNKNOWN",
+      created_at: "2026-08-02T11:59:00.000Z",
+      first_name: "Daisy",
+      last_name: "Duck",
+      heat_number: 2,
+      round: "ROUND_ONE",
+      attempt_count: 1,
+      last_attempt_status: "PERMANENT_FAILURE",
+      last_attempt_error_code: "DELIVERY_OUTCOME_UNKNOWN",
+    }],
+  }) : ({ results: [] }));
+  const response = await handleSupportOperations(
+    new Request("https://quickducks.com/api/v1/staff/support/events/event_test/notifications"),
+    makeEnv(db),
+    admin,
+  );
+  const body = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(body.notifications[0].channel, "SMS");
+  assert.equal(body.notifications[0].errorCode, "DELIVERY_OUTCOME_UNKNOWN");
+  assert.equal("email" in body.notifications[0], false);
+  assert.equal("phone" in body.notifications[0], false);
+  assert.match(db.statements[0].sql, /n\.channel/);
+  assert.doesNotMatch(db.statements[0].sql, /r\.email|r\.phone|destination_hash/);
+});
+
 test("notification retry creates a durable attempt and queues only its notification ID", async () => {
   const commandId = crypto.randomUUID();
   const sent = [];

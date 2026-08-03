@@ -15,6 +15,7 @@ const openEvent = {
   registration_closes_at: null,
   email_required: 0,
   public_name_policy: "FIRST_NAME_LAST_INITIAL",
+  sms_notifications_enabled: 1,
 };
 
 const makeDb = (first, all = () => ({ results: [] })) => {
@@ -146,6 +147,7 @@ test("returns the current event without private configuration", async () => {
     registrationClosesAt: null,
     emailRequired: false,
     publicNamePolicy: "FIRST_NAME_LAST_INITIAL",
+    smsAvailable: true,
   });
   assert.doesNotMatch(db.statements[0].sql, /DRAFT/);
 });
@@ -906,7 +908,7 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.equal(body.replayed, false);
   assert.match(body.lookupCode, /^[A-HJ-NP-Z2-9]{8}$/);
   assert.equal(db.batches.length, 1);
-  assert.equal(db.batches[0].length, 6);
+  assert.equal(db.batches[0].length, 8);
   assert.match(db.batches[0][0].sql, /INSERT INTO race_commands/);
   assert.match(db.batches[0][1].sql, /INSERT INTO registrations/);
   assert.match(db.batches[0][1].sql, /email_notifications_enabled, sms_notifications_enabled/);
@@ -917,13 +919,17 @@ test("creates registration, race-entry, command, and audit records atomically", 
   assert.equal(db.batches[0][2].args.length, 3);
   assert.match(db.batches[0][3].sql, /INSERT INTO audit_events/);
   assert.equal(db.batches[0][3].args.at(-1), JSON.stringify({ created_via: "PUBLIC" }));
-  assert.match(db.batches[0][4].sql, /INSERT INTO browser_registration_collections/);
+  assert.match(db.batches[0][4].sql, /INSERT INTO email_notifications/);
+  assert.match(db.batches[0][5].sql, /INSERT INTO email_notifications/);
+  assert.equal(db.batches[0][4].args.includes("EMAIL"), true);
+  assert.equal(db.batches[0][5].args.includes("SMS"), true);
+  assert.match(db.batches[0][6].sql, /INSERT INTO browser_registration_collections/);
   // Registering in this browser always claims the link as REGISTRATION, so an
   // earlier followed link can never keep hiding this browser's own lookup code.
-  assert.match(db.batches[0][5].sql, /INSERT INTO browser_collection_registrations/);
-  assert.match(db.batches[0][5].sql, /VALUES \(\?, \?, \?, 'REGISTRATION', \?\)/);
-  assert.match(db.batches[0][5].sql, /DO UPDATE SET added_via = 'REGISTRATION'/);
-  assert.equal(db.batches[0][5].args.at(-1), await hashToken(privateToken));
+  assert.match(db.batches[0][7].sql, /INSERT INTO browser_collection_registrations/);
+  assert.match(db.batches[0][7].sql, /VALUES \(\?, \?, \?, 'REGISTRATION', \?\)/);
+  assert.match(db.batches[0][7].sql, /DO UPDATE SET added_via = 'REGISTRATION'/);
+  assert.equal(db.batches[0][7].args.at(-1), await hashToken(privateToken));
   assert.match(response.headers.get("set-cookie") ?? "", /__Host-quickducks_browser=/);
   assert.match(response.headers.get("set-cookie") ?? "", /HttpOnly/);
   assert.ok(publicationTask);

@@ -287,10 +287,18 @@ test.describe("owned My Ducks contact preferences", () => {
       response.request().method() === "PATCH"
       && new URL(response.url()).pathname.endsWith(created.registration.registrationId));
     await edit.getByRole("button", { name: "Save participant details" }).click();
-    expect((await updatedResponse).status()).toBe(200);
-    await expect(page.locator("[data-participant-facts]")).toContainText("(817) 320-6124");
-    await expect(page.locator("[data-participant-facts]")).toContainText("Email updatesOpted in");
-    await expect(page.locator("[data-participant-facts]")).toContainText("SMS updatesNot opted in");
+    const updatedHttpResponse = await updatedResponse;
+    expect(updatedHttpResponse.status()).toBe(200);
+    const updated = (await updatedHttpResponse.json()).registration;
+    expect(updated.phone).toBe("(817) 320-6124");
+    expect(updated.emailNotificationsEnabled).toBe(true);
+    expect(updated.smsNotificationsEnabled).toBe(false);
+    const factValue = (label) => page.locator("[data-participant-facts] .fact")
+      .filter({ has: page.locator("dt", { hasText: label }) })
+      .locator("dd");
+    await expect(factValue("Phone")).toHaveText("(817) 320-6124");
+    await expect(factValue("Email updates")).toHaveText("Opted in");
+    await expect(factValue("SMS updates")).toHaveText("Not opted in");
 
     const direct = await rawJson(`/api/v1/staff/registrations/${created.registration.registrationId}`, {
       token: registrationStaff.token,

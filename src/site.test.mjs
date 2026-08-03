@@ -53,7 +53,13 @@ const renderedPages = [
 const style = renderedPages[0].match(/<style>([\s\S]+)<\/style>/)?.[1];
 
 test("public and staff participant forms expose independent contact consent controls", () => {
-  const publicForm = renderRegistration(undefined, "REGISTRATION")
+  const defaultOffForm = renderRegistration(undefined, "REGISTRATION")
+    .match(/<form[^>]*data-registration-form[^>]*>[\s\S]*?<\/form>/)?.[0];
+  assert.ok(defaultOffForm);
+  assert.doesNotMatch(defaultOffForm, /name="phone"|name="sms_notifications_enabled"/);
+  assert.match(defaultOffForm, /name="email_notifications_enabled" type="checkbox" disabled/);
+
+  const publicForm = renderRegistration(undefined, "REGISTRATION", false, true)
     .match(/<form[^>]*data-registration-form[^>]*>[\s\S]*?<\/form>/)?.[0];
   assert.ok(publicForm);
   assert.match(publicForm, /name="phone"[^>]*inputmode="tel"[^>]*placeholder="\(817\) 320-6150"/);
@@ -70,10 +76,15 @@ test("public and staff participant forms expose independent contact consent cont
       const form = markup.match(new RegExp(`<form ${formHook}>[\\s\\S]*?<\\/form>`))?.[0];
       assert.ok(form, formHook);
       assert.match(form, /name="emailNotificationsEnabled" type="checkbox" disabled/);
-      assert.match(form, /name="smsNotificationsEnabled" type="checkbox" disabled/);
       assert.match(form, /data-contact-error="email"/);
-      assert.match(form, /data-contact-error="phone"/);
+      assert.doesNotMatch(form, /name="phone"|name="smsNotificationsEnabled"|data-contact-error="phone"/);
     }
+    // Empty slots are not controls and disclose no stored contact data. The
+    // client fills them only after the selected event says SMS is available.
+    assert.match(markup, /data-sms-field-slot="walkup"/);
+    assert.match(markup, /data-sms-consent-slot="walkup"/);
+    assert.match(markup, /data-sms-field-slot="edit"/);
+    assert.match(markup, /data-sms-consent-slot="edit"/);
   }
 });
 
@@ -254,8 +265,9 @@ test("every rendered form class remains covered by the shared form constraints",
   //
   // The registration desk then added five: the shared participants surface's
   // filter, walk-up, duck-name, and edit forms, plus its own sign-out form. The
-  // scanned-duck page adds the emergency-replacement search form.
-  assert.equal(openingForms, 33);
+  // scanned-duck page adds the emergency-replacement search form. Event Details
+  // now adds the administrator-controlled per-event SMS setting form.
+  assert.equal(openingForms, 34);
   assert.equal(closingForms, openingForms);
   // "danger-zone" left the form vocabulary with the two purge forms; it now
   // styles only the <details>/<article> wrappers around destructive actions.

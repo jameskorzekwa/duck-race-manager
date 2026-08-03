@@ -960,6 +960,20 @@ test("atomic round-one start rejects provisioning begun after readiness prefligh
     "0007_duck_inventory_operations.sql",
     "0008_event_operations.sql",
     "0009_heat_result_operations.sql",
+    "0010_staff_lifecycle.sql",
+    "0011_support_operations.sql",
+    "0012_staff_role_assignments.sql",
+    "0013_followed_collection_entries.sql",
+    "0014_simplified_lifecycle_schema.sql",
+    "0015_participant_duck_names.sql",
+    "0016_locked_final_winner_correction.sql",
+    "0017_final_podium_selections.sql",
+    "0018_participant_contact_preferences.sql",
+    "0019_round_one_walk_up_admission.sql",
+    "0020_email_notification_assignment.sql",
+    "0021_email_delivery_claim.sql",
+    "0022_pending_heat_result_announcement.sql",
+    "0023_participant_notifications.sql",
   ]) {
     database.exec(readFileSync(new URL(`../db/migrations/${name}`, import.meta.url), "utf8"));
   }

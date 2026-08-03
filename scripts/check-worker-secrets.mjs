@@ -4,6 +4,9 @@ import { pathToFileURL } from "node:url";
 export const requiredWorkerSecrets = [
   "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
+  "NOTIFICATION_HMAC_SECRET",
+  "SMS_OPT_OUT_LIST_NAME",
+  "SMS_ORIGINATION_IDENTITY",
   "TURNSTILE_SECRET_KEY",
   "TURNSTILE_SITE_KEY",
 ];

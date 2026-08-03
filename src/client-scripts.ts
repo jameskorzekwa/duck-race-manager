@@ -295,33 +295,33 @@ globalThis.quickDucksContact ||= (() => {
     const phone = form.elements[fieldNames.phone];
     const emailConsent = form.elements[fieldNames.emailConsent];
     const smsConsent = form.elements[fieldNames.smsConsent];
-    if (!email || !phone || !emailConsent || !smsConsent) return null;
+    if (!email || !emailConsent || Boolean(phone) !== Boolean(smsConsent)) return null;
     const setError = (name, message) => {
       const target = form.querySelector("[data-contact-error='" + name + "']");
       if (target) target.textContent = message;
     };
     const sync = () => {
-      formatInput(phone);
+      if (phone) formatInput(phone);
       const emailOkay = validEmail(email.value);
-      const phoneOkay = validPhone(phone.value);
+      const phoneOkay = !phone || validPhone(phone.value);
       const emailPresent = email.value.trim() !== "";
-      const phonePresent = phone.value.trim() !== "";
+      const phonePresent = Boolean(phone && phone.value.trim() !== "");
       const emailMessage = emailPresent && !emailOkay ? "Enter a valid email address." : "";
       const phoneMessage = phonePresent && !phoneOkay ? "Enter a valid 10-digit US phone number." : "";
       if (typeof email.setCustomValidity === "function") email.setCustomValidity(emailMessage);
-      if (typeof phone.setCustomValidity === "function") phone.setCustomValidity(phoneMessage);
+      if (phone && typeof phone.setCustomValidity === "function") phone.setCustomValidity(phoneMessage);
       setError(fieldNames.email, emailMessage);
       setError(fieldNames.phone, phoneMessage);
       emailConsent.disabled = !emailPresent || !emailOkay;
-      smsConsent.disabled = !phonePresent || !phoneOkay;
+      if (smsConsent) smsConsent.disabled = !phonePresent || !phoneOkay;
       if (emailConsent.disabled) emailConsent.checked = false;
-      if (smsConsent.disabled) smsConsent.checked = false;
+      if (smsConsent && smsConsent.disabled) smsConsent.checked = false;
       if (!emailConsent.checked) setError(fieldNames.emailConsent, "");
-      if (!smsConsent.checked) setError(fieldNames.smsConsent, "");
+      if (!smsConsent || !smsConsent.checked) setError(fieldNames.smsConsent, "");
       return emailOkay && phoneOkay;
     };
     email.addEventListener("input", sync);
-    phone.addEventListener("input", sync);
+    if (phone) phone.addEventListener("input", sync);
     form.addEventListener("reset", () => queueMicrotask(sync));
     sync();
     return {
@@ -427,6 +427,11 @@ const loadRegistrationEvent = async () => {
       return;
     }
     eventName.textContent = event.name;
+    const renderedSms = form.querySelector("[data-registration-sms]") !== null;
+    if (event.smsAvailable !== renderedSms) {
+      location.reload();
+      return;
+    }
     eventDate.textContent = event.eventDate
       ? new Intl.DateTimeFormat(undefined, { dateStyle: "full" }).format(new Date(event.eventDate + "T12:00:00"))
       : "Race date to be announced";
@@ -1037,15 +1042,18 @@ const participantNameControls = (registration) => {
 const participantValidContact = (value, registrationId) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const keys = Object.keys(value).sort().join(",");
-  const readKeys = "email,emailNotificationsEnabled,phone,registrationId,revision,smsNotificationsEnabled";
-  const mutationKeys = "email,emailNotificationsEnabled,phone,registrationId,replayed,revision,smsNotificationsEnabled";
-  return (keys === readKeys || keys === mutationKeys)
+  const readKeys = "email,emailNotificationsEnabled,phone,registrationId,revision,smsNotificationsAvailable,smsNotificationsEnabled";
+  const mutationKeys = "email,emailNotificationsEnabled,phone,registrationId,replayed,revision,smsNotificationsAvailable,smsNotificationsEnabled";
+  const legacyReadKeys = "email,emailNotificationsEnabled,phone,registrationId,revision,smsNotificationsEnabled";
+  const legacyMutationKeys = "email,emailNotificationsEnabled,phone,registrationId,replayed,revision,smsNotificationsEnabled";
+  return (keys === readKeys || keys === mutationKeys || keys === legacyReadKeys || keys === legacyMutationKeys)
     && value.registrationId === registrationId
     && (value.email === null || typeof value.email === "string")
     && (value.phone === null || typeof value.phone === "string")
     && typeof value.emailNotificationsEnabled === "boolean"
     && typeof value.smsNotificationsEnabled === "boolean"
-    && (keys === readKeys || typeof value.replayed === "boolean")
+    && (value.smsNotificationsAvailable === undefined || typeof value.smsNotificationsAvailable === "boolean")
+    && (keys === readKeys || keys === legacyReadKeys || typeof value.replayed === "boolean")
     && Number.isInteger(value.revision) && value.revision >= 0;
 };
 
@@ -1059,6 +1067,7 @@ const participantContactSnapshot = (value) => ({
   phone: value.phone,
   emailNotificationsEnabled: value.emailNotificationsEnabled,
   smsNotificationsEnabled: value.smsNotificationsEnabled,
+  smsNotificationsAvailable: value.smsNotificationsAvailable === true,
   revision: value.revision,
 });
 
@@ -1163,14 +1172,17 @@ const participantPaintContact = (panel, registration) => {
     ));
     return;
   }
+  const smsAvailable = contact.smsNotificationsAvailable === true;
 
   const summary = participantText("div", "", "participant-contact-summary");
   summary.dataset.contactSummary = registration.registrationId;
   summary.append(
     participantText("strong", "Contact and update preferences"),
     participantContactLine("Email", contact.email || "Not provided"),
-    participantContactLine("Phone", contact.phone || "Not provided"),
     participantContactLine("Email updates", contact.emailNotificationsEnabled ? "Opted in" : "Not opted in"),
+  );
+  if (smsAvailable) summary.append(
+    participantContactLine("Phone", contact.phone || "Not provided"),
     participantContactLine("SMS updates", contact.smsNotificationsEnabled ? "Opted in" : "Not opted in"),
   );
   const edit = participantText("button", "Edit contact details", "button secondary small");
@@ -1233,7 +1245,14 @@ const participantPaintContact = (panel, registration) => {
   cancel.type = "button";
   const actions = participantText("div", "", "actions");
   actions.append(save, cancel);
-  form.append(emailLabel, phoneLabel, emailChoice, smsChoice, actions, feedback);
+  form.append(
+    emailLabel,
+    ...(smsAvailable ? [phoneLabel] : []),
+    emailChoice,
+    ...(smsAvailable ? [smsChoice] : []),
+    actions,
+    feedback,
+  );
   // HTMLFormElement supplies this collection in browsers. The fallback keeps
   // the same explicit controls usable in minimal DOM harnesses without changing
   // the production path.
@@ -6143,6 +6162,8 @@ const readinessList = document.querySelector("[data-event-readiness]");
 const eventConfigCard = document.querySelector("[data-event-config-card]");
 const eventConfigForm = document.querySelector("[data-event-config-form]");
 const eventConfigSlugPreview = document.querySelector("[data-event-config-slug-preview]");
+const eventSmsCard = document.querySelector("[data-event-sms-card]");
+const eventSmsForm = document.querySelector("[data-event-sms-form]");
 const forceDeleteCard = document.querySelector("[data-force-delete-card]");
 const forceDeleteOpen = document.querySelector("[data-open-force-delete]");
 const forceDeleteDialog = document.querySelector("[data-force-delete-dialog]");
@@ -6151,6 +6172,52 @@ const forceDeleteEventName = document.querySelector("[data-force-delete-event-na
 const forceDeleteMessage = document.querySelector("[data-force-delete-message]");
 const forceDeleteCancel = document.querySelector("[data-cancel-force-delete]");
 let forceDeleteBusy = false;
+
+let renderedSmsAvailability = null;
+const createStaffSmsField = () => {
+  const label = text("label", "Phone");
+  label.dataset.smsContact = "";
+  const input = document.createElement("input");
+  input.name = "phone";
+  input.type = "tel";
+  input.inputMode = "tel";
+  input.maxLength = 32;
+  input.placeholder = "(817) 320-6150";
+  input.setAttribute("aria-label", "Phone");
+  const error = text("span", "", "field-error");
+  error.dataset.contactError = "phone";
+  label.append(input, error);
+  return label;
+};
+const createStaffSmsConsent = () => {
+  const label = text("label", "", "check");
+  label.dataset.smsContact = "";
+  const input = document.createElement("input");
+  input.name = "smsNotificationsEnabled";
+  input.type = "checkbox";
+  input.disabled = true;
+  const copy = text("span", "Send operational race updates by SMS");
+  const error = text("span", "", "field-error");
+  error.dataset.contactError = "smsNotificationsEnabled";
+  copy.append(error);
+  label.append(input, copy);
+  return label;
+};
+const renderSmsAvailability = (enabled) => {
+  const available = enabled === true;
+  if (renderedSmsAvailability !== available) {
+    for (const slot of document.querySelectorAll("[data-sms-field-slot]")) {
+      slot.querySelector("[data-sms-contact]")?.remove();
+      if (available) slot.append(createStaffSmsField());
+    }
+    for (const slot of document.querySelectorAll("[data-sms-consent-slot]")) {
+      slot.replaceChildren(...(available ? [createStaffSmsConsent()] : []));
+    }
+    renderedSmsAvailability = available;
+    bindParticipantContactForms();
+  }
+  if (eventSmsForm) eventSmsForm.elements.enabled.checked = available;
+};
 
 const closeForceDeleteDialog = () => {
   if (!forceDeleteBusy && forceDeleteDialog && forceDeleteDialog.open) forceDeleteDialog.close();
@@ -6476,7 +6543,10 @@ const renderEvent = (detail, readiness) => {
     ["Reserved ducks", detail.summary.eventDucks],
     ["Round-one heats", detail.summary.roundOneHeats],
     ["Final heats", detail.summary.finalHeats],
+    ["Participant SMS", currentEvent.smsNotificationsEnabled ? "Enabled" : "Off"],
   ]);
+  renderSmsAvailability(currentEvent.smsNotificationsEnabled === true);
+  if (eventSmsCard) eventSmsCard.hidden = false;
   renderReadiness(readiness.readiness);
   if (eventConfigCard) {
     eventConfigCard.hidden = currentEvent.status !== "DRAFT";
@@ -6573,6 +6643,8 @@ const loadEvents = async (preferredId) => {
       closeForceDeleteDialog();
       forceDeleteCard.hidden = true;
     }
+    if (eventSmsCard) eventSmsCard.hidden = true;
+    renderSmsAvailability(false);
     if (eventDetailRegion) eventDetailRegion.hidden = true;
     if (eventEmptyState) eventEmptyState.hidden = false;
     // No event: creating one is the only thing to do, so the card comes back
@@ -6701,6 +6773,23 @@ if (eventConfigForm) eventConfigForm.addEventListener("submit", async (event) =>
   });
 });
 
+if (eventSmsForm) eventSmsForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  await perform(button, "Saving the event SMS setting…", async () => {
+    const result = await api(
+      "/api/v1/staff/events/" + encodeURIComponent(currentEventId()) + "/sms-notifications",
+      commandOptions("PATCH", {
+        commandId: crypto.randomUUID(),
+        revision: currentEvent.revision,
+        enabled: form.elements.enabled.checked,
+      }),
+    );
+    await loadEvents(result.event.id);
+  });
+});
+
 if (forceDeleteOpen) forceDeleteOpen.addEventListener("click", () => {
   if (!currentEvent || !forceDeleteDialog || !forceDeleteForm) return;
   resetForceDeleteDialog();
@@ -6802,8 +6891,13 @@ const participantEditForm = document.querySelector("[data-participant-edit-form]
 const participantActions = document.querySelector("[data-participant-actions]");
 const walkUpCard = document.querySelector("[data-walkup-card]");
 const walkUpForm = document.querySelector("[data-walkup-form]");
-const walkUpContact = globalThis.quickDucksContact.bindForm(walkUpForm);
-const participantEditContact = globalThis.quickDucksContact.bindForm(participantEditForm);
+let walkUpContact = null;
+let participantEditContact = null;
+const bindParticipantContactForms = () => {
+  walkUpContact = globalThis.quickDucksContact.bindForm(walkUpForm);
+  participantEditContact = globalThis.quickDucksContact.bindForm(participantEditForm);
+};
+bindParticipantContactForms();
 const walkUpAvailability = document.querySelector("[data-walkup-availability]");
 const walkUpGuide = document.querySelector("[data-walkup-guide]");
 let currentWalkUpAdmission = { allowed: false, reason: "Checking walk-up availability…" };
@@ -7149,13 +7243,16 @@ const renderParticipantDetail = (registration) => {
   selectedRegistration = registration;
   participantDetail.hidden = false;
   document.querySelector("[data-participant-name]").textContent = registration.firstName + " " + registration.lastName;
+  const smsAvailable = currentEvent?.smsNotificationsEnabled === true;
   showFacts(participantFacts, [
     ["Status", humanize(registration.status)],
     ["Lookup code", registration.lookupCode],
     ["Email", registration.email || "Not provided"],
-    ["Phone", registration.phone || "Not provided"],
     ["Email updates", registration.emailNotificationsEnabled ? "Opted in" : "Not opted in"],
-    ["SMS updates", registration.smsNotificationsEnabled ? "Opted in" : "Not opted in"],
+    ...(smsAvailable ? [
+      ["Phone", registration.phone || "Not provided"],
+      ["SMS updates", registration.smsNotificationsEnabled ? "Opted in" : "Not opted in"],
+    ] : []),
     ["Created via", humanize(registration.createdVia)],
     ["Duck", participantDuckFact(registration)],
     ["Heat", participantHeatFact(registration)],
@@ -7166,10 +7263,12 @@ const renderParticipantDetail = (registration) => {
   participantEditForm.elements.firstName.value = registration.firstName;
   participantEditForm.elements.lastName.value = registration.lastName;
   participantEditForm.elements.email.value = registration.email || "";
-  participantEditForm.elements.phone.value = registration.phone || "";
+  if (participantEditForm.elements.phone) participantEditForm.elements.phone.value = registration.phone || "";
   participantEditForm.elements.emailNotificationsEnabled.checked = registration.emailNotificationsEnabled;
-  participantEditForm.elements.smsNotificationsEnabled.checked = registration.smsNotificationsEnabled;
-  participantEditContact.sync();
+  if (participantEditForm.elements.smsNotificationsEnabled) {
+    participantEditForm.elements.smsNotificationsEnabled.checked = registration.smsNotificationsEnabled;
+  }
+  participantEditContact?.sync();
   participantEditForm.elements.notes.value = registration.notes || "";
   // Naming needs a duck to name *now*, and the endpoint refuses without a
   // current assignment, so this is the pairing question rather than the
@@ -7265,7 +7364,7 @@ walkUpForm?.addEventListener("submit", async (event) => {
     resultTarget.textContent = currentWalkUpAdmission.reason;
     return;
   }
-  if (!walkUpContact.validate()) return;
+  if (!walkUpContact?.validate()) return;
   const values = new FormData(form);
   pendingWalkUpCommand ??= { commandId: crypto.randomUUID(), privateToken: randomPrivateToken() };
   await perform(button, "Creating walk-up registration…", async () => {
@@ -7278,7 +7377,7 @@ walkUpForm?.addEventListener("submit", async (event) => {
         firstName: String(values.get("firstName")),
         lastName: String(values.get("lastName")),
         email: String(values.get("email")) || null,
-        phone: String(values.get("phone")) || null,
+        phone: values.get("phone") === null ? null : String(values.get("phone")) || null,
         emailNotificationsEnabled: values.get("emailNotificationsEnabled") === "on",
         smsNotificationsEnabled: values.get("smsNotificationsEnabled") === "on",
         notes: String(values.get("notes")) || null,
@@ -7292,7 +7391,7 @@ walkUpForm?.addEventListener("submit", async (event) => {
     resultTarget.replaceChildren(text("strong", "Lookup code: " + result.registration.lookupCode + " · "), link);
     pendingWalkUpCommand = null;
     form.reset();
-    walkUpContact.sync();
+    walkUpContact?.sync();
     // Paint the committed response before the follow-up list refresh. The list
     // is useful for selection state, but a slow or failed refresh must not hide
     // the participant staff just created or delay the edit controls.
@@ -7304,10 +7403,15 @@ walkUpForm?.addEventListener("submit", async (event) => {
 
 participantEditForm?.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!participantEditContact.validate()) return;
+  if (!participantEditContact?.validate()) return;
   const form = event.currentTarget;
   const button = form.querySelector("button");
   const values = new FormData(form);
+  const smsNotificationsControl = form.elements.smsNotificationsEnabled;
+  // A detail read can have started before this edit became dirty. Retire it
+  // before the mutation so an older response cannot land after markClean() and
+  // replace the committed response with the pre-edit contact preferences.
+  participantDetailRequest.invalidate();
   await perform(button, "Saving participant details…", async () => {
     const result = await api(
       "/api/v1/staff/registrations/" + encodeURIComponent(selectedRegistration.registrationId),
@@ -7317,9 +7421,14 @@ participantEditForm?.addEventListener("submit", async (event) => {
         firstName: String(values.get("firstName")),
         lastName: String(values.get("lastName")),
         email: String(values.get("email")) || null,
-        phone: String(values.get("phone")) || null,
+        phone: values.get("phone") === null ? selectedRegistration.phone : String(values.get("phone")) || null,
         emailNotificationsEnabled: values.get("emailNotificationsEnabled") === "on",
-        smsNotificationsEnabled: values.get("smsNotificationsEnabled") === "on",
+        // An unchecked checkbox and an absent checkbox are both omitted from
+        // FormData. Read the live control when SMS is available; preserve the
+        // stored preference only when the event switch removed that control.
+        smsNotificationsEnabled: smsNotificationsControl
+          ? smsNotificationsControl.checked
+          : selectedRegistration.smsNotificationsEnabled,
         notes: String(values.get("notes")) || null,
       }),
     );
@@ -7759,7 +7868,11 @@ const loadNotifications = async () => {
   notificationList.replaceChildren();
   for (const notification of body.notifications) {
     const card = text("article", "", "data-card");
-    card.append(text("h3", notification.participantName + " · " + humanize(notification.type)), text("p", humanize(notification.status) + " · " + notification.attempts + " attempts", "muted"));
+    const channel = notification.channel === "SMS" ? "SMS" : "Email";
+    card.append(
+      text("h3", notification.participantName + " · " + channel + " · " + humanize(notification.type)),
+      text("p", humanize(notification.status) + " · " + notification.attempts + " attempts", "muted"),
+    );
     if (notification.errorCode) card.append(text("p", "Error code: " + notification.errorCode, "error-text"));
     const reason = document.createElement("input");
     reason.placeholder = "Reason for suppress or cancel";
