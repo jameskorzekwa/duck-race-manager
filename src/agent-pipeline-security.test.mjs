@@ -149,6 +149,7 @@ test("local model agents deny unspecified and executable tools", async () => {
   const paths = [
     ".opencode/agents/pipeline-orchestrator.md",
     ".opencode/agents/pipeline-doctor.md",
+    ".opencode/agents/pipeline-doctor-repair.md",
     ".opencode/agents/pipeline-reviewer.md",
     ".opencode/agents/pipeline-risk-reviewer.md",
     ".opencode/agents/pipeline-scout.md",
@@ -574,6 +575,11 @@ test("reconciliation is deterministic and model-free", async () => {
 
 test("Pipeline Doctor isolates diagnosis from trusted publication", async () => {
   const workflow = await read(".github/workflows/pipeline-doctor.yml");
+  const approve = workflow.slice(workflow.indexOf("  approve:"), workflow.indexOf("  prepare:"));
+  const prepareStep = workflow.slice(
+    workflow.indexOf("      - name: Select and deduplicate failed run"),
+    workflow.indexOf("      - name: Upload immutable incident context"),
+  );
   const diagnose = workflow.slice(workflow.indexOf("  diagnose:"), workflow.indexOf("  verify:"));
   const verify = workflow.slice(workflow.indexOf("  verify:"), workflow.indexOf("  publish:"));
   const publish = workflow.slice(workflow.indexOf("  publish:"), workflow.indexOf("  metrics:"));
@@ -582,6 +588,20 @@ test("Pipeline Doctor isolates diagnosis from trusted publication", async () => 
   assert.match(workflow, /schedule:\n\s+- cron:/);
   assert.match(workflow, /permissions: \{\}/);
   assert.match(workflow, /pipeline:incident/);
+  assert.match(workflow, /pipeline:approval-required/);
+  assert.match(workflow, /github\.event\.comment\.body == '\/approve-pipeline-repair'/);
+  assert.match(workflow, /github\.actor_id == '38769771'/);
+  assert.match(workflow, /pipeline-doctor approved=\$\{signature\}/);
+  assert.match(workflow, /phase=\$\{selected\.phase\}/);
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  for (const section of [approve, prepareStep]) {
+    const marker = "          script: |\n";
+    const script = section.slice(section.indexOf(marker) + marker.length)
+      .split("\n")
+      .map((line) => line.startsWith("            ") ? line.slice(12) : line)
+      .join("\n");
+    assert.doesNotThrow(() => new AsyncFunction("github", "context", "core", "require", "process", script));
+  }
   assert.match(workflow, /doctorIncidentMarker/);
   assert.match(workflow, /REQUESTED_INCIDENT/);
   assert.match(workflow, /pipeline-doctor feature=/);
@@ -589,7 +609,9 @@ test("Pipeline Doctor isolates diagnosis from trusted publication", async () => 
   assert.match(workflow, /attempts >= 2/);
   assert.match(diagnose, /runs-on: \[self-hosted, macOS, ARM64, quickducks-implement\]/);
   assert.match(diagnose, /openchamber session create/);
-  assert.match(diagnose, /--agent pipeline-doctor/);
+  assert.match(diagnose, /doctor_agent="pipeline-doctor"/);
+  assert.match(diagnose, /doctor_agent="pipeline-doctor-repair"/);
+  assert.match(diagnose, /--agent "\$doctor_agent"/);
   assert.match(diagnose, /scripts\/validate-pipeline-repair\.mjs/);
   assert.doesNotMatch(diagnose, /contents: write|issues: write|pull-requests: write|actions: write|GITHUB_TOKEN:/);
   assert.match(verify, /rhysd\/actionlint@sha256:[0-9a-f]{64}/);
@@ -600,11 +622,21 @@ test("Pipeline Doctor isolates diagnosis from trusted publication", async () => 
   assert.match(publish, /pull-requests: write/);
   assert.match(publish, /gh workflow run ci\.yml --ref "\$branch"/);
   assert.doesNotMatch(publish, /openchamber|runs-on: \[self-hosted/);
+  const proposalBranch = publish.slice(
+    publish.indexOf('decision === "proposal"'),
+    publish.indexOf('decision === "repair"'),
+  );
+  assert.match(proposalBranch, /pipeline:approval-required/);
+  assert.doesNotMatch(proposalBranch, /resumeFeature|createWorkflowDispatch|gh pr create/);
 
   const agent = await read(".opencode/agents/pipeline-doctor.md");
   assert.match(agent, /task:\n\s+"\*": deny/);
-  assert.match(agent, /pipeline-doctor\.yml/);
-  assert.match(agent, /Do not edit application code/);
+  assert.match(agent, /Do not edit any file/);
+  assert.doesNotMatch(agent, /"\*\*\/scripts\/agent-pipeline\.mjs": allow/);
+  const repairAgent = await read(".opencode/agents/pipeline-doctor-repair.md");
+  assert.match(repairAgent, /pipeline-doctor\.yml/);
+  assert.match(repairAgent, /Do not edit application code/);
+  assert.match(repairAgent, /\/approve-pipeline-repair/);
   for (const allowed of [
     ".github/workflows/agent-review.yml",
     ".opencode/agents/pipeline-reviewer.md",
@@ -612,9 +644,9 @@ test("Pipeline Doctor isolates diagnosis from trusted publication", async () => 
     "scripts/agent-pipeline.mjs",
     "src/agent-pipeline-security.test.mjs",
   ]) {
-    assert.match(agent, new RegExp(`"\\*\\*/${allowed.replaceAll(".", "\\.")}": allow`));
+    assert.match(repairAgent, new RegExp(`"\\*\\*/${allowed.replaceAll(".", "\\.")}": allow`));
   }
-  assert.doesNotMatch(agent, /"\*\*\/\.github\/workflows\/pipeline-doctor\.yml": allow/);
+  assert.doesNotMatch(repairAgent, /"\*\*\/\.github\/workflows\/pipeline-doctor\.yml": allow/);
   const validator = await read("scripts/validate-pipeline-repair.mjs");
   assert.doesNotMatch(validator, /pipeline-doctor\.yml",/);
   assert.match(validator, /1,500-line limit/);

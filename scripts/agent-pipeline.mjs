@@ -441,8 +441,14 @@ export async function escalateAgentError({ github, context }, issueNumber) {
   });
   const trusted = trustedAutomationComments(incidentComments);
   const terminal = trusted.some((comment) => /<!-- pipeline-doctor (?:terminal|repair-pr)=/.test(comment.body ?? ""));
-  const attempts = trusted.filter((comment) => String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
-  if (!terminal && attempts < 2) {
+  const proposed = trusted.some((comment) =>
+    String(comment.body ?? "").includes(`<!-- pipeline-doctor proposal=${identity.signature} `));
+  const approved = trusted.some((comment) =>
+    String(comment.body ?? "").includes(`<!-- pipeline-doctor approved=${identity.signature} `));
+  const attempts = trusted.filter((comment) => new RegExp(
+    `<!-- pipeline-doctor attempt=[0-9]+ source=[0-9]+ phase=${approved ? "repair" : "diagnose"} -->`,
+  ).test(comment.body ?? "")).length;
+  if (!terminal && (!proposed || approved) && attempts < 2) {
     await github.rest.actions.createWorkflowDispatch({
       owner, repo, workflow_id: "pipeline-doctor.yml", ref: defaultBranch,
       inputs: { incident: String(incident.number) },
