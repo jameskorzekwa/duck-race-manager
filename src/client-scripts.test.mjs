@@ -1042,7 +1042,7 @@ test("My Ducks consumes only the matching same-origin relative private handoff o
 });
 
 const inventoryHelpers = () => new Function(
-  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
+  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeSafePhotoRequirement, intakeCaptureJpeg, intakeCreatePhotoController, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
 )();
 
 const androidChromeUserAgent = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
@@ -1066,6 +1066,151 @@ test("inventory runtime gate requires visible top-level Android Chrome Web NFC",
   assert.equal(intakeProvisioningRuntimeIssue({ ...supported, secureContext: false }), "secure-context");
   assert.equal(intakeProvisioningRuntimeIssue({ ...supported, topLevel: false }), "top-level");
   assert.equal(intakeProvisioningRuntimeIssue({ ...supported, visible: false }), "visible");
+});
+
+test("inventory photo requirements accept only the server's bounded recovery shape", () => {
+  const { intakeSafePhotoRequirement } = inventoryHelpers();
+  const record = { status: "PHOTO_REQUIRED", duckId: "duck-1", visibleNumber: 42 };
+  assert.deepEqual(intakeSafePhotoRequirement(record, "event-1"), {
+    duckId: "duck-1", visibleNumber: 42, eventId: "event-1",
+  });
+  assert.deepEqual(intakeSafePhotoRequirement({ ...record, eventId: "event-2" }, "event-1"), {
+    duckId: "duck-1", visibleNumber: 42, eventId: "event-2",
+  });
+  for (const rejected of [
+    null,
+    { ...record, status: "PENDING_WRITE" },
+    { ...record, duckId: null },
+    { ...record, visibleNumber: 0 },
+  ]) assert.equal(intakeSafePhotoRequirement(rejected, "event-1"), null);
+});
+
+const photoControl = () => {
+  const listeners = new Map();
+  return {
+    hidden: false,
+    disabled: false,
+    addEventListener(name, listener) { listeners.set(name, listener); },
+    dispatch(name) { return listeners.get(name)?.({ type: name }); },
+  };
+};
+
+const photoTrack = () => {
+  const listeners = new Map();
+  return {
+    stopped: false,
+    addEventListener(name, listener) { listeners.set(name, listener); },
+    removeEventListener(name, listener) {
+      if (listeners.get(name) === listener) listeners.delete(name);
+    },
+    stop() { this.stopped = true; },
+    end() { listeners.get("ended")?.(); },
+  };
+};
+
+const photoControllerHarness = ({ getUserMedia, upload }) => {
+  const { intakeCreatePhotoController } = inventoryHelpers();
+  const captureButton = photoControl();
+  const retryButton = photoControl();
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ({ drawImage() {} }),
+    toBlob: (callback) => callback(new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: "image/jpeg" })),
+  };
+  const video = { srcObject: null, videoWidth: 1600, videoHeight: 1200, async play() {} };
+  const panel = { hidden: true };
+  const message = { textContent: "" };
+  let command = 0;
+  const controller = intakeCreatePhotoController({
+    panel, video, canvas, captureButton, retryButton, message,
+    getUserMedia,
+    upload,
+    commandId: () => `photo-command-${++command}`,
+  });
+  return { controller, captureButton, retryButton, canvas, video, panel, message };
+};
+
+test("the intake camera requests the rear camera exactly, compresses to JPEG, and stops after upload", async () => {
+  const constraints = [];
+  const uploads = [];
+  const track = photoTrack();
+  const harness = photoControllerHarness({
+    getUserMedia: async (requested) => {
+      constraints.push(requested);
+      return { getTracks: () => [track] };
+    },
+    upload: async (...args) => uploads.push(args),
+  });
+  const requirement = { duckId: "duck-1", visibleNumber: 42, eventId: "event-1" };
+  const pending = harness.controller.capture(requirement);
+  await Promise.resolve();
+  assert.deepEqual(constraints, [{ video: { facingMode: { ideal: "environment" } }, audio: false }]);
+  assert.equal(harness.captureButton.hidden, false);
+  assert.equal(harness.captureButton.disabled, false);
+  await harness.captureButton.dispatch("click");
+  await pending;
+
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0][0], requirement);
+  assert.equal(uploads[0][1].type, "image/jpeg");
+  assert.equal(uploads[0][2], "photo-command-1");
+  assert.deepEqual([harness.canvas.width, harness.canvas.height], [1280, 960]);
+  assert.equal(track.stopped, true);
+  assert.equal(harness.video.srcObject, null);
+  assert.equal(harness.panel.hidden, true);
+});
+
+test("camera denial and an ended track leave an enabled retry instead of completing intake", async () => {
+  const denied = photoControllerHarness({
+    getUserMedia: async () => { throw new Error("NotAllowedError"); },
+    upload: async () => assert.fail("a denied camera cannot upload"),
+  });
+  const requirement = { duckId: "duck-1", visibleNumber: 42, eventId: "event-1" };
+  await assert.rejects(denied.controller.capture(requirement), /NotAllowedError/);
+  assert.equal(denied.retryButton.hidden, false);
+  assert.equal(denied.retryButton.disabled, false);
+  assert.match(denied.message.textContent, /Camera access is required/);
+
+  const track = photoTrack();
+  const ended = photoControllerHarness({
+    getUserMedia: async () => ({ getTracks: () => [track] }),
+    upload: async () => assert.fail("an ended camera cannot upload"),
+  });
+  const pending = ended.controller.capture(requirement);
+  const rejected = assert.rejects(pending, /camera-ended/);
+  await Promise.resolve();
+  track.end();
+  await rejected;
+  assert.equal(ended.retryButton.hidden, false);
+  assert.equal(ended.retryButton.disabled, false);
+  assert.match(ended.message.textContent, /camera stopped/i);
+});
+
+test("an interrupted photo upload retries one JPEG with one command instead of recapturing", async () => {
+  const track = photoTrack();
+  const attempts = [];
+  const harness = photoControllerHarness({
+    getUserMedia: async () => ({ getTracks: () => [track] }),
+    upload: async (requirement, blob, commandId) => {
+      attempts.push({ requirement, blob, commandId });
+      if (attempts.length === 1) throw new TypeError("network interrupted");
+    },
+  });
+  const requirement = { duckId: "duck-1", visibleNumber: 42, eventId: "event-1" };
+  const first = harness.controller.capture(requirement);
+  const firstRejected = assert.rejects(first, /network interrupted/);
+  await Promise.resolve();
+  await harness.captureButton.dispatch("click");
+  await firstRejected;
+  assert.equal(harness.controller.hasRetry(), true);
+  assert.equal(harness.retryButton.disabled, false);
+
+  await harness.controller.capture(requirement);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[1].blob, attempts[0].blob);
+  assert.equal(attempts[1].commandId, attempts[0].commandId);
+  assert.equal(attempts[1].commandId, "photo-command-1");
 });
 
 // The inventory page itself is not device gated: it lists ducks and runs every
@@ -1296,7 +1441,7 @@ const makeProvisioningMachine = (overrides = {}) => {
   };
   const calls = {
     accepted: [], classifications: [], confirms: [], feedback: [], messages: [],
-    ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
+    photos: [], ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
   };
   let nextCommand = 0;
   const machine = intakeCreateProvisioningMachine({
@@ -1323,6 +1468,10 @@ const makeProvisioningMachine = (overrides = {}) => {
     confirm: async (material) => {
       calls.confirms.push({ ...material });
       return overrides.confirm ? overrides.confirm(material) : { replayed: false };
+    },
+    photo: async (requirement) => {
+      calls.photos.push({ ...requirement });
+      if (overrides.photo) return overrides.photo(requirement);
     },
     refresh: async () => {
       calls.refreshes += 1;
@@ -1352,10 +1501,11 @@ test("blank NFC reading performs one generated start, exact write, and confirmat
     provisioningCommandId: pending.provisioningCommandId,
     physicalWriteVerified: true,
   }]);
+  assert.deepEqual(calls.photos, [{ duckId: pending.duckId, visibleNumber: 42, eventId: "event-1" }]);
   assert.deepEqual(calls.accepted, [{ outcome: "added" }]);
   assert.equal(calls.refreshes, 1);
   assert.deepEqual(calls.feedback, ["added"]);
-  assert.equal(calls.recoveries.length, 1);
+  assert.equal(calls.recoveries.length, 0);
   assert.deepEqual(await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }), { accepted: false, reason: "busy" });
   calls.ready[0]();
   assert.deepEqual(await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }), { accepted: false, reason: "repeated" });
@@ -1498,6 +1648,60 @@ test("a replayed server confirmation completes one session addition and remove-d
   assert.match(calls.messages.at(-1)[0], /Remove this duck/);
   calls.ready[0]();
   assert.equal(calls.states.at(-1), "ready");
+});
+
+test("a failed required photo blocks intake completion, ending, and every later NFC read until retry", async () => {
+  let photoAttempts = 0;
+  const current = makeProvisioningMachine({
+    photo: async () => {
+      photoAttempts += 1;
+      if (photoAttempts === 1) throw new Error("camera denied");
+    },
+  });
+  assert.deepEqual(
+    await current.machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }),
+    { accepted: false, reason: "photo-required" },
+  );
+  assert.equal(current.machine.hasPending(), false);
+  assert.equal(current.machine.hasPhotoPending(), true);
+  assert.equal(current.machine.end(), false);
+  assert.deepEqual(
+    await current.machine.reading({ serialNumber: "serial-b", canonicalUrls: [] }),
+    { accepted: false, reason: "photo-required" },
+  );
+  assert.equal(current.calls.starts.length, 1);
+  assert.deepEqual(current.calls.accepted, []);
+  assert.equal(current.calls.refreshes, 0);
+
+  assert.deepEqual(await current.machine.resumePhoto(), { accepted: true, outcome: "added" });
+  assert.equal(current.machine.hasPhotoPending(), false);
+  assert.equal(current.calls.photos.length, 2);
+  assert.deepEqual(current.calls.accepted, [{ outcome: "added" }]);
+  assert.equal(current.calls.refreshes, 1);
+  assert.equal(current.calls.states.at(-1), "remove");
+});
+
+test("reload recovery resumes a confirmed duck's photo without allocating or rewriting a tag", async () => {
+  const recovered = {
+    status: "PHOTO_REQUIRED",
+    duckId: "duck-photo",
+    visibleNumber: 84,
+  };
+  let firstRecovery = true;
+  const current = makeProvisioningMachine({ recover: () => {
+    if (!firstRecovery) return null;
+    firstRecovery = false;
+    return recovered;
+  } });
+  assert.deepEqual(await current.machine.recover(), {
+    duckId: "duck-photo", visibleNumber: 84, eventId: "event-1",
+  });
+  assert.equal(current.machine.hasPhotoPending(), true);
+  assert.deepEqual(await current.machine.resumePhoto(), { accepted: true, outcome: "added" });
+  assert.deepEqual(current.calls.photos, [{ duckId: "duck-photo", visibleNumber: 84, eventId: "event-1" }]);
+  assert.deepEqual(current.calls.starts, []);
+  assert.deepEqual(current.calls.writes, []);
+  assert.deepEqual(current.calls.confirms, []);
 });
 
 test("an exact local pending URL classified as already resolves the lost confirmation", async () => {

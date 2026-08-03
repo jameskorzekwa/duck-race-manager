@@ -66,6 +66,8 @@ const createDatabase = () => {
   return database;
 };
 
+const sqliteValue = (value) => value instanceof ArrayBuffer ? new Uint8Array(value) : value;
+
 const sqliteD1 = (database) => ({
   prepare(sql) {
     return {
@@ -86,7 +88,7 @@ const sqliteD1 = (database) => ({
   async batch(items) {
     database.exec("BEGIN IMMEDIATE");
     try {
-      const results = items.map((item) => database.prepare(item.sql).run(...item.args));
+      const results = items.map((item) => database.prepare(item.sql).run(...item.args.map(sqliteValue)));
       database.exec("COMMIT");
       return results;
     } catch (error) {
@@ -448,6 +450,101 @@ test("provisioning routes retain the duck-manager role gate", async () => {
 
   assert.equal(response.status, 403);
   assert.equal(db.statements.length, 0);
+});
+
+test("duck photo upload keeps the inventory role gate and rejects non-JPEG bytes before storage", async () => {
+  const deniedDb = makeDb();
+  const denied = await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/photo", {
+      method: "PUT",
+      headers: {
+        "content-type": "image/jpeg",
+        "x-quickducks-command-id": crypto.randomUUID(),
+        "x-quickducks-event-id": "event_test",
+      },
+      body: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+    }),
+    makeEnv(deniedDb),
+    { ...actor, roles: ["REGISTRATION"] },
+  );
+  assert.equal(denied.status, 403);
+  assert.equal(deniedDb.statements.length, 0);
+
+  const invalidDb = makeDb();
+  const invalid = await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/photo", {
+      method: "PUT",
+      headers: {
+        "content-type": "image/jpeg",
+        "x-quickducks-command-id": crypto.randomUUID(),
+        "x-quickducks-event-id": "event_test",
+      },
+      body: new Uint8Array([0x00, 0x01, 0x02, 0x03]),
+    }),
+    makeEnv(invalidDb),
+    actor,
+  );
+  assert.equal(invalid.status, 400);
+  assert.match((await invalid.json()).error, /not a valid JPEG/);
+  assert.equal(invalidDb.statements.length, 0);
+});
+
+test("a photo requirement that appears during a provisioning start blocks the new duck atomically", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff_test', 'staff-sub', 'staff@example.com');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event_test', 'test-race', 'Test Race', 'America/Denver', 'DRAFT');
+    INSERT INTO ducks
+      (id, visible_number, inventory_status, inventory_status_changed_at, physical_condition)
+    VALUES ('duck_required', 41, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00Z', 'GOOD');
+    INSERT INTO event_ducks
+      (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
+    VALUES ('event_duck_required', 'event_test', 'duck_required',
+            '2026-08-03T00:00:00Z', 'staff_test');
+    INSERT INTO race_commands
+      (id, event_id, command_type, result_id, requested_at, completed_at)
+    VALUES ('confirm_required', 'event_test', 'CONFIRM_DUCK_PROVISIONING', 'duck_required',
+            '2026-08-03T00:00:00Z', '2026-08-03T00:00:00Z');
+  `);
+  const base = sqliteD1(database);
+  let requirementInjected = false;
+  const env = makeEnv({
+    prepare(sql) { return base.prepare(sql); },
+    async batch(items) {
+      if (!requirementInjected && items.some((item) => item.sql.includes("START_DUCK_PROVISIONING"))) {
+        requirementInjected = true;
+        database.exec(`
+          INSERT INTO duck_photos
+            (duck_id, event_id, event_duck_id, owner_staff_profile_id,
+             provisioning_command_id, required_at, updated_at)
+          VALUES ('duck_required', 'event_test', 'event_duck_required', 'staff_test',
+                  'confirm_required', '2026-08-03T00:00:01Z', '2026-08-03T00:00:01Z');
+        `);
+      }
+      return base.batch(items);
+    },
+  });
+
+  const response = await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/provisioning", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ commandId: crypto.randomUUID(), eventId: "event_test", location: "Concurrent station" }),
+    }),
+    env,
+    actor,
+  );
+  assert.equal(response.status, 409);
+  assert.equal(requirementInjected, true);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM ducks").get().count, 1);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_DUCK_PROVISIONING'",
+  ).get().count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM duck_photos").get().count, 1);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
 });
 
 test("aged abandoned provisioning takeover transfers exact ownership safely in migrated SQLite", async (context) => {
@@ -1193,6 +1290,20 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ eventId: "event_test", tagUrl }),
   });
+  const photoBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const photoCommandId = crypto.randomUUID();
+  const photoRequest = (commandId = photoCommandId, bytes = photoBytes) => new Request(
+    `https://quickducks.com/api/v1/staff/inventory/ducks/${provisioning.duckId}/photo`,
+    {
+      method: "PUT",
+      headers: {
+        "content-type": "image/jpeg",
+        "x-quickducks-command-id": commandId,
+        "x-quickducks-event-id": "event_test",
+      },
+      body: bytes,
+    },
+  );
 
   const start = await handleDuckOperations(startRequest(), env, actor);
   const provisioning = await start.json();
@@ -1270,6 +1381,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   assert.equal(confirmed.status, 201);
   assert.equal(intakeBody.duck.inventoryStatus, "RESERVED_FOR_EVENT");
   assert.equal(intakeBody.tag.status, "ACTIVE");
+  assert.equal(intakeBody.photo.status, "REQUIRED");
   const activeTag = database.prepare(
     "SELECT status, written_at, verified_at, activated_at FROM duck_tags WHERE duck_id = ?",
   ).get(provisioning.duckId);
@@ -1277,6 +1389,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   assert.equal([activeTag.written_at, activeTag.verified_at, activeTag.activated_at].every(Boolean), true);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM event_ducks WHERE duck_id = ?").get(provisioning.duckId).count, 1);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM duck_inventory_events WHERE duck_id = ? AND action = 'DUCK_INTAKE'").get(provisioning.duckId).count, 1);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM duck_photos WHERE duck_id = ? AND photo_bytes IS NULL").get(provisioning.duckId).count, 1);
   assert.equal(database.prepare("SELECT details_json FROM audit_events").all().some((row) => row.details_json.includes(token)), false);
 
   const confirmReplay = await handleDuckOperations(confirmRequest(confirmCommandId, provisioning), env, actor);
@@ -1289,6 +1402,61 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
 
   const activeClassification = await handleDuckOperations(classifyRequest(provisioning.tagUrl), env, actor);
   assert.equal((await activeClassification.json()).kind, "already");
+  const photoRecovery = await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/provisioning?eventId=event_test"), env, actor,
+  );
+  const photoRecoveryBody = await photoRecovery.json();
+  assert.equal(photoRecoveryBody.provisioning.status, "PHOTO_REQUIRED");
+  assert.equal(photoRecoveryBody.provisioning.duckId, provisioning.duckId);
+
+  const blockedNextStart = await handleDuckOperations(startRequest({
+    commandId: crypto.randomUUID(), eventId: "event_test", location: "Next station",
+  }), env, actor);
+  assert.equal(blockedNextStart.status, 200);
+  assert.equal((await blockedNextStart.json()).status, "PHOTO_REQUIRED");
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'START_DUCK_PROVISIONING'",
+  ).get().count, 1);
+
+  const wrongOperatorPhoto = await handleDuckOperations(photoRequest(crypto.randomUUID()), env, otherActor);
+  assert.equal(wrongOperatorPhoto.status, 403);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'SAVE_DUCK_PHOTO'").get().count, 0);
+
+  const savedPhoto = await handleDuckOperations(photoRequest(), env, actor);
+  const savedPhotoBody = await savedPhoto.json();
+  assert.equal(savedPhoto.status, 201);
+  assert.equal(savedPhotoBody.photo.status, "READY");
+  assert.equal(savedPhotoBody.photo.contentType, "image/jpeg");
+  assert.equal(savedPhotoBody.photo.byteLength, photoBytes.byteLength);
+  assert.equal(savedPhotoBody.replayed, false);
+  const storedPhoto = database.prepare(
+    "SELECT upload_command_id, byte_length, length(photo_bytes) AS stored_length, content_sha256 FROM duck_photos WHERE duck_id = ?",
+  ).get(provisioning.duckId);
+  assert.equal(storedPhoto.upload_command_id, photoCommandId);
+  assert.equal(storedPhoto.byte_length, photoBytes.byteLength);
+  assert.equal(storedPhoto.stored_length, photoBytes.byteLength);
+  assert.match(storedPhoto.content_sha256, /^[a-f0-9]{64}$/);
+
+  const photoReplay = await handleDuckOperations(photoRequest(), env, actor);
+  assert.equal(photoReplay.status, 200);
+  assert.equal((await photoReplay.json()).replayed, true);
+  const changedReplay = await handleDuckOperations(
+    photoRequest(photoCommandId, new Uint8Array([0xff, 0xd8, 0xff, 0x00, 0xff, 0xd9])), env, actor,
+  );
+  assert.equal(changedReplay.status, 409);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'SAVE_DUCK_PHOTO'").get().count, 1);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM audit_events WHERE action = 'DUCK_PHOTO_SAVED'").get().count, 1);
+  assert.equal(database.prepare("SELECT details_json FROM audit_events WHERE action = 'DUCK_PHOTO_SAVED'").get().details_json.includes("photo_bytes"), false);
+
+  const privatePhoto = await handleDuckOperations(
+    new Request(`https://quickducks.com/api/v1/staff/inventory/ducks/${provisioning.duckId}/photo`), env, actor,
+  );
+  assert.equal(privatePhoto.status, 200);
+  assert.equal(privatePhoto.headers.get("cache-control"), "no-store");
+  assert.equal(privatePhoto.headers.get("content-type"), "image/jpeg");
+  assert.equal(privatePhoto.headers.get("content-security-policy"), "default-src 'none'; frame-ancestors 'none'; sandbox");
+  assert.deepEqual(new Uint8Array(await privatePhoto.arrayBuffer()), photoBytes);
+
   const clearedRecovery = await handleDuckOperations(
     new Request("https://quickducks.com/api/v1/staff/inventory/provisioning?eventId=event_test"), env, actor,
   );
@@ -1332,7 +1500,7 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   const deletedBody = await deleted.json();
   assert.equal(deleted.status, 201);
   assert.equal(deletedBody.erased, true);
-  for (const table of ["ducks", "duck_tags", "event_ducks", "duck_inventory_events"]) {
+  for (const table of ["ducks", "duck_tags", "duck_photos", "event_ducks", "duck_inventory_events"]) {
     const column = table === "ducks" ? "id" : "duck_id";
     assert.equal(
       database.prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE ${column} = ?`).get(intakeBody.duck.id).count,

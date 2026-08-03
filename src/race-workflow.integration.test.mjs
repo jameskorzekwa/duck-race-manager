@@ -30,10 +30,13 @@ class D1Statement {
   }
 
   async run() {
-    const result = this.database.prepare(this.sql).run(...this.args);
+    const result = this.database.prepare(this.sql).run(...this.args.map(sqliteValue));
     return { success: true, meta: { changes: Number(result.changes) } };
   }
 }
+
+const sqliteValue = (value) => value instanceof ArrayBuffer ? new Uint8Array(value) : value;
+const testJpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
 
 const createD1 = (database, { afterDeliveryClaim, failDeliveryFinalization } = {}) => ({
   prepare(sql) {
@@ -52,7 +55,7 @@ const createD1 = (database, { afterDeliveryClaim, failDeliveryFinalization } = {
     let results;
     try {
       results = statements.map((statement) => {
-        const result = database.prepare(statement.sql).run(...statement.args);
+        const result = database.prepare(statement.sql).run(...statement.args.map(sqliteValue));
         return { success: true, meta: { changes: Number(result.changes) } };
       });
       database.exec("COMMIT");
@@ -97,6 +100,20 @@ const jsonBody = async (response, status, label) => {
   assert.equal(response.status, status, `${label}: ${JSON.stringify(body)}`);
   return body;
 };
+
+const uploadIntakePhoto = async (api, eventId, duckId, label) => jsonBody(await api(
+  `/api/v1/staff/inventory/ducks/${duckId}/photo`,
+  {
+    method: "PUT",
+    token: staffToken,
+    headers: {
+      "content-type": "image/jpeg",
+      "x-quickducks-command-id": crypto.randomUUID(),
+      "x-quickducks-event-id": eventId,
+    },
+    rawBody: testJpeg,
+  },
+), 201, label);
 
 // One Worker, one migrated database, and the same handler entry point the
 // deployed site uses. The integration tests below drive it; nothing here writes event-domain
@@ -180,7 +197,9 @@ const createWorkerHarness = (
     const headers = new Headers(options.headers);
     if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
     let body;
-    if (options.body !== undefined) {
+    if (options.rawBody !== undefined) {
+      body = options.rawBody;
+    } else if (options.body !== undefined) {
       headers.set("content-type", "application/json");
       body = JSON.stringify(options.body);
     }
@@ -488,13 +507,15 @@ const raceToAwaitingFinal = async (
     }), 201, "provision duck");
     participant.visibleNumber = provisioning.visibleNumber;
     participant.tagToken = provisioning.tagUrl.split("/").at(-1);
-    await jsonBody(await post("/api/v1/staff/inventory/provisioning/confirm", {
+    const confirmedDuck = await jsonBody(await post("/api/v1/staff/inventory/provisioning/confirm", {
       commandId: crypto.randomUUID(),
       eventId,
       duckId: provisioning.duckId,
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm duck");
+    assert.equal(confirmedDuck.photo.status, "REQUIRED");
+    await uploadIntakePhoto(api, eventId, provisioning.duckId, `save private photo for duck ${participant.visibleNumber}`);
     const pairing = await jsonBody(await post(`/api/v1/staff/ducks/${participant.tagToken}/assignments`, {
       commandId: crypto.randomUUID(),
       eventId,
@@ -526,13 +547,15 @@ const raceToAwaitingFinal = async (
       commandId: crypto.randomUUID(),
       eventId,
     }), 201, "provision a spare duck");
-    await jsonBody(await post("/api/v1/staff/inventory/provisioning/confirm", {
+    const confirmedSpare = await jsonBody(await post("/api/v1/staff/inventory/provisioning/confirm", {
       commandId: crypto.randomUUID(),
       eventId,
       duckId: provisioning.duckId,
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm the spare duck");
+    assert.equal(confirmedSpare.photo.status, "REQUIRED");
+    await uploadIntakePhoto(api, eventId, provisioning.duckId, `save private photo for spare duck ${provisioning.visibleNumber}`);
     const spare = await jsonBody(await api(
       `/api/v1/staff/inventory/ducks/${provisioning.duckId}`,
       { token: staffToken },
@@ -2328,6 +2351,12 @@ test("a final reduced by a withdrawal is still published and the event completed
       provisioningCommandId: provisioning.provisioningCommandId,
       physicalWriteVerified: true,
     }), 201, "confirm duck");
+    await uploadIntakePhoto(
+      api,
+      eventId,
+      provisioning.duckId,
+      `save required photo for duck ${participant.visibleNumber}`,
+    );
     const pairing = await jsonBody(await post(`/api/v1/staff/ducks/${participant.tagToken}/assignments`, {
       commandId: crypto.randomUUID(),
       eventId,
@@ -2903,6 +2932,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0021_email_delivery_claim.sql",
     "0022_pending_heat_result_announcement.sql",
     "0023_participant_notifications.sql",
+    "0024_duck_intake_photos.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -2962,7 +2992,9 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
     if (options.cookie !== undefined) headers.set("cookie", options.cookie);
     let body;
-    if (options.body !== undefined) {
+    if (options.rawBody !== undefined) {
+      body = options.rawBody;
+    } else if (options.body !== undefined) {
       headers.set("content-type", "application/json");
       body = JSON.stringify(options.body);
     }
@@ -3176,6 +3208,27 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     }), 201, `confirm provisioned duck ${participant.visibleNumber}`);
     participant.duckId = intake.duck.id;
     assert.equal(intake.duck.inventoryStatus, "RESERVED_FOR_EVENT");
+    assert.equal(intake.photo.status, "REQUIRED");
+    const pendingPhotoRead = await api(
+      `/api/v1/staff/inventory/ducks/${participant.duckId}/photo`,
+      { token: staffToken },
+    );
+    assert.equal(pendingPhotoRead.status, 409);
+    const savedPhoto = await uploadIntakePhoto(
+      api,
+      eventId,
+      participant.duckId,
+      `save required intake photo ${participant.visibleNumber}`,
+    );
+    assert.equal(savedPhoto.photo.status, "READY");
+    const privatePhoto = await api(
+      `/api/v1/staff/inventory/ducks/${participant.duckId}/photo`,
+      { token: staffToken },
+    );
+    assert.equal(privatePhoto.status, 200);
+    assert.equal(privatePhoto.headers.get("cache-control"), "no-store");
+    assert.deepEqual(new Uint8Array(await privatePhoto.arrayBuffer()), testJpeg);
+    assert.equal((await api(`/api/v1/staff/inventory/ducks/${participant.duckId}/photo`)).status, 401);
 
     const anonymousTag = await jsonBody(await api(`/api/v1/ducks/${participant.tagToken}`), 200, "unpaired tag privacy");
     assert.deepEqual(anonymousTag, { destination: "HOME" });
@@ -3836,6 +3889,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "race_entries",
     "ducks",
     "duck_tags",
+    "duck_photos",
     "race_commands",
     "audit_events",
     "event_ducks",

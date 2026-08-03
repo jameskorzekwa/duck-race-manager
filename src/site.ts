@@ -486,6 +486,10 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .station-counter strong { display:block; color:var(--ink); font-size:clamp(2rem,10vw,4rem); line-height:1; }
 .station-history { display:grid; gap:.55rem; padding:0; list-style:none; }
 .station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; overflow-wrap:anywhere; }
+.intake-photo-panel { border-color:var(--water-dark); background:#f4fbfd; }
+.intake-photo-video { display:block; width:100%; max-width:34rem; margin:0 auto; aspect-ratio:4/3; border:3px solid var(--ink); border-radius:.8rem; background:var(--ink); object-fit:cover; }
+.intake-photo-panel .actions { margin-top:var(--space-md); }
+.inventory-photo { display:block; width:100%; max-width:28rem; max-height:24rem; margin:0 auto var(--space-md); border:3px solid var(--ink); border-radius:.8rem; background:var(--cream); object-fit:contain; }
 .announcer-panel h2 { font-size:clamp(1.8rem,7vw,3.2rem); overflow-wrap:anywhere; }
 .announcer-section { margin:1.4rem 0; padding:clamp(1rem,3vw,1.5rem); border:3px solid var(--ink); border-radius:1rem; background:#fffdf8; }
 .announcer-section > :last-child { margin-bottom:0; }
@@ -540,7 +544,7 @@ li.ineligible,.data-card.ineligible { border-color:#9f261c; background:#fff3f1; 
   .actions { position:relative; z-index:4; justify-content:center; gap:var(--space-sm); }
   .actions > * { max-width:100%; }
   .actions > .button { text-align:center; }
-  form > .button:not(.small),.page-panel > .button,.operation-card > .button:not(.small),.station-panel > .button,.pairing-confirmation > .button { display:flex; width:min(100%,24rem); margin-inline:auto; }
+  form > .button:not(.small),.page-panel > .button,.operation-card > .button:not(.small),.station-panel > .button,.pairing-confirmation > .button,[data-intake-controls] > .actions > .button { display:flex; width:min(100%,24rem); margin-inline:auto; }
   .pairing-confirmation > .button { justify-content:center; }
   .section-tools { justify-content:center; }
   .section-tools > label { flex-basis:100%; }
@@ -1830,6 +1834,17 @@ export const renderStaffInventory = (
             <button class="button station-control" type="button" data-start-intake-nfc>Start NFC provisioning</button>
             <button class="button secondary station-control" type="button" data-end-intake-nfc hidden disabled>End NFC provisioning</button>
           </div>
+          <article class="operation-card intake-photo-panel" data-intake-photo-panel hidden aria-live="polite">
+            <h3>Required duck photo</h3>
+            <p class="privacy"><strong>Private staff record.</strong><span>This photo is stored privately with the race until the event is deleted. It is never shown on public participant or race pages.</span></p>
+            <video class="intake-photo-video" data-intake-photo-video muted playsinline></video>
+            <canvas data-intake-photo-canvas hidden></canvas>
+            <p class="message-line" data-intake-photo-message>Center the duck in the frame.</p>
+            <div class="actions">
+              <button class="button station-control" type="button" data-capture-intake-photo>Take photo</button>
+              <button class="button secondary station-control" type="button" data-retry-intake-photo hidden>Try camera again</button>
+            </div>
+          </article>
           <article class="operation-card danger-zone" data-intake-takeover hidden>
             <h3>Abandoned sticker recovery</h3>
             <p class="muted" data-intake-takeover-message></p>
@@ -1863,7 +1878,7 @@ export const renderStaffInventory = (
         </details>
         <div class="inventory-layout"><div class="data-list inventory-card-grid" data-inventory-list></div>
           <aside class="operation-card inventory-detail-panel" id="inventory-detail-panel" role="region" aria-labelledby="inventory-detail-title" data-inventory-detail hidden>
-            <div class="inventory-detail-heading"><h3 id="inventory-detail-title" data-inventory-name>Duck detail</h3><button class="button secondary small" type="button" data-close-inventory-detail>Close</button></div><dl class="facts compact-facts" data-inventory-facts></dl>
+            <div class="inventory-detail-heading"><h3 id="inventory-detail-title" data-inventory-name>Duck detail</h3><button class="button secondary small" type="button" data-close-inventory-detail>Close</button></div><dl class="facts compact-facts" data-inventory-facts></dl><div data-inventory-photo></div>
             <div class="actions"><button class="button secondary small" type="button" data-print-label>Open label data</button><span class="muted" data-label-result></span></div>
             <form class="operation-card" data-inventory-duck-name-form hidden><h3>Duck name</h3><label>Name shown beside the number<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Public. Staff names go through the same wordlist as a participant’s own.</span></label><div class="actions"><button class="button secondary small" type="submit">Save duck name</button><button class="button danger small" type="button" data-clear-duck-name hidden>Clear name</button></div></form>
             <details class="operation-card"><summary>Assign or reassign duck</summary><form data-inventory-assign-form><label>Participant race-entry ID<input name="raceEntryId" maxlength="128" required></label><label>Reason<input name="reason" minlength="4" maxlength="500" required placeholder="Walk-up pairing correction"></label><button class="button" type="submit">Assign selected duck</button></form></details>

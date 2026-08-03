@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0023_participant_notifications.sql`, browser
+the Worker, D1 migrations through `0024_duck_intake_photos.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -42,7 +42,7 @@ not authorized.
 | Set or clear a participant's duck name | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
 | Participant disqualification/reactivation | `RACE_DIRECTOR` | Yes |
 | Participant contact data and registration notes | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
-| Duck inventory intake, deletion, assignment, unassignment, and reservation | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
+| Duck inventory intake, required private photo capture/read, deletion, assignment, unassignment, and reservation | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open a staff duck inspection | `REGISTRATION`, `DUCK_MANAGER`, `RESULT_TAKER`, or `RACE_DIRECTOR`; projection stays role-narrow | Yes |
 | Open `/staff/inventory` or the standalone `/staff/inventory-intake` entry | `DUCK_MANAGER` or `RACE_DIRECTOR` | Yes |
 | Open `/staff/registration` | `REGISTRATION` or `RACE_DIRECTOR` | Yes |
@@ -316,7 +316,9 @@ The supported complete sequence is:
    registration.
 2. A race director opens registration.
 3. Participants self-register, or registration staff create walk-ups.
-4. Duck managers intake physical ducks and active tag tokens for the event.
+4. Duck managers intake physical ducks and active tag tokens for the event. An
+   Android NFC admission is complete only after its operator captures and saves
+   the required private duck photo.
 5. Registration staff pair each eligible participant with one eligible duck.
    Each pairing also places the duck into the lowest-numbered round-one heat
    with an open slot, creating the next heat automatically when every existing
@@ -1184,7 +1186,31 @@ optional station location and presses Start once. That user gesture starts one
 `NDEFReader.scan()` in current Android Chrome over HTTPS; the top-level page must
 remain visible. Each subsequent physical reading writes and confirms one sticker
 without a per-duck form, printed number, pasted URL, presence checkbox, or
-desktop fallback.
+desktop fallback. Immediately after the server confirms the written sticker,
+the station opens the rear camera and requires one clear photo of that physical
+duck. There is no skip action. The station does not count the duck as a completed
+session addition, allow another blank-sticker admission, allow event switching,
+or allow the station to end until the photo upload is confirmed.
+
+The browser scales the longest image side to at most 1280 pixels and encodes a
+JPEG of at most 1,000,000 bytes. The upload uses one UUID command and one exact
+image fingerprint across transport retries; it never stores the image or a data
+URL in `localStorage` or `sessionStorage`. Camera denial, a camera track that
+ends, capture failure, and upload interruption leave the same duck in the
+**Photo required** state with an enabled retry. A page reload recovers that
+requirement from D1 before it offers another sticker. Camera streams are stopped
+after upload, on failure, when the station ends, and when the page is left.
+
+The JPEG is a private staff record in D1, associated with the exact event,
+event-duck reservation, admitting operator, and provisioning command. It is
+available only through authenticated inventory APIs and the protected duck
+detail panel, with `no-store`, `nosniff`, and a sandboxed image response. Public
+tag, duck-number, participant, search, board, and live-update projections never
+contain photo bytes, metadata, URLs, or identifiers. The photo remains with the
+race dataset until the duck or event is deleted; event deletion removes it
+before its reservation and command parents. Ducks created before this workflow,
+and ducks entered through the explicit manual already-written-tag form, are not
+backfilled with a fabricated photo requirement.
 
 The page itself is not device gated. Authentication and the inventory-role check
 decide who may open it, and every device that passes them gets the whole page,
@@ -1202,6 +1228,12 @@ everything else on the page still works. Provisioning APIs do not trust or
 require a user agent: they continue to enforce live staff authentication,
 inventory roles, and same-origin provenance for cookie-authenticated mutations,
 including for automated API clients.
+
+The Worker enables `Permissions-Policy: camera=(self)` only on the authenticated
+inventory page and the existing authenticated participant-QR pairing page. The
+default remains `camera=()` for public pages, APIs, the finish station, and every
+other staff page. NFC provisioning still requires Android Chrome; the camera is
+part of that same station rather than a new cross-device intake fallback.
 
 QuickDucks generates the UUID, next globally unique positive internal number,
 and random 32-byte base64url token. The number remains an internal inventory

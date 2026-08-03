@@ -2237,6 +2237,9 @@ const forceDeleteEvent = async (
       scoped("heat_entries"),
       scoped("heats"),
       scoped("duck_assignments"),
+      // Private photo bytes reference both the reservation and the provisioning
+      // command, so they must leave before either parent.
+      scoped("duck_photos"),
       scoped("event_ducks"),
       scoped("duck_inventory_events"),
       global("browser_collection_registrations"),

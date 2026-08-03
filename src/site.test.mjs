@@ -869,6 +869,26 @@ test("the tag token pattern still accepts exactly what the server accepts", () =
   assert.equal(field.test(""), false);
 });
 
+test("inventory renders the mandatory private photo step without a skip control", () => {
+  const page = renderStaffInventory("Duck Manager", "https://quickducks.com");
+  const panel = page.match(/<article class="operation-card intake-photo-panel"[\s\S]*?<\/article>/)?.[0];
+  assert.ok(panel);
+  for (const hook of [
+    "data-intake-photo-video",
+    "data-intake-photo-canvas",
+    "data-capture-intake-photo",
+    "data-retry-intake-photo",
+    "data-intake-photo-message",
+  ]) assert.ok(panel.includes(hook), hook);
+  assert.match(panel, /Private staff record/);
+  assert.match(panel, /never shown on public participant or race pages/);
+  assert.doesNotMatch(panel, /skip|optional/i);
+  assert.doesNotMatch(panel, /data-capture-intake-photo[^>]*disabled/);
+  assert.match(page, /<div data-inventory-photo><\/div>/);
+  assert.match(style, /\.intake-photo-video \{[^}]*width:100%;[^}]*aspect-ratio:4\/3/);
+  assert.match(style, /\.inventory-photo \{[^}]*width:100%;[^}]*max-width:28rem/);
+});
+
 // Pairing puts a physical duck into a physical heat bag it never comes out of,
 // so the pairing screen has to shout which bag before the staffer walks away.
 test("the pairing page carries an unmissable heat-bag callout above everything else", () => {

@@ -235,6 +235,9 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && /^\/api\/v1\/staff\/inventory\/provisioning(?:\/(takeover|confirm))?$/.test(pathname)) {
     return domains("ducks", "support");
   }
+  if (method === "PUT" && /^\/api\/v1\/staff\/inventory\/ducks\/[^/]{1,128}\/photo$/.test(pathname)) {
+    return domains("ducks", "support");
+  }
   if (method === "POST" && pathname === "/api/v1/staff/inventory/ducks") {
     return domains("ducks", "event");
   }

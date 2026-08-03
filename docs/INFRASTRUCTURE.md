@@ -560,6 +560,23 @@ to add a new racer after Round One starts. Rollback is Worker-only: retain the
 migration and any admitted roster entries; the previous Worker reads and races
 them normally but offers no further Round One walk-ups.
 
+Migration `0024_duck_intake_photos.sql` adds `duck_photos` and the exact composite
+indexes needed to associate a private JPEG with one duck, event reservation,
+admitting staff profile, and confirmed provisioning command. It backfills
+nothing. Pending and complete row shapes are CHECK-constrained, JPEG bytes are
+capped at 1,000,000 bytes, and upload command/fingerprint fields become complete
+together. Cascades keep the migration compatible during the migrations-before-
+Worker window: the previously deployed Worker's duck and event deletion order
+still removes a photo when it deletes the reservation or provisioning command.
+The new Worker deletes `duck_photos` explicitly before those parents.
+
+Photos are stored as private D1 BLOBs; this release adds no R2 bucket, binding,
+secret, queue, or public object URL. They therefore follow D1 backup, Time Travel,
+regional storage, and complete-event deletion behavior. Invocation logs remain
+disabled, and application logs and audit details must never contain JPEG bytes,
+digests, request bodies, or a protected photo URL. Capacity planning must include
+up to 1 MB per Android-NFC-admitted duck plus row/index overhead.
+
 The Worker sends only opaque notification IDs to `quickducks-email` through the
 `EMAIL_QUEUE` producer binding. The same Worker consumes batches of at most ten,
 with five bounded queue attempts and `quickducks-email-dlq` attached. A one-minute
@@ -934,6 +951,13 @@ that production recorded.
 If Worker deployment fails, the migrated database remains live with the old
 Worker. This is why migrations must be backward compatible. Correct the Worker
 or add a forward migration and release a new version.
+
+After any `duck_photos` row has been created, do not roll back to a Worker from
+before the required-photo workflow: that code can read the compatible schema and
+delete rows through cascades, but it does not enforce the photo interlock or
+render recovery. Use a forward fix. A pre-photo Worker is an acceptable rollback
+target only when production inspection proves the table is empty and no intake
+is in progress; retain migration `0024` either way.
 
 If smoke tests fail after Worker deployment, stop normal releases and assess the
 application before changing data. The first release that applies `RaceUpdates`

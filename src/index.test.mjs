@@ -262,6 +262,11 @@ test("the inventory page is role gated and renders on every device", async () =>
       const body = await allowed.text();
       const where = `${currentActor.roles.join(",") || "admin"} @ ${userAgent ?? "no user agent"}`;
       assert.equal(allowed.status, 200, where);
+      assert.equal(
+        allowed.headers.get("permissions-policy"),
+        "camera=(self), geolocation=(), microphone=(), nfc=(self)",
+        where,
+      );
       assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow", where);
       // The staff navigation is on the page whatever the device is.
       assert.match(body, /<nav class="staff-nav" aria-label="Staff pages">/, where);
@@ -277,6 +282,8 @@ test("the inventory page is role gated and renders on every device", async () =>
       assert.match(body, /Start NFC provisioning/, where);
       assert.match(body, /data-end-intake-nfc hidden disabled/, where);
       assert.match(body, /data-intake-takeover hidden/, where);
+      assert.match(body, /data-intake-photo-panel hidden/, where);
+      assert.match(body, /data-capture-intake-photo/, where);
       assert.match(body, /data-app-origin="https:\/\/quickducks\.com"/, where);
       // Retired inventory controls are gone from the markup entirely.
       assert.doesNotMatch(body, /data-inventory-edit-form|data-tag-replace-form|data-tag-retire-form/, where);
@@ -309,6 +316,7 @@ test("the standalone inventory intake path uses the complete inventory authoriza
     const allowed = await page(currentActor);
     const body = await allowed.text();
     assert.equal(allowed.status, 200);
+    assert.equal(allowed.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
     assert.match(body, /data-intake-station/);
     assert.match(body, /data-intake-runtime/);
     assert.match(body, /data-start-intake-nfc/);
@@ -958,6 +966,22 @@ test("requires same-origin protection for cookie-authenticated provisioning", as
   );
   assert.equal(takeover.status, 403);
   assert.deepEqual(await takeover.json(), { error: "Same-origin staff request required." });
+
+  const photo = await createWorker(async () => cookieActor).fetch(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/photo", {
+      method: "PUT",
+      headers: {
+        "content-type": "image/jpeg",
+        origin: "https://attacker.example",
+        "x-quickducks-command-id": crypto.randomUUID(),
+        "x-quickducks-event-id": "event_test",
+      },
+      body: new Uint8Array([0xff, 0xd8, 0xff, 0xd9]),
+    }),
+    env,
+  );
+  assert.equal(photo.status, 403);
+  assert.deepEqual(await photo.json(), { error: "Same-origin staff request required." });
 });
 
 const refreshedActor = {
@@ -1173,7 +1197,7 @@ test("the QR decoder is served same-origin so browsers without native detection 
   assert.match(response.headers.get("permissions-policy") ?? "", /(^|, )camera=\(\)/);
 });
 
-test("camera access is granted only to the authenticated duck-pairing page", async () => {
+test("camera access is granted only to authenticated pairing and inventory pages", async () => {
   const token = "a".repeat(32);
   const authenticated = createWorker(async () => ({
     id: "staff_test",
@@ -1189,8 +1213,13 @@ test("camera access is granted only to the authenticated duck-pairing page", asy
     id: "result_test", cognitoSub: "result-sub", email: "result@example.com",
     displayName: "Result Staff", isSystemAdmin: false, roles: ["RESULT_TAKER"], authentication: "cookie",
   })).fetch(new Request(`https://quickducks.com/staff/ducks/${token}`), env);
+  const inventory = await createWorker(async () => ({
+    id: "inventory_test", cognitoSub: "inventory-sub", email: "inventory@example.com",
+    displayName: "Inventory Staff", isSystemAdmin: false, roles: ["DUCK_MANAGER"], authentication: "cookie",
+  })).fetch(new Request("https://quickducks.com/staff/inventory"), env);
 
   assert.equal(pairing.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
+  assert.equal(inventory.headers.get("permissions-policy"), "camera=(self), geolocation=(), microphone=(), nfc=(self)");
 
   // Every other surface, signed in or not, keeps the camera denied.
   const others = await Promise.all([
