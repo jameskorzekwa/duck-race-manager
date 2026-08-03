@@ -58,17 +58,29 @@ test("candidate verification remains in the existing feature repair loop", () =>
 
 test("doctor output requires the incident signature and patch shape", () => {
   const signature = "c".repeat(64);
+  const report = "## Diagnosis\nThe queue handoff failed.\n\n## Next step\nVerify the repair.";
+  const proposal = `${report}\n\n## Proposed repair\nChange the handoff and add a regression test.`;
+  assert.deepEqual(classifyDoctorResult({
+    signature, marker: `PIPELINE_DOCTOR_PROPOSAL:${signature}`, patchLength: 0, exitStatus: 0,
+    phase: "diagnose", report: proposal,
+  }), { type: "proposal" });
   assert.deepEqual(classifyDoctorResult({
     signature, marker: `PIPELINE_DOCTOR_REPAIR:${signature}`, patchLength: 10, exitStatus: 0,
+    phase: "repair", report,
   }), { type: "repair" });
   assert.deepEqual(classifyDoctorResult({
-    signature, marker: `PIPELINE_DOCTOR_APPLICATION:${signature}`, patchLength: 0, exitStatus: 0,
+    signature, marker: `PIPELINE_DOCTOR_APPLICATION:${signature}`, patchLength: 0, exitStatus: 0, report,
   }), { type: "application" });
   assert.deepEqual(classifyDoctorResult({
-    signature, marker: `PIPELINE_DOCTOR_REPAIR:${signature}`, patchLength: 0, exitStatus: 0,
+    signature, marker: `PIPELINE_DOCTOR_REPAIR:${signature}`, patchLength: 10, exitStatus: 0,
+    phase: "diagnose", report,
   }), { type: "failed" });
   assert.deepEqual(classifyDoctorResult({
-    signature, marker: `PIPELINE_DOCTOR_NOOP:${"d".repeat(64)}`, patchLength: 0, exitStatus: 0,
+    signature, marker: `PIPELINE_DOCTOR_PROPOSAL:${signature}`, patchLength: 0, exitStatus: 0,
+    phase: "diagnose", report,
+  }), { type: "failed" });
+  assert.deepEqual(classifyDoctorResult({
+    signature, marker: `PIPELINE_DOCTOR_NOOP:${"d".repeat(64)}`, patchLength: 0, exitStatus: 0, report,
   }), { type: "failed" });
   assert.equal(doctorIncidentMarker(signature, "e".repeat(40)), `<!-- pipeline-doctor signature=${signature} sha=${"e".repeat(40)} -->`);
 });
@@ -95,6 +107,7 @@ test("repair policy allows bounded control files but denies doctor self-edit and
   for (const path of [
     ".github/workflows/pipeline-doctor.yml",
     ".opencode/agents/pipeline-doctor.md",
+    ".opencode/agents/pipeline-doctor-repair.md",
     "scripts/pipeline-doctor.mjs",
     "scripts/validate-pipeline-repair.mjs",
     "src/api.ts",

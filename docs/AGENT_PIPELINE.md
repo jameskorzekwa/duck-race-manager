@@ -33,7 +33,7 @@ Artifact promotion or fallback validation -> production approval -> deploy and s
         v
 deterministic Agent Reconcile -> agent:deployed or agent:failed -> next slot
         |
-        +-> failed control-plane run -> Pipeline Doctor incident -> verified repair PR
+        +-> failed control-plane run -> diagnosis -> James approval -> verified repair PR
         |
         +-> exhausted feature recovery -> doctor-owned blocker -> resume, repair, or explicit intervention
 ```
@@ -79,9 +79,11 @@ deduplicated doctor incident, so it can never remain parked indefinitely at
 
 Pipeline infrastructure incidents use separate labels rather than overloading a
 feature's state: `pipeline:incident` is the deduplicated incident ledger,
-`pipeline:repair` identifies a verified repair PR, `pipeline:application` records
-that the existing feature loop owns the failure, and `pipeline:external` records
-a terminal provider, service, authentication, quota, runner, or network diagnosis.
+`pipeline:approval-required` visibly waits for James to approve the posted
+diagnosis and proposed repair, `pipeline:repair` identifies a verified repair PR,
+`pipeline:application` records that the existing feature loop owns the failure,
+and `pipeline:external` records a terminal provider, service, authentication,
+quota, runner, or network diagnosis.
 
 ## Trusted Intake
 
@@ -200,27 +202,37 @@ incidents bind the issue, latest owning task run, and terminal recovery reason.
 Hosted Agent Task verification failures remain in the feature loop until that
 loop exhausts its bounded budget.
 
-Each incident is a GitHub issue carrying `pipeline:incident`. The model receives
-only a plain trusted-main snapshot and bounded, credential-redacted failed-job
-or trusted feature-history evidence. It classifies the failure as application,
-pipeline, external, or already repaired. Application and no-op diagnoses close
-the incident and automatically resume the feature with a fresh bounded budget;
-pipeline repairs keep it blocked until the repair closes the incident; external
-diagnoses keep an explicit open intervention incident. After two complete doctor
-recovery generations, another exhaustion becomes an explicit external incident
-instead of unlimited model churn. The dedicated `pipeline-doctor` agent cannot
-run commands, launch subagents, edit application code, or edit its own workflow,
-contract, classifier, or validator.
+Each incident is a GitHub issue carrying `pipeline:incident`. The diagnosis model
+receives only a plain trusted-main snapshot and bounded, credential-redacted
+failed-job or trusted feature-history evidence. It cannot edit any file. Its
+report must state the diagnosis, decisive evidence, next step, and, for a
+pipeline defect, the exact proposed repair and focused tests. Application and
+no-op diagnoses close the incident and automatically resume the feature with a
+fresh bounded budget; external diagnoses keep an explicit open intervention
+incident.
 
-A pipeline repair may touch only an explicit control-plane allowlist. A copied
-trusted validator rejects other paths, binary files, symlinks, gitlinks, broad
-new workflow authority, unpinned actions, oversized patches, and more than 12
-changed files. A hosted read-only job then runs the pinned actionlint container,
-dependency audit, typecheck, unit/integration tests, and Wrangler validation.
+A pipeline diagnosis adds `pipeline:approval-required` and posts a prominent
+approval request. Schedules and reconciliation do not start or repeat repair
+work while that label is present. Only an exact `/approve-pipeline-repair`
+comment from James on that trusted incident records approval, removes the label,
+and dispatches the separate allowlisted repair agent. The feature that originally
+errored remains `agent:blocked` on the incident throughout diagnosis, approval,
+repair, CI, and review. When the approved repair PR merges, its `Closes` reference
+closes the incident; deterministic reconciliation then moves the feature to
+`agent:inbox` and dispatches it from current `main` with a fresh bounded budget.
+After two diagnosis attempts or two approved repair attempts, Doctor stops
+instead of creating unlimited model churn.
+
+A separately approved pipeline repair may touch only an explicit control-plane
+allowlist. A copied trusted validator rejects other paths, binary files,
+symlinks, gitlinks, broad new workflow authority, unpinned actions, oversized
+patches, and more than 12 changed files. A hosted read-only job then runs the
+pinned actionlint container, dependency audit, typecheck, unit/integration tests,
+and Wrangler validation.
 Only after those checks pass can a separate model-free job publish a
 `pipeline:repair` PR and explicitly dispatch CI. Doctor PRs never auto-merge;
-normal review and branch protection remain required. Two failed diagnoses stop
-without retry churn, and external incidents stay open with a terminal diagnosis.
+normal review and branch protection remain required. External incidents stay
+open with a terminal diagnosis.
 
 Any review-dismissal event runs a separate non-concurrent hosted workflow that
 removes approval state, the merge slot, and auto-merge without launching a paid
@@ -494,6 +506,8 @@ gh run list --workflow pipeline-doctor.yml
 gh run list --workflow release.yml
 gh workflow run agent-reconcile.yml
 gh workflow run pipeline-doctor.yml -f run=<failed-run-id>
+# On an incident labeled pipeline:approval-required:
+gh issue comment <incident-number> --body '/approve-pipeline-repair'
 gh api repos/jameskorzekwa/duck-race-manager/actions/runners
 openchamber status
 openchamber session list --dir <runner-workspace> --with-status

@@ -185,6 +185,47 @@ test("reconciliation transfers agent:error to a durable doctor-owned blocker", a
   }]);
 });
 
+test("an unapproved doctor proposal keeps the errored feature blocked without redispatch", async () => {
+  const featureComments = [
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline task-run=200 -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline task-exhausted -->" },
+    { user: { id: 41898282 }, body: "<!-- agent-pipeline blocked-by=900 -->" },
+  ];
+  const identity = agentErrorIdentity(70, featureComments);
+  const incident = {
+    number: 900,
+    state: "open",
+    labels: [{ name: "pipeline:incident" }, { name: "pipeline:approval-required" }],
+    body: doctorFeatureIncidentMarker(identity),
+  };
+  const incidentComments = [{
+    user: { id: 41898282 },
+    body: `<!-- pipeline-doctor proposal=${identity.signature} source=200 -->\nDiagnosis`,
+  }];
+  const actions = { dispatches: 0, labels: [] };
+  const issues = {
+    get: async ({ issue_number }) => ({ data: issue_number === 70
+      ? { number: 70, state: "open", user: { id: 38769771 }, labels: [{ name: "agent:error" }] }
+      : incident }),
+    listComments: async ({ issue_number }) => ({ data: issue_number === 70 ? featureComments : incidentComments }),
+    listForRepo: async () => ({ data: [incident] }),
+    createComment: async () => ({}),
+    setLabels: async ({ labels }) => { actions.labels = labels; },
+  };
+  const github = {
+    paginate: async (fn, input) => (await fn(input)).data,
+    rest: {
+      issues,
+      actions: { createWorkflowDispatch: async () => { actions.dispatches += 1; } },
+    },
+  };
+  const context = { repo: { owner: "o", repo: "r" }, payload: { repository: { default_branch: "main" } } };
+
+  assert.equal(await escalateAgentError({ github, context }, 70), "escalated");
+  assert.deepEqual(actions.labels, ["agent:blocked"]);
+  assert.equal(actions.dispatches, 0);
+});
+
 test("a question resumes only on a James reply newer than the question", () => {
   const question = {
     user: { id: 41898282 },

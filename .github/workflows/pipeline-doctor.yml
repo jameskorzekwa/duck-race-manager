@@ -1,5 +1,5 @@
 name: Pipeline Doctor
-run-name: Pipeline Doctor ${{ inputs.incident || inputs.run || github.event.workflow_run.id || 'sweep' }}
+run-name: Pipeline Doctor ${{ inputs.incident || inputs.run || github.event.issue.number || github.event.workflow_run.id || 'sweep' }}
 
 on:
   schedule:
@@ -17,6 +17,8 @@ on:
   workflow_run:
     workflows: [Agent Task, Agent Review, Agent Reconcile, Release]
     types: [completed]
+  issue_comment:
+    types: [created]
 
 permissions: {}
 
@@ -25,6 +27,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  approve:
+    name: Record James's repair approval
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.actor_id == '38769771' &&
+      !github.event.issue.pull_request &&
+      github.event.comment.body == '/approve-pipeline-repair' &&
+      contains(github.event.issue.labels.*.name, 'pipeline:approval-required')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      issues: write
+    steps:
+      - name: Approve the diagnosed repair and dispatch it
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const incident = context.issue.number;
+            const issue = (await github.rest.issues.get({ owner, repo, issue_number: incident })).data;
+            const labels = new Set((issue.labels ?? []).map((label) => typeof label === "string" ? label : label.name));
+            if (issue.state !== "open" || issue.user?.id !== 41898282
+                || !labels.has("pipeline:incident") || !labels.has("pipeline:approval-required")) {
+              throw new Error("Only an open trusted Pipeline Doctor incident awaiting approval can be approved.");
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: incident, per_page: 100,
+            });
+            const trusted = comments.filter((comment) => comment.user?.id === 41898282);
+            const proposal = trusted.findLast((comment) =>
+              /<!-- pipeline-doctor proposal=[0-9a-f]{64} source=[0-9]+ -->/.test(comment.body ?? ""));
+            if (!proposal) throw new Error("The incident has no trusted repair proposal to approve.");
+            const signature = proposal.body.match(/<!-- pipeline-doctor proposal=([0-9a-f]{64}) source=[0-9]+ -->/)[1];
+            if (trusted.some((comment) => String(comment.body ?? "").includes(`<!-- pipeline-doctor approved=${signature} `))) {
+              core.info(`Repair ${signature} was already approved.`);
+              return;
+            }
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: incident,
+              body: `<!-- pipeline-doctor approved=${signature} comment=${context.payload.comment.id} -->\nJames approved the diagnosed pipeline repair. Repair work may now begin.`,
+            });
+            await github.rest.issues.removeLabel({
+              owner, repo, issue_number: incident, name: "pipeline:approval-required",
+            });
+            await github.rest.actions.createWorkflowDispatch({
+              owner, repo, workflow_id: "pipeline-doctor.yml",
+              ref: context.payload.repository.default_branch,
+              inputs: { incident: String(incident) },
+            });
+
   prepare:
     name: Prepare trusted incident
     if: >-
@@ -45,6 +98,7 @@ jobs:
       incident: ${{ steps.prepare.outputs.incident }}
       run: ${{ steps.prepare.outputs.run }}
       signature: ${{ steps.prepare.outputs.signature }}
+      phase: ${{ steps.prepare.outputs.phase }}
       workflow: ${{ steps.prepare.outputs.workflow }}
     steps:
       - name: Check out trusted default branch
@@ -76,6 +130,7 @@ jobs:
               }
             };
             await ensureLabel("pipeline:incident", "b60205", "Trusted Pipeline Doctor incident");
+            await ensureLabel("pipeline:approval-required", "fbca04", "Waiting for James to approve the diagnosed pipeline repair");
             await ensureLabel("pipeline:repair", "5319e7", "Pipeline Doctor repair awaiting review");
             await ensureLabel("pipeline:external", "d93f0b", "External pipeline intervention required");
             await ensureLabel("pipeline:application", "0e8a16", "Application failure owned by the feature repair loop");
@@ -88,6 +143,21 @@ jobs:
             const incidents = await github.paginate(github.rest.issues.listForRepo, {
               owner, repo, state: "all", labels: "pipeline:incident", per_page: 100,
             });
+            const incidentState = (comments, signature) => {
+              const trusted = comments.filter((comment) => comment.user?.id === 41898282);
+              const terminal = trusted.some((comment) => /<!-- pipeline-doctor (?:terminal|repair-pr)=/.test(comment.body ?? ""));
+              const proposal = trusted.findLast((comment) =>
+                String(comment.body ?? "").includes(`<!-- pipeline-doctor proposal=${signature} `));
+              const approved = trusted.findLast((comment) =>
+                String(comment.body ?? "").includes(`<!-- pipeline-doctor approved=${signature} `));
+              const phase = proposal ? (approved ? "repair" : "waiting") : "diagnose";
+              const attempts = trusted.filter((comment) => {
+                const body = String(comment.body ?? "");
+                if (phase === "repair") return /<!-- pipeline-doctor attempt=[0-9]+ source=[0-9]+ phase=repair -->/.test(body);
+                return /<!-- pipeline-doctor attempt=[0-9]+ source=[0-9]+(?: phase=diagnose)? -->/.test(body);
+              }).length;
+              return { attempts, phase, proposal, terminal };
+            };
             let selected;
 
             const featureIncidents = requestedIncident
@@ -102,10 +172,8 @@ jobs:
               const incidentComments = await github.paginate(github.rest.issues.listComments, {
                 owner, repo, issue_number: incident.number, per_page: 100,
               });
-              const trusted = incidentComments.filter((comment) => comment.user?.id === 41898282);
-              const terminal = trusted.some((comment) => /<!-- pipeline-doctor (?:terminal|repair-pr)=/.test(comment.body ?? ""));
-              const attempts = trusted.filter((comment) => String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
-              if (terminal || attempts >= 2) continue;
+              const state = incidentState(incidentComments, match[3]);
+              if (state.terminal || state.phase === "waiting" || state.attempts >= 2) continue;
               const featureNumber = Number(match[1]);
               const feature = (await github.rest.issues.get({ owner, repo, issue_number: featureNumber })).data;
               if (feature.state !== "open" || feature.pull_request || feature.user?.id !== 38769771) continue;
@@ -136,6 +204,8 @@ jobs:
                 featureComments: trustedFeatureComments,
                 run,
                 jobs: [],
+                phase: state.phase,
+                approvedProposal: state.proposal?.body ?? null,
                 identity: {
                   failures: [{ id: 0, job: `Feature recovery #${featureNumber}`, conclusion: "failure", steps: [reason] }],
                   headSha: /^[0-9a-f]{40}$/.test(String(run?.head_sha ?? "")) ? run.head_sha : base,
@@ -146,6 +216,41 @@ jobs:
                 },
               };
               break;
+            }
+
+            if (!selected) {
+              const directIncidents = requestedIncident
+                ? incidents.filter((candidate) => candidate.number === Number(requestedIncident))
+                : incidents.filter((candidate) => candidate.state === "open");
+              for (const incident of directIncidents) {
+                if (incident.user?.id !== 41898282) continue;
+                const marker = String(incident.body ?? "").match(
+                  /<!-- pipeline-doctor signature=([0-9a-f]{64}) sha=([0-9a-f]{40}) -->/,
+                );
+                const sourceRun = Number(String(incident.body ?? "").match(/\/actions\/runs\/([1-9][0-9]*)/)?.[1]);
+                if (marker && Number.isSafeInteger(sourceRun)) {
+                  const comments = await github.paginate(github.rest.issues.listComments, {
+                    owner, repo, issue_number: incident.number, per_page: 100,
+                  });
+                  const state = incidentState(comments, marker[1]);
+                  if (!requestedIncident && state.phase !== "repair") continue;
+                  if (!state.terminal && state.phase !== "waiting" && state.attempts < 2) {
+                    const run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: sourceRun })).data;
+                    const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                      owner, repo, run_id: sourceRun, filter: "latest", per_page: 100,
+                    });
+                    const identity = doctor.pipelineFailureIdentity(run, jobs);
+                    if (identity.signature !== marker[1] || identity.headSha !== marker[2]) {
+                      throw new Error("Approved incident no longer matches its source run identity.");
+                    }
+                    selected = {
+                      kind: "run", run, jobs, identity, existing: incident,
+                      phase: state.phase, approvedProposal: state.proposal?.body ?? null,
+                    };
+                    break;
+                  }
+                }
+              }
             }
 
             const candidates = [];
@@ -186,17 +291,18 @@ jobs:
               }
               const marker = doctor.doctorIncidentMarker(identity.signature, identity.headSha);
               const existing = incidents.find((issue) => String(issue.body ?? "").includes(marker));
-              let comments = [];
+              let state = { attempts: 0, phase: "diagnose", proposal: null, terminal: false };
               if (existing) {
-                comments = await github.paginate(github.rest.issues.listComments, {
+                const comments = await github.paginate(github.rest.issues.listComments, {
                   owner, repo, issue_number: existing.number, per_page: 100,
                 });
-                const trusted = comments.filter((comment) => comment.user?.id === 41898282);
-                const terminal = trusted.some((comment) => /<!-- pipeline-doctor (?:terminal|repair-pr)=/.test(comment.body ?? ""));
-                const attempts = trusted.filter((comment) => String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
-                if (terminal || attempts >= 2) continue;
+                state = incidentState(comments, identity.signature);
+                if (state.terminal || state.phase === "waiting" || state.attempts >= 2) continue;
               }
-              selected = { kind: "run", run, jobs, identity, marker, existing };
+              selected = {
+                kind: "run", run, jobs, identity, marker, existing,
+                phase: state.phase, approvedProposal: state.proposal?.body ?? null,
+              };
               break;
             }
 
@@ -219,7 +325,7 @@ jobs:
             }
             await github.rest.issues.createComment({
               owner, repo, issue_number: incident.number,
-              body: `<!-- pipeline-doctor attempt=${context.runId} source=${identity.sourceRun ?? run.id} -->\nDiagnosing ${selected.kind === "feature" ? `feature #${selected.feature.number}` : `${identity.workflow} run ${run.id}`} against current trusted main \`${base}\`.`,
+              body: `<!-- pipeline-doctor attempt=${context.runId} source=${identity.sourceRun ?? run.id} phase=${selected.phase} -->\n${selected.phase === "repair" ? "Applying James's approved repair for" : "Diagnosing"} ${selected.kind === "feature" ? `feature #${selected.feature.number}` : `${identity.workflow} run ${run.id}`} against current trusted main \`${base}\`.`,
             });
 
             const evidence = [];
@@ -254,11 +360,15 @@ jobs:
             const artifact = path.join(process.env.RUNNER_TEMP, "pipeline-doctor-context");
             fs.mkdirSync(artifact, { recursive: true });
             fs.writeFileSync(path.join(artifact, "doctor-context.json"), JSON.stringify({
-              schemaVersion: 1,
+              schemaVersion: 2,
               repository: `${owner}/${repo}`,
               trustedBase: base,
               incident: incident.number,
               signature: identity.signature,
+              phase: selected.phase,
+              approvedProposal: selected.approvedProposal
+                ? doctor.redactDoctorEvidence(selected.approvedProposal, { maxCharacters: 20000, maxLineCharacters: 600 })
+                : null,
               featureIssue: selected.kind === "feature" ? {
                 number: selected.feature.number,
                 title: doctor.redactDoctorEvidence(selected.feature.title, { maxCharacters: 500, maxLineCharacters: 500 }),
@@ -280,6 +390,7 @@ jobs:
             core.setOutput("incident", String(incident.number));
             core.setOutput("run", String(identity.sourceRun ?? run.id));
             core.setOutput("signature", identity.signature);
+            core.setOutput("phase", selected.phase);
             core.setOutput("workflow", identity.workflow);
 
       - name: Upload immutable incident context
@@ -292,7 +403,7 @@ jobs:
           retention-days: 7
 
   diagnose:
-    name: Diagnose control plane
+    name: Diagnose or repair control plane
     needs: prepare
     if: needs.prepare.outputs.eligible == 'true'
     runs-on: [self-hosted, macOS, ARM64, quickducks-implement]
@@ -303,6 +414,7 @@ jobs:
     env:
       EXPECTED_BASE: ${{ needs.prepare.outputs.base }}
       INCIDENT_NUMBER: ${{ needs.prepare.outputs.incident }}
+      DOCTOR_PHASE: ${{ needs.prepare.outputs.phase }}
       SOURCE_RUN: ${{ needs.prepare.outputs.run }}
       SOURCE_SIGNATURE: ${{ needs.prepare.outputs.signature }}
     outputs:
@@ -394,13 +506,23 @@ jobs:
           const fs=require("node:fs"); const state=JSON.parse(fs.readFileSync(process.env.STATE_PATH,"utf8"));
           state.phase="dispatching"; fs.writeFileSync(process.env.STATE_PATH,JSON.stringify(state));
           NODE
+          if [[ "$DOCTOR_PHASE" == "diagnose" ]]; then
+            doctor_agent="pipeline-doctor"
+            doctor_prompt="Diagnose source run ${SOURCE_RUN} from .pipeline/doctor-context.json without editing files. Follow the pipeline-doctor diagnosis contract and emit exactly one matching final marker."
+          elif [[ "$DOCTOR_PHASE" == "repair" ]]; then
+            doctor_agent="pipeline-doctor-repair"
+            doctor_prompt="James approved the diagnosis in .pipeline/doctor-context.json. Apply only that pipeline repair, follow the pipeline-doctor-repair contract, and emit exactly one matching final marker."
+          else
+            printf 'Unexpected Pipeline Doctor phase %q.\n' "$DOCTOR_PHASE" >&2
+            exit 1
+          fi
           status=0
           openchamber session create \
             --dir "$PIPELINE_MODEL_DIR" \
             --title "QuickDucks pipeline incident #${INCIDENT_NUMBER}" \
-            --prompt "Diagnose source run ${SOURCE_RUN} from .pipeline/doctor-context.json. Follow the pipeline-doctor contract, make only an allowlisted control-plane repair when justified, and emit exactly one matching final marker." \
+            --prompt "$doctor_prompt" \
             --model "$PIPELINE_DOCTOR_MODEL" \
-            --agent pipeline-doctor \
+            --agent "$doctor_agent" \
             --variant "$PIPELINE_DOCTOR_VARIANT" \
             --json \
             > "$RUNNER_TEMP/pipeline-doctor/session-dispatch.json" 2>&1 || true
@@ -446,11 +568,15 @@ jobs:
           const markers=report.split(/\r?\n/).map(line => line.trim()).filter(line => line.startsWith("PIPELINE_DOCTOR_"));
           const marker=markers.length === 1 ? markers[0] : "";
           const patch=fs.readFileSync(`${root}/doctor.patch`);
-          const decision=classifyDoctorResult({signature:process.env.SOURCE_SIGNATURE,marker,patchLength:patch.length,exitStatus});
+          const decision=classifyDoctorResult({
+            signature:process.env.SOURCE_SIGNATURE,marker,patchLength:patch.length,exitStatus,
+            phase:process.env.DOCTOR_PHASE,report,
+          });
           const digest=crypto.createHash("sha256").update(patch).digest("hex");
           fs.writeFileSync(`${root}/doctor-result.json`,JSON.stringify({
             baseSha:process.env.EXPECTED_BASE,incident:Number(process.env.INCIDENT_NUMBER),sourceRun:Number(process.env.SOURCE_RUN),
-            signature:process.env.SOURCE_SIGNATURE,decision,digest,report,exitStatus,modelMetrics:session.metrics ?? null,
+            signature:process.env.SOURCE_SIGNATURE,phase:process.env.DOCTOR_PHASE,
+            decision,digest,report,exitStatus,modelMetrics:session.metrics ?? null,
           },null,2));
           fs.appendFileSync(process.env.GITHUB_OUTPUT,`decision=${decision.type}\ndigest=${digest}\n`);
           NODE
@@ -515,6 +641,7 @@ jobs:
           const result=JSON.parse(fs.readFileSync("doctor-artifact/doctor-result.json","utf8"));
           const digest=crypto.createHash("sha256").update(patch).digest("hex");
           if(result.baseSha !== process.env.EXPECTED_BASE || result.signature !== process.env.EXPECTED_SIGNATURE
+            || result.phase !== "repair"
             || result.digest !== digest || digest !== process.env.EXPECTED_DIGEST || result.decision?.type !== "repair") {
             throw new Error("Pipeline Doctor artifact identity is invalid.");
           }
@@ -561,6 +688,7 @@ jobs:
       EXPECTED_DIGEST: ${{ needs.diagnose.outputs.digest }}
       FEATURE_ISSUE: ${{ needs.prepare.outputs.feature }}
       INCIDENT_NUMBER: ${{ needs.prepare.outputs.incident }}
+      DOCTOR_PHASE: ${{ needs.prepare.outputs.phase }}
       SOURCE_RUN: ${{ needs.prepare.outputs.run }}
       SOURCE_SIGNATURE: ${{ needs.prepare.outputs.signature }}
     steps:
@@ -592,6 +720,7 @@ jobs:
           const result=JSON.parse(fs.readFileSync("doctor-artifact/doctor-result.json","utf8"));
           const digest=crypto.createHash("sha256").update(patch).digest("hex");
           if(result.baseSha !== process.env.EXPECTED_BASE || result.signature !== process.env.SOURCE_SIGNATURE
+            || result.phase !== "repair"
             || result.digest !== digest || digest !== process.env.EXPECTED_DIGEST || result.decision?.type !== "repair") {
             throw new Error("Pipeline Doctor publication identity is invalid.");
           }
@@ -644,8 +773,16 @@ jobs:
               maxCharacters: 20000, maxLineCharacters: 600,
             });
             const decision = String(process.env.DOCTOR_DECISION ?? "failed");
+            const phase = String(process.env.DOCTOR_PHASE ?? "diagnose");
             const pr = Number(process.env.PR_NUMBER);
             const addLabel = async (name) => github.rest.issues.addLabels({ owner, repo, issue_number: incident, labels: [name] });
+            const removeLabel = async (name) => {
+              try {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: incident, name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+            };
             const resumeFeature = async () => {
               if (!Number.isSafeInteger(feature) || feature < 1) return;
               const issue = (await github.rest.issues.get({ owner, repo, issue_number: feature })).data;
@@ -688,13 +825,21 @@ jobs:
                 throw error;
               }
             };
+            if (decision === "proposal" && phase === "diagnose") {
+              await addLabel("pipeline:approval-required");
+              await github.rest.issues.createComment({ owner, repo, issue_number: incident,
+                body: `<!-- pipeline-doctor proposal=${process.env.SOURCE_SIGNATURE} source=${process.env.SOURCE_RUN} -->\n# Pipeline repair approval required\n\n${report}\n\nNo repair work has started. James can approve this exact diagnosis by replying with \`/approve-pipeline-repair\`.` });
+              return;
+            }
             if (decision === "repair" && process.env.VERIFY_RESULT === "success" && Number.isSafeInteger(pr) && pr > 0) {
+              await removeLabel("pipeline:approval-required");
               await addLabel("pipeline:repair");
               await github.rest.issues.createComment({ owner, repo, issue_number: incident,
-                body: `<!-- pipeline-doctor repair-pr=${pr} -->\nVerified repair published as PR #${pr}. It remains unmerged for normal CI and review.` });
+                body: `<!-- pipeline-doctor repair-pr=${pr} -->\nThe approved repair was verified and published as PR #${pr}. It remains unmerged for normal CI and review. Any blocked feature will return to the queue only after this incident closes when the repair merges.` });
               return;
             }
             if (["application", "external", "noop"].includes(decision)) {
+              await removeLabel("pipeline:approval-required");
               if (decision === "application") await addLabel("pipeline:application");
               if (decision === "external") await addLabel("pipeline:external");
               await github.rest.issues.createComment({ owner, repo, issue_number: incident,
@@ -710,13 +855,13 @@ jobs:
               owner, repo, issue_number: incident, per_page: 100,
             });
             const attempts = comments.filter((comment) => comment.user?.id === 41898282
-              && String(comment.body ?? "").includes("<!-- pipeline-doctor attempt=")).length;
+              && new RegExp(`<!-- pipeline-doctor attempt=[0-9]+ source=[0-9]+ phase=${phase} -->`).test(comment.body ?? "")).length;
             const exhausted = attempts >= 2;
             if (exhausted) await addLabel("pipeline:external");
             await github.rest.issues.createComment({ owner, repo, issue_number: incident,
               body: exhausted
-                ? `<!-- pipeline-doctor terminal=diagnosis-failed -->\nAutomatic diagnosis failed twice. Inspect Pipeline Doctor run ${context.runId}; no repair was published.`
-                : `<!-- pipeline-doctor diagnosis-failed=${context.runId} -->\nDiagnosis or hosted repair verification failed. One bounded retry remains.` });
+                ? `<!-- pipeline-doctor terminal=${phase}-failed -->\nPipeline Doctor ${phase} failed twice. Inspect Pipeline Doctor run ${context.runId}; no repair was published.`
+                : `<!-- pipeline-doctor ${phase}-failed=${context.runId} -->\nPipeline Doctor ${phase} or hosted repair verification failed. One bounded retry remains.` });
 
   metrics:
     name: Metrics

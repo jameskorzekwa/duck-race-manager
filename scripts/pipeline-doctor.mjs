@@ -83,15 +83,22 @@ export function redactDoctorEvidence(log, { maxCharacters = 30000, maxLineCharac
   return `${text.slice(0, maxCharacters)}\n[truncated]`;
 }
 
-export function classifyDoctorResult({ signature, marker, patchLength, exitStatus }) {
+export function classifyDoctorResult({ signature, marker, patchLength, exitStatus, phase = "diagnose", report = "" }) {
   const failed = { type: "failed" };
-  if (exitStatus !== 0 || !/^[0-9a-f]{64}$/.test(signature)) return failed;
+  if (exitStatus !== 0 || !/^[0-9a-f]{64}$/.test(signature)
+      || !/^## Diagnosis$/m.test(report) || !/^## Next step$/m.test(report)) return failed;
   const match = String(marker ?? "").match(
-    /^PIPELINE_DOCTOR_(REPAIR|APPLICATION|EXTERNAL|NOOP):([0-9a-f]{64})$/,
+    /^PIPELINE_DOCTOR_(PROPOSAL|REPAIR|APPLICATION|EXTERNAL|NOOP):([0-9a-f]{64})$/,
   );
   if (!match || match[2] !== signature) return failed;
   const type = match[1].toLowerCase();
-  if ((type === "repair") !== (patchLength > 0)) return failed;
+  const phaseTypes = phase === "diagnose"
+    ? new Set(["proposal", "application", "external", "noop"])
+    : phase === "repair"
+      ? new Set(["repair", "external", "noop"])
+      : new Set();
+  if (!phaseTypes.has(type) || (type === "repair") !== (patchLength > 0)
+      || (type === "proposal" && !/^## Proposed repair$/m.test(report))) return failed;
   return { type };
 }
 
