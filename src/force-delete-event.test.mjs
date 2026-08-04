@@ -70,6 +70,12 @@ const makeDb = (first, all = () => ({ results: [] })) => {
 
 const makeEnv = (db) => ({ APP_ORIGIN: "https://quickducks.com", DB: db });
 
+class MemoryR2Bucket {
+  objects = new Map();
+  deletes = [];
+  async delete(key) { this.deletes.push(key); this.objects.delete(key); }
+}
+
 const sqliteD1 = (database) => ({
   prepare(sql) {
     return {
@@ -172,6 +178,13 @@ const seedFullEventDataset = (database, status) => {
        '2026-07-26T00:20:00Z', NULL);
     INSERT INTO event_ducks (id, event_id, duck_id, reserved_at, reserved_by_staff_profile_id)
     VALUES ('event-duck', 'event_test', 'duck', '2026-07-26T00:00:00Z', 'admin_test');
+    INSERT INTO duck_photos
+      (id, event_id, duck_id, state, object_key, upload_command_id, content_sha256,
+       byte_length, owner_staff_profile_id, created_at, ready_at)
+    VALUES
+      ('photo', 'event_test', 'duck', 'READY', 'opaque-photo-object',
+       '44444444-4444-4444-8444-444444444444', '${"a".repeat(64)}', 100,
+       'admin_test', '2026-07-26T00:00:00Z', '2026-07-26T00:01:00Z');
     INSERT INTO duck_assignments
       (id, event_id, race_entry_id, event_duck_id, duck_id, valid_from,
        assigned_by_staff_profile_id, source_command_id)
@@ -266,6 +279,7 @@ const eventLinkedTables = [
   "event_ducks",
   "duck_assignments",
   "duck_inventory_events",
+  "duck_photos",
   "heats",
   "heat_entries",
   "heat_results",
@@ -504,6 +518,7 @@ for (const status of [
     for (const table of eventLinkedTables) {
       assert.equal(count(database, table), 0, `expected ${table} to be empty`);
     }
+    assert.equal(count(database, "duck_photo_cleanup"), 1, "R2 cleanup survives deletion without a bucket binding");
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(count(database, "staff_profiles"), 2);
     assert.equal(count(database, "staff_role_assignments"), 1);
@@ -624,9 +639,11 @@ test("a concurrent revision change makes the guarded batch delete nothing", asyn
     },
   };
 
+  const bucket = new MemoryR2Bucket();
+  bucket.objects.set("opaque-photo-object", new Uint8Array(100));
   const response = await handleEventOperations(
     forceDeleteRequest({ commandId: crypto.randomUUID(), revision: 0, confirmName: "Test Duck Race" }),
-    makeEnv(raced),
+    { ...makeEnv(raced), DUCK_PHOTOS: bucket },
     admin,
   );
   assert.equal(response.status, 409);
@@ -637,7 +654,26 @@ test("a concurrent revision change makes the guarded batch delete nothing", asyn
   assert.equal(count(database, "final_podium_selections"), 1);
   assert.equal(count(database, "audit_events"), 1);
   assert.equal(count(database, "race_commands"), 3);
+  assert.equal(count(database, "duck_photos"), 1);
+  assert.equal(bucket.deletes.length, 0, "R2 remains untouched until the guarded D1 batch commits");
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a committed force delete drains its durable R2 tombstone", async (context) => {
+  const database = migratedDatabase();
+  context.after(() => database.close());
+  seedFullEventDataset(database, "COMPLETED");
+  const bucket = new MemoryR2Bucket();
+  bucket.objects.set("opaque-photo-object", new Uint8Array(100));
+  const response = await handleEventOperations(
+    forceDeleteRequest({ commandId: crypto.randomUUID(), revision: 0, confirmName: "Test Duck Race" }),
+    { ...makeEnv(sqliteD1(database)), DUCK_PHOTOS: bucket },
+    admin,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(bucket.objects.size, 0);
+  assert.deepEqual(bucket.deletes, ["opaque-photo-object"]);
+  assert.equal(count(database, "duck_photo_cleanup"), 0);
 });
 
 // Force delete no longer rewrites the status mid-batch, so a refused delete

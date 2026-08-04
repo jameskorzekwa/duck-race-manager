@@ -253,6 +253,7 @@ test("the inventory page is role gated and renders on every device", async () =>
 
   const denied = await page(actor(["REGISTRATION"]), desktopChromeUserAgent);
   assert.equal(denied.status, 403);
+  assert.match(denied.headers.get("permissions-policy") ?? "", /camera=\(\)/);
   assert.equal(denied.headers.get("x-robots-tag"), "noindex, nofollow");
   assert.match(await denied.text(), /permission to use duck inventory/);
 
@@ -262,6 +263,7 @@ test("the inventory page is role gated and renders on every device", async () =>
       const body = await allowed.text();
       const where = `${currentActor.roles.join(",") || "admin"} @ ${userAgent ?? "no user agent"}`;
       assert.equal(allowed.status, 200, where);
+      assert.match(allowed.headers.get("permissions-policy") ?? "", /camera=\(self\)/, where);
       assert.equal(allowed.headers.get("x-robots-tag"), "noindex, nofollow", where);
       // The staff navigation is on the page whatever the device is.
       assert.match(body, /<nav class="staff-nav" aria-label="Staff pages">/, where);
@@ -277,6 +279,8 @@ test("the inventory page is role gated and renders on every device", async () =>
       assert.match(body, /Start NFC provisioning/, where);
       assert.match(body, /data-end-intake-nfc hidden disabled/, where);
       assert.match(body, /data-intake-takeover hidden/, where);
+      assert.match(body, /data-intake-photo hidden/, where);
+      assert.match(body, /Capture and save photo/, where);
       assert.match(body, /data-app-origin="https:\/\/quickducks\.com"/, where);
       // Retired inventory controls are gone from the markup entirely.
       assert.doesNotMatch(body, /data-inventory-edit-form|data-tag-replace-form|data-tag-retire-form/, where);
@@ -309,6 +313,7 @@ test("the standalone inventory intake path uses the complete inventory authoriza
     const allowed = await page(currentActor);
     const body = await allowed.text();
     assert.equal(allowed.status, 200);
+    assert.match(allowed.headers.get("permissions-policy") ?? "", /camera=\(self\)/);
     assert.match(body, /data-intake-station/);
     assert.match(body, /data-intake-runtime/);
     assert.match(body, /data-start-intake-nfc/);
@@ -958,6 +963,21 @@ test("requires same-origin protection for cookie-authenticated provisioning", as
   );
   assert.equal(takeover.status, 403);
   assert.deepEqual(await takeover.json(), { error: "Same-origin staff request required." });
+
+  const photo = await createWorker(async () => cookieActor).fetch(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/photo", {
+      method: "PUT",
+      headers: {
+        "content-type": "image/jpeg",
+        "x-quickducks-command-id": crypto.randomUUID(),
+        origin: "https://attacker.example",
+      },
+      body: Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]),
+    }),
+    env,
+  );
+  assert.equal(photo.status, 403);
+  assert.deepEqual(await photo.json(), { error: "Same-origin staff request required." });
 });
 
 const refreshedActor = {
@@ -1527,13 +1547,21 @@ test("renders protected staff pairing preview with code and contact lookup", asy
 });
 
 test("keeps the database health check", async () => {
-  const response = await worker.fetch(new Request("https://quickducks.com/health"), env);
+  const response = await worker.fetch(new Request("https://quickducks.com/health"), {
+    ...env,
+    DUCK_PHOTOS: {
+      async get() {
+        return { async text() { return "quickducks-r2-release-probe-v1"; } };
+      },
+    },
+  });
 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     service: "quickducks",
     status: "ok",
     database: "connected",
+    photoStorage: "connected",
     region: "us-east-1",
   });
 });

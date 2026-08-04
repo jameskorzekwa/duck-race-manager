@@ -35,6 +35,24 @@ class D1Statement {
   }
 }
 
+class MemoryR2Bucket {
+  objects = new Map();
+
+  async put(key, value) {
+    const bytes = value instanceof Uint8Array ? value : new Uint8Array(await value.arrayBuffer());
+    this.objects.set(key, new Uint8Array(bytes));
+  }
+
+  async get(key) {
+    const bytes = this.objects.get(key);
+    return bytes === undefined ? null : { body: bytes, size: bytes.byteLength };
+  }
+
+  async delete(key) {
+    this.objects.delete(key);
+  }
+}
+
 const createD1 = (database, { afterDeliveryClaim, failDeliveryFinalization } = {}) => ({
   prepare(sql) {
     return new D1Statement(database, sql);
@@ -145,6 +163,7 @@ const createWorkerHarness = (
     COGNITO_USER_POOL_CLIENT_ID: "client-example",
     COGNITO_DOMAIN: "https://quickducks-staff.example.com",
     DB: createD1(database),
+    DUCK_PHOTOS: new MemoryR2Bucket(),
     EMAIL_QUEUE: {
       async send(notificationId) {
         const notificationType = database.prepare(
@@ -180,7 +199,9 @@ const createWorkerHarness = (
     const headers = new Headers(options.headers);
     if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
     let body;
-    if (options.body !== undefined) {
+    if (options.rawBody !== undefined) {
+      body = options.rawBody;
+    } else if (options.body !== undefined) {
       headers.set("content-type", "application/json");
       body = JSON.stringify(options.body);
     }
@@ -2903,6 +2924,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "0021_email_delivery_claim.sql",
     "0022_pending_heat_result_announcement.sql",
     "0023_participant_notifications.sql",
+    "0024_duck_photos.sql",
   ]);
 
   // Staff identities are infrastructure; all event-domain data is created through API handlers below.
@@ -2931,6 +2953,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     COGNITO_USER_POOL_CLIENT_ID: "client-example",
     COGNITO_DOMAIN: "https://quickducks-staff.example.com",
     DB: createD1(database),
+    DUCK_PHOTOS: new MemoryR2Bucket(),
     EMAIL_QUEUE: { async send() {} },
     PUBLIC_SEARCH_RATE_LIMITER: { async limit() { return { success: true }; } },
     RACE_UPDATES: {
@@ -2962,7 +2985,9 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     if (options.token !== undefined) headers.set("authorization", `Bearer ${options.token}`);
     if (options.cookie !== undefined) headers.set("cookie", options.cookie);
     let body;
-    if (options.body !== undefined) {
+    if (options.rawBody !== undefined) {
+      body = options.rawBody;
+    } else if (options.body !== undefined) {
       headers.set("content-type", "application/json");
       body = JSON.stringify(options.body);
     }
@@ -3152,7 +3177,7 @@ test("runs the complete race workflow through real API handlers and migrated SQL
 
   const anonymousInventory = await api("/api/v1/staff/inventory/ducks");
   assert.equal(anonymousInventory.status, 401);
-  for (const participant of participants) {
+  for (const [index, participant] of participants.entries()) {
     const provisioning = await jsonBody(await post("/api/v1/staff/inventory/provisioning", {
       commandId: crypto.randomUUID(),
       eventId,
@@ -3176,6 +3201,28 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     }), 201, `confirm provisioned duck ${participant.visibleNumber}`);
     participant.duckId = intake.duck.id;
     assert.equal(intake.duck.inventoryStatus, "RESERVED_FOR_EVENT");
+    assert.deepEqual(intake.duck.photo, { required: true, state: "PENDING", viewPath: null });
+    const jpeg = Uint8Array.from([0xff, 0xd8, index + 1, 0xff, 0xd9]);
+    const savedPhoto = await jsonBody(await api(
+      `/api/v1/staff/inventory/ducks/${participant.duckId}/photo`,
+      {
+        method: "PUT",
+        token: staffToken,
+        headers: {
+          "content-type": "image/jpeg",
+          "x-quickducks-command-id": crypto.randomUUID(),
+        },
+        rawBody: jpeg,
+      },
+    ), 201, `save required photo for duck ${participant.visibleNumber}`);
+    assert.equal(savedPhoto.photo.state, "READY");
+    const privatePhoto = await api(savedPhoto.photo.viewPath, { token: staffToken });
+    assert.equal(privatePhoto.status, 200);
+    assert.equal(privatePhoto.headers.get("content-type"), "image/jpeg");
+    assert.equal(privatePhoto.headers.get("cache-control"), "no-store");
+    assert.deepEqual(new Uint8Array(await privatePhoto.arrayBuffer()), jpeg);
+    const anonymousPhoto = await api(savedPhoto.photo.viewPath);
+    assert.equal(anonymousPhoto.status, 401);
 
     const anonymousTag = await jsonBody(await api(`/api/v1/ducks/${participant.tagToken}`), 200, "unpaired tag privacy");
     assert.deepEqual(anonymousTag, { destination: "HOME" });
@@ -3841,6 +3888,8 @@ test("runs the complete race workflow through real API handlers and migrated SQL
     "event_ducks",
     "duck_assignments",
     "duck_inventory_events",
+    "duck_photos",
+    "duck_photo_cleanup",
     "heats",
     "heat_entries",
     "heat_results",

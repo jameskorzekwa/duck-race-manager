@@ -4,7 +4,7 @@
 
 This document is the canonical operator and user workflow specification for the
 currently implemented QuickDucks application. It describes behavior present in
-the Worker, D1 migrations through `0023_participant_notifications.sql`, browser
+the Worker, D1 migrations through `0024_duck_photos.sql`, browser
 scripts, and automated tests. When this document conflicts with an older
 planning or design document, this document controls for current operation.
 
@@ -1174,7 +1174,7 @@ manual field also accepts a pasted canonical tag URL or visible duck number.
 Both paths only select a roster entry; neither submits a result. Inventory tag
 provisioning and participant QR scanning remain separate from the finish station.
 Response headers continue to disable browser camera access at the finish station;
-only the duck-pairing page enables the camera.
+only the protected duck-pairing and inventory-intake pages enable the camera.
 
 The blank-sticker station is the **Scan ducks** section of `/staff/inventory`.
 The standalone `/staff/inventory-intake` entry renders that same complete,
@@ -1185,6 +1185,32 @@ optional station location and presses Start once. That user gesture starts one
 remain visible. Each subsequent physical reading writes and confirms one sticker
 without a per-duck form, printed number, pasted URL, presence checkbox, or
 desktop fallback.
+
+After the NFC write and server confirmation, the same station immediately opens
+an in-page camera view for that exact duck. It prefers the rear camera, names the
+duck number in the prompt, compresses the captured frame to a bounded JPEG, and
+saves it automatically after one press of **Capture and save photo**. The duck is
+already durable inventory at this point, but the station does not count it as a
+completed intake, show the remove-duck interlock, or become ready for another
+duck until the server confirms the private R2 object and D1 association.
+
+The required-photo state is durable and recoverable. Permission denial, a
+stopped stream, capture failure, network uncertainty, and storage failure keep
+the same duck visibly incomplete with **Retry required photo**; camera denial
+also tells the operator to enable camera permission for this site in Chrome.
+An exact retry reuses one upload command and one opaque object, while a reload
+recovers the pending duck from D1. The station retains a live rear-camera stream
+between successful ducks so Android does not request permission for every duck,
+and releases every track when the operator stops it or leaves the page.
+
+Duck photos are private staff inventory data. Duck managers, race directors,
+and administrators can retrieve a ready photo only through the authenticated
+Worker endpoint. The R2 bucket has no public URL, responses are `no-store`, and
+public tag, duck-number, race-board, search, participant, and live-update
+projections include no photo status, bytes, key, URL, uploader, or cleanup state.
+Manual duck entry and ducks that existed before this feature do not acquire a
+photo requirement; the requirement belongs specifically to newly confirmed NFC
+intake.
 
 The page itself is not device gated. Authentication and the inventory-role check
 decide who may open it, and every device that passes them gets the whole page,

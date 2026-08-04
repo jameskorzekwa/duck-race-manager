@@ -1,6 +1,11 @@
 import type { StaffActor } from "./auth.ts";
 import { canViewParticipantPii, requireAnyRole } from "./authorization.ts";
 import { publicDuckName } from "./duck-name-filter.ts";
+import {
+  drainDuckPhotoCleanup,
+  queueDuckPhotoCleanup,
+  stageDuckPhotoCleanup,
+} from "./duck-photo-storage.ts";
 import { isCommandId } from "./registration.ts";
 import type { Env } from "./types.ts";
 
@@ -129,6 +134,7 @@ interface DuckSummaryRow {
   heat_number: number | null;
   heat_status: string | null;
   heat_slot_number: number | null;
+  photo_state: "PENDING" | "READY" | null;
 }
 
 const duckSelect = `
@@ -142,7 +148,8 @@ const duckSelect = `
          da.race_entry_id, re.duck_name, r.id AS registration_id,
          r.first_name, r.last_name, r.status AS registration_status,
          h.id AS heat_id, h.round AS heat_round, h.heat_number,
-         h.status AS heat_status, he.slot_number AS heat_slot_number
+          h.status AS heat_status, he.slot_number AS heat_slot_number,
+          dp.state AS photo_state
     FROM ducks d
     LEFT JOIN duck_tags dt ON dt.id = (
       SELECT dt2.id
@@ -173,7 +180,8 @@ const duckSelect = `
        ORDER BY CASE h2.round WHEN 'FINAL' THEN 0 ELSE 1 END, h2.heat_number
        LIMIT 1
     )
-    LEFT JOIN heats h ON h.id = he.heat_id`;
+    LEFT JOIN heats h ON h.id = he.heat_id
+    LEFT JOIN duck_photos dp ON dp.duck_id = d.id`;
 
 const summaryResponse = (row: DuckSummaryRow, includePii: boolean): Record<string, unknown> => ({
   id: row.duck_id,
@@ -182,6 +190,13 @@ const summaryResponse = (row: DuckSummaryRow, includePii: boolean): Record<strin
   revision: row.duck_revision,
   location: row.storage_location,
   notes: row.notes,
+  photo: row.photo_state == null ? null : {
+    required: true,
+    state: row.photo_state,
+    viewPath: row.photo_state === "READY"
+      ? `${inventoryPath}/ducks/${encodeURIComponent(row.duck_id)}/photo`
+      : null,
+  },
   tag: row.tag_id === null ? null : {
     id: row.tag_id,
     status: row.tag_status,
@@ -561,17 +576,19 @@ interface IntakeResultRow {
   notes: string | null;
   tag_id: string;
   event_duck_id: string;
+  photo_state: "PENDING" | "READY" | null;
 }
 
 const getIntakeResult = (env: Env, duckId: string, eventId: string): Promise<IntakeResultRow | null> =>
   env.DB.prepare(
     `SELECT d.id AS duck_id, d.visible_number, d.inventory_status, d.revision,
             d.storage_location, d.notes,
-            dt.id AS tag_id, ed.id AS event_duck_id
+             dt.id AS tag_id, ed.id AS event_duck_id, dp.state AS photo_state
        FROM ducks d
        JOIN duck_tags dt ON dt.duck_id = d.id AND dt.status = 'ACTIVE'
        JOIN event_ducks ed
-         ON ed.duck_id = d.id AND ed.event_id = ? AND ed.released_at IS NULL
+          ON ed.duck_id = d.id AND ed.event_id = ? AND ed.released_at IS NULL
+       LEFT JOIN duck_photos dp ON dp.duck_id = d.id AND dp.event_id = ed.event_id
       WHERE d.id = ?
       LIMIT 1`,
   ).bind(eventId, duckId).first<IntakeResultRow>();
@@ -584,6 +601,13 @@ const intakeResponse = (row: IntakeResultRow, replayed: boolean): Response => js
     revision: row.revision,
     location: row.storage_location,
     notes: row.notes,
+    photo: row.photo_state == null ? null : {
+      required: true,
+      state: row.photo_state,
+      viewPath: row.photo_state === "READY"
+        ? `${inventoryPath}/ducks/${encodeURIComponent(row.duck_id)}/photo`
+        : null,
+    },
   },
   tag: { id: row.tag_id, status: "ACTIVE" },
   reservation: { id: row.event_duck_id },
@@ -682,6 +706,7 @@ const intakeDuck = async (request: Request, env: Env, actor: StaffActor): Promis
     notes,
     tag_id: tagId,
     event_duck_id: eventDuckId,
+    photo_state: null,
   }, false);
 };
 
@@ -860,6 +885,34 @@ const parseProvisioningLocation = (payload: Record<string, unknown>): string | n
   return location.length <= 100 ? location : undefined;
 };
 
+interface PendingPhotoRow {
+  duck_id: string;
+  visible_number: number;
+}
+
+const getPendingPhoto = (
+  env: Env,
+  eventId: string,
+  actorId: string,
+): Promise<PendingPhotoRow | null> => env.DB.prepare(
+  `SELECT dp.duck_id, d.visible_number
+     FROM duck_photos dp
+     JOIN ducks d ON d.id = dp.duck_id
+    WHERE dp.event_id = ? AND dp.owner_staff_profile_id = ? AND dp.state = 'PENDING'
+    ORDER BY dp.created_at, dp.id LIMIT 1`,
+).bind(eventId, actorId).first<PendingPhotoRow>();
+
+const pendingPhotoRecord = (photo: PendingPhotoRow): Record<string, unknown> => ({
+  duckId: photo.duck_id,
+  visibleNumber: photo.visible_number,
+  status: "PHOTO_REQUIRED",
+  photo: { required: true, state: "PENDING", viewPath: null },
+});
+
+const pendingPhotoResponse = (photo: PendingPhotoRow): Response => json({
+  provisioning: pendingPhotoRecord(photo),
+});
+
 const recoverProvisioning = async (
   url: URL,
   env: Env,
@@ -881,6 +934,8 @@ const recoverProvisioning = async (
       },
     });
   }
+  const pendingPhoto = await getPendingPhoto(env, eventId, actor.id);
+  if (pendingPhoto !== null) return pendingPhotoResponse(pendingPhoto);
   if (!actor.isSystemAdmin && !actor.roles.includes("RACE_DIRECTOR")) {
     return json({ provisioning: null });
   }
@@ -1129,10 +1184,10 @@ const startProvisioning = async (
            FROM events e
           WHERE e.id = ?
             AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')
-            AND COALESCE((SELECT MAX(visible_number) FROM ducks), 0) < 999999999
-            AND NOT EXISTS (
-              SELECT 1
-                FROM race_commands pending_rc
+             AND COALESCE((SELECT MAX(visible_number) FROM ducks), 0) < 999999999
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM race_commands pending_rc
                 JOIN audit_events pending_ae
                   ON pending_ae.command_id = pending_rc.id
                  AND pending_ae.action = 'DUCK_PROVISIONING_STARTED'
@@ -1413,6 +1468,15 @@ const confirmProvisioning = async (
           )`,
       ).bind(eventDuckId, eventId, duckId, now, actor.id, commandId, duckId),
       env.DB.prepare(
+        `INSERT INTO duck_photos
+          (id, event_id, duck_id, state, owner_staff_profile_id, created_at)
+         SELECT ?, ?, ?, 'PENDING', ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM race_commands
+             WHERE id = ? AND command_type = '${provisioningConfirmCommand}' AND result_id = ?
+          )`,
+      ).bind(crypto.randomUUID(), eventId, duckId, actor.id, now, commandId, duckId),
+      env.DB.prepare(
         `INSERT INTO duck_inventory_events
           (id, event_id, duck_id, action, actor_staff_profile_id,
            source_command_id, occurred_at, details_json)
@@ -1478,6 +1542,251 @@ const getLabelData = async (env: Env, duckId: string): Promise<Response> => {
   if (label === null) return json({ error: "Duck has no active label tag." }, 404);
   const tagUrl = new URL(`/t/${label.token}`, env.APP_ORIGIN).toString();
   return json({ visibleNumber: label.visible_number, tagUrl });
+};
+
+const maximumPhotoBytes = 1_500_000;
+
+const readBoundedPhoto = async (request: Request): Promise<Uint8Array | null> => {
+  if (request.body === null) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maximumPhotoBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+};
+
+interface DuckPhotoRow {
+  id: string;
+  event_id: string;
+  duck_id: string;
+  state: "PENDING" | "READY";
+  object_key: string | null;
+  upload_command_id: string | null;
+  content_sha256: string | null;
+  byte_length: number | null;
+}
+
+const getDuckPhoto = (env: Env, duckId: string): Promise<DuckPhotoRow | null> => env.DB.prepare(
+  `SELECT dp.id, dp.event_id, dp.duck_id, dp.state, dp.object_key,
+          dp.upload_command_id, dp.content_sha256, dp.byte_length
+     FROM duck_photos dp
+     JOIN ducks d ON d.id = dp.duck_id
+    WHERE dp.duck_id = ? AND d.inventory_status != 'RETIRED'
+    LIMIT 1`,
+).bind(duckId).first<DuckPhotoRow>();
+
+const photoResponse = (photo: DuckPhotoRow, replayed: boolean): Response => json({
+  duckId: photo.duck_id,
+  photo: {
+    required: true,
+    state: photo.state,
+    viewPath: photo.state === "READY"
+      ? `${inventoryPath}/ducks/${encodeURIComponent(photo.duck_id)}/photo`
+      : null,
+  },
+  replayed,
+}, replayed ? 200 : 201);
+
+const hashBytes = async (bytes: Uint8Array): Promise<string> => {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+
+const saveDuckPhoto = async (
+  request: Request,
+  env: Env,
+  actor: StaffActor,
+  duckId: string,
+): Promise<Response> => {
+  const commandId = request.headers.get("x-quickducks-command-id");
+  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
+  const declaredLength = Number(request.headers.get("content-length") ?? 0);
+  if (
+    commandId === null || !isCommandId(commandId) || contentType !== "image/jpeg"
+    || (Number.isFinite(declaredLength) && declaredLength > maximumPhotoBytes)
+  ) {
+    return json({ error: "A valid command and a JPEG photo no larger than 1.5 MB are required." }, 400);
+  }
+  if (!env.DUCK_PHOTOS) return json({ error: "Photo storage is temporarily unavailable. Retry this photo." }, 503);
+
+  const bytes = await readBoundedPhoto(request);
+  if (
+    bytes === null || bytes.byteLength < 4
+    || bytes[0] !== 0xff || bytes[1] !== 0xd8
+    || bytes[bytes.byteLength - 2] !== 0xff || bytes[bytes.byteLength - 1] !== 0xd9
+  ) {
+    return json({ error: "The captured file is not a valid bounded JPEG photo." }, 400);
+  }
+  const photo = await getDuckPhoto(env, duckId);
+  if (photo === null) return json({ error: "This duck has no incomplete NFC intake photo." }, 404);
+  const digest = await hashBytes(bytes);
+  const fingerprint = await hashValue(JSON.stringify({
+    operation: "SAVE_DUCK_PHOTO",
+    actorId: actor.id,
+    eventId: photo.event_id,
+    duckId,
+    digest,
+    byteLength: bytes.byteLength,
+  }));
+  const previous = await getProvisioningCommand(env, commandId);
+  if (previous !== null) {
+    if (
+      previous.event_id !== photo.event_id
+      || previous.command_type !== "SAVE_DUCK_PHOTO"
+      || previous.result_id !== photo.id
+      || previous.request_fingerprint !== fingerprint
+    ) {
+      return json({ error: "This command identifier was already used for another operation." }, 409);
+    }
+    return photo.state === "READY" && photo.upload_command_id === commandId
+      ? photoResponse(photo, true)
+      : json({ error: "The earlier photo save is incomplete. Retry the same capture." }, 409);
+  }
+  if (photo.state !== "PENDING") {
+    return json({ error: "This duck already has its required photo." }, 409);
+  }
+
+  // The key is deterministic for an exact capture retry and opaque. Including
+  // the photo row and digest inside the hash prevents concurrent misuse of one
+  // command ID for another duck or another capture from sharing (and later
+  // deleting) the object that won the guarded D1 association.
+  const objectKey = `duck-photos/${await hashValue(`photo:${photo.id}:${commandId}:${digest}`)}.jpg`;
+  try {
+    await stageDuckPhotoCleanup(env, objectKey);
+  } catch {
+    return json({ error: "Photo storage could not be prepared safely. The duck still needs a photo; retry." }, 503);
+  }
+  try {
+    await env.DUCK_PHOTOS.put(objectKey, bytes, {
+      httpMetadata: { contentType: "image/jpeg", cacheControl: "no-store" },
+    });
+  } catch {
+    try {
+      await queueDuckPhotoCleanup(env, objectKey);
+    } catch {
+      // The staged durable row remains eligible for the scheduled retry.
+    }
+    return json({ error: "Photo storage did not accept the image. The duck still needs a photo; retry." }, 503);
+  }
+
+  const now = new Date().toISOString();
+  let racedMatchingSave = false;
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO race_commands
+          (id, event_id, command_type, result_id, requested_at, completed_at, request_fingerprint)
+         SELECT ?, dp.event_id, 'SAVE_DUCK_PHOTO', dp.id, ?, ?, ?
+           FROM duck_photos dp
+           JOIN events e ON e.id = dp.event_id
+          WHERE dp.id = ? AND dp.duck_id = ? AND dp.state = 'PENDING'
+            AND e.status IN ('DRAFT', 'REGISTRATION_OPEN', 'REGISTRATION_CLOSED', 'ROUND_ONE', 'FINAL')`,
+      ).bind(commandId, now, now, fingerprint, photo.id, duckId),
+      env.DB.prepare(
+        `UPDATE duck_photos
+            SET state = 'READY', object_key = ?, upload_command_id = ?,
+                content_sha256 = ?, byte_length = ?, ready_at = ?
+          WHERE id = ? AND duck_id = ? AND state = 'PENDING'
+            AND EXISTS (
+              SELECT 1 FROM race_commands
+               WHERE id = ? AND event_id = ? AND command_type = 'SAVE_DUCK_PHOTO'
+                 AND result_id = ? AND request_fingerprint = ?
+            )`,
+      ).bind(
+        objectKey, commandId, digest, bytes.byteLength, now, photo.id, duckId,
+        commandId, photo.event_id, photo.id, fingerprint,
+      ),
+      env.DB.prepare(
+        `INSERT INTO audit_events
+          (id, event_id, command_id, action, subject_type, subject_id,
+           actor_type, occurred_at, details_json)
+         SELECT ?, ?, ?, 'DUCK_PHOTO_SAVED', 'DUCK', ?, 'STAFF', ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM duck_photos
+             WHERE id = ? AND duck_id = ? AND state = 'READY' AND upload_command_id = ?
+          )`,
+      ).bind(
+        crypto.randomUUID(), photo.event_id, commandId, duckId, now,
+        JSON.stringify({ staff_profile_id: actor.id, changed_fields: ["photo"] }),
+        photo.id, duckId, commandId,
+      ),
+      env.DB.prepare(
+        `DELETE FROM duck_photo_cleanup
+          WHERE object_key = ?
+            AND EXISTS (
+              SELECT 1 FROM duck_photos
+               WHERE id = ? AND duck_id = ? AND state = 'READY'
+                 AND object_key = ? AND upload_command_id = ?
+            )`,
+      ).bind(objectKey, photo.id, duckId, objectKey, commandId),
+    ]);
+  } catch {
+    // A concurrent deletion or save may win after R2 accepted the bytes. The
+    // unassociated candidate is tombstoned and removed rather than exposed.
+    racedMatchingSave = true;
+  }
+  let savedCommand: ProvisioningCommandRow | null = null;
+  let savedPhoto: DuckPhotoRow | null = null;
+  try {
+    savedCommand = await getProvisioningCommand(env, commandId);
+    savedPhoto = await getDuckPhoto(env, duckId);
+  } catch {
+    // The candidate's staged cleanup row survives an unavailable D1 read.
+  }
+  if (
+    savedCommand !== null
+    && savedCommand.event_id === photo.event_id
+    && savedCommand.command_type === "SAVE_DUCK_PHOTO"
+    && savedCommand.result_id === photo.id
+    && savedCommand.request_fingerprint === fingerprint
+    && savedPhoto?.state === "READY"
+    && savedPhoto.upload_command_id === commandId
+  ) {
+    return photoResponse(savedPhoto, racedMatchingSave);
+  }
+  try {
+    await queueDuckPhotoCleanup(env, objectKey);
+  } catch {
+    // Staging happened before R2 accepted bytes, so the scheduled drain still
+    // has a durable row even when D1 is temporarily unavailable here.
+  }
+  return json({ error: "The photo association conflicted with another update. The duck still needs a photo." }, 409);
+};
+
+const readDuckPhoto = async (env: Env, duckId: string): Promise<Response> => {
+  const photo = await getDuckPhoto(env, duckId);
+  if (photo === null || photo.state !== "READY" || photo.object_key === null) {
+    return json({ error: "Duck photo not found." }, 404);
+  }
+  if (!env.DUCK_PHOTOS) return json({ error: "Photo storage is temporarily unavailable." }, 503);
+  try {
+    const object = await env.DUCK_PHOTOS.get(photo.object_key);
+    if (object === null) return json({ error: "Duck photo is temporarily unavailable." }, 503);
+    return new Response(object.body, {
+      headers: {
+        ...headers,
+        "content-type": "image/jpeg",
+        "content-length": String(object.size),
+      },
+    });
+  } catch {
+    return json({ error: "Duck photo is temporarily unavailable." }, 503);
+  }
 };
 
 // ---------------------------------------------------------------------------
@@ -1591,6 +1900,7 @@ const deleteDuck = async (
     ) {
       return json({ error: "This command identifier was already used for another operation." }, 409);
     }
+    await drainDuckPhotoCleanup(env);
     return json({ duckId, deleted: true, replayed: true });
   }
 
@@ -1666,6 +1976,11 @@ const deleteDuck = async (
       unpaired_race_entry_id: context.race_entry_id,
       reason,
     }),
+    // This transaction makes the photo inaccessible and the migration trigger
+    // records its opaque key before any R2 deletion is attempted. It is needed
+    // explicitly for the published-result path, where the duck row survives.
+    env.DB.prepare(`DELETE FROM duck_photos WHERE duck_id = ? ${committed}`)
+      .bind(duckId, ...commit),
   ];
 
   if (context.active_assignment_id !== null) {
@@ -1737,9 +2052,11 @@ const deleteDuck = async (
     return json({ error: "Deleting this duck conflicted with another update. Refresh and try again." }, 409);
   }
   const saved = await findRaceCommand(env, commandId);
-  return saved === null || saved.command_type !== "DELETE_DUCK"
-    ? json({ error: "Deleting this duck conflicted with another update. Refresh and try again." }, 409)
-    : json({
+  if (saved === null || saved.command_type !== "DELETE_DUCK") {
+    return json({ error: "Deleting this duck conflicted with another update. Refresh and try again." }, 409);
+  }
+  await drainDuckPhotoCleanup(env);
+  return json({
       duckId,
       deleted: true,
       erased: erasable,
@@ -2380,12 +2697,16 @@ export const handleDuckOperations = async (
   }
 
   const duckActionMatch = url.pathname.match(
-    /^\/api\/v1\/staff\/inventory\/ducks\/([A-Za-z0-9_-]{1,128})\/(history|label|assignments|reservations\/release|delete)$/,
+    /^\/api\/v1\/staff\/inventory\/ducks\/([A-Za-z0-9_-]{1,128})\/(history|label|photo|assignments|reservations\/release|delete)$/,
   );
   if (duckActionMatch !== null) {
     const [, duckId, action] = duckActionMatch;
     if (action === "history" && request.method === "GET") return getDuckDetail(env, duckId, true, includePii);
     if (action === "label" && request.method === "GET") return getLabelData(env, duckId);
+    if (action === "photo" && request.method === "GET") return readDuckPhoto(env, duckId);
+    if (action === "photo" && (request.method === "PUT" || request.method === "POST")) {
+      return saveDuckPhoto(request, env, actor, duckId);
+    }
     if (action === "assignments" && request.method === "POST") return assignDuck(request, env, actor, duckId);
     if (action === "delete" && request.method === "POST") return deleteDuck(request, env, actor, duckId);
     if (action === "reservations/release" && request.method === "POST") {

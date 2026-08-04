@@ -27,6 +27,7 @@ const migrationNames = [
   "0021_email_delivery_claim.sql",
   "0022_pending_heat_result_announcement.sql",
   "0023_participant_notifications.sql",
+  "0024_duck_photos.sql",
 ];
 
 const lifecycleStatuses = [
@@ -69,6 +70,58 @@ const createDatabase = () => {
   applyMigrations(database);
   return database;
 };
+
+test("0024 adds private one-photo requirements without backfilling existing ducks", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  applyMigrations(database, migrationsBefore("0024_duck_photos.sql"));
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('photo-staff', 'photo-staff-sub', 'photo-staff@example.com');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('photo-event', 'photo-event', 'Photo Event', 'UTC', 'DRAFT');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES
+      ('existing-duck', 1, 'AVAILABLE', '2026-08-03T00:00:00Z'),
+      ('second-duck', 2, 'AVAILABLE', '2026-08-03T00:00:00Z');
+  `);
+  applyMigrations(database, ["0024_duck_photos.sql"]);
+
+  assert.equal(count(database, "duck_photos"), 0, "existing and old-Worker ducks are not backfilled");
+  database.exec(`
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES ('old-worker-duck', 3, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00Z');
+    INSERT INTO duck_photos
+      (id, event_id, duck_id, owner_staff_profile_id, created_at)
+    VALUES
+      ('photo-one', 'photo-event', 'existing-duck', 'photo-staff', '2026-08-03T00:00:00Z'),
+      ('photo-two', 'photo-event', 'second-duck', 'photo-staff', '2026-08-03T00:00:01Z');
+  `);
+  assert.equal(count(database, "duck_photos"), 2, "one operator may intake many ducks in one event");
+  assert.throws(() => database.exec(`
+    INSERT INTO duck_photos
+      (id, event_id, duck_id, owner_staff_profile_id, created_at)
+    VALUES ('duplicate-duck-photo', 'photo-event', 'existing-duck', 'photo-staff', '2026-08-03T00:00:02Z');
+  `), /UNIQUE constraint failed/);
+  assert.throws(() => database.exec(`
+    UPDATE duck_photos SET state = 'READY' WHERE id = 'photo-one';
+  `), /CHECK constraint failed/);
+
+  database.exec(`
+    UPDATE duck_photos
+       SET state = 'READY', object_key = 'opaque-object-one',
+           upload_command_id = '11111111-1111-4111-8111-111111111111',
+           content_sha256 = '${"a".repeat(64)}', byte_length = 100,
+           ready_at = '2026-08-03T00:01:00Z'
+     WHERE id = 'photo-one';
+    DELETE FROM duck_photos WHERE id = 'photo-one';
+  `);
+  assert.deepEqual(database.prepare(
+    "SELECT object_key, attempt_count FROM duck_photo_cleanup",
+  ).all().map((row) => ({ ...row })), [{ object_key: "opaque-object-one", attempt_count: 0 }]);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  database.close();
+});
 
 test("participant notification migration defaults SMS off and keys outbox work by channel and lifecycle", () => {
   const database = createDatabase();

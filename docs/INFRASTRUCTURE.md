@@ -9,6 +9,7 @@
 | Redirect origin | `https://www.quickducks.com` | Worker Custom Domain; application returns `308` |
 | Web and API | Cloudflare Worker `quickducks` | `wrangler.jsonc` and merge-driven production releases |
 | Database | Cloudflare D1 `quickducks-prod` | Wrangler and `db/migrations` |
+| Private duck photos | Cloudflare R2 `quickducks-duck-photos`, binding `DUCK_PHOTOS` | Private Wrangler binding; no public/custom domain |
 | Live refresh fan-out | Durable Object class `RaceUpdates`, binding `RACE_UPDATES` | Wrangler class migration and Worker deployment |
 | Public search limit | Workers binding `PUBLIC_SEARCH_RATE_LIMITER` | `wrangler.jsonc` |
 | Email queue | Cloudflare Queue `quickducks-email` | Wrangler producer/consumer and `EMAIL_QUEUE` binding |
@@ -56,6 +57,12 @@ are production resources. Do not create substitutes during a release.
 - Before any AWS, D1, or Worker mutation, the release lists encrypted Worker
   secret names and requires the complete documented set. Secret values are
   never requested or printed.
+- After CloudFormation and before production D1 migration, the
+  `db:migrate:remote` command performs an R2 object write/read/delete probe and
+  refreshes the fixed private health canary. A missing bucket or token without
+  object access therefore fails before migration `0024` changes D1. Post-deploy
+  smoke reads that canary through the Worker's authenticated R2 binding and
+  verifies that an anonymous photo endpoint request is denied.
 
 Automatic Workers invocation logs are disabled in `wrangler.jsonc` because
 fetch-event logs include request URLs. QuickDucks private status credentials are
@@ -179,6 +186,35 @@ workflow, repository variable, shell profile, or committed file:
 | Secret | Value | Used for |
 | --- | --- | --- |
 | `CLOUDFLARE_API_TOKEN` | Scoped Cloudflare API token | Remote D1 migrations and Worker/custom-domain deployment |
+
+The token must additionally have object read, write, and delete access to the
+single `quickducks-duck-photos` bucket. Do not make the bucket public to avoid
+granting that scope. Create the bucket once, before the first release containing
+migration `0024`:
+
+```sh
+npx wrangler r2 bucket create quickducks-duck-photos
+```
+
+Review the active Cloudflare account before this production-affecting command.
+Local development uses the distinct `quickducks-duck-photos-local` identity and
+Wrangler's local persistence; it must never bind the production bucket.
+
+Photo deletion is two phase because D1 and R2 cannot share a transaction. The
+revision-guarded D1 batch first removes the accessible association and inserts
+an FK-free opaque-key cleanup row. Only after commit does the Worker delete R2;
+transient failures remain in `duck_photo_cleanup` and the minute scheduler
+retries them. Rollback to the previous Worker remains safe because migration
+`0024` installs the same tombstone trigger on photo-row deletion. During an
+incident, do not delete cleanup rows or R2 objects by hand; restore Worker
+service and let the idempotent scheduled drain finish them.
+
+Uploads use the same ledger in the opposite direction: QuickDucks records an
+opaque candidate key with a short cleanup lease before writing R2, then removes
+that row in the guarded D1 association batch. A lost or conflicting request
+therefore leaves a durable, eventually eligible cleanup record rather than an
+untracked object, while the lease keeps the scheduled drain from racing an
+active upload.
 
 Create these as repository Actions variables so both the deployment and release
 jobs can read non-secret deployment metadata:
@@ -485,11 +521,13 @@ registrar.
 
 Create a dedicated Cloudflare deployment token scoped to only this account and
 the `quickducks.com` zone. Start from **Edit Cloudflare Workers**, remove
-unrelated KV/R2 permissions, and grant the current permission names needed by
-this repository:
+unrelated KV permissions and any R2 scope beyond the one photo bucket, and grant
+the current permission names needed by this repository:
 
 - Account: Workers Scripts Write.
 - Account: D1 Write, for `quickducks-prod` migrations.
+- Account: R2 object read/write/delete for only
+  `quickducks-duck-photos`, for the preflight and private photo lifecycle.
 - Account: Account Settings Read, if Wrangler requires account discovery.
 - Zone `quickducks.com`: Workers Routes Write, for both Custom Domains.
 

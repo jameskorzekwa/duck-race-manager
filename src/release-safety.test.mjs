@@ -18,6 +18,8 @@ import {
 
 const readRepositoryFile = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const releaseWorkflow = readRepositoryFile(".github/workflows/release.yml");
+const packageManifest = JSON.parse(readRepositoryFile("package.json"));
+const r2Preflight = readRepositoryFile("scripts/check-r2-release-preflight.mjs");
 
 test("release tag parsing uses strict SemVer and exact prerelease state", () => {
   assert.deepEqual(parseReleaseTag("v1.2.3"), { tag: "v1.2.3", version: "1.2.3", prerelease: false });
@@ -354,6 +356,22 @@ test("release workflow publishes only the validated tag after deploy and smoke g
   assert.match(releaseWorkflow, /queue: max/);
 });
 
+test("the immutable release D1 step preflights private R2 read, write, and delete first", () => {
+  const command = packageManifest.scripts["db:migrate:remote"];
+  assert.equal(
+    command,
+    "node scripts/check-r2-release-preflight.mjs && wrangler d1 migrations apply quickducks-prod --remote",
+  );
+  assert.match(r2Preflight, /quickducks-duck-photos/);
+  const write = r2Preflight.indexOf('"put", temporaryObject');
+  const read = r2Preflight.indexOf('"get", temporaryObject');
+  const remove = r2Preflight.indexOf('"delete", temporaryObject');
+  assert.ok(write > 0 && read > write && remove > read);
+  assert.match(r2Preflight, /health\/release-probe-v1/);
+  assert.match(readRepositoryFile("scripts/smoke-websocket.mjs"), /authenticated R2 retrieval/);
+  assert.match(readRepositoryFile("scripts/smoke-websocket.mjs"), /Anonymous duck photo retrieval/);
+});
+
 test("release versions are monotonic and same-version reruns require the recorded commit", () => {
   const base = { incomingVersion: "1.2.3", incomingCommit: "new-sha" };
   assert.equal(assessReleaseVersion(base), "first");
@@ -479,9 +497,18 @@ test("Worker secret preflight requires names without inspecting values", () => {
 // future widening of the host rules would pass a scheme check unnoticed.
 test("the deployed Worker configuration cannot reach the local development harness", () => {
   const production = JSON.parse(readRepositoryFile("wrangler.jsonc").replaceAll(/^\s*\/\/.*$/gm, ""));
+  const local = JSON.parse(readRepositoryFile("wrangler.local.jsonc").replaceAll(/^\s*\/\/.*$/gm, ""));
 
   assert.equal(production.main, "src/index.ts");
   assert.equal(production.vars.APP_ORIGIN, "https://quickducks.com");
   assert.equal(isLocalPreviewOrigin(production.vars.APP_ORIGIN), false);
   assert.equal(isLoopbackOrigin(production.vars.APP_ORIGIN), false);
+  assert.deepEqual(production.r2_buckets, [{
+    binding: "DUCK_PHOTOS",
+    bucket_name: "quickducks-duck-photos",
+  }]);
+  assert.deepEqual(local.r2_buckets, [{
+    binding: "DUCK_PHOTOS",
+    bucket_name: "quickducks-duck-photos-local",
+  }]);
 });
