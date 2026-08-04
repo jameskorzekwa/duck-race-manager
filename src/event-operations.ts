@@ -1,4 +1,5 @@
 import type { StaffActor } from "./auth.ts";
+import { drainDuckPhotoCleanup } from "./duck-photo-storage.ts";
 import { operationalRoles, requireAnyRole } from "./authorization.ts";
 import { eligibleEntryCountSql, eligibleRacerExists } from "./heat-operations.ts";
 import { isCommandId } from "./registration.ts";
@@ -2179,6 +2180,7 @@ const forceDeleteEvent = async (
 
   const event = await getEvent(eventId, env);
   if (event === null) {
+    await drainDuckPhotoCleanup(env);
     return json({ deleted: true, alreadyDeleted: true });
   }
   if (event.revision !== revision) {
@@ -2238,6 +2240,7 @@ const forceDeleteEvent = async (
       scoped("heats"),
       scoped("duck_assignments"),
       scoped("event_ducks"),
+      scoped("duck_photos"),
       scoped("duck_inventory_events"),
       global("browser_collection_registrations"),
       global("browser_registration_collections"),
@@ -2286,6 +2289,7 @@ const forceDeleteEvent = async (
   if (results[0]?.meta.changes === 0 || results[results.length - 1]?.meta.changes === 0) {
     return json({ error: "Event deletion conflicted with another update. Refresh and try again." }, 409);
   }
+  await drainDuckPhotoCleanup(env);
   return json({ deleted: true, alreadyDeleted: false });
 };
 

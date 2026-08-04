@@ -486,6 +486,10 @@ details.operation-card[open] > summary { margin-bottom:0; }
 .station-counter strong { display:block; color:var(--ink); font-size:clamp(2rem,10vw,4rem); line-height:1; }
 .station-history { display:grid; gap:.55rem; padding:0; list-style:none; }
 .station-history li { padding:.75rem; border-left:.4rem solid var(--water); background:#eaf7fa; font-weight:850; overflow-wrap:anywhere; }
+.intake-camera { border:4px solid var(--water-dark); background:#eaf7fa; }
+.intake-camera-video { display:block; width:100%; max-width:32rem; min-width:0; margin:0 auto; aspect-ratio:4/3; border:3px solid var(--ink); border-radius:.8rem; background:var(--ink); object-fit:cover; }
+.intake-camera .actions { margin-top:var(--space-md); }
+.intake-camera .button { flex:1 1 11rem; min-height:4rem; }
 .announcer-panel h2 { font-size:clamp(1.8rem,7vw,3.2rem); overflow-wrap:anywhere; }
 .announcer-section { margin:1.4rem 0; padding:clamp(1rem,3vw,1.5rem); border:3px solid var(--ink); border-radius:1rem; background:#fffdf8; }
 .announcer-section > :last-child { margin-bottom:0; }
@@ -1837,6 +1841,18 @@ export const renderStaffInventory = (
             <button class="button danger" type="button" data-takeover-provisioning>Take over pending sticker</button>
           </article>
           <article class="operation-card station-state" role="status" aria-live="polite" aria-atomic="true"><p class="eyebrow">Station state</p><h3 data-intake-state>Not started</h3><p class="message-line muted" data-intake-message>Press Start once when you are ready to scan.</p></article>
+          <article class="operation-card intake-camera" data-intake-photo hidden aria-labelledby="intake-photo-title">
+            <p class="eyebrow">Required duck photo</p>
+            <h3 id="intake-photo-title" data-intake-photo-prompt>Photograph the duck just added.</h3>
+            <p class="muted">Keep this duck at the station. The next intake stays blocked until QuickDucks confirms its photo is stored.</p>
+            <video class="intake-camera-video" data-intake-camera muted playsinline></video>
+            <canvas data-intake-photo-canvas hidden></canvas>
+            <div class="actions">
+              <button class="button station-control" type="button" data-capture-intake-photo>Capture and save photo</button>
+              <button class="button secondary station-control" type="button" data-retry-intake-photo hidden>Retry required photo</button>
+              <button class="button secondary station-control" type="button" data-stop-intake-camera>Stop camera</button>
+            </div>
+          </article>
           <div class="station-counters" aria-label="Inventory counts">
             <div class="station-counter"><span>Reserved for race</span><strong data-reserved-count>0</strong></div>
             <div class="station-counter"><span>Added this session</span><strong data-session-count>0</strong></div>
@@ -1863,7 +1879,7 @@ export const renderStaffInventory = (
         </details>
         <div class="inventory-layout"><div class="data-list inventory-card-grid" data-inventory-list></div>
           <aside class="operation-card inventory-detail-panel" id="inventory-detail-panel" role="region" aria-labelledby="inventory-detail-title" data-inventory-detail hidden>
-            <div class="inventory-detail-heading"><h3 id="inventory-detail-title" data-inventory-name>Duck detail</h3><button class="button secondary small" type="button" data-close-inventory-detail>Close</button></div><dl class="facts compact-facts" data-inventory-facts></dl>
+            <div class="inventory-detail-heading"><h3 id="inventory-detail-title" data-inventory-name>Duck detail</h3><button class="button secondary small" type="button" data-close-inventory-detail>Close</button></div><dl class="facts compact-facts" data-inventory-facts></dl><div data-inventory-photo></div>
             <div class="actions"><button class="button secondary small" type="button" data-print-label>Open label data</button><span class="muted" data-label-result></span></div>
             <form class="operation-card" data-inventory-duck-name-form hidden><h3>Duck name</h3><label>Name shown beside the number<input name="duckName" maxlength="${DUCK_NAME_MAX_LENGTH}" autocomplete="off" required placeholder="Sir Quacks-a-Lot"><span>Public. Staff names go through the same wordlist as a participant’s own.</span></label><div class="actions"><button class="button secondary small" type="submit">Save duck name</button><button class="button danger small" type="button" data-clear-duck-name hidden>Clear name</button></div></form>
             <details class="operation-card"><summary>Assign or reassign duck</summary><form data-inventory-assign-form><label>Participant race-entry ID<input name="raceEntryId" maxlength="128" required></label><label>Reason<input name="reason" minlength="4" maxlength="500" required placeholder="Walk-up pairing correction"></label><button class="button" type="submit">Assign selected duck</button></form></details>

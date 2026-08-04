@@ -25,6 +25,7 @@ import {
   startLineScript,
 } from "./client-scripts.ts";
 import { isLocalPreviewOrigin } from "./local-preview.ts";
+import { drainDuckPhotoCleanup } from "./duck-photo-storage.ts";
 import {
   dispatchPendingEmailNotifications,
   handleEmailUnsubscribe,
@@ -119,8 +120,8 @@ const html = (body: string, status = 200, noindex = false, formActionOrigin?: st
   });
 
 // Camera access stays denied for the whole site except the authenticated staff
-// duck-pairing page, which is the only surface that scans a participant QR
-// code. Public pages, APIs, and every other staff station keep `camera=()`.
+// duck-pairing and inventory-intake pages. Public pages, APIs, and every other
+// staff station keep `camera=()`.
 const withCameraAccess = (response: Response): Response => {
   response.headers.set(
     "permissions-policy",
@@ -178,6 +179,8 @@ const stationPages = new Map<string, StationPage>([
 ]);
 
 const inventoryRoles: readonly OperationalRole[] = ["DUCK_MANAGER", "RACE_DIRECTOR"];
+const r2HealthProbeKey = "health/release-probe-v1";
+const r2HealthProbeValue = "quickducks-r2-release-probe-v1";
 
 // Where `/staff` sends a signed-in staffer who cannot open the Admin view, in
 // race-day priority order. `RACE_DIRECTOR` is deliberately absent from every
@@ -336,11 +339,21 @@ export const createWorker = (
 
     if (url.pathname === "/health") {
       const database = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
+      let photoStorage = localPreview ? "connected" : "unavailable";
+      if (!localPreview && env.DUCK_PHOTOS) {
+        try {
+          const probe = await env.DUCK_PHOTOS.get(r2HealthProbeKey);
+          if (probe !== null && await probe.text() === r2HealthProbeValue) photoStorage = "connected";
+        } catch {
+          photoStorage = "unavailable";
+        }
+      }
 
       return json({
         service: "quickducks",
-        status: database?.ok === 1 ? "ok" : "degraded",
+        status: database?.ok === 1 && photoStorage === "connected" ? "ok" : "degraded",
         database: database?.ok === 1 ? "connected" : "unavailable",
+        photoStorage,
         region: env.AWS_REGION,
       });
     }
@@ -540,13 +553,13 @@ export const createWorker = (
       if (!hasAnyRole(actor, inventoryRoles)) {
         return withSessionCookies(html(renderStaffAuthError("This account does not have permission to use duck inventory.", actor), 403, true));
       }
-      return withSessionCookies(staffHtml(renderStaffInventory(
+      return withSessionCookies(withCameraAccess(staffHtml(renderStaffInventory(
         actor.displayName ?? actor.email,
         appOrigin.origin,
         actor.isSystemAdmin,
         actor.roles,
         await publicPhase(),
-      )));
+      ))));
     }
 
     const station = stationPages.get(url.pathname);
@@ -661,6 +674,7 @@ export const createWorker = (
   },
   async scheduled(_controller, env, ctx): Promise<void> {
     ctx.waitUntil(dispatchPendingEmailNotifications(env));
+    ctx.waitUntil(drainDuckPhotoCleanup(env));
   },
 });
 

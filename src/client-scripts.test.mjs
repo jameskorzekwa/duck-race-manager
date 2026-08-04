@@ -1042,7 +1042,7 @@ test("My Ducks consumes only the matching same-origin relative private handoff o
 });
 
 const inventoryHelpers = () => new Function(
-  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
+  `${inventoryIntakeHelpersScript}; return { intakeProvisioningRuntimeIssue, intakeParseCanonicalTagUrl, intakeCanonicalUrlsFromMessage, intakeSafeTakeoverCandidate, intakeCreatePhotoController, intakeCreateProvisioningMachine, intakeCreateNfcStation };`,
 )();
 
 const androidChromeUserAgent = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
@@ -1296,7 +1296,7 @@ const makeProvisioningMachine = (overrides = {}) => {
   };
   const calls = {
     accepted: [], classifications: [], confirms: [], feedback: [], messages: [],
-    ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
+    photos: [], ready: [], recoveries: [], starts: [], states: [], writes: [], refreshes: 0,
   };
   let nextCommand = 0;
   const machine = intakeCreateProvisioningMachine({
@@ -1323,6 +1323,10 @@ const makeProvisioningMachine = (overrides = {}) => {
     confirm: async (material) => {
       calls.confirms.push({ ...material });
       return overrides.confirm ? overrides.confirm(material) : { replayed: false };
+    },
+    photo: async (duck) => {
+      calls.photos.push({ ...duck });
+      if (overrides.photo) return overrides.photo(duck);
     },
     refresh: async () => {
       calls.refreshes += 1;
@@ -1353,12 +1357,132 @@ test("blank NFC reading performs one generated start, exact write, and confirmat
     physicalWriteVerified: true,
   }]);
   assert.deepEqual(calls.accepted, [{ outcome: "added" }]);
+  assert.deepEqual(calls.photos, [{ duckId: pending.duckId, visibleNumber: pending.visibleNumber }]);
   assert.equal(calls.refreshes, 1);
   assert.deepEqual(calls.feedback, ["added"]);
   assert.equal(calls.recoveries.length, 1);
   assert.deepEqual(await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }), { accepted: false, reason: "busy" });
   calls.ready[0]();
   assert.deepEqual(await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }), { accepted: false, reason: "repeated" });
+});
+
+test("NFC intake cannot advance until the server-confirmed required photo finishes", async () => {
+  let savePhoto;
+  const { calls, machine, pending } = makeProvisioningMachine({
+    photo: () => new Promise((resolve) => { savePhoto = resolve; }),
+  });
+  const intake = machine.reading({ serialNumber: "serial-photo", canonicalUrls: [] });
+  while (!savePhoto) await Promise.resolve();
+  assert.equal(calls.confirms.length, 1);
+  assert.deepEqual(calls.photos, [{ duckId: pending.duckId, visibleNumber: pending.visibleNumber }]);
+  assert.equal(calls.accepted.length, 0);
+  assert.equal(calls.ready.length, 0);
+  assert.equal(machine.hasPending(), true);
+  assert.equal(machine.end(), false);
+  savePhoto({ photo: { state: "READY" } });
+  assert.deepEqual(await intake, { accepted: true, outcome: "added" });
+  assert.deepEqual(calls.accepted, [{ outcome: "added" }]);
+  assert.equal(calls.ready.length, 1);
+});
+
+test("recovered required photo refuses every newly presented sticker", async () => {
+  let finishPhoto;
+  const recovered = {
+    duckId: "duck-recovered-photo",
+    visibleNumber: 77,
+    status: "PHOTO_REQUIRED",
+  };
+  const { calls, machine } = makeProvisioningMachine({
+    recover: () => recovered,
+    photo: () => new Promise((resolve) => { finishPhoto = resolve; }),
+  });
+
+  assert.equal((await machine.recover()).duckId, recovered.duckId);
+  while (!finishPhoto) await Promise.resolve();
+  assert.deepEqual(
+    await machine.reading({ serialNumber: "another-sticker", canonicalUrls: [] }),
+    { accepted: false, reason: "photo-incomplete" },
+  );
+  assert.deepEqual(calls.starts, []);
+  assert.deepEqual(calls.writes, []);
+  assert.deepEqual(calls.confirms, []);
+  assert.match(calls.messages.at(-1)[0], /still needs its required photo/);
+
+  finishPhoto({ photo: { state: "READY" } });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls.accepted, [{ outcome: "added" }]);
+});
+
+test("the intake camera reuses one rear stream for two ducks and releases it only on exit", async () => {
+  const { intakeCreatePhotoController } = inventoryHelpers();
+  const listeners = new Map();
+  const track = {
+    readyState: "live",
+    stops: 0,
+    addEventListener(name, listener) { listeners.set(name, listener); },
+    stop() { this.stops += 1; this.readyState = "ended"; },
+  };
+  const stream = { getTracks: () => [track] };
+  const video = { srcObject: null, videoWidth: 1600, videoHeight: 1200, async play() {} };
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => ({ drawImage() {} }),
+    toBlob: (callback, type, quality) => {
+      assert.equal(type, "image/jpeg");
+      assert.equal(quality, 0.82);
+      callback(new Blob([Uint8Array.from([0xff, 0xd8, 1, 0xff, 0xd9])], { type }));
+    },
+  };
+  const element = (extra = {}) => ({
+    disabled: false, hidden: false, listeners: new Map(),
+    addEventListener(name, listener) { this.listeners.set(name, listener); },
+    focus() {},
+    ...extra,
+  });
+  const panel = element({ hidden: true });
+  const prompt = element({ textContent: "" });
+  const captureButton = element();
+  const retryButton = element({ hidden: true });
+  const stopButton = element();
+  const constraints = [];
+  const uploads = [];
+  const controller = intakeCreatePhotoController({
+    video,
+    canvas,
+    panel,
+    prompt,
+    captureButton,
+    retryButton,
+    stopButton,
+    getUserMedia: async (value) => { constraints.push(value); return stream; },
+    upload: async (duck, blob, commandId) => {
+      uploads.push({ duckId: duck.duckId, commandId, size: blob.size });
+      return { duckId: duck.duckId, photo: { state: "READY" } };
+    },
+    message() {},
+    state() {},
+    commandId: (() => { let id = 0; return () => `photo-command-${++id}`; })(),
+  });
+
+  const first = controller.require({ duckId: "duck-one", visibleNumber: 1 });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(await controller.capture(), true);
+  await first;
+  assert.equal(track.stops, 0);
+  const second = controller.require({ duckId: "duck-two", visibleNumber: 2 });
+  await Promise.resolve();
+  assert.equal(await controller.capture(), true);
+  await second;
+  assert.deepEqual(constraints, [{ audio: false, video: { facingMode: { exact: "environment" } } }]);
+  assert.deepEqual(uploads.map(({ duckId }) => duckId), ["duck-one", "duck-two"]);
+  assert.notEqual(uploads[0].commandId, uploads[1].commandId);
+  assert.equal(track.stops, 0);
+  controller.stop();
+  assert.equal(track.stops, 1);
+  assert.equal(video.srcObject, null);
 });
 
 test("provisioning serializes physical reads without queueing a second sticker", async () => {

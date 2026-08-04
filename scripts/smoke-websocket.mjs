@@ -9,6 +9,19 @@ if (origin.protocol !== "https:" || origin.origin !== productionUrl) {
 const websocketUrl = new URL("/api/v1/live", origin);
 websocketUrl.protocol = "wss:";
 
+const healthResponse = await fetch(new URL("/health", origin), { redirect: "manual" });
+const health = await healthResponse.json();
+if (!healthResponse.ok || health.status !== "ok" || health.photoStorage !== "connected") {
+  throw new Error("Production health did not confirm authenticated R2 retrieval.");
+}
+const anonymousPhoto = await fetch(
+  new URL("/api/v1/staff/inventory/ducks/release-smoke/photo", origin),
+  { redirect: "manual" },
+);
+if (anonymousPhoto.status !== 401) {
+  throw new Error(`Anonymous duck photo retrieval returned HTTP ${anonymousPhoto.status}, not 401.`);
+}
+
 await new Promise((resolve, reject) => {
   const socket = new WebSocket(websocketUrl, {
     followRedirects: false,
@@ -51,4 +64,4 @@ await new Promise((resolve, reject) => {
   });
 });
 
-process.stdout.write("Production WebSocket opened and closed cleanly.\n");
+process.stdout.write("Production R2 health, private-photo denial, and WebSocket smoke checks passed.\n");

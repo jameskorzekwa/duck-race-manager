@@ -238,6 +238,9 @@ export const mutationRefreshDomains = (request: Request): readonly LiveUpdateDom
   if (method === "POST" && pathname === "/api/v1/staff/inventory/ducks") {
     return domains("ducks", "event");
   }
+  if (["POST", "PUT"].includes(method) && /^\/api\/v1\/staff\/inventory\/ducks\/[^/]{1,128}\/photo$/.test(pathname)) {
+    return domains("ducks");
+  }
   // Deleting a duck reaches all three: the duck leaves inventory, its
   // participant goes back to the pairing queue, and their heat is left with a
   // racer holding nothing.

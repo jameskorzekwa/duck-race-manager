@@ -52,6 +52,25 @@ const makeEnv = (db) => ({
   DB: db,
 });
 
+class MemoryR2Bucket {
+  objects = new Map();
+  deletes = [];
+
+  async put(key, value) {
+    this.objects.set(key, new Uint8Array(value));
+  }
+
+  async get(key) {
+    const bytes = this.objects.get(key);
+    return bytes === undefined ? null : { body: bytes, size: bytes.byteLength };
+  }
+
+  async delete(key) {
+    this.deletes.push(key);
+    this.objects.delete(key);
+  }
+}
+
 // The full ordered chain, so these run against the schema production runs.
 const migrationNames = readdirSync(new URL("../db/migrations/", import.meta.url))
   .filter((name) => /^\d{4}_.+\.sql$/.test(name))
@@ -822,7 +841,8 @@ test("a duck with a published result leaves inventory without erasing the result
   assert.equal(response.status, 201);
   assert.equal(body.erased, false);
   const joined = db.batches[0].map((statement) => statement.sql).join("\n");
-  assert.doesNotMatch(joined, /DELETE FROM/);
+  assert.match(joined, /DELETE FROM duck_photos/);
+  assert.doesNotMatch(joined, /DELETE FROM (?:ducks|duck_tags|duck_assignments|event_ducks)/);
   assert.match(joined, /SET inventory_status = 'RETIRED'/);
   assert.match(joined, /status = 'RETIRED', retired_at = \?/);
   assert.match(joined, /release_reason = 'DUCK_DELETED'/);
@@ -1292,7 +1312,12 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   const clearedRecovery = await handleDuckOperations(
     new Request("https://quickducks.com/api/v1/staff/inventory/provisioning?eventId=event_test"), env, actor,
   );
-  assert.equal((await clearedRecovery.json()).provisioning, null);
+  assert.deepEqual((await clearedRecovery.json()).provisioning, {
+    duckId: provisioning.duckId,
+    visibleNumber: provisioning.visibleNumber,
+    status: "PHOTO_REQUIRED",
+    photo: { required: true, state: "PENDING", viewPath: null },
+  });
 
   database.exec("UPDATE events SET status = 'REGISTRATION_CLOSED' WHERE id = 'event_test'");
   const release = await handleDuckOperations(
@@ -1367,6 +1392,168 @@ test("blank-tag provisioning, recovery, confirmation, and inventory lifecycle ex
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM race_commands WHERE command_type = 'CONFIRM_DUCK_PROVISIONING'").get().count, 2);
   assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
   database.close();
+});
+
+test("required NFC photo upload is private, idempotent, and associated with only its duck", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff_test', 'staff-sub', 'staff@example.com');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event_test', 'photo-race', 'Photo Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES
+      ('duck_test', 42, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00Z'),
+      ('duck_other', 43, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00Z');
+    INSERT INTO duck_photos (id, event_id, duck_id, owner_staff_profile_id, created_at)
+    VALUES
+      ('photo_test', 'event_test', 'duck_test', 'staff_test', '2026-08-03T00:00:00Z'),
+      ('photo_other', 'event_test', 'duck_other', 'staff_test', '2026-08-03T00:00:01Z');
+  `);
+  const bucket = new MemoryR2Bucket();
+  const env = { ...makeEnv(sqliteD1(database)), DUCK_PHOTOS: bucket };
+  const commandId = crypto.randomUUID();
+  const jpeg = Uint8Array.from([0xff, 0xd8, 1, 2, 3, 0xff, 0xd9]);
+  const request = (body = jpeg, id = commandId, duckId = "duck_test") => new Request(
+    `https://quickducks.com/api/v1/staff/inventory/ducks/${duckId}/photo`,
+    {
+      method: "PUT",
+      headers: { "content-type": "image/jpeg", "x-quickducks-command-id": id },
+      body,
+    },
+  );
+
+  const saved = await handleDuckOperations(request(), env, actor);
+  const savedBody = await saved.json();
+  assert.equal(saved.status, 201);
+  assert.deepEqual(savedBody.photo, {
+    required: true,
+    state: "READY",
+    viewPath: "/api/v1/staff/inventory/ducks/duck_test/photo",
+  });
+  assert.equal(bucket.objects.size, 1);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM duck_photo_cleanup").get().count, 0);
+  assert.deepEqual({ ...database.prepare(
+    "SELECT duck_id, state, upload_command_id, byte_length FROM duck_photos WHERE id = 'photo_test'",
+  ).get() }, { duck_id: "duck_test", state: "READY", upload_command_id: commandId, byte_length: jpeg.byteLength });
+  assert.equal(database.prepare(
+    "SELECT state FROM duck_photos WHERE id = 'photo_other'",
+  ).get().state, "PENDING");
+
+  const replay = await handleDuckOperations(request(), env, actor);
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).replayed, true);
+  assert.equal(bucket.objects.size, 1);
+  const changedReplay = await handleDuckOperations(
+    request(Uint8Array.from([0xff, 0xd8, 9, 0xff, 0xd9])), env, actor,
+  );
+  assert.equal(changedReplay.status, 409);
+  assert.equal(bucket.objects.size, 1);
+
+  const read = await handleDuckOperations(
+    new Request(`https://quickducks.com${savedBody.photo.viewPath}`),
+    env,
+    actor,
+  );
+  assert.equal(read.status, 200);
+  assert.equal(read.headers.get("cache-control"), "no-store");
+  assert.equal(read.headers.get("x-content-type-options"), "nosniff");
+  assert.deepEqual(new Uint8Array(await read.arrayBuffer()), jpeg);
+  const deleted = await handleDuckOperations(
+    new Request("https://quickducks.com/api/v1/staff/inventory/ducks/duck_test/delete", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        commandId: crypto.randomUUID(),
+        eventId: "event_test",
+        expectedRevision: 0,
+        reason: "Photo cleanup integration test",
+      }),
+    }),
+    env,
+    actor,
+  );
+  assert.equal(deleted.status, 201);
+  assert.equal(bucket.objects.size, 0);
+  assert.equal(bucket.deletes.length, 1);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM duck_photo_cleanup").get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("concurrent reuse of one photo command cannot delete the winning duck's object", async (context) => {
+  const database = createDatabase();
+  context.after(() => database.close());
+  database.exec(`
+    INSERT INTO staff_profiles (id, cognito_sub, email)
+    VALUES ('staff_test', 'staff-sub', 'staff@example.com');
+    INSERT INTO events (id, slug, name, timezone, status)
+    VALUES ('event_test', 'photo-race', 'Photo Race', 'UTC', 'REGISTRATION_OPEN');
+    INSERT INTO ducks (id, visible_number, inventory_status, inventory_status_changed_at)
+    VALUES
+      ('duck_test', 42, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00Z'),
+      ('duck_other', 43, 'RESERVED_FOR_EVENT', '2026-08-03T00:00:00Z');
+    INSERT INTO duck_photos (id, event_id, duck_id, owner_staff_profile_id, created_at)
+    VALUES
+      ('photo_test', 'event_test', 'duck_test', 'staff_test', '2026-08-03T00:00:00Z'),
+      ('photo_other', 'event_test', 'duck_other', 'staff_test', '2026-08-03T00:00:01Z');
+  `);
+  const bucket = new MemoryR2Bucket();
+  let uploaded = 0;
+  let releaseUploads;
+  const uploadsReady = new Promise((resolve) => { releaseUploads = resolve; });
+  bucket.put = async function (key, value) {
+    this.objects.set(key, new Uint8Array(value));
+    uploaded += 1;
+    if (uploaded === 2) releaseUploads();
+    await uploadsReady;
+  };
+  const env = { ...makeEnv(sqliteD1(database)), DUCK_PHOTOS: bucket };
+  const commandId = crypto.randomUUID();
+  const jpeg = Uint8Array.from([0xff, 0xd8, 1, 2, 3, 0xff, 0xd9]);
+  const upload = (duckId) => handleDuckOperations(new Request(
+    `https://quickducks.com/api/v1/staff/inventory/ducks/${duckId}/photo`,
+    {
+      method: "PUT",
+      headers: { "content-type": "image/jpeg", "x-quickducks-command-id": commandId },
+      body: jpeg,
+    },
+  ), env, actor);
+
+  const responses = await Promise.all([upload("duck_test"), upload("duck_other")]);
+  assert.deepEqual(responses.map((response) => response.status).sort(), [201, 409]);
+  const bodies = await Promise.all(responses.map((response) => response.json()));
+  const winner = bodies.find((body) => body.photo?.state === "READY");
+  assert.ok(winner);
+  assert.equal(bucket.objects.size, 1);
+  const read = await handleDuckOperations(
+    new Request(`https://quickducks.com${winner.photo.viewPath}`), env, actor,
+  );
+  assert.equal(read.status, 200);
+  assert.deepEqual(new Uint8Array(await read.arrayBuffer()), jpeg);
+  assert.equal(database.prepare(
+    "SELECT COUNT(*) AS count FROM duck_photos WHERE state = 'READY'",
+  ).get().count, 1);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM duck_photo_cleanup").get().count, 0);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+});
+
+test("a delete revision conflict never removes photo bytes before D1 commits", async () => {
+  const db = deleteDuckDb(deletableDuck(), null);
+  db.batch = async (items) => {
+    db.batches.push(items);
+    return items.map(() => ({ success: true, meta: { changes: 0 } }));
+  };
+  const bucket = new MemoryR2Bucket();
+  bucket.objects.set("existing-photo", Uint8Array.from([0xff, 0xd8, 0xff, 0xd9]));
+  const response = await handleDuckOperations(
+    deleteDuckRequest(),
+    { ...makeEnv(db), DUCK_PHOTOS: bucket },
+    actor,
+  );
+  assert.equal(response.status, 409);
+  assert.equal(bucket.deletes.length, 0);
+  assert.equal(bucket.objects.has("existing-photo"), true);
 });
 
 test("migration adds constrained inventory metadata and command-linked history", () => {

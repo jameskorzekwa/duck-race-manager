@@ -142,6 +142,17 @@ test("the staff pairing page offers scanning, manual search, and a cancel path",
   assert.doesNotMatch(page, /QD1:/);
 });
 
+test("NFC inventory intake includes one in-page required-photo recovery surface", () => {
+  const page = renderStaffInventory("Inventory staff", "https://quickducks.com");
+  assert.match(page, /data-intake-photo hidden/);
+  assert.match(page, /<video class="intake-camera-video" data-intake-camera muted playsinline><\/video>/);
+  assert.match(page, /data-capture-intake-photo>Capture and save photo/);
+  assert.match(page, /data-retry-intake-photo hidden>Retry required photo/);
+  assert.match(page, /data-stop-intake-camera>Stop camera/);
+  assert.match(page, /next intake stays blocked until QuickDucks confirms its photo is stored/);
+  assert.match(style, /\.intake-camera-video \{[^}]*width:100%;[^}]*aspect-ratio:4\/3;[^}]*object-fit:cover;/);
+});
+
 test("result taker duck inspection exposes only the winner surface, not pairing controls", () => {
   const page = renderStaffDuck("a".repeat(32), "Result staff", false, ["RESULT_TAKER"]);
 

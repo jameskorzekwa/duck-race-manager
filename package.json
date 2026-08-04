@@ -8,7 +8,7 @@
     "check": "npm run typecheck && npm run wrangler:validate",
     "db:migrate:local": "wrangler d1 migrations apply quickducks-prod --local",
     "db:reset:local": "node scripts/reset-local-database.mjs",
-    "db:migrate:remote": "wrangler d1 migrations apply quickducks-prod --remote",
+    "db:migrate:remote": "node scripts/check-r2-release-preflight.mjs && wrangler d1 migrations apply quickducks-prod --remote",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "dev:local": "node scripts/clear-network-session.mjs && wrangler d1 migrations apply quickducks-local --local --config wrangler.local.jsonc && wrangler dev --config wrangler.local.jsonc",
