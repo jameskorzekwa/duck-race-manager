@@ -934,6 +934,55 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     if (issuesWithOpenPulls.has(issue.number)) continue;
     await escalateAgentError({ github, context }, issue.number);
   }
+
+  await closeResolvedRunIncidents({ github, context });
+}
+
+// A run incident describes one failed workflow run. Re-running that run to
+// success resolves it, but nothing used to say so, and the incident stayed open
+// looking like live breakage. Three such incidents accumulated while their runs
+// were green. Settling them here keeps the incident ledger honest.
+export async function closeResolvedRunIncidents({ github, context }) {
+  const { owner, repo } = context.repo;
+  const incidents = (await github.paginate(github.rest.issues.listForRepo, {
+    owner, repo, state: "open", labels: "pipeline:incident", per_page: 100,
+  })).filter((issue) => !issue.pull_request && issue.user?.id === AUTOMATION_USER_ID);
+
+  for (const incident of incidents) {
+    const body = String(incident.body ?? "");
+    // Only run incidents settle this way. A feature incident owns a blocked
+    // feature's recovery and is not resolved by any single run succeeding.
+    if (!/<!-- pipeline-doctor signature=[0-9a-f]{64} sha=[0-9a-f]{40} -->/.test(body)) continue;
+    if (/<!-- pipeline-doctor feature=/.test(body)) continue;
+    const runId = Number(body.match(/\/actions\/runs\/([1-9][0-9]*)/)?.[1]);
+    if (!Number.isSafeInteger(runId)) continue;
+
+    const comments = trustedAutomationComments(await github.paginate(github.rest.issues.listComments, {
+      owner, repo, issue_number: incident.number, per_page: 100,
+    }));
+    // A published repair owns the incident's closure; do not pre-empt it.
+    if (comments.some((comment) => /<!-- pipeline-doctor repair-pr=/.test(String(comment.body ?? "")))) continue;
+
+    let run;
+    try {
+      run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: runId })).data;
+    } catch (error) {
+      if (error.status === 404) continue;
+      throw error;
+    }
+    if (run.status !== "completed" || run.conclusion !== "success") continue;
+
+    const marker = `<!-- pipeline-doctor run-resolved=${runId} -->`;
+    if (!comments.some((comment) => String(comment.body ?? "").includes(marker))) {
+      await github.rest.issues.createComment({
+        owner, repo, issue_number: incident.number,
+        body: `${marker}\nWorkflow run ${runId} has since completed successfully, so this incident is resolved.`,
+      });
+    }
+    await github.rest.issues.update({
+      owner, repo, issue_number: incident.number, state: "closed", state_reason: "completed",
+    });
+  }
 }
 
 export async function queueNextApproved({ github, context, core }) {
