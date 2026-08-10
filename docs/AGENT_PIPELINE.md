@@ -249,7 +249,11 @@ loop exhausts its bounded budget.
 
 Each incident is a GitHub issue carrying `pipeline:incident`. The diagnosis model
 receives only a plain trusted-main snapshot and bounded, credential-redacted
-failed-job or trusted feature-history evidence. It cannot edit any file. Its
+failed-job or trusted feature-history evidence. That evidence budget keeps the
+**tail** of an oversized log, because a run's terminal error is always at its
+end. Keeping the head instead handed the model everything except the failure,
+and every incident escalated as unclassifiable; `src/pipeline-doctor.test.mjs`
+pins the terminal error surviving truncation. It cannot edit any file. Its
 report must state the diagnosis, decisive evidence, next step, and, for a
 pipeline defect, the exact proposed repair and focused tests. Application and
 no-op diagnoses close the incident and automatically resume the feature with a
@@ -278,6 +282,14 @@ Only after those checks pass can a separate model-free job publish a
 `pipeline:repair` PR and explicitly dispatch CI. Doctor PRs never auto-merge;
 normal review and branch protection remain required. External incidents stay
 open with a terminal diagnosis.
+
+Re-running a failed workflow to success resolves the run incident that describes
+it. Deterministic reconciliation settles those: `closeResolvedRunIncidents`
+closes an open, bot-authored run incident once its recorded run reports
+`success`, recording a `run-resolved` marker first. It never settles a feature
+incident, an incident whose repair PR is already published, or one whose run is
+still failing, unfinished, or missing. Without it, resolved incidents
+accumulated as apparent live breakage.
 
 Any review-dismissal event runs a separate non-concurrent hosted workflow that
 removes approval state, the merge slot, and auto-merge without launching a paid

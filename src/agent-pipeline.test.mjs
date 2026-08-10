@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { TRUSTED_ISSUE_AUTHOR_ID, agentErrorIdentity, classifyTaskResult, closingIssueNumbers, doctorFeatureIncidentMarker, escalateAgentError, firstDeployedRelease, latestTaskRun, markerNumbers, pipelineValidationProvenance, questionAnswered, reconcileAgentPipeline, recoverFailedIssue, trustedManualPullProvenance, trustedPipelineIssue, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
+import { TRUSTED_ISSUE_AUTHOR_ID, agentErrorIdentity, classifyTaskResult, closeResolvedRunIncidents, closingIssueNumbers, doctorFeatureIncidentMarker, escalateAgentError, firstDeployedRelease, latestTaskRun, markerNumbers, pipelineValidationProvenance, questionAnswered, reconcileAgentPipeline, recoverFailedIssue, trustedManualPullProvenance, trustedPipelineIssue, validExactCheck, verificationFailureSignature, writeIssueStateIfCurrent } from "../scripts/agent-pipeline.mjs";
 
 // Minimal but real harness for reconcileAgentPipeline. Everything the sweep
 // reads is empty unless a test supplies it, so a test states exactly the
@@ -600,6 +600,97 @@ test("a public closed pull request cannot shadow the real merged candidate", asy
 
   assert.deepEqual(recorded.dispatched, []);
   assert.ok(!recorded.comments.some(({ body }) => body.includes("orphan-retry")));
+});
+
+// Incidents #194, #202 and #204 all sat open while the runs they describe were
+// green, because nothing settled a run incident after a successful re-run.
+function fakeIncidentGithub(incidents, runs, comments = {}) {
+  const recorded = { closed: [], comments: [] };
+  const github = {
+    paginate: async (fn, input) => (await fn(input)).data,
+    rest: {
+      issues: {
+        listForRepo: async () => ({ data: incidents }),
+        listComments: async ({ issue_number }) => ({ data: comments[issue_number] ?? [] }),
+        createComment: async ({ issue_number, body }) => { recorded.comments.push({ issue_number, body }); },
+        update: async ({ issue_number, state }) => { recorded.closed.push({ issue_number, state }); },
+      },
+      actions: {
+        getWorkflowRun: async ({ run_id }) => {
+          const run = runs[run_id];
+          if (!run) { const error = new Error("Not Found"); error.status = 404; throw error; }
+          return { data: run };
+        },
+      },
+    },
+  };
+  return { github, context: { repo: { owner: "o", repo: "r" } }, recorded };
+}
+
+const runIncident = (number, runId) => ({
+  number,
+  user: { id: 41898282 },
+  body: `<!-- pipeline-doctor signature=${"a".repeat(64)} sha=${"b".repeat(40)} -->\n[Failed workflow run](https://github.com/o/r/actions/runs/${runId}).`,
+});
+
+test("an incident closes once its workflow run has succeeded", async () => {
+  const { github, context, recorded } = fakeIncidentGithub(
+    [runIncident(204, 31346068929)],
+    { 31346068929: { status: "completed", conclusion: "success" } },
+  );
+
+  await closeResolvedRunIncidents({ github, context });
+
+  assert.deepEqual(recorded.closed, [{ issue_number: 204, state: "closed" }]);
+  assert.ok(recorded.comments[0].body.includes("run-resolved=31346068929"));
+});
+
+test("an incident stays open while its run is still failing or unfinished", async () => {
+  const { github, context, recorded } = fakeIncidentGithub(
+    [runIncident(204, 1), runIncident(205, 2), runIncident(206, 3)],
+    {
+      1: { status: "completed", conclusion: "failure" },
+      2: { status: "in_progress", conclusion: null },
+      // 3 is absent: a deleted or expired run must not close anything.
+    },
+  );
+
+  await closeResolvedRunIncidents({ github, context });
+
+  assert.deepEqual(recorded.closed, []);
+  assert.deepEqual(recorded.comments, []);
+});
+
+test("a feature incident and a published repair are never settled by a green run", async () => {
+  const feature = {
+    number: 900,
+    user: { id: 41898282 },
+    body: `<!-- pipeline-doctor feature=70 source=200 signature=${"c".repeat(64)} -->\nhttps://github.com/o/r/actions/runs/5`,
+  };
+  const repaired = runIncident(901, 5);
+  const untrusted = { ...runIncident(902, 5), user: { id: 99 } };
+  const { github, context, recorded } = fakeIncidentGithub(
+    [feature, repaired, untrusted],
+    { 5: { status: "completed", conclusion: "success" } },
+    { 901: [{ user: { id: 41898282 }, body: "<!-- pipeline-doctor repair-pr=210 -->" }] },
+  );
+
+  await closeResolvedRunIncidents({ github, context });
+
+  assert.deepEqual(recorded.closed, []);
+});
+
+test("closing an already-settled incident posts no duplicate comment", async () => {
+  const { github, context, recorded } = fakeIncidentGithub(
+    [runIncident(204, 7)],
+    { 7: { status: "completed", conclusion: "success" } },
+    { 204: [{ user: { id: 41898282 }, body: "<!-- pipeline-doctor run-resolved=7 -->" }] },
+  );
+
+  await closeResolvedRunIncidents({ github, context });
+
+  assert.deepEqual(recorded.comments, []);
+  assert.deepEqual(recorded.closed, [{ issue_number: 204, state: "closed" }]);
 });
 
 test("a labeled public issue cannot open a Pipeline Doctor recovery incident", async () => {

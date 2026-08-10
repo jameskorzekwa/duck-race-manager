@@ -100,7 +100,17 @@ export function redactDoctorEvidence(log, { maxCharacters = 30000, maxLineCharac
   });
   const text = [...selected].sort((left, right) => left - right).map((index) => lines[index]).join("\n").trim();
   if (text.length <= maxCharacters) return text;
-  return `${text.slice(0, maxCharacters)}\n[truncated]`;
+  // A failure's terminal error is always at the end, so the tail is the part
+  // that must survive the budget. Keeping the head instead handed the model
+  // everything except the failure: the selection above deliberately includes
+  // the final 120 lines, and front truncation then discarded exactly those.
+  // Every incident became an unclassifiable escalation because of it. Keep a
+  // small head for run context and spend the rest of the budget on the tail.
+  const marker = "\n[truncated]\n";
+  if (maxCharacters <= marker.length) return text.slice(-maxCharacters);
+  const headBudget = Math.floor((maxCharacters - marker.length) * 0.25);
+  const tailBudget = maxCharacters - marker.length - headBudget;
+  return `${text.slice(0, headBudget)}${marker}${text.slice(-tailBudget)}`;
 }
 
 export function classifyDoctorResult({ signature, marker, patchLength, exitStatus, phase = "diagnose", report = "" }) {

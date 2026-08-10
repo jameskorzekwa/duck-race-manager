@@ -124,6 +124,30 @@ test("doctor evidence is bounded and neutralizes credentials and state markers",
   assert.equal(redactDoctorEvidence("Current main already contains the repair."), "Current main already contains the repair.");
 });
 
+// The whole point of the evidence bundle is to carry the failure. Incidents
+// #194, #202 and #204 were each escalated as unclassifiable because the budget
+// kept the head of an oversized log and dropped the terminal error at its end.
+test("oversized evidence keeps the terminal error instead of the log preamble", () => {
+  const noise = Array.from(
+    { length: 4000 },
+    (_, index) => `2026-01-01T00:00:00.000Z [WebServer] step ${index} failed check, error keyword, padding padding`,
+  ).join("\n");
+  const evidence = redactDoctorEvidence(`START_OF_RUN\n${noise}\n##[error]TERMINAL: secret QUACK_TOKEN not found`);
+
+  assert.ok(evidence.length <= 30000, `evidence must stay bounded, got ${evidence.length}`);
+  assert.match(evidence, /TERMINAL: secret QUACK_TOKEN not found/);
+  assert.match(evidence, /\[truncated\]/);
+  // A small head survives so the model still sees how the run started.
+  assert.match(evidence, /START_OF_RUN/);
+  // The failure must be the last thing the model reads, not a truncation notice.
+  assert.doesNotMatch(evidence.trimEnd().split("\n").at(-1), /^\[truncated\]$/);
+
+  // A budget too small for the marker still yields the tail, never the head.
+  const tiny = redactDoctorEvidence(`HEAD_ONLY\n${noise}\n##[error]TERMINAL_TINY`, { maxCharacters: 8 });
+  assert.equal(tiny.length, 8);
+  assert.doesNotMatch(tiny, /HEAD_ONLY/);
+});
+
 test("repair policy allows bounded control files but denies doctor self-edit and application code", () => {
   assert.doesNotThrow(() => assertPipelineRepairPaths([
     ".github/workflows/agent-review.yml",
