@@ -993,7 +993,25 @@ If Worker deployment fails, the migrated database remains live with the old
 Worker. This is why migrations must be backward compatible. Correct the Worker
 or add a forward migration and release a new version.
 
-If smoke tests fail after Worker deployment, stop normal releases and assess the
+If smoke tests fail after Worker deployment, the release job restores the Worker
+version that was live immediately before the deploy, then re-checks `/health`
+and fails the run. Production deploys are automatic, so detection alone would
+have left a bad Worker serving race-day traffic until a human noticed a red run.
+
+The immediate predecessor is the only automatic target, and it is the safest one
+available: migrations deploy before Worker code and must be backward compatible
+with the previously deployed Worker, so that version is by definition able to
+operate on the schema now live. The rollback target is captured before the
+deploy replaces it, because afterwards the live version is the suspect one.
+
+Automatic rollback deliberately does not fire when the deploy never replaced the
+Worker, when no single previous version can be identified (a split gradual
+deployment has no one predecessor), or when the restored Worker fails the same
+health contract — the run reports the failure loudly instead of implying
+production recovered. `scripts/production-rollback-target.mjs` owns that choice
+and fails closed on any unrecognised deployment shape.
+
+Whether or not the rollback succeeded, stop normal releases and assess the
 application before changing data. The first release that applies `RaceUpdates`
 Durable Object migration `v1` cannot roll back to a Worker from before that
 migration: no bridge deployment is implemented, and a pre-migration Worker does

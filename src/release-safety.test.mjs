@@ -15,6 +15,7 @@ import {
   parseReleaseTag,
   selectAutomaticRelease,
 } from "../scripts/release-version.mjs";
+import { selectRollbackTarget } from "../scripts/production-rollback-target.mjs";
 
 const readRepositoryFile = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 const releaseWorkflow = readRepositoryFile(".github/workflows/release.yml");
@@ -354,6 +355,72 @@ test("release workflow publishes only the validated tag after deploy and smoke g
   assert.equal(releaseWorkflow.match(/id-token: write/g)?.length, 1);
   assert.match(releaseWorkflow, /permissions: \{\}/);
   assert.match(releaseWorkflow, /queue: max/);
+});
+
+// Production deploys are automatic, so verification failing is the only signal
+// that a bad Worker reached race-day traffic. Detection alone left it serving.
+test("failed production verification restores the previous Worker automatically", () => {
+  const captureIndex = releaseWorkflow.indexOf("Capture current production Worker version");
+  const deployIndex = releaseWorkflow.indexOf("- name: Deploy Cloudflare Worker");
+  const smokeIndex = releaseWorkflow.indexOf("Smoke-test apex and www redirect");
+  const rollbackIndex = releaseWorkflow.indexOf("Roll back failed production verification");
+
+  // The predecessor must be recorded before it is replaced; afterwards the live
+  // version is the one under suspicion.
+  assert.ok(captureIndex > 0, "the deploy job must capture a rollback target");
+  assert.ok(captureIndex < deployIndex, "the rollback target must be captured before deploying");
+  assert.ok(smokeIndex < rollbackIndex, "rollback must follow verification");
+
+  const rollback = releaseWorkflow.slice(rollbackIndex, releaseWorkflow.indexOf("Report unrecoverable production deployment"));
+  // Only roll back when this deploy actually replaced the Worker, and only when
+  // a specific predecessor is known.
+  assert.match(rollback, /if: failure\(\) && steps\.worker-metadata\.outcome == 'success' && steps\.previous-worker\.outputs\.previous-version != ''/);
+  assert.match(rollback, /wrangler rollback "\$PREVIOUS_WORKER_VERSION" --yes/);
+  // A rollback that silently fails must not be reported as a restore.
+  assert.match(rollback, /Production is unhealthy after rollback/);
+  assert.ok(
+    rollback.indexOf("wrangler rollback") < rollback.indexOf("PRODUCTION_URL/health"),
+    "the restored Worker must be health-checked after the rollback",
+  );
+
+  // When no predecessor is known the run must say so loudly rather than imply
+  // production was restored.
+  const unrecoverable = releaseWorkflow.slice(releaseWorkflow.indexOf("Report unrecoverable production deployment"));
+  assert.match(unrecoverable, /previous-version == ''/);
+  assert.match(unrecoverable, /::error::/);
+  assert.match(unrecoverable, /is still serving/);
+
+  // Capturing a target must never block a release on its own.
+  const capture = releaseWorkflow.slice(captureIndex, deployIndex);
+  assert.match(capture, /continue-on-error: true/);
+  assert.match(capture, /wrangler deployments status --json/);
+  assert.match(capture, /scripts\/production-rollback-target\.mjs/);
+});
+
+test("a rollback target is only chosen when exactly one version serves traffic", () => {
+  const version = "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d";
+  const other = "9f8e7d6c-5b4a-3210-9876-543210fedcba";
+
+  assert.equal(selectRollbackTarget({ versions: [{ version_id: version, percentage: 100 }] }), version);
+  assert.equal(selectRollbackTarget({ deployment: { versions: [{ id: version }] } }), version);
+  assert.equal(selectRollbackTarget({ versions: [version] }), version);
+  // A zero-share version is not serving, so one live version remains decisive.
+  assert.equal(
+    selectRollbackTarget({ versions: [{ version_id: version, percentage: 100 }, { version_id: other, percentage: 0 }] }),
+    version,
+  );
+
+  // A split deployment has no single previous version: guessing one would aim
+  // real traffic at a version that may never have served it.
+  assert.throws(
+    () => selectRollbackTarget({ versions: [{ version_id: version, percentage: 50 }, { version_id: other, percentage: 50 }] }),
+    /Roll back manually/,
+  );
+  // Unusable shapes fail closed rather than producing a bad rollback target.
+  for (const bad of [null, undefined, [], "text", {}, { versions: [] }, { versions: [{ version_id: "nope!" }] }]) {
+    assert.throws(() => selectRollbackTarget(bad));
+  }
+  assert.throws(() => selectRollbackTarget({ versions: [{ version_id: version, percentage: "all" }] }), /non-numeric/);
 });
 
 test("the immutable release D1 step preflights private R2 read, write, and delete first", () => {
