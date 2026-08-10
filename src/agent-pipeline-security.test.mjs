@@ -652,6 +652,151 @@ test("Pipeline Doctor isolates diagnosis from trusted publication", async () => 
   assert.match(validator, /1,500-line limit/);
 });
 
+// The repository is public, so intake authorization is the control that keeps
+// strangers from spending James's paid model subscriptions. Every job that can
+// reach a local OpenChamber session must prove the issue is his, on the runner
+// that holds the OAuth session, rather than trusting an upstream job's output
+// or a label that a maintainer action could move onto someone else's issue.
+test("no untrusted issue can reach a local model runner", async () => {
+  const task = await read(".github/workflows/agent-task.yml");
+  const review = await read(".github/workflows/agent-review.yml");
+  const doctor = await read(".github/workflows/pipeline-doctor.yml");
+  const implementation = await read("scripts/agent-pipeline.mjs");
+
+  // Event-level intake stays pinned to James's immutable user ID.
+  assert.match(task, /github\.event_name == 'issues' && github\.actor_id == '38769771' && github\.event\.issue\.user\.id == 38769771/);
+  assert.match(task, /github\.event_name == 'issue_comment' && github\.actor_id == '38769771' && github\.event\.issue\.user\.id == 38769771 && github\.event\.comment\.user\.id == 38769771/);
+
+  // The self-hosted implementation job re-proves authorship before it spends a
+  // model, and does so before any other step in the job.
+  const implement = task.slice(task.indexOf("  implement:"), task.indexOf("  verify:"));
+  const authorCheck = implement.indexOf("Verify the issue is trusted intake");
+  assert.ok(authorCheck > 0, "the implement job must re-verify trusted intake");
+  assert.match(implement, /issue\.user\?\.id !== 38769771/);
+  assert.ok(
+    authorCheck < implement.indexOf("Report that implementation started"),
+    "authorship must be proven before any durable state is written",
+  );
+  assert.ok(
+    authorCheck < implement.indexOf("openchamber session create"),
+    "authorship must be proven before a local model session is created",
+  );
+
+  // The self-hosted review job does the same before the candidate and issue
+  // text become model input.
+  const independent = review.slice(review.indexOf("  independent-review:"), review.indexOf("  gate:"));
+  const reviewCheck = independent.indexOf("Refusing to review work for untrusted issue");
+  assert.ok(reviewCheck > 0, "the review job must re-verify trusted intake");
+  assert.ok(
+    reviewCheck < independent.indexOf("openchamber session create"),
+    "authorship must be proven before the reviewer session is created",
+  );
+
+  // Pipeline Doctor may only adopt a feature issue James authored.
+  assert.match(doctor, /feature\.user\?\.id !== 38769771\) continue;/);
+
+  // Deterministic reconciliation is the other way a model run can start. Its
+  // label sweeps and its dispatch both fail closed on authorship.
+  assert.match(implementation, /export const TRUSTED_ISSUE_AUTHOR_ID = 38769771;/);
+  assert.match(implementation, /\.filter\(\(issue\) => trustedPipelineIssue\(issue\)\)/);
+  const dispatchFn = implementation.slice(
+    implementation.indexOf("const dispatch = async (issueNumber)"),
+    implementation.indexOf("const issuesWithLabel"),
+  );
+  assert.match(dispatchFn, /if \(!trustedPipelineIssue\(issue\)\)/);
+  assert.ok(
+    dispatchFn.indexOf("trustedPipelineIssue") < dispatchFn.indexOf("createWorkflowDispatch"),
+    "reconciliation must check authorship before dispatching Agent Task",
+  );
+  for (const entryPoint of ["export async function recoverFailedIssue", "export async function escalateAgentError"]) {
+    const body = implementation.slice(implementation.indexOf(entryPoint));
+    assert.ok(
+      body.indexOf("trustedPipelineIssue") < body.indexOf("createWorkflowDispatch"),
+      `${entryPoint} must refuse untrusted issues before dispatching work`,
+    );
+  }
+});
+
+// Authorship of the issue is necessary but not sufficient. A public account can
+// still comment on James's issue, open a pull request that references it, and
+// cause pipeline workflow runs. None of those may drive a model turn.
+test("public comments, pull requests, and runs cannot drive a model turn", async () => {
+  const implementation = await read("scripts/agent-pipeline.mjs");
+  const reconcile = await read(".github/workflows/agent-reconcile.yml");
+  const doctorWorkflow = await read(".github/workflows/pipeline-doctor.yml");
+  const review = await read(".github/workflows/agent-review.yml");
+
+  // Terminal failure markers are what make reconciliation retry, so they must
+  // come from the pipeline's own comments only.
+  const failedSweep = implementation.slice(
+    implementation.indexOf('issuesWithLabel("agent:failed")'),
+    implementation.indexOf('issuesWithLabel("agent:error")'),
+  );
+  assert.match(failedSweep, /trustedAutomationComments\(await commentsFor\(issue\.number\)\)/);
+  assert.doesNotMatch(failedSweep, /const comments = await commentsFor\(issue\.number\);/);
+
+  // Only the pipeline can pose a question that a reply resumes.
+  const question = implementation.slice(
+    implementation.indexOf("export function questionAnswered"),
+    implementation.indexOf("export function attemptDigests"),
+  );
+  assert.match(question, /trustedAutomationComments\(comments\)\.findLast/);
+
+  // A closed pull request only represents an issue with pipeline provenance.
+  assert.match(
+    implementation,
+    /const latest = closedPulls\.find\(\(pr\) => closingIssueNumbers\(pr\.body\)\.includes\(issue\.number\)\n\s+&& \(pipelinePullProvenance\(pr, defaultBranch\) \|\| trustedManualPullProvenance\(pr, defaultBranch\)\)\);/,
+  );
+
+  // A public actor's no-op run must not wake reconciliation or the doctor.
+  const actorGate = /contains\(fromJSON\('\[38769771, 41898282\]'\), github\.event\.workflow_run\.actor\.id\)/;
+  const triggerGate = /contains\(fromJSON\('\[38769771, 41898282\]'\), github\.event\.workflow_run\.triggering_actor\.id\)/;
+  for (const [name, workflow, expected] of [
+    // refresh-candidates, reconcile, and metrics.
+    ["agent-reconcile.yml", reconcile, 3],
+    ["pipeline-doctor.yml", doctorWorkflow, 1],
+  ]) {
+    assert.equal(workflow.match(new RegExp(actorGate, "g"))?.length, expected, `${name} actor gate`);
+    assert.equal(workflow.match(new RegExp(triggerGate, "g"))?.length, expected, `${name} triggering actor gate`);
+  }
+  assert.doesNotMatch(reconcile, /if: github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_run'/);
+
+  // Metrics must not be the one job that keeps an untrusted actor's run alive:
+  // a run with no executed job cannot later be adopted as a failure.
+  const metrics = reconcile.slice(reconcile.indexOf("  metrics:"));
+  assert.match(metrics, /if: >-\n\s+always\(\) && \(/);
+  assert.doesNotMatch(metrics, /if: always\(\)$/m);
+
+  // Failed-run adoption is authorship-checked in the shared predicate, and the
+  // approved-incident path re-checks it before reusing a recorded source run.
+  const doctorPolicy = await read("scripts/pipeline-doctor.mjs");
+  assert.match(doctorPolicy, /export const TRUSTED_RUN_ACTOR_IDS = new Set\(\[38769771, 41898282\]\);/);
+  assert.match(doctorPolicy, /if \(actorIds\.length === 0 \|\| !actorIds\.every\(\(id\) => TRUSTED_RUN_ACTOR_IDS\.has\(id\)\)\) return false;/);
+  assert.equal(doctorWorkflow.match(/doctor\.trustedDoctorRun\(run, context\.payload\.repository\.id\)/g)?.length, 2);
+  assert.doesNotMatch(doctorWorkflow, /if \(!doctor\.isDoctorFailure\(run\)/);
+
+  // A deleted fork leaves a null head repository. Dereferencing it failed the
+  // hosted job, which handed a public PR a Pipeline Doctor incident.
+  assert.match(review, /pr\.head\.repo\?\.full_name === process\.env\.GITHUB_REPOSITORY/);
+  assert.match(review, /pr\.head\.repo\?\.id === pr\.base\.repo\?\.id/);
+  assert.doesNotMatch(review, /pr\.head\.repo\.full_name|pr\.head\.repo\.id ===/);
+});
+
+test("untrusted public intake is stripped of pipeline state without running a model", async () => {
+  const task = await read(".github/workflows/agent-task.yml");
+  const reject = task.slice(task.indexOf("  reject-untrusted-intake:"), task.indexOf("  prepare:"));
+
+  assert.match(reject, /github\.event\.issue\.user\.id != 38769771/);
+  assert.match(reject, /issues: write/);
+  assert.match(reject, /label\.startsWith\("agent:"\)/);
+  // It is a deterministic hosted janitor: no model, no runner, no extra scope.
+  assert.match(reject, /runs-on: ubuntu-24\.04/);
+  assert.doesNotMatch(reject, /openchamber|runs-on: \[self-hosted|contents: write|pull-requests: write|actions: write/);
+  // It must never post the same notice twice on one issue.
+  assert.match(reject, /agent-pipeline untrusted-intake/);
+  assert.match(reject, /comment\.user\?\.id === 41898282/);
+});
+
 test("every merge lane can dispatch the release it creates", async () => {
   const review = await read(".github/workflows/agent-review.yml");
   const reviewLane = review.slice(review.indexOf("  queue-merge:"), review.indexOf("  metrics:"));

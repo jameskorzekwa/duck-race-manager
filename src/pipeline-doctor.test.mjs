@@ -7,6 +7,7 @@ import {
   isDoctorFailure,
   pipelineFailureIdentity,
   redactDoctorEvidence,
+  trustedDoctorRun,
 } from "../scripts/pipeline-doctor.mjs";
 import {
   assertPipelineRepairPaths,
@@ -45,6 +46,31 @@ test("doctor identities bind workflow, SHA, failed jobs, and failed steps", () =
     pipelineFailureIdentity({ ...failedRun, head_sha: "b".repeat(40) }, jobs).signature,
     identity.signature,
   );
+});
+
+// Adopting a failed run starts a local model session. The repository is public
+// and Agent Review runs on pull_request_target, so a stranger's fork PR can
+// produce a failed run of a pipeline workflow. Only James's or the pipeline's
+// own runs may become incidents.
+test("only a pipeline-authored failed run may become a Pipeline Doctor incident", () => {
+  const james = { id: 38769771 };
+  const bot = { id: 41898282 };
+  const stranger = { id: 99 };
+  const run = { ...failedRun, actor: james, triggering_actor: james, repository: { id: 7 } };
+
+  assert.equal(trustedDoctorRun(run, 7), true);
+  assert.equal(trustedDoctorRun({ ...run, actor: bot, triggering_actor: bot }, 7), true);
+
+  // A public fork pull request that fails a hosted Agent Review job.
+  assert.equal(trustedDoctorRun({ ...run, actor: stranger, triggering_actor: stranger }, 7), false);
+  // A stranger's run that James later re-ran stays untrusted.
+  assert.equal(trustedDoctorRun({ ...run, actor: stranger, triggering_actor: james }, 7), false);
+  assert.equal(trustedDoctorRun({ ...run, actor: james, triggering_actor: stranger }, 7), false);
+  // Fail closed when the payload does not identify an actor at all.
+  assert.equal(trustedDoctorRun({ ...failedRun, repository: { id: 7 } }, 7), false);
+  // Non-failures and other repositories remain out of scope.
+  assert.equal(trustedDoctorRun({ ...run, conclusion: "success" }, 7), false);
+  assert.equal(trustedDoctorRun({ ...run, repository: { id: 8 } }, 7), false);
 });
 
 test("candidate verification remains in the existing feature repair loop", () => {

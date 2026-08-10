@@ -84,7 +84,10 @@ jobs:
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && github.actor_id == '38769771') ||
       (github.event_name == 'workflow_dispatch' && github.actor_id == '41898282' && inputs.incident != '') ||
-      (github.event_name == 'workflow_run' && contains(fromJSON('["action_required","failure","startup_failure","timed_out"]'), github.event.workflow_run.conclusion))
+      (github.event_name == 'workflow_run' &&
+        contains(fromJSON('["action_required","failure","startup_failure","timed_out"]'), github.event.workflow_run.conclusion) &&
+        contains(fromJSON('[38769771, 41898282]'), github.event.workflow_run.actor.id) &&
+        contains(fromJSON('[38769771, 41898282]'), github.event.workflow_run.triggering_actor.id))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -236,6 +239,7 @@ jobs:
                   if (!requestedIncident && state.phase !== "repair") continue;
                   if (!state.terminal && state.phase !== "waiting" && state.attempts < 2) {
                     const run = (await github.rest.actions.getWorkflowRun({ owner, repo, run_id: sourceRun })).data;
+                    if (!doctor.trustedDoctorRun(run, context.payload.repository.id)) continue;
                     const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
                       owner, repo, run_id: sourceRun, filter: "latest", per_page: 100,
                     });
@@ -271,8 +275,10 @@ jobs:
             }
 
             for (const run of selected ? [] : candidates) {
-              if (!doctor.isDoctorFailure(run)
-                  || (run.repository?.id !== undefined && run.repository.id !== context.payload.repository.id)) continue;
+              if (!doctor.trustedDoctorRun(run, context.payload.repository.id)) {
+                core.info(`Skipping run ${run?.id}: not a trusted pipeline failure.`);
+                continue;
+              }
               const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
                 owner, repo, run_id: run.id, filter: "latest", per_page: 100,
               });

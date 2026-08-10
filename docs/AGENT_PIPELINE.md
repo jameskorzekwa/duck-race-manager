@@ -93,6 +93,51 @@ actor and issue author match James's immutable GitHub user ID. James can retry o
 refine an issue with a comment beginning `/agent` or `/oc`. Before model execution,
 the workflow excludes comments from untrusted accounts from the immutable snapshot.
 
+The repository is public and the issue form applies `agent:inbox` to whoever
+submits it, so a pipeline label is never evidence of authorization. Authorship
+is. `TRUSTED_ISSUE_AUTHOR_ID` in `scripts/agent-pipeline.mjs` is the single
+definition, and it is enforced independently at every point where work can
+become a local model run:
+
+| Entry point | Where authorship is re-proven |
+| --- | --- |
+| Agent Task event trigger | `prepare` job condition and its issue fetch |
+| Agent Task implementation | `Verify the issue is trusted intake`, before any state write or session |
+| Agent Review eligibility | linked-issue author check in `prepare` |
+| Agent Review model turn | re-check on the review runner before the session |
+| Pipeline Doctor | feature adoption skips issues James did not author |
+| Reconciliation | `trustedPipelineIssue` filters every label sweep and guards dispatch |
+| Retry and escalation | `recoverFailedIssue` and `escalateAgentError` return `untrusted` |
+
+Untrusted issues additionally have their `agent:*` labels removed by a
+deterministic, model-free job so the board never shows public work as accepted
+pipeline state.
+
+Issue authorship alone is not sufficient, because a public account can still
+comment on James's issue, reference it from a pull request, and cause pipeline
+workflow runs. Three further inputs are therefore treated as untrusted:
+
+- **Comment markers.** Only `github-actions[bot]` comments may carry durable
+  markers. Reconciliation reads `run-failed`, `review-exhausted`, and
+  `question` through `trustedAutomationComments`, so a public comment cannot
+  forge a terminal failure that drives a retry, or a pending question that
+  James's next reply appears to answer.
+- **Pull request provenance.** A closed pull request only represents an issue
+  when `pipelinePullProvenance` or `trustedManualPullProvenance` accepts it. A
+  public PR saying `Closes #N` cannot shadow the real candidate and force a
+  fresh attempt.
+- **Workflow run actors.** Pipeline Doctor adopts a failed run only when
+  `trustedDoctorRun` accepts it, which requires both `actor` and
+  `triggering_actor` to be James or the bot, and fails closed when the payload
+  identifies no actor. Agent Reconcile applies the same actor gate to
+  `workflow_run`. Agent Review treats a deleted fork's null `head.repo` as
+  ineligible rather than crashing, because a failed hosted job was itself an
+  adoptable incident.
+
+Each of these is covered by regression tests in `src/agent-pipeline.test.mjs`,
+`src/pipeline-doctor.test.mjs`, and `src/agent-pipeline-security.test.mjs`;
+treat a failure there as a security regression, not a fixture update.
+
 The global OpenCode `orchestrator` agent is the preferred conversational intake
 path. It converts a request into an issue with explicit acceptance criteria and
 then returns immediately. New requests remain accepted while the local model

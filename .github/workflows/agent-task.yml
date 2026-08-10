@@ -28,6 +28,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The repository is public and the intake form applies agent:inbox to whoever
+  # submits it, so an untrusted issue can arrive already wearing a pipeline
+  # label. No model runs for it, but leaving the label in place makes a public
+  # request look like accepted agent work on the board. Strip it deterministically
+  # so pipeline state always means James's own work.
+  reject-untrusted-intake:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.issue.user.id != 38769771 &&
+      !github.event.issue.pull_request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Remove pipeline state labels from untrusted intake
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issueNumber = context.payload.issue.number;
+            const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+            if (issue.user?.id === 38769771) return;
+            const labels = (issue.labels ?? []).map((label) => typeof label === "string" ? label : label.name);
+            const pipelineLabels = labels.filter((label) => label.startsWith("agent:"));
+            if (pipelineLabels.length === 0) return;
+            await github.rest.issues.setLabels({
+              owner, repo, issue_number: issueNumber,
+              labels: labels.filter((label) => !pipelineLabels.includes(label)),
+            });
+            const marker = "<!-- agent-pipeline untrusted-intake -->";
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: issueNumber, per_page: 100,
+            });
+            if (comments.some((comment) => comment.user?.id === 41898282
+              && String(comment.body ?? "").includes(marker))) {
+              return;
+            }
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issueNumber,
+              body: `${marker}\nThanks for the report. The automated agent pipeline only runs on issues opened by the repository owner, so its state labels were removed. This issue stays open for normal review.`,
+            });
+
   prepare:
     if: >-
       (github.event_name == 'issues' && github.actor_id == '38769771' && github.event.issue.user.id == 38769771 && contains(github.event.issue.labels.*.name, 'agent:inbox')) ||
@@ -174,6 +217,27 @@ jobs:
       decision: ${{ steps.result.outputs.decision }}
       digest: ${{ steps.result.outputs.digest }}
     steps:
+      # This job spends James's local model subscription, so it proves the work
+      # is his before doing anything else. prepare already fails closed, but the
+      # repository is public and intake carries an attacker-influenced label, so
+      # the authorization boundary is re-checked on the runner that holds the
+      # OAuth session rather than inherited from an upstream job's output.
+      - name: Verify the issue is trusted intake
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ISSUE_NUMBER: ${{ needs.prepare.outputs.issue }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issueNumber = Number(process.env.ISSUE_NUMBER);
+            if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) {
+              throw new Error("Agent Task requires a positive issue number.");
+            }
+            const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+            if (issue.pull_request || issue.user?.id !== 38769771 || issue.state !== "open") {
+              throw new Error(`Refusing to run a local model for untrusted issue #${issueNumber}.`);
+            }
+
       # The runner reports its own state the moment it starts. No observer has
       # to look at the right time, so the label cannot lag behind reality
       # regardless of which event dispatched this run or how deep the queue is.
