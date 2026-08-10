@@ -129,6 +129,26 @@ recovered from GitHub state rather than treated as durable jobs.
 Only issues created by James with `agent:inbox`, explicit James `/agent` or
 `/oc` issue comments, and trusted workflow dispatches run code agents. Public
 issue or PR content never receives an automatic privileged execution path.
+
+This repository is public, so anyone can open an issue and the intake form
+applies `agent:inbox` on their behalf. Authorship, not the label, is the
+authorization boundary: every path that can reach a local model re-checks
+James's immutable user ID against the issue author, and fails closed otherwise.
+That check repeats in Agent Task's hosted intake, again on the self-hosted
+runner before an OpenChamber session is created, in Agent Review's eligibility
+gate and again on its review runner, in Pipeline Doctor's feature adoption, and
+in deterministic reconciliation's label sweeps, retry recovery, error
+escalation, and Agent Task dispatch. A deterministic hosted job also strips
+`agent:*` labels from untrusted intake so pipeline state always means James's
+own work. Never relax any of these to a label, team, or collaborator check.
+
+Because public accounts can still comment on James's issues, reference them from
+pull requests, and cause pipeline runs, three further inputs are untrusted:
+durable comment markers are read only from `github-actions[bot]`, a closed pull
+request represents an issue only with pipeline or trusted-manual provenance, and
+Pipeline Doctor and Agent Reconcile adopt a workflow run only when its `actor`
+and `triggering_actor` are James or the bot. See `docs/AGENT_PIPELINE.md` for
+the complete table.
 Implementation jobs run on two repository-scoped `quickducks-implement` runners;
 independent review uses a dedicated `quickducks-review` runner. They submit
 sessions to James's local OpenChamber runtime, which already owns the paid

@@ -19,6 +19,26 @@ export function isDoctorFailure(run) {
     && DOCTOR_WORKFLOWS.has(normalizedWorkflowPath(run.path));
 }
 
+// Diagnosis spends a local model, so a failure is only adoptable when James or
+// the pipeline's own automation caused the run. The repository is public: a
+// stranger's fork pull request reaches Agent Review through pull_request_target
+// and can make a hosted job fail (a deleted fork leaves a null head repository).
+// Without this, that failure became a Pipeline Doctor incident and started an
+// OpenChamber session on James's Mac.
+export const TRUSTED_RUN_ACTOR_IDS = new Set([38769771, 41898282]);
+
+export function trustedDoctorRun(run, repositoryId) {
+  if (!isDoctorFailure(run)) return false;
+  const actorIds = [run.actor?.id, run.triggering_actor?.id].filter((id) => id !== undefined);
+  // Fail closed: a payload that does not identify its actor is not adoptable.
+  if (actorIds.length === 0 || !actorIds.every((id) => TRUSTED_RUN_ACTOR_IDS.has(id))) return false;
+  if (run.repository?.id !== undefined && repositoryId !== undefined
+      && run.repository.id !== repositoryId) {
+    return false;
+  }
+  return true;
+}
+
 export function pipelineFailureIdentity(run, jobs) {
   const workflowPath = normalizedWorkflowPath(run?.path);
   if (!isDoctorFailure(run)) throw new Error("Run is not an eligible Pipeline Doctor failure.");

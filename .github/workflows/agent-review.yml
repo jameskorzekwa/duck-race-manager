@@ -65,8 +65,12 @@ jobs:
           const pr = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/agent-review-pr.json`, "utf8"));
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `head=${pr.head.sha}\npr=${pr.number}\n`);
           const branchMatch = pr.head.ref.match(/^opencode\/issue(\d+)-run(\d+)$/);
-          const eligible = pr.head.repo.full_name === process.env.GITHUB_REPOSITORY
-            && pr.head.repo.id === pr.base.repo.id
+          // head.repo is null once a fork is deleted. Dereferencing it threw,
+          // which failed this hosted job and handed a public pull request a
+          // Pipeline Doctor incident, i.e. a local model run. An ineligible PR
+          // must always exit cleanly instead.
+          const eligible = pr.head.repo?.full_name === process.env.GITHUB_REPOSITORY
+            && pr.head.repo?.id === pr.base.repo?.id
             && pr.base.ref === event.repository.default_branch
             && pr.user.id === 41898282
             && branchMatch !== null;
@@ -344,6 +348,14 @@ jobs:
           mkdir -p "$model_dir/.pipeline" "$RUNNER_TEMP/agent-review"
           git -C candidate diff --no-ext-diff --binary "${{ needs.prepare.outputs.base }}..${EXPECTED_HEAD}" \
             > "$model_dir/.pipeline/candidate.patch"
+          # Re-prove trusted intake on the runner that holds the OAuth session:
+          # the reviewed issue text becomes model input, so a public issue must
+          # never reach the model workspace even if an upstream eligibility
+          # check regresses. Prove authorship before writing that text at all.
+          if [[ "$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUMBER}" --jq '.user.id')" != "38769771" ]]; then
+            printf 'Refusing to review work for untrusted issue #%s.\n' "$ISSUE_NUMBER" >&2
+            exit 1
+          fi
           gh issue view "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --json number,title,body,state,url \
             > "$model_dir/.pipeline/review-context.json"
           chmod -R a-w "$model_dir"

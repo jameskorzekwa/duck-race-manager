@@ -18,6 +18,18 @@ const STATE_LABELS = [
 ];
 const AUTOMATION_USER_ID = 41898282;
 
+// The repository is public, so anyone can open an issue and the intake form
+// applies agent:inbox for them. Authorship, not a label, is the authorization
+// boundary for spending James's local model subscriptions: only an issue he
+// authored may ever reach a self-hosted OpenChamber session. Labels are
+// repository state that a maintainer action or a bug can move onto someone
+// else's issue, so every autonomous path re-checks the immutable author ID.
+export const TRUSTED_ISSUE_AUTHOR_ID = 38769771;
+
+export function trustedPipelineIssue(issue) {
+  return Boolean(issue) && !issue.pull_request && issue.user?.id === TRUSTED_ISSUE_AUTHOR_ID;
+}
+
 function trustedAutomationComments(comments) {
   return comments.filter((comment) => comment.user?.id === AUTOMATION_USER_ID);
 }
@@ -147,8 +159,11 @@ export function classifyTaskResult({ issue, marker, patchLength, exitStatus }) {
 
 // An agent:question issue resumes when James replies after the latest posted
 // question. Automation comments never count as an answer.
-export function questionAnswered(comments, trustedUserId = 38769771) {
-  const lastQuestion = comments.findLast(
+export function questionAnswered(comments, trustedUserId = TRUSTED_ISSUE_AUTHOR_ID) {
+  // Only the pipeline can pose a question. Accepting any comment's marker let a
+  // public account fabricate a pending question that James's next unrelated
+  // reply would then "answer", dispatching a model turn.
+  const lastQuestion = trustedAutomationComments(comments).findLast(
     (comment) => String(comment.body ?? "").includes("<!-- agent-pipeline question="),
   );
   if (!lastQuestion) return false;
@@ -236,7 +251,7 @@ export function pipelineValidationProvenance(pr) {
 // lane. Limiting this exception to James, the default branch, the same repository,
 // and exactly one closing reference prevents an unrelated or forked PR from
 // suppressing recovery.
-export function trustedManualPullProvenance(pr, defaultBranch, trustedUserId = 38769771) {
+export function trustedManualPullProvenance(pr, defaultBranch, trustedUserId = TRUSTED_ISSUE_AUTHOR_ID) {
   return pr.user?.id === trustedUserId
     && pr.base.ref === defaultBranch
     && pr.head.repo?.id === pr.base.repo?.id
@@ -289,6 +304,10 @@ export async function validExactCheck(github, owner, repo, pr) {
 export async function recoverFailedIssue({ github, context }, issueNumber) {
   const { owner, repo } = context.repo;
   const defaultBranch = context.payload.repository.default_branch;
+  // Retrying dispatches a model run, so authorship is re-checked here rather
+  // than inherited from whichever caller observed the label.
+  const subject = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+  if (!trustedPipelineIssue(subject)) return "untrusted";
   const setState = async (state) => {
     const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
     const labels = [...labelNames(issue)].filter((label) => !STATE_LABELS.includes(label));
@@ -357,6 +376,7 @@ export async function escalateAgentError({ github, context }, issueNumber) {
   const { owner, repo } = context.repo;
   const defaultBranch = context.payload.repository.default_branch;
   const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+  if (!trustedPipelineIssue(issue)) return "untrusted";
   if (issue.state !== "open" || !labelNames(issue).has("agent:error")) return "skipped";
   const comments = await github.paginate(github.rest.issues.listComments, {
     owner, repo, issue_number: issueNumber, per_page: 100,
@@ -483,16 +503,28 @@ export async function reconcileAgentPipeline({ github, context, core }) {
     if (trustedAutomationComments(comments).some((comment) => comment.body?.includes(marker))) return;
     await github.rest.issues.createComment({ owner, repo, issue_number: issueNumber, body: `${marker}\n${body}` });
   };
-  const dispatch = (issueNumber) => github.rest.actions.createWorkflowDispatch({
-    owner,
-    repo,
-    workflow_id: "agent-task.yml",
-    ref: defaultBranch,
-    inputs: { issue: String(issueNumber) },
-  });
+  const dispatch = async (issueNumber) => {
+    // Last deterministic checkpoint before a local model can be spent. Agent
+    // Task's own prepare job re-checks authorship and fails closed, so this
+    // keeps untrusted work from ever queueing rather than relying on that.
+    const issue = (await github.rest.issues.get({ owner, repo, issue_number: issueNumber })).data;
+    if (!trustedPipelineIssue(issue)) {
+      core.warning(`Refusing to dispatch Agent Task for untrusted issue #${issueNumber}.`);
+      return;
+    }
+    await github.rest.actions.createWorkflowDispatch({
+      owner,
+      repo,
+      workflow_id: "agent-task.yml",
+      ref: defaultBranch,
+      inputs: { issue: String(issueNumber) },
+    });
+  };
+  // Every label sweep below reads through this helper, so filtering authorship
+  // once keeps a mislabeled public issue out of all autonomous lanes.
   const issuesWithLabel = async (label) => (await github.paginate(github.rest.issues.listForRepo, {
     owner, repo, state: "open", labels: label, per_page: 100,
-  })).filter((issue) => !issue.pull_request);
+  })).filter((issue) => trustedPipelineIssue(issue));
 
   const slots = await github.paginate(github.rest.search.issuesAndPullRequests, {
     q: `repo:${owner}/${repo} is:pr label:agent:merge-slot`, sort: "created", order: "asc", per_page: 100,
@@ -739,7 +771,11 @@ export async function reconcileAgentPipeline({ github, context, core }) {
   for (const state of ["agent:review", "agent:approved"]) {
     for (const issue of await issuesWithLabel(state)) {
       if (issuesWithOpenPulls.has(issue.number)) continue;
-      const latest = closedPulls.find((pr) => closingIssueNumbers(pr.body).includes(issue.number));
+      // Only a provenanced candidate may represent this issue's work. Matching
+      // on the closing reference alone let any public PR that says "Closes #N"
+      // shadow the real merged candidate and force a fresh model attempt.
+      const latest = closedPulls.find((pr) => closingIssueNumbers(pr.body).includes(issue.number)
+        && (pipelinePullProvenance(pr, defaultBranch) || trustedManualPullProvenance(pr, defaultBranch)));
       if (latest?.merged_at) {
         const releaseRuns = await github.rest.actions.listWorkflowRuns({
           owner, repo, workflow_id: "release.yml", per_page: 100,
@@ -881,7 +917,10 @@ export async function reconcileAgentPipeline({ github, context, core }) {
 
   for (const issue of await issuesWithLabel("agent:failed")) {
     if (issuesWithOpenPulls.has(issue.number)) continue;
-    const comments = await commentsFor(issue.number);
+    // Terminal markers decide whether to spend another model turn, so only the
+    // pipeline's own comments count. Reading every comment let any public
+    // account forge `run-failed` on James's issue and drive retries.
+    const comments = trustedAutomationComments(await commentsFor(issue.number));
     const latestFailure = comments.findLast((comment) => comment.body?.includes("<!-- agent-pipeline run-failed="));
     const latestTerminal = comments.findLast((comment) => /<!-- agent-pipeline (?:run-failed|review-exhausted)=/.test(comment.body ?? ""));
     if (!latestFailure || latestFailure.id !== latestTerminal?.id) continue;

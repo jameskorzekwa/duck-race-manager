@@ -22,7 +22,16 @@ jobs:
   # Return its saved patch to the same implementation session so the model can
   # resolve the conflict against current main and produce a fresh attestation.
   refresh-candidates:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_run' || github.actor_id == '38769771'
+    # A public issue comment or fork pull request produces a no-op run of a
+    # pipeline workflow, and its completion used to wake this reconciler. The
+    # sweeps are authorship-filtered, but keeping untrusted actors from driving
+    # them at all removes the timing lever entirely; cron remains the backstop.
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_run' &&
+        contains(fromJSON('[38769771, 41898282]'), github.event.workflow_run.actor.id) &&
+        contains(fromJSON('[38769771, 41898282]'), github.event.workflow_run.triggering_actor.id)) ||
+      github.actor_id == '38769771'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -54,7 +63,12 @@ jobs:
           done < candidates.txt
 
   reconcile:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_run' || github.actor_id == '38769771'
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_run' &&
+        contains(fromJSON('[38769771, 41898282]'), github.event.workflow_run.actor.id) &&
+        contains(fromJSON('[38769771, 41898282]'), github.event.workflow_run.triggering_actor.id)) ||
+      github.actor_id == '38769771'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
@@ -110,7 +124,17 @@ jobs:
   metrics:
     name: Metrics
     needs: [refresh-candidates, reconcile, queue-next]
-    if: always()
+    # Gated like the sweeps above so an untrusted actor produces a run with no
+    # executed job at all. Otherwise this job alone keeps the run alive, and a
+    # failure in it would be a Pipeline Doctor candidate whose actor is this
+    # workflow rather than the public account that caused it.
+    if: >-
+      always() && (
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_run' &&
+        contains(fromJSON('[38769771, 41898282]'), github.event.workflow_run.actor.id) &&
+        contains(fromJSON('[38769771, 41898282]'), github.event.workflow_run.triggering_actor.id)) ||
+      github.actor_id == '38769771')
     permissions:
       actions: read
     uses: ./.github/workflows/pipeline-metrics.yml

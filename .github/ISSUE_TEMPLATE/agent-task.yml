@@ -4,6 +4,13 @@ title: "[Agent] "
 labels:
   - agent:inbox
 body:
+  - type: markdown
+    attributes:
+      value: |
+        The automated agent pipeline only runs on issues opened by the
+        repository owner. Anyone is welcome to file a report here and it will be
+        read, but submissions from other accounts are never executed
+        automatically and their pipeline labels are removed.
   - type: textarea
     id: problem
     attributes:
