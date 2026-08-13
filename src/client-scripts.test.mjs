@@ -1498,60 +1498,63 @@ test("provisioning serializes physical reads without queueing a second sticker",
   assert.equal(calls.writes.length, 1);
 });
 
-test("failed NFC write retaps the same sticker with the same URL and no new allocation", async () => {
+test("failed reusable-sticker write retaps its old URL with the same reservation and commands", async () => {
   let attempts = 0;
+  const oldUrl = `https://quickducks.com/t/${"r".repeat(43)}`;
   const { calls, machine, pending } = makeProvisioningMachine({
+    classify: async () => ({ kind: "reusable" }),
     write: async () => {
       attempts += 1;
       if (attempts === 1) throw new Error("tag moved");
     },
   });
   assert.deepEqual(
-    await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }),
+    await machine.reading({ serialNumber: "serial-a", canonicalUrls: [oldUrl] }),
     { accepted: false, reason: "write-failed" },
   );
-  assert.deepEqual(
-    await machine.reading({
-      serialNumber: "active-tag",
-      canonicalUrls: [`https://quickducks.com/t/${"a".repeat(43)}`],
-    }),
-    { accepted: false, reason: "mismatch" },
-  );
-  assert.match(calls.messages.at(-1)[0], /Finish the pending sticker/);
+  const startMaterial = { ...calls.starts[0] };
   assert.equal(calls.accepted.length, 0);
   assert.equal(calls.refreshes, 0);
   assert.deepEqual(
-    await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] }),
+    await machine.reading({ serialNumber: "serial-a", canonicalUrls: [oldUrl] }),
     { accepted: true, outcome: "added" },
   );
   assert.equal(calls.starts.length, 1);
-  assert.deepEqual(calls.classifications, [{
-    eventId: "event-1",
-    tagUrl: `https://quickducks.com/t/${"a".repeat(43)}`,
-  }]);
+  assert.deepEqual(calls.starts[0], startMaterial);
+  assert.deepEqual(calls.classifications, [
+    { eventId: "event-1", tagUrl: oldUrl },
+    { eventId: "event-1", tagUrl: oldUrl },
+  ]);
   assert.deepEqual(calls.writes, [pending.tagUrl, pending.tagUrl]);
-  assert.equal(calls.confirms.length, 1);
+  assert.deepEqual(calls.confirms, [{
+    commandId: "command-2",
+    eventId: "event-1",
+    duckId: pending.duckId,
+    provisioningCommandId: pending.provisioningCommandId,
+    physicalWriteVerified: true,
+  }]);
 });
 
-test("uncertain confirmation retries without rewrite or allocation and rejects a different sticker", async () => {
+test("resolved reusable-sticker write requires its exact new URL to retry confirmation", async () => {
   let confirmations = 0;
+  const oldUrl = `https://quickducks.com/t/${"r".repeat(43)}`;
   const { calls, machine, pending } = makeProvisioningMachine({
+    classify: async ({ tagUrl }) => tagUrl === oldUrl
+      ? { kind: "reusable" }
+      : { kind: "pending", duckId: pending.duckId, provisioningCommandId: pending.provisioningCommandId },
     confirm: async () => {
       confirmations += 1;
       if (confirmations === 1) throw new TypeError("network lost");
       return { replayed: false };
     },
   });
-  assert.equal((await machine.reading({ serialNumber: "serial-a", canonicalUrls: [] })).reason, "confirm-uncertain");
+  assert.equal((await machine.reading({ serialNumber: "serial-a", canonicalUrls: [oldUrl] })).reason, "confirm-uncertain");
   assert.equal(
     (await machine.reading({ serialNumber: "serial-b", canonicalUrls: [] })).reason,
     "wrong-confirmation-tag",
   );
   assert.equal(
-    (await machine.reading({
-      serialNumber: "active-tag",
-      canonicalUrls: [`https://quickducks.com/t/${"a".repeat(43)}`],
-    })).reason,
+    (await machine.reading({ serialNumber: "old-url-again", canonicalUrls: [oldUrl] })).reason,
     "mismatch",
   );
   assert.match(calls.messages.at(-1)[0], /Finish the pending sticker/);
@@ -1566,9 +1569,102 @@ test("uncertain confirmation retries without rewrite or allocation and rejects a
   assert.equal(calls.confirms.length, 2);
   assert.deepEqual(calls.confirms[1], calls.confirms[0]);
   assert.deepEqual(calls.classifications, [
-    { eventId: "event-1", tagUrl: `https://quickducks.com/t/${"a".repeat(43)}` },
+    { eventId: "event-1", tagUrl: oldUrl },
+    { eventId: "event-1", tagUrl: oldUrl },
     { eventId: "event-1", tagUrl: pending.tagUrl },
   ]);
+});
+
+test("an unresolved pending write accepts only all-reusable canonical records", async () => {
+  const firstReusableUrl = `https://quickducks.com/t/${"r".repeat(43)}`;
+  const secondReusableUrl = `https://quickducks.com/t/${"s".repeat(43)}`;
+  const knownUrl = `https://quickducks.com/t/${"k".repeat(43)}`;
+  let attempts = 0;
+  const current = makeProvisioningMachine({
+    classify: async ({ tagUrl }) => tagUrl === knownUrl
+      ? { kind: "already", duckId: "duck-known" }
+      : { kind: "reusable" },
+    write: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("tag moved");
+    },
+  });
+
+  assert.equal((await current.machine.reading({
+    serialNumber: "first-read",
+    canonicalUrls: [firstReusableUrl, secondReusableUrl],
+  })).reason, "write-failed");
+  assert.equal((await current.machine.reading({
+    serialNumber: "mixed-read",
+    canonicalUrls: [firstReusableUrl, knownUrl],
+  })).reason, "mismatch");
+  assert.match(current.calls.messages.at(-1)[0], /Finish the pending sticker/);
+  assert.deepEqual(current.calls.writes, [current.pending.tagUrl]);
+  assert.equal(current.calls.starts.length, 1);
+  assert.deepEqual(current.calls.confirms, []);
+  assert.deepEqual(current.calls.accepted, []);
+  assert.equal(current.machine.hasPending(), true);
+
+  assert.deepEqual(await current.machine.reading({
+    serialNumber: "reusable-retry",
+    canonicalUrls: [firstReusableUrl, secondReusableUrl],
+  }), { accepted: true, outcome: "added" });
+  assert.equal(current.calls.starts.length, 1);
+  assert.deepEqual(current.calls.writes, [current.pending.tagUrl, current.pending.tagUrl]);
+  assert.equal(current.calls.confirms.length, 1);
+  assert.deepEqual(current.calls.classifications.map(({ tagUrl }) => tagUrl), [
+    firstReusableUrl,
+    secondReusableUrl,
+    firstReusableUrl,
+    knownUrl,
+    firstReusableUrl,
+    secondReusableUrl,
+  ]);
+});
+
+test("an unresolved reusable retry never accepts a known or mismatched classification", async () => {
+  const reusableUrl = `https://quickducks.com/t/${"r".repeat(43)}`;
+  const otherUrl = `https://quickducks.com/t/${"o".repeat(43)}`;
+  const cases = [
+    { name: "active or retired known", result: { kind: "already", duckId: "duck-known" } },
+    { name: "another operator pending", result: { kind: "already", duckId: "duck-other-pending" } },
+    { name: "otherwise mismatched", result: { kind: "mismatch", message: "Do not overwrite it." } },
+  ];
+
+  for (const entry of cases) {
+    let attempts = 0;
+    const current = makeProvisioningMachine({
+      classify: async ({ tagUrl }) => tagUrl === reusableUrl ? { kind: "reusable" } : entry.result,
+      write: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("tag moved");
+      },
+    });
+    assert.equal((await current.machine.reading({
+      serialNumber: entry.name + "-first",
+      canonicalUrls: [reusableUrl],
+    })).reason, "write-failed", entry.name);
+    assert.equal((await current.machine.reading({
+      serialNumber: entry.name + "-mixed",
+      canonicalUrls: [reusableUrl, otherUrl],
+    })).reason, "mismatch", entry.name);
+    assert.deepEqual(current.calls.classifications.map(({ tagUrl }) => tagUrl), [
+      reusableUrl,
+      reusableUrl,
+      otherUrl,
+    ], entry.name);
+    assert.deepEqual(current.calls.writes, [current.pending.tagUrl], entry.name);
+    assert.equal(current.calls.starts.length, 1, entry.name);
+    assert.deepEqual(current.calls.confirms, [], entry.name);
+    assert.deepEqual(current.calls.accepted, [], entry.name);
+    assert.equal(current.machine.hasPending(), true, entry.name);
+    assert.equal((await current.machine.reading({
+      serialNumber: entry.name + "-recovery",
+      canonicalUrls: [reusableUrl],
+    })).outcome, "added", entry.name);
+    assert.equal(current.calls.starts.length, 1, entry.name);
+    assert.deepEqual(current.calls.writes, [current.pending.tagUrl, current.pending.tagUrl], entry.name);
+  }
 });
 
 test("reload recovery recognizes the exact pending URL and confirms without rewriting", async () => {

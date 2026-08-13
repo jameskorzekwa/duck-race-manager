@@ -4793,18 +4793,25 @@ const intakeCreateProvisioningMachine = ({
           message(mismatch.result.message || "That QuickDucks sticker does not belong to this provisioning station. Do not overwrite it.", true);
           return { accepted: false, reason: "mismatch" };
         }
+        const already = classifications.filter(({ result }) => result.kind === "already");
+        const pendingClassifications = classifications.filter(({ result }) => result.kind === "pending");
+        const reusable = classifications.filter(({ result }) => result.kind === "reusable");
         const exactLocalPending = pending !== null
           && distinctCanonicalUrls.length === 1
           && distinctCanonicalUrls[0] === pending.tagUrl;
-        if (pending && !exactLocalPending) {
+        // A failed physical write leaves the old reusable URL on the sticker.
+        // Retrying that all-reusable reading is safe only before write()
+        // resolves: it reuses the local reservation and still has to write the
+        // pending URL. Once resolved, only the exact pending URL can confirm.
+        const unresolvedReusableRetry = Boolean(pending)
+          && pending.writeResolved === false
+          && reusable.length === distinctCanonicalUrls.length;
+        if (pending && !exactLocalPending && !unresolvedReusableRetry) {
           state("error");
           message("Finish the pending sticker before tapping another or mixed QuickDucks tag. Nothing was written.", true);
           return { accepted: false, reason: "mismatch" };
         }
 
-        const already = classifications.filter(({ result }) => result.kind === "already");
-        const pendingClassifications = classifications.filter(({ result }) => result.kind === "pending");
-        const reusable = classifications.filter(({ result }) => result.kind === "reusable");
         if (pendingClassifications.length > 0 && distinctCanonicalUrls.length !== 1) {
           state("error");
           message("This sticker mixes a pending QuickDucks URL with other records. Nothing was written; retap only the exact pending sticker.", true);
