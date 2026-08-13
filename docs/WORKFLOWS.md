@@ -1967,8 +1967,10 @@ abandon a `PENDING_WRITE` item.
 The browser allows one operation in flight and has no scan queue. It uses an NFC
 hardware serial only as an in-memory same-reading debounce and never as duck
 identity. A failed or interrupted write retains the same pending URL and both
-command IDs; a blank retap retries the same URL and no new duck is allocated. If
-the physical write succeeded but confirmation is uncertain, retapping its exact
+command IDs. A blank retap, or a retap whose every canonical QuickDucks URL is
+absent from the current dataset and therefore reusable, retries writing that same
+pending URL; no new duck is allocated. If the physical write succeeded but
+confirmation is uncertain, retapping its exact
 canonical URL retries confirmation without rewriting. Reloading recovers the
 pending record from the server; reading that exact recovered URL treats the
 physical write as complete and proceeds directly to confirmation without another
@@ -1987,16 +1989,19 @@ active, retired, released, different-event, and another operator's pending tags,
 regardless of whether an absent/reusable record appears before or after the known
 record.
 
-While this station owns a pending operation, only a reading containing exactly
-its one pending URL can finish it. A pending URL mixed with a reusable URL, or
-multiple inconsistent known URLs, fails safely after complete classification
-without writing, confirming, clearing command IDs, or changing either count. If
-the exact local pending URL now classifies as already, the station resolves the
-same confirmation command instead of treating the tag as unrelated. A replayed
-confirmation response completes that current addition exactly once, increments
-session history/count once, enters **Remove duck**, and then returns to
-**Ready**. Only a separately scanned current tag receives the count-neutral
-already-in-inventory lookup.
+While this station owns a pending operation and its physical write is unresolved,
+a reading whose canonical QuickDucks URLs all classify as reusable may retry only
+the existing pending URL. Any known or mixed classification still fails safely.
+After the physical write resolves, only a
+reading containing exactly its one pending URL can finish it. A pending URL mixed
+with a reusable URL, or multiple inconsistent known URLs, fails safely after
+complete classification without writing, confirming, clearing command IDs, or
+changing either count. If the exact local pending URL now classifies as already,
+the station resolves the same confirmation command instead of treating the tag as
+unrelated. A replayed confirmation response completes that current addition
+exactly once, increments session history/count once, enters **Remove duck**, and
+then returns to **Ready**. Only a separately scanned current tag receives the
+count-neutral already-in-inventory lookup.
 
 An exact canonical URL absent from the current dataset is reusable rather than a
 permanent duplicate. This is the expected state for a physical duck after the
