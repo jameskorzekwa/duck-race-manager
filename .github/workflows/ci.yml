@@ -95,13 +95,3 @@ jobs:
         run: |
           test "$CORE_RESULT" = "success"
           test "$BROWSER_RESULT" = "success"
-
-  metrics:
-    name: Metrics
-    needs: [core, browser, validate]
-    if: always()
-    permissions:
-      actions: read
-    uses: ./.github/workflows/pipeline-metrics.yml
-    with:
-      pipeline: CI
