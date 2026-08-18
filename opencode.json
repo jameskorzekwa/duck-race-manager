@@ -15,8 +15,5 @@
     "pocketcasts-personal": {
       "enabled": false
     }
-  },
-  "permission": {
-    "*": "deny"
   }
 }

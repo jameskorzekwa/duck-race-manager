@@ -18,7 +18,7 @@ src/                 # Worker routing, APIs, rendered UI, browser scripts, tests
 db/migrations/       # Ordered D1 schema and database invariants
 docs/                # Current workflows, infrastructure runbooks, design history
 infra/aws/           # Cognito, SES, and IAM CloudFormation
-.github/workflows/   # CI, GitHub agent pipeline, and main/tag production CD
+.github/workflows/   # CI and main/tag production CD
 wrangler.jsonc       # Production Worker, D1, queue, rate-limit, and domain bindings
 wrangler.local.jsonc # Local-only Worker entry and loopback origin; never deployed
 scripts/             # Release, validation, and local seeding tools

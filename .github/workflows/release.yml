@@ -867,13 +867,3 @@ jobs:
               draft: false,
               prerelease,
             });
-
-  metrics:
-    name: Metrics
-    needs: [validate, deploy, release]
-    if: always()
-    permissions:
-      actions: read
-    uses: ./.github/workflows/pipeline-metrics.yml
-    with:
-      pipeline: Release
