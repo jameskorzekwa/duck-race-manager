@@ -98,7 +98,6 @@ offline sign-in accounts, and what is deliberately still not local.
 
 ## Documentation
 
-- [GitHub agent pipeline](docs/AGENT_PIPELINE.md)
 - [Local development](docs/LOCAL_DEVELOPMENT.md)
 - [Project plan](docs/PROJECT_PLAN.md)
 - [Domain and hosting setup](docs/DOMAIN_SETUP.md)
