@@ -146,6 +146,26 @@ test("Durable Object caps connections and closes every client frame with policy 
   assert.deepEqual(closed, { code: 1008, reason: "Client messages are not accepted" });
 });
 
+test("Durable Object safely handles peer close codes", () => {
+  const object = new RaceUpdates({});
+  const reservedSocket = {
+    close() { assert.fail("reserved close codes must not be sent"); },
+  };
+
+  assert.doesNotThrow(() => object.webSocketClose(reservedSocket, 1005, ""));
+  assert.doesNotThrow(() => object.webSocketClose(reservedSocket, 1006, "abnormal closure"));
+
+  let closed = null;
+  object.webSocketClose({
+    close(code, reason) { closed = { code, reason }; },
+  }, 1000, "finished");
+  assert.deepEqual(closed, { code: 1000, reason: "finished" });
+
+  assert.doesNotThrow(() => object.webSocketClose({
+    close() { throw new Error("already closed"); },
+  }, 1000, "finished"));
+});
+
 test("failed best-effort publication settles inside waitUntil", async () => {
   let scheduled;
   scheduleRaceUpdate({

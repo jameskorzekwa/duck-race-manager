@@ -103,7 +103,12 @@ export class RaceUpdates {
   }
 
   webSocketClose(socket: WebSocket, code: number, reason: string): void {
-    socket.close(code, reason);
+    if (code === 1005 || code === 1006) return;
+    try {
+      socket.close(code, reason);
+    } catch {
+      // The runtime may already have closed the socket.
+    }
   }
 
   webSocketError(socket: WebSocket): void {
