@@ -1566,6 +1566,31 @@ test("keeps the database health check", async () => {
   });
 });
 
+test("reports degraded health when the database is unavailable", async () => {
+  const response = await worker.fetch(new Request("https://quickducks.com/health"), {
+    ...env,
+    DB: {
+      prepare() {
+        throw new Error("D1 unavailable");
+      },
+    },
+    DUCK_PHOTOS: {
+      async get() {
+        return { async text() { return "quickducks-r2-release-probe-v1"; } };
+      },
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    service: "quickducks",
+    status: "degraded",
+    database: "unavailable",
+    photoStorage: "connected",
+    region: "us-east-1",
+  });
+});
+
 test("renders a secured noindex not-found page", async () => {
   const response = await worker.fetch(new Request("https://quickducks.com/missing"), env);
   const body = await response.text();
