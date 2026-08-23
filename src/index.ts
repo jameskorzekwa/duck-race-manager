@@ -338,7 +338,12 @@ export const createWorker = (
     }
 
     if (url.pathname === "/health") {
-      const database = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
+      let database: { ok: number } | null = null;
+      try {
+        database = await env.DB.prepare("SELECT 1 AS ok").first<{ ok: number }>();
+      } catch {
+        database = null;
+      }
       let photoStorage = localPreview ? "connected" : "unavailable";
       if (!localPreview && env.DUCK_PHOTOS) {
         try {
