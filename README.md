@@ -40,6 +40,15 @@ The project is in early implementation. See
 architecture, NFC design, race workflows, data model, security requirements,
 delivery phases, and acceptance criteria.
 
+## Repository layout
+
+- `src/` - Worker source code and automated tests.
+- `db/migrations/` - Ordered D1 database migrations.
+- `docs/` - Product, workflow, development, and infrastructure documentation.
+- `infra/aws/` - AWS CloudFormation infrastructure definitions.
+- `scripts/` - Development, validation, seeding, and release utilities.
+- `e2e/` - Playwright browser integration tests.
+
 ## Key Decisions
 
 - Use a hosted website/PWA rather than a custom mobile application.
