@@ -1,17 +1,20 @@
 import type { Env } from "./types.ts";
 
+const CLEANUP_RETRY_BASE_MS = 60 * 1000;
+const CLEANUP_RETRY_MAX_MS = 24 * 60 * 60 * 1000;
+
 // R2 deletion is deliberately downstream of the D1 tombstone transaction. A
 // missing object is a successful idempotent cleanup; transient failures leave
 // the opaque key in D1 for the scheduled retry.
 export const drainDuckPhotoCleanup = async (env: Env, limit = 25): Promise<void> => {
   if (!env.DUCK_PHOTOS) return;
-  let queued: D1Result<{ object_key: string }>;
+  let queued: D1Result<{ object_key: string; attempt_count: number }>;
   try {
     queued = await env.DB.prepare(
-      `SELECT object_key FROM duck_photo_cleanup
+      `SELECT object_key, attempt_count FROM duck_photo_cleanup
         WHERE queued_at <= ?
         ORDER BY queued_at, object_key LIMIT ?`,
-    ).bind(new Date().toISOString(), limit).all<{ object_key: string }>();
+    ).bind(new Date().toISOString(), limit).all<{ object_key: string; attempt_count: number }>();
   } catch {
     return;
   }
@@ -23,11 +26,20 @@ export const drainDuckPhotoCleanup = async (env: Env, limit = 25): Promise<void>
       ).bind(row.object_key)]);
     } catch {
       try {
+        const attemptedAt = new Date();
+        const retryDelayMs = Math.min(
+          CLEANUP_RETRY_MAX_MS,
+          CLEANUP_RETRY_BASE_MS * (2 ** Math.min(row.attempt_count, 20)),
+        );
         await env.DB.batch([env.DB.prepare(
           `UPDATE duck_photo_cleanup
-              SET attempt_count = attempt_count + 1, last_attempt_at = ?
+              SET attempt_count = attempt_count + 1, last_attempt_at = ?, queued_at = ?
             WHERE object_key = ?`,
-        ).bind(new Date().toISOString(), row.object_key)]);
+        ).bind(
+          attemptedAt.toISOString(),
+          new Date(attemptedAt.getTime() + retryDelayMs).toISOString(),
+          row.object_key,
+        )]);
       } catch {
         // The durable row is still present; the next scheduled drain retries it.
       }
