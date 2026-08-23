@@ -1,5 +1,7 @@
 # Duck Race Manager
 
+This repository is managed by opencode-project-manager.
+
 Duck Race Manager is a planned registration and race-operations system for an
 annual physical duck race. Participants register through a public website,
 staff pair each participant with a permanently tagged duck, race officials
